@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .agent import inspect, main_version
 from .case import TASKS, CaseError, InspectionCase
-from .config import MODES, PROVIDERS, Budget, ScoutConfig
+from .config import MODES, PROVIDERS, ScoutConfig
 from .providers import ProviderError
 from .report import Report, compare, compare_markdown, defects_of, render_markdown
 
@@ -108,17 +108,10 @@ def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
     if args.provider is not None and args.model is None and not args.config:
         config.model = None
     config.__post_init__()
-    budget = config.budget
-    for flag, key in (
-        ("max_tool_calls", "max_tool_calls"),
-        ("max_images", "max_images"),
-        ("max_seconds", "max_seconds"),
-        ("max_usd", "max_usd"),
-    ):
-        value = getattr(args, flag)
+    for key in ("max_tool_calls", "max_images", "max_seconds", "max_usd"):
+        value = getattr(args, key)
         if value is not None:
-            setattr(budget, key, value)
-    config.budget = Budget(**budget.to_dict())
+            setattr(config.budget, key, value)
     if args.allow_cloud_images:
         config.allow_cloud_images = True
     if args.local_provider:

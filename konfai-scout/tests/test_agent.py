@@ -2,7 +2,9 @@
 """The loop: coverage, exploration, budget, provider failures, and what the report records of them."""
 
 import json
+from pathlib import Path
 
+import numpy as np
 import pytest
 from konfai_scout import InspectionCase, ScoutConfig, inspect
 from konfai_scout.agent import parse_second_reading
@@ -164,10 +166,26 @@ def test_a_case_json_round_trip_and_a_registration_from_a_transform_file(fixture
     report = inspect(
         affine, ScoutConfig(provider="mock", max_px=200), tmp_path / "affine", provider=HeuristicProvider()
     )
-    assert (
-        report.error is None
-        and (tmp_path / "affine" / "work" / "derived" / "Dataset" / "affine" / "FIELD.mha").exists()
+    assert report.error is None
+    from konfai.utils.dataset import Dataset
+    from konfai_scout.case import Volume
+    from konfai_scout.planes import same_grid
+
+    # the sampled field is written as the image SimpleITK made, on the fixed grid, one copy in memory
+    field = Volume(Dataset(tmp_path / "affine" / "work" / "derived" / "Dataset", "mha"), "FIELD", "affine", "field")
+    assert field.components == 3 and same_grid(field.grid, affine.grid)
+    assert np.allclose(field.region((0, 0, 0), (2, 2, 2)).reshape(3, -1).T, [1.5, -2.0, 0.5], atol=1e-5)
+
+
+def test_relative_inputs_are_staged_from_where_they_are(fixtures, tmp_path, monkeypatch):
+    case, _ = fixtures["segmentation"]
+    monkeypatch.chdir(case.inputs["image"].parent)
+    relative = InspectionCase(
+        "segmentation", "relative", {"image": Path("image.mha"), "prediction": Path("prediction.mha")}
     )
+    assert all(path.is_absolute() for path in relative.inputs.values())
+    relative.stage(tmp_path / "stage")  # the staging links from another directory
+    assert np.array_equal(relative.volume("prediction").plane(0, 12), case.volume("prediction").plane(0, 12))
 
 
 def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):

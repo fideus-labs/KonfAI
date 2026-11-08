@@ -22,7 +22,7 @@ from konfai.utils.errors import KonfAIError
 from .case import InspectionCase, Volume
 from .config import ScoutConfig
 from .derived import Derived
-from .planes import box_to_dict, window_of, world_box_of
+from .planes import box_to_dict, same_grid, window_of
 from .report import Measurement
 
 DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
@@ -113,7 +113,7 @@ class RegionEvaluator:
         window = window_of(grid, box)
         if window is None:
             raise EvaluationError("the box holds no voxel of the case")
-        measured = world_box_of(grid, window)
+        measured = grid.world_box(window)
         root = self.work / identifier
         dataset = Dataset(root / "Dataset", "mha")
         # SSIM needs 7 voxels along every axis: on a thinner box it is left out rather than refusing the whole call
@@ -174,6 +174,11 @@ class RegionEvaluator:
         self, dataset: Dataset, group: str, volume: Volume, window: tuple[slice, slice, slice], dtype: str
     ) -> np.ndarray:
         """The crop of a volume as an entry of the measurement's dataset, with the crop's own geometry."""
+        if not same_grid(volume.grid, self.case.grid):
+            raise EvaluationError(
+                f"{volume.role} is on another grid than {self.case.image_role}; Scout measures the roles of one case "
+                "on one grid"
+            )
         lo = tuple(int(part.start) for part in window)
         hi = tuple(int(part.stop) for part in window)
         array = volume.region(lo, hi)  # type: ignore[arg-type]
@@ -280,7 +285,7 @@ class RegionEvaluator:
                 fixed_points = self.case.landmarks("fixed_landmarks")
                 moving_points = self.case.landmarks("moving_landmarks")
                 moved = self.derived.moved_landmarks()
-                measured = world_box_of(self.case.grid, window)
+                measured = self.case.grid.world_box(window)
                 inside = [
                     i
                     for i, p in enumerate(fixed_points if fixed_points is not None else [])

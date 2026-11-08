@@ -198,6 +198,9 @@ def test_openai_errors_and_locality():
     assert OpenAIProvider("m", base_url="http://localhost:8000/v1", client=object()).remote is False
     assert OpenAIProvider("m", base_url="https://api.example.com/v1", client=object()).remote is True
     assert OpenAIProvider("m", base_url="http://10.0.0.5:8000/v1", local=True, client=object()).remote is False
+    assert OpenAIProvider("m", local=True, client=object()).remote is True  # no base_url: the flag names no server
+    assert AnthropicProvider("m", base_url="http://localhost:8080", client=object()).remote is False
+    assert AnthropicProvider("m", local=True, client=object()).remote is True
     assert is_loopback("http://127.0.0.1:11434/v1") and not is_loopback(None)
 
 
@@ -211,6 +214,11 @@ def test_the_privacy_gate():
     check_privacy(ScoutConfig(provider="openai", base_url="http://gpu-box:8000/v1", local_provider=True))
     with pytest.raises(ProviderError):
         check_privacy(ScoutConfig(provider="openai", base_url="http://gpu-box:8000/v1"))
+    # the flag describes a server named by base_url: without one it changes nothing, for any provider
+    for provider in ("anthropic", "openai", "claude-code", "codex"):
+        assert is_remote(ScoutConfig(provider=provider, local_provider=True))
+    assert not is_remote(ScoutConfig(provider="anthropic", base_url="http://gpu-box:8080", local_provider=True))
+    assert is_remote(ScoutConfig(provider="claude-code", base_url="http://localhost:1", local_provider=True))
     check_privacy(ScoutConfig(provider="mock"))
     assert make_provider(ScoutConfig(provider="mock")).name == "mock"
     assert ScoutConfig(provider="anthropic").model == "claude-opus-5-5"

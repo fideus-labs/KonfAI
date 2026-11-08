@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 from konfai.data.geometry import Grid
 
-from .planes import box_to_dict, world_box_of
+from .planes import box_to_dict
 
 
 def intensity_stats(values: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float]:
@@ -55,7 +55,7 @@ def label_stats(
             "voxels": int(mask.sum()),
             "volume_mm3": round(float(mask.sum() * voxel_mm3), 2),
             "components": int(count),
-            "bbox_mm": box_to_dict(world_box_of(grid, window)),
+            "bbox_mm": box_to_dict(grid.world_box(window)),
         }
         if names and label in names:
             entry["name"] = names[label]

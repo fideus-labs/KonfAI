@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from konfai.utils.dataset import Attribute, Dataset
 from konfai_scout import InspectionCase, ScoutConfig, inspect
-from konfai_scout.planes import index_to_world
 
 
 def test_a_case_of_ome_zarr_stores_is_read_through_konfai(fixtures, tmp_path):
@@ -30,7 +29,7 @@ def test_a_case_of_ome_zarr_stores_is_read_through_konfai(fixtures, tmp_path):
     assert case.volume("image").grid.same_as(source.grid)
     plane = case.volume("prediction").plane(0, 12)
     assert np.array_equal(plane, source.volume("prediction").plane(0, 12))
-    assert np.allclose(index_to_world(case.grid, [3, 4, 5]), index_to_world(source.grid, [3, 4, 5]))
+    assert np.allclose(case.grid.index_to_world.apply([3, 4, 5]), source.grid.index_to_world.apply([3, 4, 5]))
     report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "report")
     assert report.error is None and report.observations
     assert (

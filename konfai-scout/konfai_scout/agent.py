@@ -29,7 +29,7 @@ from .planes import box_around, box_center, box_from_dict, box_size, describe_gr
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers.pricing import cost_usd, price_of
-from .report import Conclusion, Observation, Report, Usage
+from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
 from .tools import Toolbox
 from .views import DEFAULT_MODE, Renderer, ViewError
 
@@ -384,7 +384,7 @@ class Inspector:
         transcript = self.out / "transcript.json"
         transcript.write_text(json.dumps(self.provider.transcript(), indent=1, default=str), encoding="utf-8")
         report = Report(
-            schema_version="1.0",
+            schema_version=SCHEMA_VERSION,
             scout_version=scout_version(),
             versions=_versions(self.provider),
             created_at=self.started_at.isoformat(timespec="seconds"),

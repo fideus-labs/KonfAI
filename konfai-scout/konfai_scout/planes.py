@@ -56,10 +56,6 @@ def plane_axis(grid: Grid, plane: str) -> int:
     return plane_axes(grid)[plane]
 
 
-def plane_of(grid: Grid, array_axis: int) -> str:
-    return next(name for name, axis in plane_axes(grid).items() if axis == array_axis)
-
-
 def dominant_world_axis(grid: Grid, array_axis: int) -> tuple[int, int]:
     """The world axis an array axis mostly runs along, and the sign of that run."""
     vector = axis_world_vector(grid, array_axis)
@@ -73,12 +69,13 @@ def index_along(grid: Grid, array_axis: int, xyz_mm: object) -> int:
     return int(min(max(round(float(index)), 0), grid.size_zyx[array_axis] - 1))
 
 
-def center_mm(grid: Grid) -> np.ndarray:
-    return grid.index_to_world.apply(np.array([(n - 1) / 2 for n in reversed(grid.size_zyx)], dtype=np.float64))
-
-
-def index_to_world(grid: Grid, ijk_xyz: object) -> np.ndarray:
-    return grid.index_to_world.apply(np.asarray(ijk_xyz, dtype=np.float64))
+def same_grid(a: Grid, b: Grid) -> bool:
+    """Whether two grids sample the same voxels, within what a header round trip loses (``Grid.same_as`` is
+    exact): the same extent, and the same geometry to a tenth of a micron."""
+    return tuple(a.size_zyx) == tuple(b.size_zyx) and all(
+        np.allclose(getattr(a, key), getattr(b, key), rtol=1e-5, atol=1e-4)
+        for key in ("origin_xyz", "spacing_xyz", "direction_xyz")
+    )
 
 
 # ------------------------------------------------------------------------------------------ boxes
@@ -93,11 +90,6 @@ def box_around(center_xyz: object, size_mm: object) -> WorldBox:
     center = np.asarray(center_xyz, dtype=np.float64)
     half = np.broadcast_to(np.asarray(size_mm, dtype=np.float64), (3,)) / 2
     return WorldBox(center - half, center + half)
-
-
-def box_of_points(points: object) -> WorldBox:
-    array = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    return WorldBox(array.min(axis=0), array.max(axis=0))
 
 
 def box_from_dict(value: object) -> WorldBox:
@@ -128,10 +120,6 @@ def box_size(value: WorldBox) -> np.ndarray:
     return value.high_xyz - value.low_xyz
 
 
-def box_volume(value: WorldBox) -> float:
-    return float(np.prod(np.maximum(box_size(value), 0.0)))
-
-
 def box_intersection(a: WorldBox, b: WorldBox) -> WorldBox | None:
     low, high = np.maximum(a.low_xyz, b.low_xyz), np.minimum(a.high_xyz, b.high_xyz)
     return None if np.any(high <= low) else WorldBox(low, high)
@@ -148,15 +136,6 @@ def window_of(grid: Grid, value: WorldBox) -> tuple[slice, slice, slice] | None:
     return window[0], window[1], window[2]
 
 
-def world_box_of(grid: Grid, window: tuple[slice, ...]) -> WorldBox:
-    """The world box the voxels of an array-order window cover, outer faces included."""
-    return grid.world_box(tuple(window))
-
-
-def grid_bounds(grid: Grid) -> WorldBox:
-    return grid.world_box()
-
-
 def describe_grid(grid: Grid) -> dict[str, object]:
     size_xyz = [int(n) for n in reversed(grid.size_zyx)]
     spacing = [float(s) for s in grid.spacing_xyz]
@@ -166,7 +145,7 @@ def describe_grid(grid: Grid) -> dict[str, object]:
         "origin_mm_xyz": [round(float(o), 3) for o in grid.origin_xyz],
         "direction": [round(float(v), 6) for v in np.asarray(grid.direction_xyz).ravel()],
         "extent_mm_xyz": [round(n * s, 2) for n, s in zip(size_xyz, spacing, strict=True)],
-        "bounds_mm": box_to_dict(grid_bounds(grid)),
+        "bounds_mm": box_to_dict(grid.world_box()),
         "planes": {
             plane: {"array_axis": axis, "slices": grid.size_zyx[axis]} for plane, axis in plane_axes(grid).items()
         },

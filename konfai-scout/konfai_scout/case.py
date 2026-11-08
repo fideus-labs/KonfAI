@@ -55,8 +55,6 @@ TRUTH_ROLES = {
 }
 #: Roles read as point sets, not volumes.
 POINT_ROLES = ("fixed_landmarks", "moving_landmarks")
-#: The group a role is staged under: the role's name in upper case.
-BACKENDS = ("mha", "omezarr", "dicom", "itktransform")
 
 
 class CaseError(ValueError):
@@ -97,21 +95,6 @@ class Volume:
             self.grid = promoted(Grid.of([int(v) for v in shape[1:]], self.attribute, role))
         except KonfAIError as error:
             raise CaseError(f"{role}: {error}") from error
-        self._dtype: np.dtype | None = None
-
-    @property
-    def is_vector(self) -> bool:
-        return self.components == self.rank and self.components > 1
-
-    @property
-    def dtype(self) -> np.dtype:
-        if self._dtype is None:
-            self._dtype = self.region((0, 0, 0), (1, 1, 1)).dtype
-        return self._dtype
-
-    @property
-    def is_integer(self) -> bool:
-        return np.issubdtype(self.dtype, np.integer) or self.dtype == np.bool_
 
     def region(self, lo_zyx: tuple[int, int, int], hi_zyx: tuple[int, int, int]) -> np.ndarray:
         """The voxels ``lo:hi`` (array order, ``hi`` exclusive) as ``[(C,) Z, Y, X]``, read as a region of the
@@ -169,7 +152,8 @@ class InspectionCase:
     def __post_init__(self) -> None:
         if self.task not in TASKS:
             raise CaseError(f"unknown task {self.task!r}; one of {', '.join(TASKS)}")
-        self.inputs = {role: Path(path) for role, path in self.inputs.items()}
+        # absolute: the staging links to them from another directory, and a saved case.json reads from anywhere
+        self.inputs = {role: Path(path).expanduser().resolve() for role, path in self.inputs.items()}
         roles = ROLES[self.task]
         unknown = sorted(set(self.inputs) - set(roles))
         if unknown:

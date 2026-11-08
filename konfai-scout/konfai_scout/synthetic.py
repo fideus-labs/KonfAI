@@ -8,16 +8,11 @@ import json
 from pathlib import Path
 
 import numpy as np
+import SimpleITK as sitk
 from konfai.data.geometry import Grid
 
 from .case import InspectionCase
-from .planes import box_to_dict, index_to_world, world_box_of
-
-
-def _sitk():
-    import SimpleITK as sitk
-
-    return sitk
+from .planes import box_to_dict
 
 
 def _direction(oblique: bool) -> tuple[float, ...]:
@@ -33,7 +28,6 @@ def _direction(oblique: bool) -> tuple[float, ...]:
 
 
 def _image(array: np.ndarray, grid: Grid, vector: bool = False):
-    sitk = _sitk()
     if vector:
         image = sitk.GetImageFromArray(
             np.ascontiguousarray(np.moveaxis(array.astype(np.float32), 0, -1)), isVector=True
@@ -48,7 +42,7 @@ def _image(array: np.ndarray, grid: Grid, vector: bool = False):
 
 def _write(image, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    _sitk().WriteImage(image, str(path), False)
+    sitk.WriteImage(image, str(path), False)
     return path
 
 
@@ -69,7 +63,7 @@ def _grid(shape: tuple[int, int, int], spacing: tuple[float, float, float], obli
 def _box_of(mask: np.ndarray, grid: Grid) -> dict[str, list[float]]:
     where = np.argwhere(mask)
     window = tuple(slice(int(a), int(b) + 1) for a, b in zip(where.min(axis=0), where.max(axis=0), strict=True))
-    return box_to_dict(world_box_of(grid, window))
+    return box_to_dict(grid.world_box(window))
 
 
 def segmentation_case(
@@ -139,7 +133,6 @@ def registration_case(
     known field, so that field is the exact registration. The field under inspection is the exact one with a region
     where it is zeroed (a residual misalignment) and, with ``fold``, a sharp bump that folds the map. ``clean``
     inspects the exact field itself: a negative control."""
-    sitk = _sitk()
     folder = Path(folder)
     grid = _grid(shape, spacing, oblique)
     rng = np.random.default_rng(1)
@@ -202,9 +195,9 @@ def registration_case(
         inputs["moving_labels"] = _write(_image(moving_labels, grid), folder / "moving_labels.mha")
         fixed_points = np.array(
             [
-                index_to_world(grid, [24.0, 24.0, 12.0]),
-                index_to_world(grid, [35.0, 10.0, 6.0]),
-                index_to_world(grid, [12.0, 30.0, 14.0]),
+                grid.index_to_world.apply(np.array([24.0, 24.0, 12.0])),
+                grid.index_to_world.apply(np.array([35.0, 10.0, 6.0])),
+                grid.index_to_world.apply(np.array([12.0, 30.0, 14.0])),
             ]
         )
         moving_points = np.array([transform.TransformPoint([float(v) for v in p]) for p in fixed_points])

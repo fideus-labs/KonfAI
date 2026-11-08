@@ -9,20 +9,24 @@ MCP image content of tool results. The CLI keeps the session, images included, u
 from __future__ import annotations
 
 import asyncio
-import base64
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 
-from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage
+from .base import (
+    SERVER,
+    ImageContent,
+    ProviderError,
+    ToolDriver,
+    ToolResult,
+    ToolSpec,
+    Turn,
+    Usage,
+    b64,
+    without_image_data,
+)
 
-SERVER = "scout"
-Executor = Callable[[ToolCall], ToolResult]
 TRANSIENT = {408, 409, 429, 500, 502, 503, 504, 529}
-
-
-def _b64(png: bytes) -> str:
-    return base64.standard_b64encode(png).decode("ascii")
 
 
 def _message_blocks(text: str, images: list[ImageContent] | None) -> list[dict[str, Any]]:
@@ -31,7 +35,7 @@ def _message_blocks(text: str, images: list[ImageContent] | None) -> list[dict[s
         if image.label:
             content.append({"type": "text", "text": image.label})
         content.append(
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _b64(image.png)}}
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(image.png)}}
         )
     return content
 
@@ -41,42 +45,26 @@ def _mcp_result(result: ToolResult) -> dict[str, Any]:
     for image in result.images:
         if image.label:
             content.append({"type": "text", "text": image.label})
-        content.append({"type": "image", "data": _b64(image.png), "mimeType": "image/png"})
+        content.append({"type": "image", "data": b64(image.png), "mimeType": "image/png"})
     return {"content": content, **({"is_error": True} if result.is_error else {})}
 
 
-def _without_image_data(content: Any) -> Any:
-    """Image bytes replaced by their size: the evidence files hold the images."""
-    if not isinstance(content, list):
-        return content
-    out = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "image":
-            data = (block.get("source") or {}).get("data") or block.get("data") or ""
-            out.append({"type": "image", "bytes": len(base64.b64decode(data)) if data else None})
-        else:
-            out.append(block)
-    return out
+class ClaudeCodeProvider(ToolDriver):
+    """The SDK runs the tool loop: the inspector binds ``execute`` and reads the record from its toolbox."""
 
-
-class ClaudeCodeProvider:
     name = "claude-code"
     remote = True
-    #: The SDK runs the tool loop: the inspector binds ``execute`` and reads the record from its toolbox.
-    drives_tools = True
 
     def __init__(self, model: str, *, effort: str | None = None, max_turns: int = 60) -> None:
+        super().__init__()
         self.model = model
         self.effort = effort
         self.max_turns = max_turns
-        self.execute: Executor | None = None
         self.system = ""
         self.tools: list[ToolSpec] = []
         self.sdk_tools: dict[str, Any] = {}
         self.messages: list[dict[str, Any]] = []
         self.session_id: str | None = None
-        self._calls = 0
-        self._lock = threading.Lock()  # the CLI may call tools in parallel; the toolbox numbers its records
 
     def sdk_version(self) -> str:
         try:
@@ -98,7 +86,7 @@ class ClaudeCodeProvider:
 
     def user(self, text: str, images: list[ImageContent] | None = None) -> Turn:
         content = _message_blocks(text, images)
-        self.messages.append({"role": "user", "content": _without_image_data(content)})
+        self.messages.append({"role": "user", "content": without_image_data(content)})
         return _run(self._turn(content))
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
@@ -120,13 +108,6 @@ class ClaudeCodeProvider:
 
             self.sdk_tools[spec.name] = tool(spec.name, spec.description, spec.parameters)(handler)
         return create_sdk_mcp_server(name=SERVER, version="1.0", tools=list(self.sdk_tools.values()))
-
-    def _execute(self, name: str, args: dict[str, Any]) -> ToolResult:
-        if self.execute is None:
-            raise ProviderError("no executor bound: the inspector binds `execute` before the first turn")
-        with self._lock:
-            self._calls += 1
-            return self.execute(ToolCall(id=f"call_{self._calls}", name=name, arguments=dict(args or {})))
 
     def _options(self) -> Any:
         from claude_agent_sdk import ClaudeAgentOptions
@@ -199,7 +180,7 @@ class ClaudeCodeProvider:
                             "type": "tool_result",
                             "tool_use_id": block.tool_use_id,
                             "is_error": bool(block.is_error),
-                            "content": _without_image_data(block.content),
+                            "content": without_image_data(block.content),
                         }
                         for block in message.content
                         if isinstance(block, ToolResultBlock)
@@ -241,7 +222,6 @@ class ClaudeCodeProvider:
                 cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
             ),
             model=model or self.model,
-            raw={"session_id": result.session_id, "subtype": result.subtype, "total_cost_usd": result.total_cost_usd},
         )
 
 

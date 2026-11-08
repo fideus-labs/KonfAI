@@ -28,12 +28,10 @@ from .planes import (
     box_center,
     box_to_dict,
     dominant_world_axis,
-    grid_bounds,
     index_along,
-    index_to_world,
     plane_frame,
+    same_grid,
     window_of,
-    world_box_of,
 )
 from .report import View
 
@@ -172,6 +170,13 @@ def checkerboard(a: np.ndarray, b: np.ndarray, tiles: int = 8) -> np.ndarray:
     return np.where(board, a, b)
 
 
+def _grid_text(grid: Grid) -> str:
+    return (
+        f"{list(grid.size_zyx)} voxels in array order, spacing {[round(float(s), 4) for s in grid.spacing_xyz]} mm, "
+        f"origin {[round(float(o), 3) for o in grid.origin_xyz]} mm"
+    )
+
+
 class Renderer:
     """Renders the case's views and keeps the record of each one."""
 
@@ -197,7 +202,6 @@ class Renderer:
         if self.case.task == "segmentation" and "truth" not in self.case.inputs:
             available = [m for m in available if m not in ("truth", "both", "disagreement")]
         if self.case.task == "registration":
-            assert self.derived is not None
             if (
                 "fixed_labels" not in self.case.inputs
                 and "moving_labels" not in self.case.inputs
@@ -211,6 +215,17 @@ class Renderer:
         return available
 
     def volume(self, role: str) -> Volume:
+        """A role's volume, refused unless it samples the reference grid: Scout views (and measures) the roles of
+        one case on one grid, a given field or warped labels included."""
+        volume = self._volume(role)
+        if not same_grid(volume.grid, self.grid):
+            raise ViewError(
+                f"{role} is on another grid than {self.case.image_role} ({_grid_text(volume.grid)} vs "
+                f"{_grid_text(self.grid)}); Scout views the roles of one case on one grid"
+            )
+        return volume
+
+    def _volume(self, role: str) -> Volume:
         if self.case.task == "registration":
             assert self.derived is not None
             if role == "warped":
@@ -224,13 +239,7 @@ class Renderer:
                 if warped is None:
                     raise ViewError("this case has no moving labels")
                 return warped
-        volume = self.case.volume(role)
-        if tuple(volume.grid.size_zyx) != tuple(self.grid.size_zyx):
-            raise ViewError(
-                f"{role} is on another grid than {self.case.image_role} ({list(volume.grid.size_zyx)} vs "
-                f"{list(self.grid.size_zyx)}, array order); Scout views the roles of one case on one grid"
-            )
-        return volume
+        return self.case.volume(role)
 
     def window(self, role: str) -> tuple[float, float]:
         if role not in self._windows:  # KonfAI's bounded passes: the volume is never held for its window
@@ -284,9 +293,11 @@ class Renderer:
             raise ViewError(f"slice {index} is outside the {plane} range 0..{self.grid.size_zyx[axis] - 1}")
         crop = self._crop(zoom, frame) if zoom is not None else None
         rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop)
-        header = self._header_text(frame, index, mode, resolved_window, extra)
+        self._count += 1
+        view_id = f"v{self._count:03d}"  # on the image before anything else: a model cites what it reads there
+        header = self._header_text(frame, index, mode, resolved_window, extra).format(id=view_id)
         image, mapping = self._display(rgb, frame, index, crop, header)
-        view = self._record("slice", frame, index, mode, resolved_window, image, mapping, extra, crop, sent)
+        view = self._record(view_id, frame, index, mode, resolved_window, image, mapping, extra, crop, sent)
         return self._png(image, view), view
 
     def montage(
@@ -352,7 +363,7 @@ class Renderer:
         self._count += 1
         view_id = f"v{self._count:03d}"
         draw.text((4, 3), title.format(id=view_id), fill=(255, 255, 255), font=self.font)
-        box = grid_bounds(self.grid)
+        box = self.grid.world_box()
         view = View(
             id=view_id,
             kind="montage",
@@ -508,7 +519,6 @@ class Renderer:
                 if fixed_labels is not None:
                     rgb = draw_contours(rgb, fixed_labels, label, color=(1.0, 1.0, 1.0))
                 extra["legend"] = "warped moving labels filled in colour, fixed labels as white contours"
-            extra["mode_needs_drawing"] = mode in ("field_arrows", "grid", "landmarks")
         else:  # synthesis
             if mode == "synthetic":
                 rgb = gray("synthetic")
@@ -577,7 +587,7 @@ class Renderer:
     def _position(self, frame: PlaneFrame, index: int) -> np.ndarray:
         center = [(n - 1) / 2 for n in reversed(self.grid.size_zyx)]
         center[2 - frame.array_axis] = float(index)
-        return index_to_world(self.grid, center)
+        return self.grid.index_to_world.apply(np.array(center))
 
     def _window_text(self, window: list[float] | None) -> str:
         return "n/a" if window is None else f"[{window[0]:.4g}, {window[1]:.4g}]"
@@ -617,7 +627,7 @@ class Renderer:
         first[frame.array_axis] = index
         first[frame.rows_axis] = rows0
         first[frame.cols_axis] = cols0
-        origin = index_to_world(self.grid, first[::-1])  # array order -> xyz
+        origin = self.grid.index_to_world.apply(first[::-1])  # array order -> xyz
         if frame.flip_cols:
             array = array[:, ::-1]
             origin = origin + (width0 - 1) * u_step
@@ -689,7 +699,7 @@ class Renderer:
 
     def _record(
         self,
-        kind: str,
+        view_id: str,
         frame: PlaneFrame,
         index: int,
         mode: str,
@@ -700,24 +710,17 @@ class Renderer:
         crop: tuple[slice, slice] | None,
         sent: bool,
     ) -> View:
-        self._count += 1
-        view_id = f"v{self._count:03d}"
-        draw = ImageDraw.Draw(image)
-        # the id is drawn once the number exists: a model cites what it reads on the image
-        draw.rectangle((0, 0, image.width, 17), fill=(20, 20, 20))
-        header = self._header_text(frame, index, mode, window, extra).format(id=view_id)
-        draw.text((4, 3), header, fill=(255, 255, 255), font=self.font)
         lo = [0, 0, 0]
         hi = list(self.grid.size_zyx)
         lo[frame.array_axis], hi[frame.array_axis] = index, index + 1
         if crop is not None:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
-        box = world_box_of(self.grid, tuple(slice(a, b) for a, b in zip(lo, hi, strict=True)))
+        box = self.grid.world_box(tuple(slice(a, b) for a, b in zip(lo, hi, strict=True)))
         position = self._position(frame, index)
         view = View(
             id=view_id,
-            kind=kind,
+            kind="slice",
             plane=frame.plane,
             array_axis=frame.array_axis,
             index=index,
@@ -730,9 +733,9 @@ class Renderer:
             path="",
             sha256="",
             sent=sent,
-            extra={k: v for k, v in extra.items() if k != "mode_needs_drawing"},
+            extra=extra,
         )
-        if extra.get("mode_needs_drawing"):
+        if mode in ("field_arrows", "grid", "landmarks"):
             self._draw_vectors(image, view, frame, index, crop, mode)
         self.views.append(view)
         return view
@@ -772,7 +775,6 @@ class Renderer:
         height0, width0 = field.shape[1:]
         assert view.px_to_mm is not None
         u, v = np.asarray(view.px_to_mm["u"]), np.asarray(view.px_to_mm["v"])
-        origin = np.asarray(view.px_to_mm["origin"])
         scale_x, scale_y = view.size_px[0] / width0, (view.size_px[1] - 18) / height0
         step = max(12, int(min(view.size_px) / 18))
         if mode == "field_arrows":
@@ -801,7 +803,6 @@ class Renderer:
             view.extra["legend"] = (
                 "a regular grid of the fixed image pushed by the field: crossings and folds show as crushed cells"
             )
-        del origin
 
     def _draw_landmarks(self, draw: ImageDraw.ImageDraw, view: View) -> None:
         assert self.derived is not None

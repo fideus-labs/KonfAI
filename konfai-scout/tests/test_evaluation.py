@@ -8,7 +8,7 @@ import pytest
 from konfai_scout.config import ScoutConfig
 from konfai_scout.derived import Derived
 from konfai_scout.evaluation import EvaluationError, RegionEvaluator, load_prior
-from konfai_scout.planes import box_from_dict, grid_bounds, window_of
+from konfai_scout.planes import box_from_dict, window_of
 
 
 def test_load_prior_reads_the_case_values(tmp_path):
@@ -57,7 +57,7 @@ def test_a_field_region_is_scored_without_a_reference(fixtures, tmp_path):
     assert not measurement.reference
     keys = set(measurement.values)
     assert any("JacobianFolding" in k for k in keys) and any("Displacement" in k for k in keys)
-    selected = evaluator.measure(grid_bounds(case.grid), metrics=["MAE"])
+    selected = evaluator.measure(case.grid.world_box(), metrics=["MAE"])
     assert all(k.endswith("MAE") for k in selected.values) and selected.values
 
 
@@ -66,7 +66,7 @@ def test_registration_references_are_scored_through_the_field(fixtures, tmp_path
     case.stage(tmp_path / "stage")
     derived = Derived(case, tmp_path / "work")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path, derived)
-    measurement = evaluator.measure(grid_bounds(case.grid), metrics=["Dice", "TRE"])
+    measurement = evaluator.measure(case.grid.world_box(), metrics=["Dice", "TRE"])
     assert measurement.reference
     dice = [v for k, v in measurement.values.items() if k == "WARPED_LABELS:FIXED_LABELS:Dice"]
     assert dice and dice[0] > 0.8  # the field is exact outside the planted errors
@@ -93,7 +93,7 @@ def test_a_thin_box_drops_ssim_and_an_unknown_metric_names_the_criteria(fixtures
     case.stage(tmp_path / "stage")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path / "work", None)
     assert evaluator.available() == ["MAE", "PSNR", "SSIM"]
-    whole = grid_bounds(case.grid)
+    whole = case.grid.world_box()
     thin = box_from_dict(
         {"min": list(whole.low_xyz), "max": [whole.high_xyz[0], whole.high_xyz[1], whole.low_xyz[2] + 3.0]}
     )

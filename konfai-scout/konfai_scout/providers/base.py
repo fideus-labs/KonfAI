@@ -4,8 +4,14 @@ keeps the conversation. One implementation per API; a local VLM joins through an
 
 from __future__ import annotations
 
+import base64
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+#: The MCP server Scout's tools are served under to a CLI that runs the tool loop itself (Claude Code, Codex).
+SERVER = "scout"
 
 
 class ProviderError(RuntimeError):
@@ -44,6 +50,9 @@ class ToolResult:
     is_error: bool = False
 
 
+Executor = Callable[[ToolCall], ToolResult]
+
+
 @dataclass
 class Usage:
     input_tokens: int = 0
@@ -61,7 +70,6 @@ class Turn:
     stop: str  # end_turn, tool_use, max_tokens, refusal, other
     usage: Usage
     model: str | None = None
-    raw: dict[str, Any] = field(default_factory=dict)
 
 
 class Provider(Protocol):
@@ -89,3 +97,40 @@ def is_loopback(base_url: str | None) -> bool:
 
     host = (urlparse(base_url).hostname or "").lower()
     return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".localhost")
+
+
+def b64(png: bytes) -> str:
+    return base64.standard_b64encode(png).decode("ascii")
+
+
+def without_image_data(content: Any) -> Any:
+    """A content list with image bytes replaced by their size: the evidence files hold the images."""
+    if not isinstance(content, list):
+        return content
+    out = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            data = block.get("data") or (block.get("source") or {}).get("data") or ""
+            out.append({"type": "image", "bytes": len(base64.b64decode(data)) if data else None})
+        else:
+            out.append(block)
+    return out
+
+
+class ToolDriver:
+    """The half shared by the providers whose CLI runs the tool loop itself: every call lands in the executor the
+    inspector binds, numbered in order (a CLI may call tools in parallel; the toolbox numbers its records)."""
+
+    drives_tools = True
+
+    def __init__(self) -> None:
+        self.execute: Executor | None = None
+        self._calls = 0
+        self._lock = threading.Lock()
+
+    def _execute(self, name: str, args: dict[str, Any]) -> ToolResult:
+        if self.execute is None:
+            raise ProviderError("no executor bound: the inspector binds `execute` before the first turn")
+        with self._lock:
+            self._calls += 1
+            return self.execute(ToolCall(id=f"call_{self._calls}", name=name, arguments=dict(args or {})))

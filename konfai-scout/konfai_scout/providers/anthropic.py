@@ -3,11 +3,21 @@
 
 from __future__ import annotations
 
-import base64
 import os
 from typing import Any
 
-from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage
+from .base import (
+    ImageContent,
+    ProviderError,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    Turn,
+    Usage,
+    b64,
+    is_loopback,
+    without_image_data,
+)
 
 
 def _image_block(image: ImageContent) -> dict[str, Any]:
@@ -16,14 +26,13 @@ def _image_block(image: ImageContent) -> dict[str, Any]:
         "source": {
             "type": "base64",
             "media_type": "image/png",
-            "data": base64.standard_b64encode(image.png).decode("ascii"),
+            "data": b64(image.png),
         },
     }
 
 
 class AnthropicProvider:
     name = "anthropic"
-    remote = True
 
     def __init__(
         self,
@@ -33,10 +42,14 @@ class AnthropicProvider:
         max_tokens: int = 16000,
         api_key_env: str | None = None,
         base_url: str | None = None,
+        local: bool = False,
         fallbacks: bool = False,
         client: Any = None,
     ) -> None:
         self.model = model
+        # the official API however the flags read; a server named by base_url is local on a loopback address or
+        # when the caller says so
+        self.remote = not (base_url and (local or is_loopback(base_url)))
         self.effort = effort
         self.max_tokens = max_tokens
         self.fallbacks = fallbacks
@@ -160,34 +173,19 @@ class AnthropicProvider:
                 cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
             ),
             model=str(data.get("model") or self.model),
-            raw={"id": data.get("id"), "stop_reason": stop},
         )
 
     def transcript(self) -> list[dict[str, Any]]:
-        return _without_image_data(self.messages)
-
-
-def _without_image_data(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The conversation with image bytes replaced by their size: the evidence files hold the images."""
-    out = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, list):
-            cleaned = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "image":
-                    cleaned.append({"type": "image", "bytes": len(base64.b64decode(block["source"]["data"]))})
-                elif (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_result"
-                    and isinstance(block.get("content"), list)
-                ):
-                    cleaned.append(
-                        {**block, "content": _without_image_data([{"content": block["content"]}])[0]["content"]}
-                    )
-                else:
-                    cleaned.append(block)
-            out.append({**message, "content": cleaned})
-        else:
-            out.append(message)
-    return out
+        """The conversation with image bytes replaced by their size, in the messages and in the tool results."""
+        out = []
+        for message in self.messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                content = [
+                    {**block, "content": without_image_data(block["content"])}
+                    if isinstance(block, dict) and block.get("type") == "tool_result"
+                    else block
+                    for block in without_image_data(content)
+                ]
+            out.append({**message, "content": content})
+        return out
