@@ -22,6 +22,7 @@ fidopt_list_datasets, fidopt_describe_dataset and fidopt_list_methods. The serve
 it does, when to search its tools), marks six entry tools to load upfront under Claude Code's tool search, and
 describes every tool in one short paragraph; listed schemas drop pydantic's `anyOf [T, null]`, `default: null` and
 the free-form output schemas: the tool list a client loads drops from ~26,600 to ~14,800 tokens.
+Every call appends one line (tool, session, ok, ms) to `tool_calls.jsonl` in the workspaces root.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

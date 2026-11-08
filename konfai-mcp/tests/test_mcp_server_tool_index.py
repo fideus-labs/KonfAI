@@ -227,3 +227,21 @@ def test_the_listed_schemas_are_lean(load_mcp_server: Callable[[], ModuleType]) 
             assert result.structured_content is not None
 
     asyncio.run(scenario())
+
+
+def test_every_tool_call_leaves_a_line_in_the_usage_log(
+    workspace_root: Path, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> bool:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("describe_konfai_capabilities", {})
+            failed = await client.call_tool("get_job_status", {"job_id": "no-such-job"}, raise_on_error=False)
+            return bool(failed.is_error)
+
+    failed = asyncio.run(scenario())
+    lines = [json.loads(line) for line in (workspace_root / "tool_calls.jsonl").read_text().splitlines()]
+    assert [line["tool"] for line in lines[-2:]] == ["describe_konfai_capabilities", "get_job_status"]
+    assert lines[-2]["ok"] is True and lines[-1]["ok"] is (not failed)
+    assert "arguments" not in lines[-1] and set(lines[-1]) == {"ts", "tool", "session", "ok", "ms"}

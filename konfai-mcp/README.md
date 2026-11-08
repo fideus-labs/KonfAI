@@ -193,6 +193,8 @@ tools, and six entry tools (`describe_konfai_capabilities`, `list_apps`, `run_ap
 `_meta["anthropic/alwaysLoad"]` so Claude Code keeps them loaded while it defers the
 rest. Listed schemas are lean (an optional parameter is its type, no output schema for a free-form
 result); the whole tool list weighs about 15k tokens for a client that loads it upfront.
+Every call appends one line (tool, session, ok, ms; no argument) to `tool_calls.jsonl` in the
+workspaces root: the usage data the next consolidation of the surface rests on.
 
 Tools are grouped by stage below. To avoid drift and wasted tokens, each tool's
 **contract (inputs, outputs, `next_actions`) is not duplicated here**; it lives

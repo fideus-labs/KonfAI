@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
@@ -143,7 +144,33 @@ class _LeanSchemas(McpMiddleware):
         ]
 
 
+class _ToolUsage(McpMiddleware):
+    """One JSON line per call in ``<workspaces root>/tool_calls.jsonl`` (tool, session, ok, ms): which tools agents
+    actually call and which ones they get wrong, the data the next consolidation of the surface rests on.
+    No argument is written. ``sort | uniq -c`` on the tool field is the tally."""
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        started = time.monotonic()
+        ok = True
+        try:
+            return await call_next(context)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            line = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "tool": context.message.name,
+                "session": WORKSPACE_LAYOUT.current_session,
+                "ok": ok,
+                "ms": round(1000 * (time.monotonic() - started)),
+            }
+            with suppress(OSError), (WORKSPACES_ROOT / "tool_calls.jsonl").open("a", encoding="utf-8") as log:
+                log.write(json.dumps(line) + "\n")
+
+
 mcp.add_middleware(_LeanSchemas())
+mcp.add_middleware(_ToolUsage())
 
 KONFAI_VERSION = konfai_pkg.__version__
 konfai_get_available_devices = konfai_pkg.get_available_devices
