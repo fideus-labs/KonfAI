@@ -1486,3 +1486,23 @@ def test_prepare_registration_evaluate_pairs_what_it_scores(tmp_path: Path) -> N
     # No transform scores the pair as it is: the misalignment a registration starts from.
     before = service.prepare_registration_evaluate(fixed_seg=[fixed], moving_seg=[moving])
     assert before["kwargs"]["transforms"] == []
+
+
+def test_describe_app_of_a_preset_does_not_import_the_app_s_model(tmp_path: Path) -> None:
+    """A preset of a bare model parameter would be checked against the model's signature: reading the manifest in
+    the server process names the preset without importing the app's code."""
+    app_dir = _write_local_app(tmp_path)
+    (app_dir / "Prediction.yml").write_text(
+        "Predictor:\n  Model:\n    classpath: Model:Net\n    Net:\n      iterations: 1\n", encoding="utf-8"
+    )
+    (app_dir / "Model.py").write_text(
+        "from pathlib import Path\nPath(__file__).with_name('imported').touch()\n\n\nclass Net:\n    pass\n",
+        encoding="utf-8",
+    )
+    manifest = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+    manifest["presets"] = {"fast": {"description": "", "set": ["iterations=2"]}}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    payload = _service(tmp_path).describe_app(f"{app_dir}#fast")
+
+    assert payload["preset"] == "fast" and not (app_dir / "imported").exists()

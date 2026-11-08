@@ -1098,6 +1098,14 @@ class LocalAppRepository(AppRepositoryInfo):
             return
         with open(self._download(config_filename), encoding="utf-8") as file:
             data = YAML().load(file)
+        root = "Predictor" if (data or {}).get("Predictor") else "Trainer"
+        for name in (override.partition("=")[0].strip() for override in overrides):
+            if name.startswith((f"{root}.manual_seed", f"{root}.Dataset", f"{root}.outputs_dataset")):
+                raise AppRepositoryError(
+                    f"The {what} of app '{self.get_name()}' sets '{name}': a preset sets the method's parameters, "
+                    "never the seed, the data or the outputs.",
+                    "Pass it as --set on the run instead.",
+                )
         try:
             apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
         except AppRepositoryError as error:

@@ -329,3 +329,15 @@ def test_list_shows_each_app_s_presets(capsys: pytest.CaptureFixture) -> None:
     cli.print_apps("konfai-apps", [("ConvexAdam", {"display_name": "ConvexAdam", "presets": _PRESETS}), ("Demons", {})])
     out = capsys.readouterr().out
     assert "#composite, #coarse, #fine_grid" in out and "NAME#PRESET runs a preset" in out
+
+
+@pytest.mark.parametrize(
+    "name", ["Predictor.manual_seed", "Predictor.Dataset.batch_size", "Predictor.outputs_dataset.x"]
+)
+def test_a_preset_sets_no_seed_data_or_output(tmp_path: Path, name: str) -> None:
+    """A preset is a set of method parameters, so one preset gives one result whatever the run's own choices."""
+    info = app_repository_module.get_app_repository_info(str(_app(tmp_path, _PRESETS)), False)
+    with pytest.raises(AppRepositoryError, match="the method's parameters"):
+        info.save_preset("bad", "", [f"{name}=7"])
+    # a fully qualified method parameter is one
+    assert info.save_preset("fine", "", ["Predictor.Model.RegistrationNet.iterations=7"]).is_file()

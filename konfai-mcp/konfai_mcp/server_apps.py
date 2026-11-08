@@ -60,6 +60,16 @@ def _import_app_repository() -> Any:
     return app_repository
 
 
+def _manifest_info(ref: str, force_update: bool) -> Any:
+    """The app ``ref`` names, for a read in the server process: its preset chosen by name alone, since checking the
+    preset's overrides (``LocalAppRepository.use_preset``) imports the app's model code."""
+    app_repository = _import_app_repository()
+    base, preset = app_repository.split_preset(ref)
+    info = app_repository.get_app_repository_info(base, force_update)
+    app_repository.AppRepositoryInfo.use_preset(info, preset)
+    return info
+
+
 def _source_of(info: Any) -> str:
     """Map a resolved repository object to a coarse source label."""
     name = type(info).__name__
@@ -316,8 +326,7 @@ class AppService:
         capabilities, checkpoints, terminology). It does not import the app's model code or install
         its requirements.
         """
-        app_repository = _import_app_repository()
-        info = app_repository.get_app_repository_info(ref, force_update)
+        info = _manifest_info(ref, force_update)
         inference, evaluation, uncertainty = info.has_capabilities()
         finetunable = info.is_finetunable()
 
@@ -553,10 +562,9 @@ class AppService:
         """
         if self._is_remote(ref):
             return None
-        app_repository = _import_app_repository()
-        if app_repository.get_app_repository_info(ref, False).get_task() != "registration":
+        if _manifest_info(ref, False).get_task() != "registration":
             return None
-        base, chosen = app_repository.split_preset(ref)
+        base, chosen = _import_app_repository().split_preset(ref)
         suffix = f"#{chosen}" if chosen else ""  # impact-reg-konfai takes the app's preset as APP#PRESET
         path = Path(base).expanduser()
         if path.exists():

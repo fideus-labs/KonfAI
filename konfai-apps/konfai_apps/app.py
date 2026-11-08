@@ -1063,6 +1063,8 @@ class KonfAIApp(AbstractKonfAIApp):
                     walk(child)
 
         for path in paths:
+            if isinstance(path, str) and not uri.is_uri(path):
+                path = Path(path)
             if isinstance(path, str):
                 # A URI, the only input kept as text, is read in place, chunk by chunk: only an OME-Zarr store
                 # is addressed by chunk, so only a store reads through it; a file there is a whole download,
