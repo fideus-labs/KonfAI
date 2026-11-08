@@ -171,6 +171,22 @@ def test_lncc_is_the_mean_of_its_windows_and_streams_with_its_halo() -> None:
     assert 0 < lncc(a, b, mask)[1] <= 1
 
 
+@pytest.mark.parametrize("offset", [0.0, 1000.0, 30000.0])
+def test_the_correlations_hold_far_from_zero(offset: float) -> None:
+    """An MR or a CT sits far from 0: the moments' differences cancelled in float32, and LNCC scored 1672 for an image
+    against itself plus noise at 1000. Both correlations are now the same wherever the intensities sit, and in
+    [0, 1] for LNCC."""
+    from konfai.metric.measure import LNCC, NCC
+
+    rng = np.random.default_rng(0)
+    base = torch.from_numpy(rng.normal(size=(1, 1, 12, 12, 12))).float() * 20
+    noisy = base + torch.from_numpy(rng.normal(size=base.shape)).float()
+    lncc, ncc = LNCC(kernel=5)(base + offset, noisy + offset)[1], NCC()(base + offset, noisy + offset)[1]
+    assert 0 <= lncc <= 1
+    assert lncc == pytest.approx(LNCC(kernel=5)(base, noisy)[1], rel=1e-4)
+    assert ncc == pytest.approx(NCC()(base, noisy)[1], rel=1e-5)
+
+
 # ---------------------------------------------------------------- the field's regularity
 
 
