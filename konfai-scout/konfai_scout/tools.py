@@ -21,7 +21,19 @@ from .evaluation import DEFAULT_THRESHOLDS, EvaluationError, RegionEvaluator
 from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
 from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
-from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation, value_text
+from .report import (
+    DEFECTS,
+    DESCRIPTION_MAX,
+    KINDS,
+    SEVERITIES,
+    SUMMARY_MAX,
+    VERDICTS,
+    Conclusion,
+    Measurement,
+    Observation,
+    short_key,
+    value_text,
+)
 from .report import ToolCall as ToolCallRecord
 from .views import WINDOW_PRESETS, Renderer, ViewError
 
@@ -169,7 +181,11 @@ class Toolbox:
                         "defect": {"type": "string", "enum": list(DEFECTS[self.case.task])},
                         "severity": {"type": "string", "enum": list(SEVERITIES)},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                        "description": {"type": "string"},
+                        "description": {
+                            "type": "string",
+                            "description": f"One sentence, at most {DESCRIPTION_MAX} characters: what, where, how "
+                            "bad, the measurement that supports it.",
+                        },
                         "box_mm": _nullable(_BOX),
                         "plane": _nullable({"type": "string", "enum": list(PLANES)}),
                         "views": {
@@ -204,7 +220,11 @@ class Toolbox:
                 _schema(
                     {
                         "verdict": {"type": "string", "enum": list(VERDICTS)},
-                        "summary": {"type": "string"},
+                        "summary": {
+                            "type": "string",
+                            "description": f"One or two sentences, at most {SUMMARY_MAX} characters: the verdict and "
+                            "the observation ids it rests on, not their descriptions again.",
+                        },
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     },
                     ["verdict", "summary", "confidence"],
@@ -398,6 +418,11 @@ class Toolbox:
             raise ValueError(f"defect is one of {DEFECTS[self.case.task]}")
         if severity not in SEVERITIES:
             raise ValueError(f"severity is one of {SEVERITIES}")
+        if len(description) > DESCRIPTION_MAX:
+            raise ValueError(
+                f"the description has {len(description)} characters: write one sentence of at most {DESCRIPTION_MAX} "
+                "(what, where, how bad, the measurement that supports it)"
+            )
         known_views = {v.id: v for v in self.renderer.views}
         known_measurements = {m.id: m for m in self.measurements}
         views = list(views or [])
@@ -469,9 +494,8 @@ class Toolbox:
                 measurements.append(check.id)
                 found = _support([check], self.thresholds)
                 support += found
-                notes.append(
-                    f"Scout's check {check.id} of the box: " + ("; ".join(found) or "no value past a threshold")
-                )
+                shown = "; ".join(found[:3]) + (f" (+{len(found) - 3})" if len(found) > 3 else "")
+                notes.append(f"Scout's check {check.id}: " + (shown or "no value past a threshold"))
         if kind == "confirmed_error" and not support:
             kind = "suspected_error"
             notes.append(
@@ -503,6 +527,11 @@ class Toolbox:
     ) -> tuple[dict[str, Any], list[ImageContent]]:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict is one of {VERDICTS}")
+        if len(summary) > SUMMARY_MAX:
+            raise ValueError(
+                f"the summary has {len(summary)} characters: write one or two sentences of at most {SUMMARY_MAX} "
+                "(the verdict and the observation ids it rests on)"
+            )
         reason = None
         if verdict == "defective" and not any(o.kind == "confirmed_error" for o in self.observations):
             reason = (
@@ -532,12 +561,12 @@ def _past(key: str, value: object, thresholds: dict[str, dict[str, float]]) -> s
         return None
     parts = key.split(":")  # OUTPUT:TARGET:Criterion[:label]; a region_stats key has no criterion
     if not math.isfinite(number):
-        return f"{key} is not finite" if parts[0] == "FIELD" else None
+        return f"{short_key(key)} is not finite" if parts[0] == "FIELD" else None
     rule = thresholds.get(parts[2], {}) if len(parts) > 2 else {}
     if "below" in rule and number < rule["below"]:
-        return f"{key} = {value_text(number)} < {rule['below']:g}"
+        return f"{short_key(key)} = {value_text(number)} < {rule['below']:g}"
     if "above" in rule and number > rule["above"]:
-        return f"{key} = {value_text(number)} > {rule['above']:g}"
+        return f"{short_key(key)} = {value_text(number)} > {rule['above']:g}"
     return None
 
 

@@ -60,7 +60,7 @@ def test_without_truth_nothing_is_confirmed(fixtures, tmp_path):
     report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path)
     assert not report.case["truth_available"]
     assert all(o.kind != "confirmed_error" for o in report.observations)
-    assert "No reference was given" in (tmp_path / "report.md").read_text()
+    assert "No reference given" in (tmp_path / "report.md").read_text()
 
 
 def test_the_budget_ends_an_endless_explorer(fixtures, tmp_path):
@@ -234,7 +234,7 @@ def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
     assert "heuristic" not in user["content"] and "measure" not in user["content"].lower()
     assert report.second_reading["observations"] == len(errors) and report.second_reading["not_visible"] == len(errors)
     assert (tmp_path / "blind" / "second_reading.json").exists()
-    assert "Second reading (not_visible" in (tmp_path / "blind" / "report.md").read_text()
+    assert "second reading: not_visible" in (tmp_path / "blind" / "report.md").read_text()
     assert report.summary()["observations"][0]["second_reading"] == "not_visible"
     assert compare([report])["rows"][0]["not_visible"] == len(errors)
     assert report.usage.images_sent >= 3 + 3 * len(errors) and report.usage.requests > readers[0].calls

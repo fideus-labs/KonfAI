@@ -9,7 +9,7 @@ import json
 from .case import InspectionCase
 from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
-from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
+from .report import DEFECTS, DESCRIPTION_MAX, KINDS, SEVERITIES, SUMMARY_MAX, VERDICTS, value_text
 
 PROMPT_VERSION = "1.3"
 
@@ -44,11 +44,17 @@ Look before you measure. The evidence is what the images show: where the result'
 of the image, what the overlays separate, what a zoom reveals. A score summarises; it does not say where or why. \
 Judge the result against the image first, with the reference hidden where you can (a prediction over its image, \
 the warped image against the fixed one), then compare with the reference when there is one, then measure to back \
-what you saw. Describe what you see so that a reader opening the cited view finds it: which structure, which edge, \
-which direction, how far. Record each finding with `note` as soon as it is established, citing the view ids (as \
-printed on each image) and the measurement ids that support it, with a confidence from 0 to 1. Prefer few, \
-decisive views. Finish with `conclude`; every statement goes through `note` and `conclude`, not prose. Your budget: \
-{budget}.
+what you saw. Record each finding with `note` as soon as it is established, citing the view ids (as printed on each \
+image) and the measurement ids that support it, with a confidence from 0 to 1. Prefer few, decisive views and few \
+observations: one per distinct defect, none for what holds up. Finish with `conclude`; every statement goes through \
+`note` and `conclude`, not prose. Your budget: {budget}.
+
+## Writing
+A reader scans the report: be brief. A `note` description is one sentence: what is wrong, where (the structure, the \
+side), how bad, and the measurement that supports it ("Dice:1 = 0.50, m003"). The `conclude` summary is one or two \
+sentences: the verdict and the observation ids it rests on, without repeating their descriptions or figures, and \
+what could not be told if it matters. `note` refuses a description over {description_max} characters, `conclude` a \
+summary over {summary_max}.
 
 ## Severity
 minor: cosmetic, no consequence on a measure or a decision. moderate: a visible local error that changes a measure \
@@ -106,6 +112,8 @@ def system_prompt(case: InspectionCase, config: ScoutConfig) -> str:
         task=case.task,
         procedure=PROCEDURES[config.mode],
         budget=", ".join(limits),
+        description_max=DESCRIPTION_MAX,
+        summary_max=SUMMARY_MAX,
         guidance=GUIDANCE[case.task],
         defects=", ".join(DEFECTS[case.task]),
         extra=("\n## Additional instructions\n" + config.extra_instructions) if config.extra_instructions else "",

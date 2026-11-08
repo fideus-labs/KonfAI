@@ -90,11 +90,27 @@ def test_json_round_trip_and_summary(tmp_path):
     assert summary["counts"]["confirmed_error"] == 1 and summary["counts"]["major"] == 1 and summary["views"] == 1
 
 
-def test_markdown_names_the_evidence():
+def test_markdown_is_short_and_names_the_evidence():
     text = render_markdown(sample())
-    assert "Verdict: defective" in text
-    assert "missing_structure" in text and "m001" in text and "![v001" in text and "evidence/v001.png" in text
-    assert "PRED:TRUTH:Dice = 0.5" in text
+    lines = text.splitlines()
+    assert lines[0] == "# c1 (segmentation): defective" and lines[2].startswith("**defective** (0.80, by model).")
+    observation = next(line for line in lines if line.startswith("- **o001**"))
+    assert "missing_structure, confirmed error, major (0.90)" in observation and "[v001; m001]" in observation
+    assert (
+        "- m001 (0, 0, 0) mm, 1 x 1 x 1 mm: Dice 0.1" in lines
+        and "- [v001](evidence/v001.png) axial prediction, slice 3" in lines
+    )
+    assert "- prior evaluation (whole case): Dice 0.5" in lines and "## Tool calls" not in text
+    report = sample()
+    report.measurements.append(
+        Measurement(
+            "m002", "konfai_eval", True, None, report.measurements[0].box_measured, dict(report.measurements[0].values)
+        )
+    )
+    report.observations[0].measurements.append("m002")
+    assert "- m002 same as m001" in render_markdown(report).splitlines()  # Scout's check of a box measured already
+    report.measurements[1].values["PRED:TRUTH:Dice"] = 0.10001  # displayed alike, measured apart
+    assert "- m002 same as m001" not in render_markdown(report).splitlines()
 
 
 def test_compare_rows():

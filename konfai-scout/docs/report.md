@@ -5,7 +5,7 @@ An inspection leaves one directory:
 ```
 <out>/
   report.json        the record, schema_version "1.1"
-  report.md          the same for a person: verdict, observations with their evidence, measurements, views, calls
+  report.md          the short form for a person: the verdict, one line per observation, the evidence they cite
   case.json          the case as inspected (task, roles, labels, prior evaluation, notes)
   transcript.json    the conversation with the model, images replaced by their byte count
   evidence/vNNN.png  every view rendered, sent to the model or not
@@ -91,6 +91,12 @@ Softer rules check, downgrade or mark instead of refusing:
   view.
 
 The Markdown rendition shows every note in italics under its observation.
+
+A reader scans a report, so `note` refuses a description over 300 characters (one sentence: what, where, how bad,
+the measurement that supports it) and `conclude` a summary over 400 (one or two sentences: the verdict and the
+observation ids it rests on, not their descriptions again). `report.md` holds the verdict and summary, one line
+per observation with its notes, and the measurements and views the observations cite; every other view,
+measurement and call is in `report.json`.
 
 ### The blind second reading
 

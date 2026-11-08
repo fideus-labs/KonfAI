@@ -16,6 +16,8 @@ SCHEMA_VERSION = "1.1"
 KINDS = ("measured_property", "suspected_error", "confirmed_error")
 SEVERITIES = ("minor", "moderate", "major", "critical")
 VERDICTS = ("acceptable", "defective", "insufficient_evidence")
+#: The longest observation description and conclusion summary `note` and `conclude` accept: a sentence, two.
+DESCRIPTION_MAX, SUMMARY_MAX = 300, 400
 DEFECTS: dict[str, tuple[str, ...]] = {
     "segmentation": (
         "missing_structure",
@@ -263,12 +265,9 @@ def _box_text(box: dict[str, list[float]] | None) -> str:
     if not box:
         return "whole case"
     lo, hi = box["min"], box["max"]
-    center = [(a + b) / 2 for a, b in zip(lo, hi, strict=True)]
-    size = [b - a for a, b in zip(lo, hi, strict=True)]
-    return (
-        f"centre ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}) mm, "
-        f"size {size[0]:.1f} x {size[1]:.1f} x {size[2]:.1f} mm"
-    )
+    center = ", ".join(f"{(a + b) / 2:.0f}" for a, b in zip(lo, hi, strict=True))
+    size = " x ".join(f"{b - a:.0f}" for a, b in zip(lo, hi, strict=True))
+    return f"({center}) mm, {size} mm"
 
 
 def value_text(value: object) -> str:
@@ -277,126 +276,78 @@ def value_text(value: object) -> str:
     return str(value)
 
 
+def short_key(key: str) -> str:
+    """A KonfAI result key without its groups (`WARPED_LABELS:FIXED_LABELS:Dice:1` is `Dice:1`)."""
+    parts = key.split(":")
+    return ":".join(parts[2:]) if len(parts) > 2 else key
+
+
+def _values_text(values: dict[str, Any]) -> str:
+    return ", ".join(f"{short_key(k)} {value_text(v)}" for k, v in values.items()) or "no value"
+
+
 def render_markdown(report: Report) -> str:
-    """The report for a person: verdict first, then the observations with their evidence, then the record."""
+    """The report for a person, short and scannable: the verdict, one line per observation, then the evidence it
+    cites. Everything else (every view, measurement and call) is in report.json."""
     case = report.case
-    lines = [f"# Scout report: {case.get('name', 'case')} ({case.get('task', '?')})", ""]
     conclusion = report.conclusion
+    verdict = conclusion.verdict if conclusion else "none"
+    lines = [f"# {case.get('name', 'case')} ({case.get('task', '?')}): {verdict}", ""]
     if conclusion:
-        lines += [
-            f"**Verdict: {conclusion.verdict}** (confidence {conclusion.confidence:.2f}, by {conclusion.by})",
-            "",
-            conclusion.summary,
-            "",
-        ]
-        if conclusion.reason:
-            lines += [f"_{conclusion.reason}_", ""]
-    if report.error:
-        lines += [f"**Error:** {report.error}", ""]
-    provider = report.provider
-    lines += [
-        f"Provider {provider.get('name')} / model {provider.get('model')}, mode `{report.config.get('mode')}`, "
-        f"{len(report.tool_calls)} tool calls, {len(report.views)} views ({report.usage.images_sent} sent), "
-        f"{len(report.measurements)} measurements, {report.duration_s:.0f} s, "
-        + (f"${report.usage.cost_usd:.4f}" if report.usage.cost_usd is not None else "cost unknown")
-        + f", {report.usage.input_tokens + report.usage.output_tokens} tokens.",
-        "",
-    ]
+        lines += [f"**{verdict}** ({conclusion.confidence:.2f}, by {conclusion.by}). {conclusion.summary}", ""]
+    caveats = [conclusion.reason] if conclusion and conclusion.reason else []
+    caveats += [f"Error: {report.error}"] if report.error else []
     if not case.get("truth_available"):
-        lines += [
-            "No reference was given: nothing here is measured against a truth, and no anatomical claim is certain.",
-            "",
-        ]
+        caveats.append("No reference given: nothing is measured against a truth.")
     if report.budget.get("exhausted"):
-        lines += [f"Budget exhausted: {report.budget['exhausted']}.", ""]
+        caveats.append(f"Budget exhausted: {report.budget['exhausted']}.")
     if report.budget.get("not_enforced"):
-        lines += [f"Not enforced: {report.budget['not_enforced']}.", ""]
+        caveats.append(f"Not enforced: {report.budget['not_enforced']}.")
     second = report.second_reading
     if second and second.get("observations"):
-        lines += [
-            f"Second reading, blind, by {second.get('model')}: of {second['observations']} error observation(s), "
-            f"{second.get('visible', 0)} visible, {second.get('not_visible', 0)} not visible, "
-            f"{second.get('unsure', 0)} unsure"
-            + (f", {second['unparsed']} unanswered" if second.get("unparsed") else "")
-            + ".",
-            "",
-        ]
+        caveats.append(
+            f"Blind second reading ({second.get('model')}): {second.get('visible', 0)} visible, "
+            f"{second.get('not_visible', 0)} not visible, {second.get('unsure', 0)} unsure of "
+            f"{second['observations']}."
+        )
+    lines += [f"_{c}_" for c in caveats] + ([""] if caveats else [])
     lines += ["## Observations", ""]
     if not report.observations:
         lines += ["None recorded.", ""]
-    views = {view.id: view for view in report.views}
-    measurements = {m.id: m for m in report.measurements}
     for o in report.observations:
-        lines += [
-            f"### {o.id}: {o.defect} ({o.kind}, {o.severity}, confidence {o.confidence:.2f})",
-            "",
-            f"Location: {_box_text(o.box_mm)}" + (f", seen on the {o.plane} plane" if o.plane else ""),
-            "",
-            o.description,
-            "",
-        ]
-        for note in o.notes:
-            lines += [f"_{note}_", ""]
-        if o.second_reading:
-            lines += [
-                f"_Second reading ({o.second_reading.get('answer')}, views "
-                f"{', '.join(o.second_reading.get('views') or [])}): {o.second_reading.get('text', '')}_",
-                "",
-            ]
-        for mid in o.measurements:
-            m = measurements.get(mid)
-            if m is None:
-                continue
-            kind = "against a reference" if m.reference else "no reference"
-            values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items())
-            lines += [f"- {mid} ({m.kind}, {kind}, {_box_text(m.box_measured or m.box_requested)}): {values}"]
-        if o.measurements:
-            lines.append("")
-        for vid in o.views:
-            v = views.get(vid)
-            if v is None:
-                continue
-            lines += [f"![{vid}: {v.plane} {v.mode}]({v.path})", ""]
-    lines += ["## Prior evaluation (KonfAI Eval, whole case)", ""]
-    if report.prior_evaluation:
-        lines += [f"- {k} = {value_text(v)}" for k, v in report.prior_evaluation.items()] + [""]
-    else:
-        lines += ["None given.", ""]
-    lines += ["## Measurements", ""]
-    for m in report.measurements:
-        values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items()) or (m.error or "no value")
-        lines += [
-            f"- {m.id} ({m.kind}, {'reference' if m.reference else 'no reference'}, "
-            f"{_box_text(m.box_measured or m.box_requested)}): {values}"
-        ]
-    lines += ["", "## Views examined", ""]
-    for v in report.views:
-        where = f"{v.plane}" + (
-            f" at {v.position_mm[0]:.1f}, {v.position_mm[1]:.1f}, {v.position_mm[2]:.1f} mm" if v.position_mm else ""
+        evidence = "; ".join(part for part in (", ".join(o.views), ", ".join(o.measurements)) if part)
+        lines.append(
+            f"- **{o.id}** {o.defect}, {o.kind.replace('_', ' ')}, {o.severity} ({o.confidence:.2f}), "
+            f"{_box_text(o.box_mm)}: {o.description}" + (f" [{evidence}]" if evidence else "")
         )
-        lines += [
-            f"- {v.id}: {v.kind} {where}, mode `{v.mode}`"
-            + ("" if v.sent else " (rendered, not sent)")
-            + f" — [{v.path}]({v.path})"
-        ]
-    lines += ["", "## Tool calls", ""]
-    for c in report.tool_calls:
-        status = "ok" if c.ok else f"error: {c.error}"
-        lines += [
-            f"{c.n}. `{c.tool}` {json.dumps(c.args, default=_json_default)} → {c.summary} "
-            f"({status}, {c.duration_s:.1f} s)"
-        ]
+        lines += [f"  - _{note}_" for note in o.notes]
+        if o.second_reading:
+            lines.append(f"  - _second reading: {o.second_reading.get('answer')}, {o.second_reading.get('text', '')}_")
+    cited_views = {v for o in report.observations for v in o.views}
+    cited_measurements = {m for o in report.observations for m in o.measurements}
+    lines += ["", "## Evidence", ""]
+    seen: dict[str, str] = {}  # Scout's check of a box the model measured already holds the same values
+    for m in report.measurements:
+        if m.id in cited_measurements:
+            same = json.dumps([m.box_measured, m.values], sort_keys=True, default=str)  # exact, not as displayed
+            text = f"{_box_text(m.box_measured or m.box_requested)}: {_values_text(m.values)}"
+            lines.append(f"- {m.id} " + (f"same as {seen[same]}" if same in seen else text))
+            seen.setdefault(same, m.id)
+    lines += [
+        f"- [{v.id}]({v.path}) {v.plane} {v.mode}" + (f", slice {v.index}" if v.index is not None else f", {v.kind}")
+        for v in report.views
+        if v.id in cited_views
+    ]
+    if report.prior_evaluation:
+        lines += [f"- prior evaluation (whole case): {_values_text(report.prior_evaluation)}"]
+    provider = report.provider
     lines += [
         "",
-        "## Record",
-        "",
-        f"- Scout {report.scout_version}; " + ", ".join(f"{k} {v}" for k, v in report.versions.items()),
-        f"- Created {report.created_at}",
-        "- Inputs: "
-        + ", ".join(
-            f"{role} `{Path(str(entry.get('path', ''))).name}` ({str(entry.get('sha256', ''))[:12]})"
-            for role, entry in (case.get("inputs") or {}).items()
-        ),
+        f"{provider.get('name')} / {provider.get('model')}, {report.config.get('mode')}, "
+        f"{len(report.tool_calls)} calls, {len(report.views)} views, {len(report.measurements)} measurements, "
+        f"{report.duration_s:.0f} s, "
+        + (f"${report.usage.cost_usd:.3f}" if report.usage.cost_usd is not None else "cost unknown")
+        + f". Scout {report.scout_version}, {report.created_at}. Every view, measurement and call: report.json.",
         "",
     ]
     return "\n".join(lines)

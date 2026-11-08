@@ -124,9 +124,7 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
     assert "at least one view" in run(box, "note", **error, views=[], measurements=[])["error"]
     assert "none of the cited views shows" in run(box, "note", **error, views=[zoom["id"]], measurements=[])["error"]
     seen = run(box, "note", **error, views=[montage["id"]], measurements=[])["observation"]
-    assert seen["kind"] == "suspected_error" and [n.split(" of the box")[0] for n in seen["notes"]] == [
-        "Scout's check m001"
-    ]
+    assert seen["kind"] == "suspected_error" and [n.split(":")[0] for n in seen["notes"]] == ["Scout's check m001"]
     # a figure needs a source: the measurement that holds it, cited
     stats = run(box, "region_stats", box_mm=cube)
     mid, voxels = stats["measurement"]["id"], stats["region"]["truth_labels"]["2"]["voxels"]
@@ -196,7 +194,7 @@ def test_a_confirmation_rests_on_a_value_past_its_threshold_and_scout_checks_eve
     }
     wrong = run(box, "note", **claim, measurements=[perfect["id"]])["observation"]
     assert wrong["kind"] == "suspected_error"  # a perfect Dice confirms nothing
-    assert "Scout's check m002 of the box: no value past a threshold" in wrong["notes"]
+    assert "Scout's check m002: no value past a threshold" in wrong["notes"]
     assert any(n.startswith("downgraded from confirmed_error") for n in wrong["notes"])
     observation, check = box.observations[-1], box.measurements[-1]
     assert observation.measurements == [perfect["id"], "m002"] and check.request["check_of"] == observation.id
@@ -206,7 +204,7 @@ def test_a_confirmation_rests_on_a_value_past_its_threshold_and_scout_checks_eve
     view = run(box, "view", plane="axial", mode="both", zoom=cube)["view"]
     missing = run(box, "note", **{**claim, "views": [view["id"]]}, measurements=[])["observation"]
     assert missing["kind"] == "confirmed_error"  # nothing cited, but Scout's own check of the box shows Dice:2 = 0
-    assert any("PRED:TRUTH:Dice:2" in n and "< 0.8" in n for n in missing["notes"])
+    assert any(n.startswith("Scout's check m001: Dice:2 = ") and "< 0.8" in n for n in missing["notes"])
 
     box = toolbox(fixtures, "segmentation_no_truth", tmp_path / "no_truth")
     view = run(box, "view", plane="axial", mode="prediction", zoom=cube)["view"]
@@ -215,14 +213,14 @@ def test_a_confirmation_rests_on_a_value_past_its_threshold_and_scout_checks_eve
 
     thresholds = {"Dice": {"below": 0.8}, "JacobianFolding": {"above": 0.0}, "JacobianMin": {"below": 0.0}}
     assert _past("PRED:TRUTH:Dice:1", 0.95, thresholds) is None and _past("PRED:TRUTH:Dice:1", None, thresholds) is None
-    assert _past("PRED:TRUTH;MASK:Dice:1", 0.3, thresholds) == "PRED:TRUTH;MASK:Dice:1 = 0.3 < 0.8"
+    assert _past("PRED:TRUTH;MASK:Dice:1", 0.3, thresholds) == "Dice:1 = 0.3 < 0.8"
     assert _past("FIELD:None:JacobianFolding", 0.01, thresholds) and not _past(
         "FIELD:None:JacobianFolding", 0, thresholds
     )
-    assert _past("FIELD:None:JacobianMin", float("nan"), thresholds) == "FIELD:None:JacobianMin is not finite"
+    assert _past("FIELD:None:JacobianMin", float("nan"), thresholds) == "JacobianMin is not finite"
     assert _past("SYN:TARGET:MAE", float("nan"), thresholds) is None  # an empty mask, not an error
     assert _past("SYN:TARGET:MAE", 500.0, thresholds) is None  # no threshold: the scale is the data's
-    assert _past("SYN:TARGET:MAE", 500.0, {"MAE": {"above": 100}}) == "SYN:TARGET:MAE = 500 > 100"
+    assert _past("SYN:TARGET:MAE", 500.0, {"MAE": {"above": 100}}) == "MAE = 500 > 100"
     assert _past("overlap_voxels_prediction_vs_truth.2.only_b", 120, thresholds) is None
 
 
@@ -244,3 +242,19 @@ def test_a_mask_restricts_the_statistics_and_a_ct_preset_follows_a_stored_offset
     assert 0 < region["mask_voxels"] < region["voxels"] and region["synthetic"]["voxels"] == region["mask_voxels"]
     assert renderer.resolve_window("ct_soft", "synthetic") == (864.0, 1264.0)  # stored as HU + 1024
     assert renderer.resolve_window("ct_soft", "target") == (-160.0, 240.0)  # stored in HU
+
+
+def test_a_description_is_a_sentence_and_a_summary_two(fixtures, tmp_path):
+    from konfai_scout.report import DESCRIPTION_MAX, SUMMARY_MAX
+
+    box = toolbox(fixtures, "segmentation", tmp_path)
+    view = run(box, "view", plane="axial", mode="prediction")["view"]
+    note = {"kind": "suspected_error", "defect": "leak", "severity": "minor", "confidence": 0.5, "box_mm": None}
+    long = run(box, "note", **note, description="x" * (DESCRIPTION_MAX + 1), views=[view["id"]], measurements=[])
+    assert "write one sentence" in long["error"] and not box.observations
+    assert "observation" in run(box, "note", **note, description="A leak.", views=[view["id"]], measurements=[])
+    assert (
+        "one or two sentences"
+        in run(box, "conclude", verdict="acceptable", summary="s" * (SUMMARY_MAX + 1), confidence=0.5)["error"]
+    )
+    assert box.conclusion is None

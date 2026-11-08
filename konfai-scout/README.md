@@ -28,7 +28,7 @@ and the measurements that support them.
 - **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
   prior scores: it judges the images and its own measurements (`--no-blind` hands them over, for a study).
 - **It leaves a record.** A versioned JSON report with versions, configuration, prompts, every tool call, every view,
-  every measurement, cost and duration, and a Markdown rendition with the evidence images. Two modes, fixed views
+  every measurement, cost and duration, and a short Markdown rendition: the verdict, one line per observation, the evidence it cites. Two modes, fixed views
   and active exploration, for a study of what exploration buys.
 - **It works with Claude, GPT, or a local vision model** through an OpenAI-compatible server, and sends images to a
   cloud API only when told to.
