@@ -989,6 +989,7 @@ class Network(ModuleArgsDict, ABC):
                                         self.patch.get_patch_slices(),
                                         self.patch.patch_size,
                                         self.patch.patch_combine,
+                                        placement=self.patch.placement,
                                     )
                                 accumulators[buffer[0][0]].add_layer(i, buffer[0][1])
                         buffer.pop(0)
@@ -998,6 +999,7 @@ class Network(ModuleArgsDict, ABC):
                             self.patch.get_patch_slices(),
                             self.patch.patch_size,
                             self.patch.patch_combine,
+                            placement=self.patch.placement,
                         )
                     accumulators[buffer[0][0]].add_layer(i, buffer[0][1])
                 # The leftover entry must not leak into the next patch iteration: the name-transition
@@ -1096,6 +1098,7 @@ class Network(ModuleArgsDict, ABC):
                             output_layer_patch_indexed[name].patch.get_patch_slices(0),
                             output_layer_patch_indexed[name].patch.patch_size,
                             output_layer_patch_indexed[name].patch.patch_combine,
+                            placement=output_layer_patch_indexed[name].patch.placement,
                         )
 
                     if name_tmp in layers_name:

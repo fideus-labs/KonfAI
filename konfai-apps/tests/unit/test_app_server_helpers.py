@@ -829,6 +829,9 @@ def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> No
         def is_finetunable(self) -> bool:
             return True
 
+        def get_presets(self) -> dict:
+            return {}
+
         def get_terminology(self) -> None:
             return None
 

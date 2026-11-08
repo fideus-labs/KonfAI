@@ -5,8 +5,8 @@ one parameter of it for one run, and `show NAME` lists every parameter the prese
 choices, and what it does:
 
 ```bash
-impact-reg-konfai show FireANTs_SyN
-impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz --gpu 0 \
+impact-reg-konfai show FireANTs#syn
+impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz --gpu 0 \
     --set deformable_iterations=[400,200,100] --set smooth_warp_sigma=1.0
 ```
 
@@ -29,12 +29,12 @@ is refused with the closest matches. A nested parameter takes its full path from
 
 The names below are those of the shipped presets; `show NAME` gives each preset's full list.
 
-| Concept | elastix (`Generic_*`, `Elastix_IMPACT_*`) | FireANTs (`FireANTs_*`) | ConvexAdam (`ConvexAdam_*`) |
+| Concept | elastix (`Elastix#*`) | FireANTs (`FireANTs#*`) | ConvexAdam (`ConvexAdam#*`) |
 |---|---|---|---|
 | Transform model | `parameter_maps` (rigid, B-spline) | `linear_method` (rigid_affine, rigid, none), `deformable_method` (syn, greedy, none) | `stages` (coarse, fine), `linear` |
 | Optimisation | `max_iterations` | `affine_iterations`, `deformable_iterations`, `affine_lr`, `deformable_lr` | `iterations`, `learning_rate` |
 | Multi-resolution | the parameter map's resolutions, or `levels` (IMPACT presets: per level, the iterations and the models) | `scales` (downsampling per level), `levels` (the models per scale) | `grid_spacing`, `displacement_half_width` (coarse search), `grid_shrink`, `levels` (the models of the coarse and fine stages) |
-| Metric | intensity: the parameter map; IMPACT: the `models` of each level | `affine_metric`, `deformable_metric`, `cc_kernel`, `deformable_masked` | the distance of `models`, `balance_coarse_layers` (each coarse-search layer divided by its spread over the candidate displacements, times `layers_weight`) |
+| Metric | intensity: the parameter map; IMPACT: the `models` of each level | `affine_metric`, `deformable_metric`, `cc_kernel`, `deformable_masked` | the distance of `models`, `balance_coarse_layers` (each coarse-search layer divided by its spread over the candidate displacements, times `layers_weight`), `deformable_masked` |
 | Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk`, `feature_overlap` (Static extraction) | the IMPACT loss (below) |
 | Regularisation | `final_grid_spacing` | `smooth_warp_sigma`, `smooth_grad_sigma` | `regularization_weight`, `control_grid_smoothing` |
 | Initialisation | the rigid map, `moments_init` (cof, com) | `moments_init` (cof, com, none) | `linear`, `linear_iterations`, `linear_sampling` |

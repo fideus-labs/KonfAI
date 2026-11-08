@@ -30,20 +30,14 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import (
-    Attribute,
-    Dataset,
-    entry_backend,
-    is_an_image,
-    is_displacement_entry,
-    link_entry,
-    symlink,
-)
+from konfai.utils import uri
+from konfai.utils.dataset import Attribute, Dataset, entry_links, is_an_image, is_displacement_entry
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -51,6 +45,7 @@ from konfai.utils.utils import (
     directory_volume_form,
     get_module,
     is_dicom_file,
+    is_store_name,
     split_format_level,
     split_path_spec,
     storage_form,
@@ -60,6 +55,9 @@ from ruamel.yaml import YAML
 from .app_repository import LocalAppRepository, get_app_repository_info
 from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
+
+#: The file an inference writes in its output folder: what ran (``LocalAppRepository.record``).
+RUN_RECORD = "konfai-run.json"
 
 # Marks the ``./Dataset`` directories konfai-apps staged: the only ones it may delete from a caller's workspace.
 _STAGED_MARKER = ".konfai-apps-staged"
@@ -209,13 +207,16 @@ def run_distributed_app(
                 janitor = _start_workspace_janitor(workspace_dir)
             # Resolve every caller-supplied path against the caller's directory before chdir'ing
             # into the workspace: a relative path would otherwise be interpreted inside the
-            # (possibly auto-created and then deleted) temporary workspace.
+            # (possibly auto-created and then deleted) temporary workspace. A URI names a store read
+            # in place: as a path it would resolve to '<cwd>/s3:/bucket/...'.
             if bound.arguments.get("output") is not None:
                 bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
             for key in ("inputs", "gt", "mask"):
                 value = bound.arguments.get(key)
                 if value is not None:
-                    bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
+                    bound.arguments[key] = [
+                        [str(p) if uri.is_uri(str(p)) else Path(p).resolve() for p in group] for group in value
+                    ]
             if bound.arguments.get("dataset") is not None:
                 bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
             os.makedirs(workspace_dir, exist_ok=True)
@@ -315,6 +316,16 @@ def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
             (key, value if isinstance(value, tuple) else (os.path.basename(getattr(value, "name", key)), value))
         )
     return MultipartEncoder(fields=fields)
+
+
+def _link_or_copy(src: str | Path, dst: str | Path) -> None:
+    """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on
+    Windows), else a copy. A link given as ``src`` is followed, as the copy does: a hard link to the
+    link itself would resolve a relative target from ``dst``."""
+    try:
+        os.link(os.path.realpath(src), dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 class AbstractKonfAIApp:
@@ -632,6 +643,13 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             if v is not None:
                                 group_sizes: list[int] = []
                                 for group in v:
+                                    remote = next((str(p) for p in group if uri.is_uri(str(p))), None)
+                                    if remote is not None:
+                                        raise AppRepositoryError(
+                                            f"'{remote}' is a URI, which a local run reads in place; a server receives"
+                                            " uploads.",
+                                            "Run without --host, or copy the store locally first.",
+                                        )
                                     count = 0
                                     for source, unit_suffix in KonfAIApp._list_input_units([Path(p) for p in group]):
                                         source = Path(source)
@@ -677,8 +695,10 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     read_timeout: int = 600
 
                     body = _multipart_body(files, data)
+                    # The app is a path segment: a preset's '#' goes as %23, or the URL would end at it.
+                    url = f"{self.remote_server.get_url()}/apps/{quote(self.app, safe='/:@')}/{func.__name__}"
                     with requests.post(
-                        f"{self.remote_server.get_url()}/apps/{self.app}/{func.__name__}",
+                        url,
                         data=body,
                         headers={**self.remote_server.get_headers(), "Content-Type": body.content_type},
                         timeout=(connect_timeout, read_timeout),
@@ -739,7 +759,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
     @run_remote_job
     def infer(
         self,
-        inputs: list[list[Path]],
+        inputs: list[list[Path | str]],
         output: Path = Path("./Output/").resolve(),
         ensemble: int = 0,
         ensemble_models: list[str] = [],
@@ -761,10 +781,10 @@ class KonfAIAppClient(AbstractKonfAIApp):
     @run_remote_job
     def evaluate(
         self,
-        inputs: list[list[Path]],
-        gt: list[list[Path]] | None,
+        inputs: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
-        mask: list[list[Path]] | None = None,
+        mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
         gpu: list[int] = [],
         cpu: int | None = None,
@@ -776,7 +796,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
     @run_remote_job
     def uncertainty(
         self,
-        inputs: list[list[Path]],
+        inputs: list[list[Path | str]],
         output: Path = Path("./Output/"),
         uncertainty_file: str = "Uncertainty.yml",
         gpu: list[int] = [],
@@ -789,8 +809,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
     @run_remote_job
     def pipeline(
         self,
-        inputs: list[list[Path]],
-        gt: list[list[Path]] | None,
+        inputs: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
         ensemble: int = 0,
         ensemble_models: list[str] = [],
@@ -801,7 +821,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
-        mask: list[list[Path]] | None = None,
+        mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
         uncertainty: bool = True,
         uncertainty_file: str = "Uncertainty.yml",
@@ -924,7 +944,7 @@ class KonfAIApp(AbstractKonfAIApp):
         return storage_form(file)
 
     @staticmethod
-    def _list_supported_files(paths: list[Path]) -> list[Path]:
+    def _list_supported_files(paths: list[Path | str]) -> list[Path]:
         """
         Expand a list of input paths into a flat list of supported files.
 
@@ -950,6 +970,10 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         files = []
         for path in paths:
+            if isinstance(path, str):
+                raise AppRepositoryError(
+                    f"'{path}' is a URI, and this command stages local files only.", "Copy the volume locally first."
+                )
             if not path.exists():
                 raise AppRepositoryError(
                     f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
@@ -987,20 +1011,21 @@ class KonfAIApp(AbstractKonfAIApp):
         return is_dicom_file(path)
 
     @staticmethod
-    def _list_input_units(paths: list[Path]) -> list[tuple[Path, str]]:
+    def _list_input_units(paths: list[Path | str]) -> list[tuple[Path | str, str]]:
         """Expand input paths into ordered ``(source, staged_suffix)`` units for the ``Dataset/`` layout.
 
         A unit is either a single supported file, or a directory that is itself one volume (an
-        OME-Zarr store or a DICOM series directory: see :meth:`_directory_volume_suffix`). A plain
-        directory is walked so each contained file / store / series becomes its own case, in sorted
-        order so cases pair consistently across input groups.
+        OME-Zarr store or a DICOM series directory: see :meth:`_directory_volume_suffix`), or an
+        OME-Zarr store named by a URI, read in place. A plain directory is walked so each contained
+        file / store / series becomes its own case, in sorted order so cases pair consistently across
+        input groups.
 
         Raises
         ------
         AppRepositoryError
             If a path does not exist, is an unsupported file, or yields no volume.
         """
-        units: list[tuple[Path, str]] = []
+        units: list[tuple[Path | str, str]] = []
         visited: set[Path] = set()
 
         def walk(path: Path) -> None:
@@ -1027,6 +1052,22 @@ class KonfAIApp(AbstractKonfAIApp):
                     walk(child)
 
         for path in paths:
+            if isinstance(path, str):
+                # A URI, the only input kept as text, is read in place, chunk by chunk: only an OME-Zarr store
+                # is addressed by chunk, so only a store reads through it; a file there is a whole download,
+                # the caller's to make. The store is probed once, so a typo in the URI or a missing credential
+                # is refused here, in the filesystem's own words, not at the first read.
+                if not is_store_name(path.rstrip("/")):
+                    raise AppRepositoryError(
+                        f"'{path}' is a URI, and only an OME-Zarr store is read in place.",
+                        "Copy the file locally first, or convert it to an OME-Zarr store.",
+                    )
+                if not uri.is_dir(path):
+                    raise AppRepositoryError(
+                        f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                    )
+                units.append((path, ".ome.zarr"))
+                continue
             if not path.exists():
                 raise AppRepositoryError(
                     f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
@@ -1061,8 +1102,18 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def _unit_backend(source: Path, suffix: str) -> str:
-        """The backend token a staged unit is read through (:func:`konfai.utils.dataset.entry_backend`)."""
-        return entry_backend(source, suffix)
+        """The backend token a staged unit is read through: an OME-Zarr store, a DICOM series (a bare
+        directory, no suffix), an ITK transform file (a ``.h5`` no ITK image reader takes: a field, an
+        affine or a composite, which a Resample or a TransformPoints reads as a transform) or an image file."""
+        if suffix in (".ome.zarr", ".zarr"):
+            return "omezarr"
+        if suffix == "":
+            return "dicom"
+        if suffix.lower() == ".tfm" or (
+            suffix.lower() == ".h5" and not sitk.ImageFileReader.GetImageIOFromFileName(str(source))
+        ):
+            return "itktransform"
+        return "mha"
 
     @staticmethod
     def _dataset_roots() -> list[Path]:
@@ -1073,16 +1124,38 @@ class KonfAIApp(AbstractKonfAIApp):
         ]
         return [root for root in roots if root.exists() or root.is_symlink()]
 
+    #: Where the inputs read in place are named: KonfAI's manifest form (``CASE: {GROUP: uri}``), inside
+    #: ``./Dataset`` so that it comes and goes with the staging, as a dot-file no walk of that root lists.
+    _REMOTE_MANIFEST = Path("Dataset") / ".konfai-apps-remote.yml"
+
     @staticmethod
-    def _stage(source: Path, suffix: str, case: str, entry: str, primary: str) -> None:
+    def _remote_manifest() -> dict[str, dict[str, str]]:
+        """What the remote manifest names, case by case; nothing without a manifest."""
+        manifest = KonfAIApp._REMOTE_MANIFEST
+        return (YAML(typ="safe").load(manifest) if manifest.is_file() else None) or {}
+
+    @staticmethod
+    def _name_remote_entry(source: str, case: str, entry: str) -> None:
+        """Name a store read in place under its case and group in the remote manifest."""
+        cases = KonfAIApp._remote_manifest()
+        cases.setdefault(case, {})[entry] = source
+        with open(KonfAIApp._REMOTE_MANIFEST, "w", encoding="utf-8") as file:
+            YAML(typ="safe").dump(cases, file)
+
+    @staticmethod
+    def _stage(source: Path | str, suffix: str, case: str, entry: str, primary: str) -> None:
         """Link one input unit as ``<root>/<case>/<entry><suffix>``, in the root of its backend.
 
         A directory dataset's backend is detected from its first case, so one OME-Zarr store or DICOM
         series staged beside plain files flips the whole root and the files stop resolving ('Group
         source not found'). A unit of the backend of ``Volume_0``'s first case (``primary``) goes to
         ``./Dataset``, the root every config reads; any other to ``./Dataset_<backend>``, which
-        :meth:`_declare_dataset_roots` adds to the config.
+        :meth:`_declare_dataset_roots` adds to the config. A store named by a URI is read in place:
+        it is named in the remote manifest, a root of its own declared beside the others.
         """
+        if isinstance(source, str):
+            KonfAIApp._name_remote_entry(source, case, entry)
+            return
         backend = KonfAIApp._unit_backend(source, suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
         # In lower case: the transform backend looks an entry up as <entry>.h5 or .tfm, an image by its stem.
@@ -1091,12 +1164,13 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def _declare_dataset_roots(config_file: str) -> None:
-        """Read the ``./Dataset_<backend>`` roots :meth:`_stage` split off wherever the config reads
-        ``./Dataset``, with the same flag: KonfAI resolves each group of a case in whichever root
-        holds it."""
+        """Read the ``./Dataset_<backend>`` roots :meth:`_stage` split off, and the remote manifest it wrote,
+        wherever the config reads ``./Dataset``, with the same flag and, for a store root, the same level:
+        KonfAI resolves each group of a case in whichever root holds it."""
         extra = [root for root in KonfAIApp._dataset_roots() if root.name != "Dataset"]
+        manifest = KonfAIApp._REMOTE_MANIFEST
         path = Path(config_file)
-        if not extra or not path.is_file():
+        if (not extra and not manifest.is_file()) or not path.is_file():
             return
         yaml = YAML()
         with open(path, encoding="utf-8") as file:
@@ -1108,13 +1182,18 @@ class KonfAIApp(AbstractKonfAIApp):
             if not entries:
                 continue
             for entry in list(entries):
-                filename, flag, _ = split_path_spec(
+                filename, flag, file_format = split_path_spec(
                     str(entry), default_format="mha", allowed_flags={"a", "i"}, supported_formats=SUPPORTED_FORMATS
                 )
                 if Path(filename).resolve() != target:
                     continue
-                for root in extra:
-                    spec = f"./{root.name}/:{f'{flag}:' if flag else ''}{root.name.removeprefix('Dataset_')}"
+                level = split_format_level(file_format)[1]
+                roots = [(f"./{root.name}/", root.name.removeprefix("Dataset_")) for root in extra]
+                if manifest.is_file():
+                    roots.append((f"./{manifest.as_posix()}", "omezarr"))
+                for root_spec, backend in roots:
+                    at = f"@{level}" if level and backend == "omezarr" else ""  # only a store has levels
+                    spec = f"{root_spec}:{f'{flag}:' if flag else ''}{backend}{at}"
                     if spec not in entries:
                         entries.append(spec)
         with open(path, "w", encoding="utf-8") as file:
@@ -1122,16 +1201,61 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def link_entry(src: Path, dst: Path) -> None:
-        """Link the image entry ``src`` as ``dst`` (:func:`konfai.utils.dataset.link_entry`)."""
-        link_entry(src, dst)
+        """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) reads where it
+        reads it from ``dst`` (``entry_links``): the header alone reads as nothing."""
+        (header, _), *companions = entry_links(src, dst)
+        KonfAIApp.symlink(header, dst)
+        for part, companion in companions:
+            if companion.exists() and companion.resolve() != part.resolve():
+                from konfai.utils.errors import DatasetManagerError
+
+                raise DatasetManagerError(
+                    f"'{src}' and another input of its case both keep their pixels at '{companion.name}'.",
+                    "Convert one of them to .mha or .nii.gz, which hold their pixels in the same file.",
+                )
+            companion.parent.mkdir(parents=True, exist_ok=True)
+            KonfAIApp.symlink(part, companion)
 
     @staticmethod
     def symlink(src: Path, dst: Path) -> None:
-        """A symlink ``dst`` to ``src``, replaced safely, a hard link or a copy where the platform makes no symlink
-        (:func:`konfai.utils.dataset.symlink`)."""
-        symlink(src, dst)
+        """
+        Create a symlink from `dst` pointing to `src`, with safe replacement.
 
-    def _write_inputs_to_dataset(self, inputs: list[list[Path]]) -> None:
+        If `dst` already exists:
+        - directories are removed (unless they are symlinks)
+        - files are unlinked
+
+        On platforms or filesystems that do not support symlinks (Windows without
+        Developer Mode raises OSError WinError 1314), each file is hard-linked where
+        the filesystem allows it (same volume) and copied otherwise; a directory is
+        rebuilt around its files.
+
+        Parameters
+        ----------
+        src : Path
+            Source file or directory.
+        dst : Path
+            Destination symlink path.
+        """
+        # ``is_symlink()`` also catches a BROKEN link (its target is gone), which ``exists()`` reports
+        # as absent: left in place it makes both os.symlink and the copy fallback fail on FileExists.
+        if dst.is_symlink() or dst.exists():
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            os.symlink(src, dst, target_is_directory=src.is_dir())
+        except OSError:
+            # Windows without Developer Mode (WinError 1314), or a filesystem without symlink support.
+            if src.is_dir():
+                shutil.copytree(src, dst, copy_function=_link_or_copy)
+            else:
+                _link_or_copy(src, dst)
+
+    def _write_inputs_to_dataset(self, inputs: list[list[Path | str]]) -> None:
         """
         Build the on-disk Dataset/ structure for inference/evaluation inputs.
 
@@ -1147,22 +1271,26 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Parameters
         ----------
-        inputs : list[list[Path]]
+        inputs : list[list[Path | str]]
             Nested list of paths. Each inner list is scanned for supported files.
         """
         KonfAIApp._stage_dataset()
         KonfAIApp._stage_groups(inputs, "Volume")
 
     @staticmethod
-    def _stage_groups(groups: list[list[Path]], prefix: str) -> None:
+    def _stage_groups(groups: list[list[Path | str]], prefix: str) -> None:
         """Link each group's volumes as ``P{idx}/{prefix}_{i}`` (``_stage``: in the root of their backend). The idx-th
         volume of every group is case idx, so each group must list one volume per staged case (the first input group
         sets them)."""
         listed = [KonfAIApp._list_input_units(group) for group in groups]
         staged = {case.name for root in KonfAIApp._dataset_roots() for case in root.iterdir() if case.is_dir()}
+        staged.update(KonfAIApp._remote_manifest())  # the cases read in place
         cases = len(staged) or (len(listed[0]) if listed else 0)
         if prefix == "Volume":
-            primary = KonfAIApp._unit_backend(*listed[0][0]) if listed and listed[0] else "mha"
+            # ./Dataset, the root every config reads, takes the backend of the first input staged on disk: a
+            # store read in place lands in no root.
+            local = next(((s, suffix) for s, suffix in listed[0] if isinstance(s, Path)), None) if listed else None
+            primary = KonfAIApp._unit_backend(*local) if local is not None else "mha"
         else:
             primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
         # A transform never takes ./Dataset, the root every config reads as images: its own root is declared beside it.
@@ -1177,8 +1305,10 @@ class KonfAIApp(AbstractKonfAIApp):
                 KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"{prefix}_{i}", primary)
 
     @staticmethod
-    def _dataset_level(prediction_file: str, dataset_dir: Path) -> int:
-        """The level ``dataset_dir`` will be read at, per the resolved config's ``dataset_filenames``.
+    def _dataset_entry(config_file: str, dataset_dir: Path) -> tuple[str, int]:
+        """The format token and the level ``dataset_dir`` will be read with, per the resolved config's
+        ``dataset_filenames``, under whichever workflow (``Predictor``, ``Evaluator``) the config holds;
+        ``("mha", 0)`` when no entry names it.
 
         ``@N`` is a property of a dataset ENTRY: every group of that entry is read at that one level. So a
         synthesised default must be readable at the same level as the inputs it stands in for, and the
@@ -1191,25 +1321,21 @@ class KonfAIApp(AbstractKonfAIApp):
         Only the entry pointing at ``dataset_dir`` counts; a config listing several sources may read each
         at its own level, and the staged inputs live in exactly one of them.
         """
-        path = Path(prediction_file)
+        path = Path(config_file)
         if not path.is_file():
-            return 0
-        from ruamel.yaml import YAML
-
+            return "mha", 0
         with open(path, encoding="utf-8") as file:
             data = YAML().load(file)
-        dataset = ((data or {}).get("Predictor") or {}).get("Dataset") or {}
         target = dataset_dir.resolve()
-        for entry in dataset.get("dataset_filenames") or []:
-            filename, _, file_format = split_path_spec(
-                str(entry),
-                default_format="mha",
-                allowed_flags={"a", "i"},
-                supported_formats=SUPPORTED_FORMATS,
-            )
-            if Path(filename).resolve() == target:
-                return split_format_level(file_format)[1]
-        return 0
+        for section in (data or {}).values():
+            dataset = section.get("Dataset") if isinstance(section, dict) else None
+            for entry in (dataset.get("dataset_filenames") if isinstance(dataset, dict) else None) or []:
+                filename, _, file_format = split_path_spec(
+                    str(entry), default_format="mha", allowed_flags={"a", "i"}, supported_formats=SUPPORTED_FORMATS
+                )
+                if Path(filename).resolve() == target:
+                    return split_format_level(file_format)
+        return "mha", 0
 
     @staticmethod
     def write_constant(
@@ -1272,17 +1398,44 @@ class KonfAIApp(AbstractKonfAIApp):
         if not fills:
             return
         fill_value = {"ones": 1, "zeros": 0}
-        # Beside each case's Volume_0, in whichever root its storage backend staged it (see _stage).
-        for dataset_dir in KonfAIApp._dataset_roots():
-            file_format = KonfAIApp._detect_group_format(dataset_dir, "Volume_0")
-            level = KonfAIApp._dataset_level(prediction_file, dataset_dir)
-            dataset = Dataset(str(dataset_dir), f"{file_format}@{level}" if level else file_format)
-            for name in dataset.get_names("Volume_0"):
-                shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
-                for i, default in fills.items():
-                    KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
+        for dataset, name, shape, attributes in KonfAIApp._staged_cases(prediction_file):
+            for i, default in fills.items():
+                KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
 
-    def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
+    @staticmethod
+    def _staged_cases(config_file: str, group: str = "Volume_0") -> list[tuple[Dataset, str, list[int], Attribute]]:
+        """Every staged case holding ``group`` as ``(writer, name, shape, attributes)``: the entry's header (no pixel
+        read) and the dataset a default input for it is written to.
+
+        A case staged on disk is read from, and written beside, the root its backend staged it in (see
+        :meth:`_stage`), at the level ``config_file`` declares for that root. A case read in place (the remote
+        manifest) is read at ``./Dataset``'s level and its defaults land in ``./Dataset``, which every config
+        reads: a manifest names where entries are read from, never written, and the roots meet on the case name.
+        """
+        # The extra roots are declared first: their level is read off the config, and a default sized at
+        # level 0 is the wrong shape for a store the run then reads at @1.
+        KonfAIApp._declare_dataset_roots(config_file)
+        found: list[tuple[Dataset, str, list[int], Attribute]] = []
+        for root in KonfAIApp._dataset_roots():
+            file_format = KonfAIApp._detect_group_format(root, "Volume_0")
+            level = KonfAIApp._dataset_entry(config_file, root)[1]
+            dataset = Dataset(str(root), f"{file_format}@{level}" if level else file_format)
+            for name in dataset.get_names(group):
+                found.append((dataset, name, *dataset.get_infos(group, name)))
+        manifest = KonfAIApp._REMOTE_MANIFEST
+        if manifest.is_file():
+            file_format, level = KonfAIApp._dataset_entry(config_file, Path("Dataset"))
+            remote = Dataset(manifest.as_posix(), f"omezarr@{level}" if level else "omezarr")
+            # ./Dataset is read with the backend of a case staged in it (detected from disk), else with the
+            # token the config names: a default written in any other form is not found under that token.
+            if any(Path("Dataset").glob("*/Volume_0*")):
+                file_format = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
+            local = Dataset("Dataset", f"{file_format}@{level}" if level else file_format)
+            for name in remote.get_names(group):
+                found.append((local, name, *remote.get_infos(group, name)))
+        return found
+
+    def _write_inference_stack_to_dataset(self, inputs: list[list[Path | str]]) -> None:
         """
         Build the Dataset/ structure for uncertainty estimation.
 
@@ -1310,7 +1463,7 @@ class KonfAIApp(AbstractKonfAIApp):
                         "Give the InferenceStack.mha an inference with -uncertainty wrote.",
                     )
 
-    def _write_gt_to_dataset(self, gt: list[list[Path]]) -> None:
+    def _write_gt_to_dataset(self, gt: list[list[Path | str]]) -> None:
         """
         Write ground-truth volumes into the Dataset/ structure.
 
@@ -1319,17 +1472,18 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Parameters
         ----------
-        gt : list[list[Path]]
+        gt : list[list[Path | str]]
             Ground truth file paths grouped similarly to inputs.
         """
         KonfAIApp._stage_groups(gt, "Reference")
 
-    def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
+    def _write_mask_or_default(self, mask: list[list[Path | str]] | None, config_file: str) -> None:
         """
         Write mask volumes into the Dataset/ structure or generate default masks.
 
         If `mask` is None:
-        - creates a mask of ones for each case using the shape/metadata of Volume_0
+        - creates a mask of ones for each case using the shape/metadata of Volume_0, at the level
+          ``config_file`` declares for its root (:meth:`_staged_cases`)
 
         If `mask` is provided:
         - symlinks mask files as:
@@ -1337,26 +1491,23 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Parameters
         ----------
-        mask : list[list[Path]] | None
+        mask : list[list[Path | str]] | None
             Optional mask paths.
         """
         if mask is None:
-            # One channel of ones, which a masked metric broadcasts over the image's, on the grid of the first of
-            # Volume_0 and Reference_0 that is an image and no field (a registration's Volume_0 masks nothing), else
-            # of the first image: a three-channel volume with no fixed image beside it is an image. A transform
+            # One channel of ones, which a masked metric broadcasts over the image's, on the grid of Volume_0 when it
+            # is an image and no field, else of the Reference_0 beside it (a registration's transform masks nothing),
+            # else of the first image: a three-channel volume with no fixed image beside it is an image. A transform
             # store holds no mask.
-            roots = [
-                Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
-                for root in KonfAIApp._dataset_roots()
-            ]
-            for name in (name for dataset in roots for name in dataset.get_names("Volume_0")):
+            references = {
+                name: (dataset, shape, attr)
+                for dataset, name, shape, attr in KonfAIApp._staged_cases(config_file, "Reference_0")
+            }
+            for dataset, name, shape, attr in KonfAIApp._staged_cases(config_file):
+                candidates = [(dataset, shape, attr), *([references[name]] if name in references else [])]
                 images = [
-                    (holder, *holder.get_infos(group, name))  # header only, no pixel read
-                    for group in ("Volume_0", "Reference_0")
-                    for holder in roots
-                    if holder.is_dataset_exist(group, name)
+                    c for c in candidates if is_an_image(c[2]) and not c[0].file_format.startswith("itktransform")
                 ]
-                images = [i for i in images if is_an_image(i[2]) and i[0].file_format != "itktransform"]
                 if images:
                     holder, shape, attr = next((i for i in images if not is_displacement_entry(i[1], i[2])), images[0])
                     KonfAIApp.write_constant(holder, "Mask_0", name, [1, *shape[1:]], attr, 1)
@@ -1447,7 +1598,7 @@ class KonfAIApp(AbstractKonfAIApp):
     @run_distributed_app
     def infer(
         self,
-        inputs: list[list[Path]],
+        inputs: list[list[Path | str]],
         output: Path = Path("./Output/").resolve(),
         ensemble: int = 0,
         ensemble_models: list[str] = [],
@@ -1516,14 +1667,18 @@ class KonfAIApp(AbstractKonfAIApp):
         self._collect_result(output, tmp_dir, "Predictions")
         for case, volumes in KonfAIApp._case_volumes(output, self._predicted or []).items():
             print(f"[KonfAI-Apps] {case}: {', '.join(str(volume) for volume in volumes)}")
+        # What ran, beside what it wrote: the app, its revision, its preset and every --set, in order.
+        output.mkdir(parents=True, exist_ok=True)
+        record = self.app_repository.record(config_overrides)
+        (output / RUN_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     @run_distributed_app
     def evaluate(
         self,
-        inputs: list[list[Path]],
-        gt: list[list[Path]] | None,
+        inputs: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
-        mask: list[list[Path]] | None = None,
+        mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
         gpu: list[int] | None = None,
         cpu: int | None = None,
@@ -1549,8 +1704,9 @@ class KonfAIApp(AbstractKonfAIApp):
         self._write_inputs_to_dataset(inputs)
         if gt:  # an evaluation of the prediction alone (a field's Jacobian) has no reference
             self._write_gt_to_dataset(gt)
-        self._write_mask_or_default(mask)
+        # The config first: a default mask is sized at the level it declares for the inputs.
         self.app_repository.install_evaluation(evaluation_file)
+        self._write_mask_or_default(mask, evaluation_file)
         self._declare_dataset_roots(evaluation_file)
         from konfai.evaluator import evaluate
 
@@ -1570,7 +1726,7 @@ class KonfAIApp(AbstractKonfAIApp):
     @run_distributed_app
     def uncertainty(
         self,
-        inputs: list[list[Path]],
+        inputs: list[list[Path | str]],
         output: Path = Path("./Output/"),
         uncertainty_file: str = "Uncertainty.yml",
         gpu: list[int] | None = None,
@@ -1603,8 +1759,8 @@ class KonfAIApp(AbstractKonfAIApp):
 
     def pipeline(
         self,
-        inputs: list[list[Path]],
-        gt: list[list[Path]] | None,
+        inputs: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
         ensemble: int = 0,
         ensemble_models: list[str] = [],
@@ -1615,7 +1771,7 @@ class KonfAIApp(AbstractKonfAIApp):
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
-        mask: list[list[Path]] | None = None,
+        mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
         uncertainty: bool = True,
         uncertainty_file: str = "Uncertainty.yml",

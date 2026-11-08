@@ -87,13 +87,13 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     work.mkdir()
     app = ImpactRegKonfAIApp()
     group, fields = app._infer_preset(
-        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [], None, True
+        "FireANTs", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [], None, True
     )
 
     assert len(captured) == 1
-    assert work / "FireANTs_SyN" in Path(_tmp_dir_value(captured[0])).parents
+    assert work / "FireANTs" in Path(_tmp_dir_value(captured[0])).parents
     assert group == "DVF" and list(fields) == ["P000"]
-    assert app._ran == {"FireANTs_SyN": plans}  # what register.json records as ``ran``
+    assert app._ran == {"FireANTs": plans}  # what register.json records as ``ran``
 
 
 def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:

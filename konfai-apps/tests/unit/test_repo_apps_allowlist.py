@@ -33,6 +33,14 @@ def test_require_configured_app_rejects_unlisted(monkeypatch: pytest.MonkeyPatch
     assert exc.value.status_code == 404
 
 
+def test_a_malformed_preset_name_is_an_unknown_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    # not a 500: the reference names no app of ours
+    monkeypatch.setattr(app_server, "_APPS", ["good/app"])
+    with pytest.raises(HTTPException) as exc:
+        app_server._require_configured_app("good/app#bad!")
+    assert exc.value.status_code == 404
+
+
 def test_get_app_info_rejects_unlisted_before_resolving(monkeypatch: pytest.MonkeyPatch) -> None:
     # The endpoint must reject an unlisted app id BEFORE calling the repository resolver, otherwise a
     # token holder could trigger arbitrary HuggingFace/local/remote fetches (SSRF / exfiltration).

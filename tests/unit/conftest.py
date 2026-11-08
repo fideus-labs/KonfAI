@@ -207,6 +207,7 @@ def _drive_tta(
 
     class DummyPatch:
         patch_size: ClassVar[list[int]] = list(_TTA_PATCH_SIZE)
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):

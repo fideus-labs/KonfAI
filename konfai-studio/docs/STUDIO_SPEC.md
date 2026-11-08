@@ -1,7 +1,7 @@
 # KonfAI Studio. Spec of the final result
 
 > What a user will be able to do. Grounded in the actual `konfai-mcp` surface,
-> the `konfai-apps` remote server, and the `konfai-rs`/`konfai-web` deploy work.
+> the `konfai-apps` remote server, and the KonfAI Edge/`konfai-web` deploy work.
 > Visual version with UI mockups: [`spec-visual.html`](spec-visual.html). Strategy brief: [`brief-for-matt.html`](brief-for-matt.html).
 
 ![KonfAI Studio: the agent authors an MR→CT synthesis run while the live training feed, multi-run loss curves, and model-output samples stream beside the chat.](screenshot.png)
@@ -27,15 +27,15 @@ Status legend: **[MCP]** already drivable on today's MCP API · **[build]** UI/e
 
 | # | Capability | What happens | Tools behind it | Status |
 |---|---|---|---|---|
-| 1 | **Bring a dataset** | Point at a folder; agent reads geometry, channels, classes, splits, ambiguities | `inspect_dataset`, `inspect_dataset(browse=True)`, `read_file`, `preview_volume`, `prepare_dataset_aliases` | **[MCP]** |
-| 2 | **Just describe the task** | The user picks a dataset and prompts: nothing else. The **agent** decides the route (reuse a published app · fine-tune it · train from scratch) and proposes it transparently ("a close liver app exists → I'll fine-tune it, ~15 min, instead of 6 h from scratch"); the user can override in conversation. Not a menu. | `solve_task` prompt routes → `fetch_app` → `run_prediction` / `run_resume(weights_only=True)` / (`design_config_strategy` → `write_workflow_config` → `run_train`) | **[MCP]** |
-| 3 | **Author by conversation** | Agent writes the YAML, validates it, can run a real forward+backward before spending GPU hours | `write_workflow_config`, `check_config`, `check_config(level='instantiate')`, `describe_model_outputs` | **[MCP]** |
+| 1 | **Bring a dataset** | Point at a folder; agent reads geometry, channels, classes, splits, ambiguities | `inspect_dataset`, `browse_dataset`, `read_dataset_file`, `preview_volume`, `prepare_dataset_aliases` | **[MCP]** |
+| 2 | **Just describe the task** | The user picks a dataset and prompts: nothing else. The **agent** decides the route (reuse a published app · fine-tune it · train from scratch) and proposes it transparently ("a close liver app exists → I'll fine-tune it, ~15 min, instead of 6 h from scratch"); the user can override in conversation. Not a menu. | `solve_task` prompt routes → `import_app` → `run_prediction` / `run_resume(weights_only=True)` / (`design_config_strategy` → `write_workflow_config` → `run_train`) | **[MCP]** |
+| 3 | **Author by conversation** | Agent writes the YAML, validates it, can run a real forward+backward before spending GPU hours | `write_workflow_config`, `review_config_semantics`, `validate_config_semantics(level='train_step')`, `describe_model_outputs` | **[MCP]** |
 | 4 | **Train / predict / evaluate** | Launch jobs on the GPU (local or on-prem server), resume interrupted runs, sweep CV folds | `run_train`, `run_prediction`, `run_evaluation`, `run_resume`, `run_batch`, `generate_folds` | **[MCP]** |
 | 5 | **Watch it live** | Live metrics + full TensorBoard curves in the tab; cancel anytime (whole process group reaped) | `read_live_metrics`, `read_training_curves`, `get_job_status`, `read_job_log`, `cancel_job` | **[MCP]** |
 | 6 | **See the result** | CT/MR with the prediction overlaid on the scan, prediction-vs-GT | `preview_volume` (PNG today); **NiiVue** for interactive 3D overlays | **[build]** viewer |
 | 7 | **Compare & rank** | Metric-by-metric comparison, config diff, leaderboard across runs and sessions | `get_run_metrics`, `compare_runs`, `diff_run_configs`, `leaderboard` | **[MCP]** |
-| 8 | **Keep & reproduce** | Every run is frozen (exact command + environment + config); export a Methods-grade record; a colleague re-imports and re-runs it | `export_run_record`, `session(action='import')` (+ auto config-snapshots & manifest) | **[MCP]** |
-| 9 | **Package & deploy** | Turn a trained model into a shareable app; run it in Slicer, on an on-prem server, or export to ONNX to run 100% in a browser tab, offline | `package_app_from_session`, `fetch_app(path=...)`; `konfai export` → `konfai-web`/`konfai-rs` | **[spike]** export = Phase 1 |
+| 8 | **Keep & reproduce** | Every run is frozen (exact command + environment + config); export a Methods-grade record; a colleague re-imports and re-runs it | `export_run_record`, `import_experiment` (+ auto config-snapshots & manifest) | **[MCP]** |
+| 9 | **Package & deploy** | Turn a trained model into a shareable app; run it in Slicer, on an on-prem server, or export to ONNX to run 100% in a browser tab, offline | `package_app_from_session`, `export_app`; `konfai export` → `konfai-web`/KonfAI Edge | **[spike]** export = Phase 1 |
 
 The MCP surface is **the tools + prompts + read-only resources** (`konfai-mcp/konfai_mcp/server.py`;
 generated reference `konfai-mcp/scripts/generate_tool_reference.py`). Three modeling entry points the
@@ -47,15 +47,15 @@ UI should expose as top-level choices: *use an app as-is*, *fine-tune an app*, *
   (override with `$KONFAI_MCP_WORKSPACES_ROOT`). One "current session" at a time.
 - A session holds many **runs**, each keyed by `train_name`: `Checkpoints/<name>`, `Statistics/<name>`
   (TensorBoard + resolved-config snapshot), `Predictions/<name>`, `Evaluations/<name>`.
-- Lifecycle: `session(action='create')` / `session(action='switch')` / `initialize_session` (⚠ destructive with
-  `overwrite=True`) / `summarize_session` / `session(action='delete')`. Switching is **refused while a job is active**.
+- Lifecycle: `create_session` / `switch_session` / `initialize_session` (⚠ destructive with
+  `overwrite=True`) / `summarize_session` / `delete_session`. Switching is **refused while a job is active**.
 - **"Keep" is real** because on every launch, *before the process spawns*, the server freezes an
   immutable layer: `config_snapshots/` (the launch-time YAML, distinct from the live file that
   reflection keeps rewriting) + `manifest.json` (exact command, `created_at`, and an environment
   snapshot: Python/platform, KonfAI version, pinned `torch/numpy/SimpleITK/fastmcp/konfai-apps`
   versions, GPU names).
 - **"Reproduce" is real** via `export_run_record` (Methods-grade receipt: manifest + frozen configs
-  + resolved config + per-split metrics + log tail) → `session(action='import')` (adopt an on-disk
+  + resolved config + per-split metrics + log tail) → `import_experiment` (adopt an on-disk
   experiment: configs/code copied, artifacts symlink/copy/none) → validate → `run_resume`/`run_train`.
 - **Caveat to surface in UI:** `export_run_record.resolved_config` reflects the *current* live YAML
   (reflection may have rewritten it); the authoritative launch-time truth is `config_snapshots` /
@@ -74,7 +74,7 @@ topology keeps compute on-prem or in the tab.
 
 **Remote already exists** (`konfai-apps` FastAPI server, `konfai-apps-server`): endpoints
 `/apps/{app}/infer|evaluate|uncertainty|pipeline|fine_tune`, async jobs with `GET /jobs/{id}`,
-`/jobs/{id}/logs` (SSE), `/result`, `/kill`; bearer-token auth; dataset upload (zip-slip +
+`/jobs/{id}/logs` (SSE), `/result`, `/kill`; bearer-token auth; dataset upload (zip, zip-slip +
 size guards); one job per GPU (semaphores). Client: `RemoteServer(host, port, token)`,
 `AppRepositoryInfoFromRemoteServer` (the surface SlicerKonfAI already imports.
 **Two caveats:** (a) it runs/fine-tunes **already-packaged apps only**) fresh agentic authoring
@@ -88,14 +88,14 @@ bearer: a non-loopback deployment needs TLS).
 - **Portable subset only:** frozen **feed-forward** models (segmentation / synthesis). **3D
   registration stays Python**: Burn's `grid_sample` is 2D-only, so VoxelMorph-style models can't run
   on Burn. TTA/ensemble/MC-dropout/diffusion also stay Python (MVP = single deterministic forward).
-- **Spike GO** (`konfai-rs`, 2026-06-29): `KonfAI → ONNX(dynamo) → burn-onnx → Burn` runs with
+- **Spike GO** (KonfAI Edge, 2026-06-29): `KonfAI → ONNX(dynamo) → burn-onnx → Burn` runs with
   near bit-exact parity. MAE **6.3e-6** (CPU) / **5.5e-6** (WGPU) on `impact_synth` (UNet++ resnet34,
   2.5D, 26M params) vs ONNX Runtime. WGPU is the backend that compiles to WASM/WebGPU.
 - **Two runtimes:** `konfai-web` (ONNX-Runtime-Web + WebGPU, generic: any bundle, no per-model
-  build; JS runtime complete, testable via `onnxruntime-node`) and `konfai-rs` (native Burn, one
+  build; JS runtime complete, testable via `onnxruntime-node`) and KonfAI Edge (native Burn, one
   artifact per architecture; CPU+WGPU proven natively).
 - **Hard gate. Phase 1 `konfai export`:** both runtimes consume `model.onnx` + `manifest.json`;
-  neither ships one (konfai-rs `build.rs` *panics* without it). Phase 1 = a pure-Python
+  neither ships one (KonfAI Edge `build.rs` *panics* without it). Phase 1 = a pure-Python
   `konfai/export/onnx.py` + an `EXPORT` CLI state, folding pre/post into the graph, keeping the
   runtimes thin (file parse + geometry + tiling only). Manifest = input/output `{name,group,channels,
   dtype}`, `patch {size,overlap,dim}`, `preprocess/postprocess_in_graph`, `geometry: preserve_from_input`.
@@ -108,11 +108,11 @@ bearer: a non-loopback deployment needs TLS).
 
 | Milestone | Effort | Deliverable |
 |---|---|---|
-| Foundation | done | konfai-mcp (v1.6.0) + config-by-reflection + konfai-rs spike (GO) |
+| Foundation | done | konfai-mcp (v1.6.0) + config-by-reflection + KonfAI Edge spike (GO) |
 | **M0** | ~1–2 d | BFF FastAPI holding the MCP session + a static front on localhost |
 | **M1** | ~1–2 w | Demo-able core: dataset (NiiVue) → chat/config → `run_train` → live curves → prediction-vs-GT overlay |
 | **Phase 1** | ~3–5 d | `konfai export → model.onnx + manifest.json` (Python): unlocks browser deploy |
-| **M3** | ~2–3 w | In-tab deployment: konfai-rs/web infers client-side → NiiVue renders; volume tiling + geometry |
+| **M3** | ~2–3 w | In-tab deployment: KonfAI Edge/web infers client-side → NiiVue renders; volume tiling + geometry |
 
 M0/M1 need **no new core code**: only today's MCP API.
 
@@ -163,14 +163,14 @@ mtime, new tfevents event, job.json rewrite), then calls the structured MCP read
 polling, MCP stays the semantic source. Raw log lines are tailed directly (no semantics needed).
 
 **Reconcile-on-load:** page load / reconnect rebuilds durable state from `summarize_session` +
-`get_job_status` + `read_training_curves` (finished runs), then subscribes to WS deltas for active jobs.
+`list_jobs` + `read_training_curves` (finished runs), then subscribes to WS deltas for active jobs.
 Durable state (rebuildable from MCP) and live deltas (WS) are kept separate → robust to reload.
 
 **Generative UI:** each agent tool call is a chat event carrying its kind + args + (for jobs)
 `job_id`; the front maps tool kind → React component. `run_train` → a **live run card** (status +
 uPlot curve + log toggle + val-image strip) bound to the job's live channel; `run_prediction` done →
 a NiiVue overlay card. The chat is the timeline; the cards are live widgets; reload re-binds from
-`get_job_status`. Disjoint-GPU jobs run concurrently → the WS multiplexes by `job_id`; the rail shows
+`list_jobs`. Disjoint-GPU jobs run concurrently → the WS multiplexes by `job_id`; the rail shows
 each with a live chip. Backpressure: coalesce log bursts, virtualize the log DOM, downsample metric
 series for display, never reload a volume on a checkpoint (only refresh the overlay / TB image).
 

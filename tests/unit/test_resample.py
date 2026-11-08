@@ -482,3 +482,35 @@ def test_the_host_blends_as_itk_a_chunk_at_a_time(monkeypatch) -> None:
 
     assert torch.equal(blended, expected)
     assert max(nbytes for pointer, nbytes in storages.items() if pointer not in held) <= 8 * chunk * 8
+
+
+@pytest.mark.parametrize("mode", ["linear", "nearest"])
+def test_an_edge_fill_reads_the_edge_voxel_past_the_volume(mode: str) -> None:
+    """``fill: edge`` is MONAI's ``padding_mode: border``: a sample past the volume reads the edge voxel the taps
+    clamp to, where a number fills it. MONAI's Spacingd grid can end a voxel past an anisotropic CT."""
+    from konfai.data.sampling import gather, gather_separable
+    from konfai.utils.errors import TransformError
+
+    source = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
+    x = torch.tensor([1.0, 3.4, 4.2])  # inside, inside the half-voxel rim, past it
+    coordinates = torch.stack([x, torch.zeros(3), torch.zeros(3)], dim=-1).reshape(1, 1, 3, 3)
+    for fill, last in ((0.0, 0.0), ("edge", 3.0)):
+        want = torch.tensor([1.0, 3.0, last]).reshape(1, 1, 1, 3)
+        assert torch.equal(gather(source, coordinates, [0, 0, 0], [1, 1, 4], mode, fill), want)
+        axes = [torch.zeros(1), torch.zeros(1), x]
+        assert torch.equal(gather_separable(source, axes, [0, 0, 0], [1, 1, 4], mode, fill), want)
+    with pytest.raises(TransformError, match="unknown fill 'border'"):
+        Resample(spacing=[1.5, 1.5, 1.5], fill="border")
+
+
+def test_an_edge_fill_clamps_a_cubic_sample_to_the_volume() -> None:
+    """Under ``fill: edge`` a cubic sample past the volume is the edge voxel, its weights included."""
+    from konfai.data.sampling import gather, gather_separable
+
+    source = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
+    x = torch.tensor([-0.75, 1.0, 4.2])
+    want = torch.tensor([0.0, 1.0, 3.0]).reshape(1, 1, 1, 3)
+    coordinates = torch.stack([x, torch.zeros(3), torch.zeros(3)], dim=-1).reshape(1, 1, 3, 3)
+    assert torch.allclose(gather(source, coordinates, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)
+    axes = [torch.zeros(1), torch.zeros(1), x]
+    assert torch.allclose(gather_separable(source, axes, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)

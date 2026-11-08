@@ -169,8 +169,9 @@ class AppService:
         (``host:port:name``), ``remote_server`` (``host:port[|token]`` to expand into its apps), each
         reached over HTTPS when prefixed ``https://``,
         ``hf_app`` (``repo_id:app_name``), ``hf_repo`` (a bare ``repo_id`` to expand into its apps),
-        or ``unknown``.
+        or ``unknown``. A ``#preset`` after the reference does not change what it names.
         """
+        ref = _import_app_repository().split_preset(ref)[0]
         if Path(ref).expanduser().exists():
             return "local"
         parts = ref.removeprefix("https://").split(":")
@@ -363,6 +364,11 @@ class AppService:
             "finetunable": finetunable,
             "next_actions": next_actions,
         }
+        presets = info.get_presets()
+        if presets:  # each a named list of --set: run one with ref#name, list_app_parameters shows its values
+            payload["presets"] = {name: preset.to_json() for name, preset in presets.items()}
+            chosen = info.get_preset()
+            payload["preset"] = chosen.name if chosen else None
 
         task = info.get_task()
         if task:
@@ -568,19 +574,23 @@ class AppService:
         """
         if self._is_remote(ref):
             return None
-        if _import_app_repository().get_app_repository_info(ref, False).get_task() != "registration":
+        app_repository = _import_app_repository()
+        if app_repository.get_app_repository_info(ref, False).get_task() != "registration":
             return None
-        path = Path(ref).expanduser()
+        base, chosen = app_repository.split_preset(ref)
+        suffix = f"#{chosen}" if chosen else ""  # impact-reg-konfai takes the app's preset as APP#PRESET
+        path = Path(base).expanduser()
         if path.exists():
-            return str(path.resolve().parent), path.resolve().name
-        repo, _, preset = ref.rpartition(":")
-        return repo, preset
+            return str(path.resolve().parent), path.resolve().name + suffix
+        repo, _, preset = base.rpartition(":")
+        return repo, preset + suffix
 
     def _app_label(self, ref: str) -> str:
         """Short, filesystem-safe name of the app behind a reference, used to label its runs."""
-        if ":" in ref and not Path(ref).expanduser().exists():
-            return ref.split(":")[-1]
-        return Path(ref).expanduser().name
+        base, preset = _import_app_repository().split_preset(ref)
+        path = Path(base).expanduser()
+        name = path.name if path.exists() or ":" not in base else base.split(":")[-1]
+        return f"{name}-{preset}" if preset else name
 
     @staticmethod
     def _normalize_input_groups(groups: list[list[str]], label: str = "inputs") -> list[list[str]]:
@@ -1163,17 +1173,18 @@ class AppService:
             # The ONNX export instantiates and traces the packaged model: it imports the bundle's
             # Model.py, runs a forward pass, and may init CUDA. That must never run in the long-lived
             # server process, so route it through the spawn subprocess like every other code-executing
-            # step. Without checkpoint= the export ships an untrained model.onnx, so pick the NEWEST
-            # packaged checkpoint (mirroring discover_model_paths); pass checkpoints=[...] to override.
+            # step. Every packaged checkpoint is exported, from the weights the bundle ships (a run's .pt
+            # published as .safetensors): konfai runs them as an ensemble, and so does the program the export
+            # writes.
             from . import runner as mcp_runner
 
             onnx_path = mcp_runner.run_api_in_subprocess(
-                "konfai_apps.bundle:export_onnx_into_bundle",
+                "konfai_apps.bundle:export_portable_into_bundle",
                 {
                     "bundle": str(bundle_path),
                     "patch_size": onnx_patch_size,
                     "in_channels": onnx_in_channels,
-                    "checkpoint": max(resolved_checkpoints, key=lambda path: Path(path).stat().st_mtime),
+                    "checkpoints": list(result["checkpoints"]),
                 },
             )
             result["onnx"] = str(onnx_path)
