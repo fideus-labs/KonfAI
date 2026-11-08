@@ -475,8 +475,9 @@ class Standardize(TransformInverse):
 
 
 class Fill(Transform):
-    """Set every voxel to ``value``, the case's grid and geometry kept: an image of ones (or zeros) of the case,
-    for instance to resample into the share of another grid it covers (``Resample``'s ``fill`` marks the rest)."""
+    """Set every voxel to ``value``, the case's grid and geometry kept, in float32: an image of ones (or zeros) of
+    the case, for instance to resample into the share of another grid it covers (``Resample``'s ``fill`` marks the
+    rest)."""
 
     working_multiple = 0.0
     locality = LocalityKind.POINTWISE
@@ -487,7 +488,7 @@ class Fill(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         del name, cache_attribute
-        return torch.full_like(tensor, self.value, dtype=tensor.dtype if tensor.is_floating_point() else torch.float32)
+        return torch.full_like(tensor, self.value, dtype=torch.float32)
 
 
 class TensorCast(TransformInverse):

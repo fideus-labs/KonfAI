@@ -20,7 +20,7 @@ anthropic = ["anthropic>=0.66"]  # Claude through the Anthropic API
 openai = ["openai>=1.40"]  # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio: a local VLM)
 claude-code = ["claude-agent-sdk>=0.2"]  # Claude under the user's Claude Code login, no API key
 codex = ["fastmcp>=2.10"]  # GPT under the user's ChatGPT login, through the Codex CLI (Scout's tools served over MCP)
-dev = ["pytest", "anthropic>=0.66", "openai>=1.40"]
+dev = ["pytest", "konfai-scout[anthropic,openai]"]
 
 [project.scripts]
 konfai-scout = "konfai_scout.cli:main"

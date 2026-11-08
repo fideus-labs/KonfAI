@@ -10,12 +10,11 @@ import json
 import os
 from typing import Any
 
-from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage, is_loopback
+from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage, b64, is_loopback
 
 
 def _image_part(image: ImageContent, detail: str) -> dict[str, Any]:
-    data = base64.standard_b64encode(image.png).decode("ascii")
-    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{data}", "detail": detail}}
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(image.png)}", "detail": detail}}
 
 
 class OpenAIProvider:
@@ -34,7 +33,9 @@ class OpenAIProvider:
     ) -> None:
         self.model = model
         self.base_url = base_url
-        self.remote = not (local or is_loopback(base_url))
+        # the official API however the flags read; a server named by base_url is local on a loopback address or
+        # when the caller says so
+        self.remote = not (base_url and (local or is_loopback(base_url)))
         self.max_tokens = max_tokens
         self.detail = detail
         self.messages: list[dict[str, Any]] = []
@@ -148,7 +149,6 @@ class OpenAIProvider:
                 cache_read_tokens=cached,
             ),
             model=str(data.get("model") or self.model),
-            raw={"id": data.get("id"), "finish_reason": finish},
         )
 
     def transcript(self) -> list[dict[str, Any]]:

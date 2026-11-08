@@ -5,7 +5,7 @@ import json
 
 from konfai_scout.config import ScoutConfig
 from konfai_scout.evaluation import RegionEvaluator
-from konfai_scout.planes import box_to_dict, grid_bounds
+from konfai_scout.planes import box_to_dict
 from konfai_scout.providers.base import ToolCall
 from konfai_scout.tools import Toolbox
 from konfai_scout.views import Renderer
@@ -27,7 +27,7 @@ def run(box: Toolbox, name: str, **arguments) -> dict:
 def test_region_stats_see_the_planted_defects(fixtures, tmp_path):
     case, defects = fixtures["segmentation"]
     box = toolbox(fixtures, "segmentation", tmp_path)
-    whole = run(box, "region_stats", box_mm=box_to_dict(grid_bounds(case.grid)))["region"]
+    whole = run(box, "region_stats", box_mm=box_to_dict(case.grid.world_box()))["region"]
     assert whole["prediction_labels"]["1"]["components"] == 2  # the sphere and the spurious blob
     assert "2" not in whole["prediction_labels"] and whole["truth_labels"]["2"]["name"] == "cube"
     assert whole["overlap_voxels_prediction_vs_truth"]["2"]["only_b"] > 0
@@ -91,7 +91,7 @@ def test_errors_are_reported_to_the_model_and_logged(fixtures, tmp_path):
 def test_registration_tools_without_references(fixtures, tmp_path):
     case, _ = fixtures["registration_no_ref"]
     box = toolbox(fixtures, "registration_no_ref", tmp_path)
-    stats = run(box, "region_stats", box_mm=box_to_dict(grid_bounds(case.grid)))["region"]
+    stats = run(box, "region_stats", box_mm=box_to_dict(case.grid.world_box()))["region"]
     assert stats["displacement"]["max_mm"] > 1.0 and "fixed_labels" not in stats
     view = run(box, "view", plane="sagittal", mode="jacobian")["view"]
     assert "scale" in view and view["scale"]["folded_pixels"] == 0

@@ -32,6 +32,7 @@ def make_provider(config: ScoutConfig, client: object = None) -> Provider:
             max_tokens=config.max_output_tokens,
             api_key_env=config.api_key_env,
             base_url=config.base_url,
+            local=config.local_provider,
             fallbacks=config.anthropic_fallbacks,
             client=client,
         )
@@ -61,11 +62,13 @@ def make_provider(config: ScoutConfig, client: object = None) -> Provider:
 
 
 def is_remote(config: ScoutConfig) -> bool:
-    """Whether the configured provider is a service off this machine, decided from the configuration alone."""
-    if config.provider == "mock" or config.local_provider:
+    """Whether the configured provider is a service off this machine, decided from the configuration alone: a
+    server named by ``base_url`` is local on a loopback address or under ``local_provider``; the official APIs,
+    Claude Code and Codex are remote whatever the flag says, since it names no server."""
+    if config.provider == "mock":
         return False
-    if config.provider == "openai" and is_loopback(config.base_url):
-        return False
+    if config.provider in ("openai", "anthropic") and config.base_url:
+        return not (config.local_provider or is_loopback(config.base_url))
     return True
 
 

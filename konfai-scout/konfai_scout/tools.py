@@ -19,9 +19,9 @@ from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import EvaluationError, RegionEvaluator
 from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
-from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, grid_bounds, window_of, world_box_of
+from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
-from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation
+from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation, value_text
 from .report import ToolCall as ToolCallRecord
 from .views import WINDOW_PRESETS, Renderer, ViewError
 
@@ -289,7 +289,7 @@ class Toolbox:
         measurement = self.evaluator.measure(box, metrics, measurement_id=f"m{len(self.measurements) + 1:03d}")
         self.measurements.append(measurement)
         record.measurements.append(measurement.id)
-        values = ", ".join(f"{k} = {_fmt(v)}" for k, v in measurement.values.items())
+        values = ", ".join(f"{k} = {value_text(v)}" for k, v in measurement.values.items())
         record.summary = f"{measurement.id}: {values}" if values else f"{measurement.id}: no value"
         return {
             "measurement": {
@@ -310,27 +310,27 @@ class Toolbox:
             raise ValueError("the box holds no voxel of the case")
         lo = tuple(int(part.start) for part in window)
         hi = tuple(int(part.stop) for part in window)
-        measured = world_box_of(grid, window)
+        measured = grid.world_box(window)
         out: dict[str, Any] = {"box_measured": box_to_dict(measured), "voxels": int(np.prod(np.subtract(hi, lo)))}
         task = self.case.task
         if task == "segmentation":
-            prediction = self.case.volume("prediction").region(lo, hi)[0]
+            prediction = self.renderer.volume("prediction").region(lo, hi)[0]
             out["prediction_labels"] = label_stats(prediction, grid, self.case.labels, lo)
-            image = self.case.volume("image").region(lo, hi)[0]
+            image = self.renderer.volume("image").region(lo, hi)[0]
             out["image"] = intensity_stats(image)
             if prediction.any():
                 out["image_inside_prediction"] = intensity_stats(image, prediction != 0)
             if "truth" in self.case.inputs:
-                truth = self.case.volume("truth").region(lo, hi)[0]
+                truth = self.renderer.volume("truth").region(lo, hi)[0]
                 out["truth_labels"] = label_stats(truth, grid, self.case.labels, lo)
                 out["overlap_voxels_prediction_vs_truth"] = label_overlap(prediction, truth)
         elif task == "registration":
-            out["fixed"] = intensity_stats(self.case.volume("fixed").region(lo, hi))
+            out["fixed"] = intensity_stats(self.renderer.volume("fixed").region(lo, hi))
             out["warped"] = intensity_stats(self.renderer.volume("warped").region(lo, hi))
             out["displacement"] = displacement_stats(self.renderer.volume("field").region(lo, hi))
             if "fixed_labels" in self.case.inputs:
                 out["fixed_labels"] = label_stats(
-                    self.case.volume("fixed_labels").region(lo, hi)[0], grid, self.case.labels, lo
+                    self.renderer.volume("fixed_labels").region(lo, hi)[0], grid, self.case.labels, lo
                 )
             try:
                 warped_labels = self.renderer.volume("warped_labels").region(lo, hi)[0]
@@ -340,7 +340,7 @@ class Toolbox:
                 out["warped_labels"] = label_stats(warped_labels, grid, self.case.labels, lo)
                 if "fixed_labels" in self.case.inputs:
                     out["overlap_voxels_warped_vs_fixed_labels"] = label_overlap(
-                        warped_labels, self.case.volume("fixed_labels").region(lo, hi)[0]
+                        warped_labels, self.renderer.volume("fixed_labels").region(lo, hi)[0]
                     )
             points = self.case.landmarks("fixed_landmarks")
             if points is not None:
@@ -348,11 +348,11 @@ class Toolbox:
                     np.sum(np.all((points >= measured.low_xyz) & (points <= measured.high_xyz), axis=1))
                 )
         else:
-            synthetic = self.case.volume("synthetic").region(lo, hi)
+            synthetic = self.renderer.volume("synthetic").region(lo, hi)
             out["synthetic"] = intensity_stats(synthetic)
-            out["source"] = intensity_stats(self.case.volume("source").region(lo, hi))
+            out["source"] = intensity_stats(self.renderer.volume("source").region(lo, hi))
             if "target" in self.case.inputs:
-                target = self.case.volume("target").region(lo, hi)
+                target = self.renderer.volume("target").region(lo, hi)
                 out["target"] = intensity_stats(target)
                 out["difference_synthetic_minus_target"] = intensity_stats(
                     synthetic.astype(np.float64) - target.astype(np.float64)
@@ -431,7 +431,7 @@ class Toolbox:
                     "of the region it describes; measure it"
                 )
         grid = self.renderer.grid
-        bounds = grid_bounds(grid)
+        bounds = grid.world_box()
         facts = [float(v) for v in (*grid.spacing_xyz, *grid.size_zyx, *bounds.low_xyz, *bounds.high_xyz)]
         for view in cited_views:  # a slice's position and extent are read off the view's header
             facts += [float(x) for x in (view.position_mm or [])]
@@ -533,7 +533,7 @@ def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:
         for index in view.extra.get("indices") or []:
             window = list(full)
             window[view.array_axis] = slice(int(index), int(index) + 1)
-            if box_intersection(world_box_of(grid, tuple(window)), box) is not None:
+            if box_intersection(grid.world_box(tuple(window)), box) is not None:
                 return True
         return False
     return box_intersection(box_from_dict(view.box_mm), box) is not None
@@ -615,10 +615,6 @@ def _view_payload(view: Any) -> dict[str, Any]:
         "size_px": view.size_px,
         **{k: v for k, v in view.extra.items() if k in ("legend", "scale", "labels", "indices", "landmarks_in_plane")},
     }
-
-
-def _fmt(value: object) -> str:
-    return f"{value:.4g}" if isinstance(value, float) else str(value)
 
 
 def _default(value: object) -> object:

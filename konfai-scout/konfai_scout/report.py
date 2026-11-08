@@ -271,7 +271,7 @@ def _box_text(box: dict[str, list[float]] | None) -> str:
     )
 
 
-def _value_text(value: object) -> str:
+def value_text(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.4g}"
     return str(value)
@@ -346,7 +346,7 @@ def render_markdown(report: Report) -> str:
             if m is None:
                 continue
             kind = "against a reference" if m.reference else "no reference"
-            values = ", ".join(f"{k} = {_value_text(v)}" for k, v in m.values.items())
+            values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items())
             lines += [f"- {mid} ({m.kind}, {kind}, {_box_text(m.box_measured or m.box_requested)}): {values}"]
         if o.measurements:
             lines.append("")
@@ -357,12 +357,12 @@ def render_markdown(report: Report) -> str:
             lines += [f"![{vid}: {v.plane} {v.mode}]({v.path})", ""]
     lines += ["## Prior evaluation (KonfAI Eval, whole case)", ""]
     if report.prior_evaluation:
-        lines += [f"- {k} = {_value_text(v)}" for k, v in report.prior_evaluation.items()] + [""]
+        lines += [f"- {k} = {value_text(v)}" for k, v in report.prior_evaluation.items()] + [""]
     else:
         lines += ["None given.", ""]
     lines += ["## Measurements", ""]
     for m in report.measurements:
-        values = ", ".join(f"{k} = {_value_text(v)}" for k, v in m.values.items()) or (m.error or "no value")
+        values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items()) or (m.error or "no value")
         lines += [
             f"- {m.id} ({m.kind}, {'reference' if m.reference else 'no reference'}, "
             f"{_box_text(m.box_measured or m.box_requested)}): {values}"
@@ -503,5 +503,5 @@ def compare_markdown(comparison: dict[str, Any]) -> str:
     ]
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for row in comparison["rows"]:
-        lines.append("| " + " | ".join("" if row.get(c) is None else _value_text(row[c]) for c in columns) + " |")
+        lines.append("| " + " | ".join("" if row.get(c) is None else value_text(row[c]) for c in columns) + " |")
     return "\n".join(lines)

@@ -8,8 +8,8 @@ import json
 
 from .case import InspectionCase
 from .config import ScoutConfig
-from .planes import box_to_dict, grid_bounds, plane_axes
-from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS
+from .planes import box_to_dict, plane_axes
+from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
 
 PROMPT_VERSION = "1.2"
 
@@ -126,7 +126,7 @@ def case_card(
         f"Truth available: {'yes' if case.truth_available else 'no'} (roles given: {', '.join(case.inputs)})",
         f"Reference grid ({case.image_role}): size_xyz {size_xyz}, spacing_mm {spacing}, "
         f"extent_mm {[round(n * s, 1) for n, s in zip(size_xyz, spacing, strict=True)]}",
-        f"bounds_mm: {json.dumps(box_to_dict(grid_bounds(grid)))}",
+        f"bounds_mm: {json.dumps(box_to_dict(grid.world_box()))}",
         "Planes: " + ", ".join(f"{p} = {grid.size_zyx[a]} slices" for p, a in plane_axes(grid).items()),
     ]
     if case.labels:
@@ -135,7 +135,8 @@ def case_card(
         lines.append("Labels present: " + json.dumps(labels_summary))
     if prior:
         lines.append(
-            "Prior evaluation (KonfAI Eval, whole case): " + ", ".join(f"{k} = {_fmt(v)}" for k, v in prior.items())
+            "Prior evaluation (KonfAI Eval, whole case): "
+            + ", ".join(f"{k} = {value_text(v)}" for k, v in prior.items())
         )
     else:
         lines.append("Prior evaluation: none given.")
@@ -181,9 +182,3 @@ def second_reading_card(observation: object, lines: list[str]) -> str:
             *lines,
         ]
     )
-
-
-def _fmt(value: object) -> str:
-    if isinstance(value, float):
-        return f"{value:.4g}"
-    return str(value)

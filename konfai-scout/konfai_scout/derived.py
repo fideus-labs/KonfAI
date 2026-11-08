@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from konfai.utils.dataset import Attribute, Dataset, read_landmarks
+from konfai.utils.dataset import Dataset, read_landmarks
 from konfai.utils.errors import KonfAIError
 
 from .case import CaseError, InspectionCase, Volume
@@ -152,9 +152,4 @@ class Derived:
         sampler = sitk.TransformToDisplacementFieldFilter()
         sampler.SetReferenceImage(reference)
         sampler.SetOutputPixelType(sitk.sitkVectorFloat32)
-        field = sitk.GetArrayFromImage(sampler.Execute(transform))  # [Z, Y, X, 3]
-        attribute = Attribute()
-        attribute["Origin"] = np.asarray(grid.origin_xyz)
-        attribute["Spacing"] = np.asarray(grid.spacing_xyz)
-        attribute["Direction"] = np.asarray(grid.direction_xyz).ravel()
-        self.dataset.write(FIELD, self.case.slug, np.ascontiguousarray(np.moveaxis(field, -1, 0)), attribute)
+        self.dataset.write(FIELD, self.case.slug, sampler.Execute(transform))  # the image carries its geometry

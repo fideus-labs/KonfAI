@@ -20,8 +20,8 @@ from claude_agent_sdk import (
 from konfai_scout import ScoutConfig, inspect
 from konfai_scout.config import Budget
 from konfai_scout.providers import ProviderError, check_privacy, make_provider
-from konfai_scout.providers.base import ImageContent, ToolResult
-from konfai_scout.providers.claude_code import ClaudeCodeProvider, _mcp_result, _without_image_data
+from konfai_scout.providers.base import ImageContent, ToolResult, without_image_data
+from konfai_scout.providers.claude_code import ClaudeCodeProvider, _mcp_result
 
 MODEL = "claude-opus-5-5"
 NOTE = {
@@ -222,8 +222,8 @@ def test_mcp_results_and_the_transcript_without_image_bytes():
     assert [b["type"] for b in result["content"]] == ["text", "text", "image"] and "is_error" not in result
     assert base64.b64decode(result["content"][2]["data"]) == png and result["content"][2]["mimeType"] == "image/png"
     assert _mcp_result(ToolResult(call_id="c", text="bad", is_error=True))["is_error"]
-    stripped = _without_image_data(
+    stripped = without_image_data(
         [{"type": "text", "text": "t"}, {"type": "image", "data": result["content"][2]["data"]}]
     )
     assert stripped == [{"type": "text", "text": "t"}, {"type": "image", "bytes": len(png)}]
-    assert _without_image_data("plain") == "plain"
+    assert without_image_data("plain") == "plain"

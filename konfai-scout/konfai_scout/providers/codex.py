@@ -11,7 +11,7 @@ plugins, trusted projects) is not loaded; only the login is."""
 from __future__ import annotations
 
 import asyncio
-import base64
+import functools
 import json
 import logging
 import os
@@ -24,29 +24,22 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage
+from .base import (
+    SERVER,
+    ImageContent,
+    ProviderError,
+    ToolDriver,
+    ToolResult,
+    ToolSpec,
+    Turn,
+    Usage,
+    b64,
+    without_image_data,
+)
 
-SERVER = "scout"
 #: Codex features switched off for an inspection: the model sees the case through Scout's tools only.
 DISABLED_FEATURES = ("plugins", "shell_tool", "apps", "browser_use", "computer_use", "skill_search")
 TRANSIENT = ("429", "rate limit", "overloaded", "temporarily", "502", "503", "504", "timeout", "timed out")
-
-
-def _b64(png: bytes) -> str:
-    return base64.standard_b64encode(png).decode("ascii")
-
-
-def _without_image_data(content: Any) -> Any:
-    if not isinstance(content, list):
-        return content
-    out = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "image":
-            data = block.get("data") or (block.get("source") or {}).get("data") or ""
-            out.append({"type": "image", "bytes": len(base64.b64decode(data)) if data else None})
-        else:
-            out.append(block)
-    return out
 
 
 def _free_port() -> int:
@@ -90,27 +83,25 @@ def _model_of(thread_id: str | None) -> str | None:
     return None
 
 
-class CodexProvider:
+class CodexProvider(ToolDriver):
+    """The CLI runs the tool loop: the inspector binds ``execute`` and reads the record from its toolbox."""
+
     name = "codex"
     remote = True
-    #: The CLI runs the tool loop: the inspector binds ``execute`` and reads the record from its toolbox.
-    drives_tools = True
 
     def __init__(
         self, model: str = "default", *, effort: str | None = None, executable: str = "codex", timeout: float = 1800.0
     ) -> None:
+        super().__init__()
         self.model = model
         self.effort = effort
         self.executable = executable
         self.timeout = timeout
-        self.execute: Any = None
         self.system = ""
         self.tools: list[ToolSpec] = []
         self.messages: list[dict[str, Any]] = []
         self.thread_id: str | None = None
         self.url: str | None = None
-        self._calls = 0
-        self._lock = threading.Lock()
         self._work = tempfile.TemporaryDirectory(prefix="konfai-scout-codex-")
 
     def sdk_version(self) -> str:
@@ -161,13 +152,6 @@ class CodexProvider:
         path.write_bytes(image.png)
         return path
 
-    def _execute(self, name: str, args: dict[str, Any]) -> ToolResult:
-        if self.execute is None:
-            raise ProviderError("no executor bound: the inspector binds `execute` before the first turn")
-        with self._lock:
-            self._calls += 1
-            return self.execute(ToolCall(id=f"call_{self._calls}", name=name, arguments=dict(args or {})))
-
     def _serve(self) -> str:
         """Scout's tools as an MCP server on a loopback port, started once per inspection."""
         if self.url:
@@ -180,7 +164,7 @@ class CodexProvider:
             logging.getLogger(name).setLevel(logging.WARNING)
         server = FastMCP(SERVER)
         for spec in self.tools:
-            server.add_tool(_ScoutTool.of(spec, self._execute))
+            server.add_tool(_scout_tool_class().of(spec, self._execute))
         port = _free_port()
         threading.Thread(
             target=lambda: server.run(
@@ -289,7 +273,7 @@ class CodexProvider:
                     self.messages.append(
                         {
                             "role": "user",
-                            "content": [{"type": "tool_result", "content": _without_image_data(result.get("content"))}],
+                            "content": [{"type": "tool_result", "content": without_image_data(result.get("content"))}],
                         }
                     )
                 elif itype == "reasoning":
@@ -336,11 +320,12 @@ class CodexProvider:
                 cache_write_tokens=int(usage.get("cache_write_input_tokens") or 0),
             ),
             model=model or self.model,
-            raw={"thread_id": self.thread_id, "usage": usage},
         )
 
 
+@functools.cache
 def _scout_tool_class() -> Any:
+    """The fastmcp subclass, built on first use: importing this module never needs fastmcp."""
     from fastmcp.tools import Tool
     from fastmcp.tools import ToolResult as McpToolResult
     from mcp.types import ImageContent as McpImage
@@ -369,22 +354,7 @@ def _scout_tool_class() -> Any:
             for image in result.images:
                 if image.label:
                     content.append(TextContent(type="text", text=image.label))
-                content.append(McpImage(type="image", data=_b64(image.png), mimeType="image/png"))
+                content.append(McpImage(type="image", data=b64(image.png), mimeType="image/png"))
             return McpToolResult(content=content, is_error=result.is_error)
 
     return ScoutTool
-
-
-class _ScoutToolFactory:
-    """``_ScoutTool.of(spec, execute)``: the fastmcp subclass is built on first use, so importing this module never
-    needs fastmcp."""
-
-    _cls: Any = None
-
-    def of(self, spec: ToolSpec, execute: Any) -> Any:
-        if self._cls is None:
-            self._cls = _scout_tool_class()
-        return self._cls.of(spec, execute)
-
-
-_ScoutTool = _ScoutToolFactory()

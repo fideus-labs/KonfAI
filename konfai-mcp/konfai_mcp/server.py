@@ -209,7 +209,7 @@ SESSION = SessionService(
 
 APP_SERVICE = AppService(workspace_layout=WORKSPACE_LAYOUT)
 SCOUT_SERVICE = ScoutService(WORKSPACE_LAYOUT)
-FIDOPT = FidoptAdapter()
+FIDOPT = FidoptAdapter(WORKSPACE_LAYOUT)
 
 
 _SESSION_SWITCH_LOCK = threading.Lock()
@@ -1665,7 +1665,6 @@ def fidopt_run(
         scout,
         scout_allow_cloud,
         extra,
-        WORKSPACE_LAYOUT.ensure_session_workspace(),
     )
     payload = _launch_app_job(spec)
     payload["next_actions"] = ["get_job_status", "read_job_log", "fidopt_table"]

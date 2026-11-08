@@ -14,10 +14,6 @@ from .base import ImageContent, ToolCall, ToolResult, ToolSpec, Turn, Usage
 Policy = Callable[[str, list[dict[str, Any]], list[ToolSpec]], Turn]
 
 
-def _tokens(text: str) -> int:
-    return max(1, len(text) // 4)
-
-
 class ScriptedProvider:
     """Answers the turns it was given, in order; ``raise_at`` makes the n-th call raise the exception it holds."""
 

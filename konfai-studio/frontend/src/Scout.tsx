@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useState } from "react";
-import { getJson } from "./api";
 import { useJson } from "./useJson";
 
 // KonfAI Scout's reports for this experiment: what a vision model found wrong, where (in millimetres), with the
@@ -40,13 +39,11 @@ type Report = {
   task: string;
   case: string;
   image: string | null;
-  inputs: Record<string, string>;
   truth_available: boolean;
   conclusion: { verdict: string; summary: string; confidence: number; by: string; reason: string | null } | null;
   observations: Observation[];
   measurements: Measurement[];
-  views: { id: string; kind: string; plane: string; mode: string; position_mm: number[] | null; sent: boolean }[];
-  prior_evaluation: Record<string, number | null>;
+  views: number;
   usage: { images_sent?: number; input_tokens?: number; output_tokens?: number; cost_usd?: number | null } | null;
   budget: { exhausted?: string | null } | null;
   error: string | null;
@@ -71,7 +68,7 @@ export default function Scout({
   onGoTo,
 }: {
   session: string;
-  onGoTo: (image: string, mm: [number, number, number], overlays: Record<string, string>) => void;
+  onGoTo: (image: string, mm: [number, number, number]) => void;
 }) {
   const [retry, setRetry] = useState(0);
   const { data, loading, error } = useJson<{ reports: ReportSummary[] }>(
@@ -80,28 +77,15 @@ export default function Scout({
   );
   const reports = data?.reports ?? [];
   const [selected, setSelected] = useState<string | null>(null);
-  const [report, setReport] = useState<Report | null>(null);
-  const [failed, setFailed] = useState("");
+  const { data: report, error: failed } = useJson<Report>(
+    selected ? `/api/scout/report?session=${encodeURIComponent(session)}&name=${encodeURIComponent(selected)}` : "",
+    [selected, session],
+  );
   const [shown, setShown] = useState<string | null>(null); // an evidence image enlarged
 
   useEffect(() => {
     if (!selected && reports.length) setSelected(reports[0].name);
   }, [reports, selected]);
-
-  useEffect(() => {
-    if (!selected) return;
-    const controller = new AbortController();
-    setFailed("");
-    getJson<Report>(`/api/scout/report?session=${encodeURIComponent(session)}&name=${encodeURIComponent(selected)}`, controller.signal)
-      .then(setReport)
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          setReport(null);
-          setFailed(e.message);
-        }
-      });
-    return () => controller.abort();
-  }, [selected, session]);
 
   const evidence = (view: string) =>
     `/api/scout/evidence?session=${encodeURIComponent(session)}&name=${encodeURIComponent(selected ?? "")}&view=${view}`;
@@ -156,7 +140,7 @@ export default function Scout({
           )}
           {report.budget?.exhausted && <div className="feed-sub">Budget exhausted: {report.budget.exhausted}.</div>}
           <div className="feed-sub">
-            {report.provider?.name}/{report.provider?.model} · {report.mode} · {report.views.length} views ·{" "}
+            {report.provider?.name}/{report.provider?.model} · {report.mode} · {report.views} views ·{" "}
             {report.measurements.length} measurements
             {report.usage?.cost_usd != null && <> · ${report.usage.cost_usd.toFixed(4)}</>}
           </div>
@@ -172,7 +156,7 @@ export default function Scout({
                 {o.box_mm && report.image && (
                   <button
                     className="rtab"
-                    onClick={() => onGoTo(report.image!, boxCentre(o.box_mm!), report.inputs)}
+                    onClick={() => onGoTo(report.image!, boxCentre(o.box_mm!))}
                     title={`Load ${report.image} and put the crosshair at ${mm(boxCentre(o.box_mm))} mm`}
                   >
                     Go to

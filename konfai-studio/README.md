@@ -91,9 +91,9 @@ inspections: a vision model looked at a segmentation, a registration or a synthe
 looked off, measured regions with KonfAI Eval and wrote down localised defects with their evidence. Each observation
 shows its kind (measured, suspected, confirmed), severity, confidence, the measurements it cites and its evidence
 images; *Go to* loads the case's image in the viewer and puts the crosshair on the observation. An inspection is
-launched by the assistant through konfai-mcp's `run_scout_inspection` (or `POST /api/scout/inspect`) and followed
-like any other job; `pip install konfai-scout` beside konfai-mcp, and pass `allow_cloud_images` to let images reach
-a cloud model (a local OpenAI-compatible server needs no flag).
+launched by the assistant through konfai-mcp's `run_scout_inspection` and followed like any other job; `pip install
+konfai-scout` beside konfai-mcp, and pass `allow_cloud_images` to let images reach a cloud model (a local
+OpenAI-compatible server needs no flag).
 
 ## Develop from a checkout
 

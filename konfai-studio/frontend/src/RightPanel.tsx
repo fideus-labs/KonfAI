@@ -1697,11 +1697,8 @@ export default function RightPanel({
 
       {/* Both panes stay mounted (hidden when inactive) so NiiVue keeps its volume and the workspace tree
           keeps its expansion/selection across tab switches. */}
-      <div className={tab === "leaderboard" ? "rscroll feed" : "rscroll feed hidden"}>
+      <div className={tab === "leaderboard" || tab === "scout" ? "rscroll feed" : "rscroll feed hidden"}>
         {tab === "leaderboard" && <Leaderboard session={session} />}
-      </div>
-
-      <div className={tab === "scout" ? "rscroll feed" : "rscroll feed hidden"}>
         {tab === "scout" && (
           <Suspense fallback={<div className="feed-sub">Loading Scout…</div>}>
             <Scout

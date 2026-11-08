@@ -47,7 +47,7 @@ Three Scout tools and five FidOpt tools, in `konfai_mcp/server_scout.py`:
 
 ## konfai-studio
 
-`/api/scout/reports`, `/api/scout/report`, `/api/scout/evidence` and `POST /api/scout/inspect` in the BFF; a
+`/api/scout/reports`, `/api/scout/report` and `/api/scout/evidence` in the BFF; a
 *Scout* tab in the right panel lists the session's reports, their observations, and a *Go to* button that loads the
 case's image in the viewer and puts the crosshair at the observation's centre (LPS to RAS for NiiVue). Progress is
 the job stream Studio already shows.

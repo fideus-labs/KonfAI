@@ -10,17 +10,13 @@ from konfai_scout.planes import (
     box_around,
     box_from_dict,
     box_to_dict,
-    center_mm,
     dominant_world_axis,
     index_along,
-    index_to_world,
     plane_axes,
     plane_axis,
     plane_frame,
-    plane_of,
     promoted,
     window_of,
-    world_box_of,
 )
 
 
@@ -39,8 +35,7 @@ def test_planes_name_the_dominant_axis_and_stay_distinct():
     assert plane_axes(oblique_grid()) == {"axial": 0, "coronal": 1, "sagittal": 2}
     swapped = Grid((10, 10, 10), np.zeros(3), np.ones(3), np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], float))
     assert plane_axes(swapped) == {"axial": 2, "coronal": 1, "sagittal": 0}
-    for plane in PLANES:
-        assert plane_of(identity_grid(), plane_axis(identity_grid(), plane)) == plane
+    assert [plane_axis(identity_grid(), plane) for plane in PLANES] == [0, 1, 2]
     with pytest.raises(ValueError):
         plane_axis(identity_grid(), "oblique")
 
@@ -59,7 +54,8 @@ def test_the_radiological_frame():
 
 def test_windows_cover_every_voxel_centre_inside_a_box():
     grid = oblique_grid()
-    box = box_around(center_mm(grid), (12.0, 9.0, 11.0))
+    centre = grid.index_to_world.apply([(n - 1) / 2 for n in reversed(grid.size_zyx)])
+    box = box_around(centre, (12.0, 9.0, 11.0))
     window = window_of(grid, box)
     assert window is not None
     zz, yy, xx = np.indices(grid.size_zyx)
@@ -69,15 +65,15 @@ def test_windows_cover_every_voxel_centre_inside_a_box():
     for z, y, x in zip(zz.ravel()[inside], yy.ravel()[inside], xx.ravel()[inside], strict=True):
         assert window[0].start <= z < window[0].stop and window[1].start <= y < window[1].stop
         assert window[2].start <= x < window[2].stop
-    measured = world_box_of(grid, window)
+    measured = grid.world_box(window)
     assert np.all(centres[inside] >= measured.low_xyz - 1e-6) and np.all(centres[inside] <= measured.high_xyz + 1e-6)
     assert window_of(grid, box_around((500.0, 500.0, 500.0), 10.0)) is None
 
 
 def test_index_along_and_box_forms():
     grid = oblique_grid()
-    assert index_along(grid, 0, index_to_world(grid, [0, 0, 7])) == 7
-    assert index_along(grid, 2, index_to_world(grid, [-10, 0, 0])) == 0
+    assert index_along(grid, 0, grid.index_to_world.apply([0, 0, 7])) == 7
+    assert index_along(grid, 2, grid.index_to_world.apply([-10, 0, 0])) == 0
     a = box_from_dict({"min": [0, 0, 0], "max": [2, 4, 6]})
     b = box_from_dict({"center": [1, 2, 3], "size": 2})
     c = box_from_dict({"center_mm": [1, 2, 3], "size_mm": 2})

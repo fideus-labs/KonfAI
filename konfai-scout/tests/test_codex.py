@@ -13,7 +13,8 @@ from fastmcp import Client
 from konfai_scout import ScoutConfig, inspect
 from konfai_scout.config import Budget
 from konfai_scout.providers import ProviderError, check_privacy, make_provider
-from konfai_scout.providers.codex import CodexProvider, _model_of, _without_image_data
+from konfai_scout.providers.base import without_image_data
+from konfai_scout.providers.codex import CodexProvider, _model_of
 
 NOTE = {
     "kind": "suspected_error",
@@ -193,7 +194,7 @@ def test_the_gate_the_factory_and_the_records(tmp_path, monkeypatch):
         + "\n"
     )
     assert _model_of("t9") == "gpt-test" and _model_of("t10") is None and _model_of(None) is None
-    stripped = _without_image_data(
+    stripped = without_image_data(
         [{"type": "text", "text": "t"}, {"type": "image", "data": "AAAA", "mimeType": "image/png"}]
     )
     assert stripped == [{"type": "text", "text": "t"}, {"type": "image", "bytes": 3}]

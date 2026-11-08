@@ -204,12 +204,13 @@ def test_fidopt_is_read_through_its_own_code_and_run_only_when_allowed(
     assert called == ["check", "deeds", "--on", "AMOS_CTCT", "a", "--scout", "mock"]
 
 
-def test_the_adapter_says_when_fidopt_is_not_there(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_adapter_says_when_fidopt_is_not_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from konfai_mcp.server_scout import FidoptAdapter
+    from konfai_mcp.workspace import WorkspaceLayout
 
     monkeypatch.setenv("KONFAI_MCP_FIDOPT", "/nowhere/fidopt")
     monkeypatch.delenv("KONFAI_MCP_FIDOPT_ALLOWED", raising=False)
-    adapter = FidoptAdapter()
+    adapter = FidoptAdapter(WorkspaceLayout(tmp_path))
     assert adapter.allowed == ("check",)
     with pytest.raises(ValueError, match="KONFAI_MCP_FIDOPT"):
         adapter.list_datasets()

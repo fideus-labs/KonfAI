@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - FidOpt's own executable, argv lists, no shell
 import sys
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -58,19 +59,10 @@ class ScoutService:
         labels: dict[str, str] | None = None,
         evaluation: list[str] | None = None,
         notes: str = "",
-        provider: str = "anthropic",
-        model: str | None = None,
-        base_url: str | None = None,
-        effort: str | None = None,
-        mode: str = "active",
-        max_tool_calls: int = 40,
-        max_images: int = 60,
-        max_seconds: float | None = 900.0,
-        max_usd: float | None = None,
-        allow_cloud_images: bool = False,
-        local_provider: bool = False,
+        **options: Any,
     ) -> dict[str, Any]:
-        """The job spec of one inspection: the case and config JSON written, the privacy gate passed."""
+        """The job spec of one inspection: the case and config JSON written, the privacy gate passed. ``options``
+        are ``ScoutConfig`` fields; the ``Budget`` ones (``max_*``) go to its budget."""
         try:
             from konfai_scout.case import CaseError, InspectionCase
             from konfai_scout.config import Budget, ScoutConfig
@@ -95,18 +87,9 @@ class ScoutService:
                     "notes": notes,
                 }
             )
-            config = ScoutConfig(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                effort=effort,
-                mode=mode,
-                budget=Budget(
-                    max_tool_calls=max_tool_calls, max_images=max_images, max_seconds=max_seconds, max_usd=max_usd
-                ),
-                allow_cloud_images=allow_cloud_images,
-                local_provider=local_provider,
-            )
+            budget_keys = {f.name for f in fields(Budget)}
+            budget = {key: options.pop(key) for key in tuple(options) if key in budget_keys}
+            config = ScoutConfig(budget=Budget(**budget), **options)
             check_privacy(config)
         except (CaseError, ProviderError, ValueError) as exc:
             raise ValueError(str(exc)) from exc
@@ -194,13 +177,14 @@ class ScoutService:
 class FidoptAdapter:
     """FidOpt through its own CLI and Python; nothing reimplemented, nothing launched outside the allowed list."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_layout: WorkspaceLayout) -> None:
+        self.workspace_layout = workspace_layout
         self.executable = os.environ.get("KONFAI_MCP_FIDOPT") or shutil.which("fidopt") or "fidopt"
         beside = Path(self.executable).with_name("python")
         self.python = os.environ.get("KONFAI_MCP_FIDOPT_PYTHON") or (str(beside) if beside.exists() else sys.executable)
         allowed = os.environ.get("KONFAI_MCP_FIDOPT_ALLOWED", "check")
         self.allowed = tuple(part.strip() for part in allowed.split(",") if part.strip())
-        self.timeout = float(os.environ.get("KONFAI_MCP_FIDOPT_TIMEOUT", "120"))
+        self.timeout = 120.0
 
     def available(self) -> None:
         if not (Path(self.executable).exists() or shutil.which(self.executable)):
@@ -290,7 +274,6 @@ class FidoptAdapter:
         scout: str | None,
         scout_allow_cloud: bool,
         extra: list[str] | None,
-        workspace: Path,
     ) -> dict[str, Any]:
         """The job spec of one allowed FidOpt operation."""
         if operation not in self.allowed:
@@ -320,8 +303,8 @@ class FidoptAdapter:
             if not re.fullmatch(r"--[a-z][a-z0-9-]*(=[A-Za-z0-9._:/-]+)?|[A-Za-z0-9._:/-]+", item):
                 raise ValueError(f"extra argument {item!r}: flags and plain values only, no paths outside the corpus.")
             args.append(item)
-        label = self.workspace_layout_name(f"fidopt_{operation}_{method}_{dataset or 'none'}")
-        output = workspace / "FidOpt" / label
+        label = self.workspace_layout.sanitize_name(f"fidopt_{operation}_{method}_{dataset or 'none'}")
+        output = self.workspace_layout.ensure_session_workspace() / "FidOpt" / label
         output.mkdir(parents=True, exist_ok=True)
         # FidOpt writes its rows where its own configuration says, so the job's folder only records what was asked
         # (and is never the empty output the registry would read as a failed run).
@@ -336,7 +319,3 @@ class FidoptAdapter:
             "kwargs": {"executable": self.executable, "args": args},
             "output": str(output),
         }
-
-    @staticmethod
-    def workspace_layout_name(name: str) -> str:
-        return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80]

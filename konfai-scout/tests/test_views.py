@@ -6,7 +6,7 @@ import io
 import numpy as np
 import pytest
 from konfai_scout.config import ScoutConfig
-from konfai_scout.planes import box_from_dict, box_volume, grid_bounds, plane_frame
+from konfai_scout.planes import box_from_dict, box_size
 from konfai_scout.views import DEFAULT_MODE, MODES, Renderer, ViewError
 from PIL import Image
 
@@ -46,15 +46,6 @@ def test_every_available_mode_renders(fixtures, tmp_path, key):
                 r.render("axial", mode)
 
 
-def test_radiological_convention_on_an_identity_grid(fixtures):
-    case, _ = fixtures["segmentation"]
-    assert plane_frame(case.grid, "axial").edges == ("R", "L", "A", "P")
-    assert plane_frame(case.grid, "coronal").edges == ("R", "L", "S", "I")
-    assert plane_frame(case.grid, "sagittal").edges == ("A", "P", "S", "I")
-    flipped = plane_frame(case.grid, "coronal")
-    assert flipped.flip_rows and not flipped.flip_cols  # z runs upward on screen
-
-
 @pytest.mark.parametrize("key", ["segmentation", "segmentation_oblique"])
 def test_the_affine_points_at_the_drawn_voxels(fixtures, tmp_path, key):
     case, _ = fixtures[key]
@@ -87,7 +78,7 @@ def test_zoom_crops_to_the_box_and_keeps_the_size(fixtures, tmp_path):
     assert view.kind == "slice" and max(view.size_px) in (256, 256 + 18)
     shown = box_from_dict(view.box_mm)
     assert np.all(shown.low_xyz <= box.high_xyz) and np.all(shown.high_xyz >= box.low_xyz)
-    assert box_volume(shown) < box_volume(grid_bounds(case.grid)) / 10
+    assert np.prod(box_size(shown)) < np.prod(box_size(case.grid.world_box())) / 10
     with pytest.raises(ViewError):
         r.render("axial", "prediction", zoom=box_from_dict({"min": [900, 900, 900], "max": [910, 910, 910]}))
 
@@ -114,6 +105,29 @@ def test_windows_and_unknown_modes_are_checked(fixtures, tmp_path):
         r.render("axial", "nothing")
     with pytest.raises(ValueError):
         r.render("oblique", "image")
+
+
+def test_a_role_on_another_grid_is_refused(fixtures, tmp_path):
+    import SimpleITK as sitk
+    from konfai_scout.case import InspectionCase
+    from konfai_scout.evaluation import EvaluationError, RegionEvaluator
+
+    case, _ = fixtures["segmentation"]
+    shifted = sitk.ReadImage(str(case.inputs["prediction"]))
+    shifted.SetOrigin(tuple(o + s for o, s in zip(shifted.GetOrigin(), shifted.GetSpacing(), strict=True)))
+    sitk.WriteImage(shifted, str(tmp_path / "prediction.mha"))
+    moved = InspectionCase(
+        "segmentation", "moved", {**case.inputs, "prediction": tmp_path / "prediction.mha"}, labels=case.labels
+    )
+    moved.stage(tmp_path / "work" / "stage")
+    assert moved.volume("prediction").grid.size_zyx == moved.grid.size_zyx  # the same voxels, one voxel away
+    r = Renderer(moved, tmp_path / "work", ScoutConfig(max_px=200), tmp_path / "evidence")
+    with pytest.raises(ViewError, match="another grid"):
+        r.render("axial", "prediction")
+    with pytest.raises(EvaluationError, match="another grid"):
+        RegionEvaluator(moved, ScoutConfig(), tmp_path / "work", None).measure(moved.grid.world_box())
+    _png, view = r.render("axial", "image")  # the reference itself is fine
+    assert view.mode == "image"
 
 
 def test_a_2d_case_renders_one_plane(tmp_path):
