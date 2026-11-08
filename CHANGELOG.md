@@ -83,6 +83,13 @@ A synthesis experiment from scratch (one epoch on 34 SynthRAD abdomen cases, eva
 `inspect_dataset` warns about a group holding one value (a mask of ones), two groups with identical statistics and
 groups on different grids; `read_file` pages through a dataset text file with `offset`; the check's
 `iterations_per_epoch` says it is counted on the data the check built.
+Driving KonfAI Studio in a browser (dataset chosen, a lung training designed and run by its Claude Code brain,
+prediction, evaluation, viewer, Scout) added: Studio's model list and defaults name the current Claude 5 family; a
+job whose process just exited gets a few seconds before the feed paints it failed (a finished Scout inspection read
+as a failed run); the pane beside the file tree shrinks with its column at laptop widths; `summarize_session`
+answers for a session whose workspace is not made yet; the packager's weights-only load also admits ruamel's
+`Anchor` and `ScalarString`, which every checkpoint written from a YAML config carries. A plain static site for the
+ecosystem lives under `site/`.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

@@ -166,11 +166,13 @@ def _konfai_scalar_globals() -> list[Any]:
     allowed: list[Any] = [np.dtype, np.ndarray, multiarray.scalar, multiarray._reconstruct]
     allowed += [getattr(np.dtypes, name) for name in dir(np.dtypes) if name.endswith("DType")]
     try:
+        from ruamel.yaml.anchor import Anchor  # every ruamel scalar carries one
         from ruamel.yaml.scalarbool import ScalarBoolean
         from ruamel.yaml.scalarfloat import ScalarFloat
         from ruamel.yaml.scalarint import ScalarInt
+        from ruamel.yaml.scalarstring import ScalarString
 
-        allowed += [ScalarFloat, ScalarInt, ScalarBoolean]
+        allowed += [ScalarFloat, ScalarInt, ScalarBoolean, ScalarString, Anchor]
     except ImportError:  # pragma: no cover - ruamel is a KonfAI dependency
         pass
     return allowed

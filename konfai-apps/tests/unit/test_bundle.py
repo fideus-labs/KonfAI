@@ -136,7 +136,9 @@ def test_a_runs_own_checkpoint_scalars_are_published(tmp_path):
 
     app_json = _write(tmp_path / "app.json", VALID_META)
     checkpoint = tmp_path / "CV_0.pt"
-    torch.save({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": np.int64(3), "lr": ScalarFloat(0.1)}, checkpoint)
+    lr = ScalarFloat(0.1)
+    _ = lr.anchor  # a ruamel scalar read from a config carries its Anchor, pickled with it
+    torch.save({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": np.int64(3), "lr": lr}, checkpoint)
     bundle = assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
     assert bundle and any((tmp_path / "out").rglob("*.safetensors"))
 
