@@ -191,6 +191,38 @@ def select_inference_head(model: torch.nn.Module, *example_input: torch.Tensor) 
     return head
 
 
+def _write_onnx(
+    module: torch.nn.Module,
+    examples: tuple[torch.Tensor, ...],
+    onnx_path: Path,
+    input_names: list[str],
+    output_names: list[str],
+    opset: int = 18,
+) -> None:
+    """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``. The dynamo
+    exporter writes weights as external data, inlined here. It also records every node's Python stack, and with
+    it the paths of the machine that exported, which a model handed to others does not carry."""
+    onnx = _require("onnx")
+    _require("onnxscript")  # required by the torch dynamo ONNX exporter
+    with torch.no_grad():
+        torch.onnx.export(
+            module,
+            examples,
+            str(onnx_path),
+            opset_version=opset,
+            input_names=input_names,
+            output_names=output_names,
+            dynamo=True,
+        )
+    exported = onnx.load(str(onnx_path))
+    for node in [*exported.graph.node, *(node for function in exported.functions for node in function.node)]:
+        kept = [prop for prop in node.metadata_props if prop.key != "pkg.torch.onnx.stack_trace"]
+        del node.metadata_props[:]
+        node.metadata_props.extend(kept)
+    onnx.save(exported, str(onnx_path), save_as_external_data=False)
+    onnx_path.with_name(onnx_path.name + ".data").unlink(missing_ok=True)
+
+
 def export_to_onnx(
     model: torch.nn.Module,
     output_dir: str | Path,
@@ -242,9 +274,6 @@ def export_to_onnx(
     ``(onnx_path, manifest)``: the written ONNX path and the manifest dict (also written
     to ``manifest.json`` when ``write_manifest``).
     """
-    onnx = _require("onnx")
-    _require("onnxscript")  # required by the torch dynamo ONNX exporter
-
     out_dir = Path(output_dir)
     onnx_path = out_dir / model_filename
 
@@ -264,30 +293,8 @@ def export_to_onnx(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
-    with torch.no_grad():
-        names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
-        torch.onnx.export(
-            wrapper,
-            examples,
-            str(onnx_path),
-            opset_version=opset,
-            input_names=names,
-            output_names=[output_name],
-            dynamo=True,
-        )
-
-    # The dynamo exporter writes weights as external data; inline them so the .onnx is a
-    # single self-contained file. It also records every node's Python stack, and with it the
-    # paths of the machine that exported, which a model handed to others does not carry.
-    exported = onnx.load(str(onnx_path))
-    for node in [*exported.graph.node, *(node for function in exported.functions for node in function.node)]:
-        kept = [prop for prop in node.metadata_props if prop.key != "pkg.torch.onnx.stack_trace"]
-        del node.metadata_props[:]
-        node.metadata_props.extend(kept)
-    onnx.save(exported, str(onnx_path), save_as_external_data=False)
-    sidecar = onnx_path.with_name(onnx_path.name + ".data")
-    if sidecar.exists():
-        sidecar.unlink()
+    names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
+    _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset)
 
     input_shape = tuple(int(s) for s in examples[0].shape)
     spatial = list(input_shape[2:])

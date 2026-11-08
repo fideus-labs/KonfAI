@@ -130,6 +130,56 @@ def test_a_nested_app_needs_the_exporter_that_resolves_it(tmp_path: Path) -> Non
     assert exported == ["Output_seg"]
 
 
+def test_a_group_running_two_nested_apps_exports_each_under_its_own_name(tmp_path: Path) -> None:
+    from konfai.portable_evaluation import _group_steps
+
+    def exporter(group: str, params: dict, out: Path) -> dict:
+        return {"id": group, "manifest": {"model": params["model_name"]}}
+
+    chain = {
+        "KonfAIInference": {"repo_id": "a", "model_name": "b"},
+        "KonfAIInference#2": {"repo_id": "a", "model_name": "c"},
+    }
+    steps = _group_steps("Output_seg", chain, tmp_path, {}, exporter)
+    # Named after the group, the second app would overwrite the first's `Output_seg.onnx`.
+    assert [(step["model"], step["manifest"]["model"]) for step in steps] == [
+        ("Output_seg", "b"),
+        ("Output_seg_2", "c"),
+    ]
+
+
+def test_a_crop_after_a_stage_moving_the_values_is_refused_in_an_evaluation_chain(tmp_path: Path) -> None:
+    from konfai.portable_evaluation import _group_steps
+
+    # konfai's Crop finds its box in the group as stored, the runtime in the volume it is handed: one box only
+    # while nothing before it moved the grid or the values (`compile_chain` refuses the same).
+    steps = _group_steps(
+        "Output", {"Statistics": {}, "TensorCast": {"dtype": "float32"}, "Crop": {}}, tmp_path, {}, None
+    )
+    assert [step["op"] for step in steps] == ["statistics", "cast", "crop"]
+    with pytest.raises(EvaluatorError, match=r"(?s)'Crop' follows 'Clip'.*konfai EVALUATION"):
+        _group_steps("Output", {"Clip": {"min_value": 0.0, "max_value": 400.0}, "Crop": {}}, tmp_path, {}, None)
+    exporter = lambda group, _params, _out: {"id": group, "manifest": {}}  # noqa: E731
+    with pytest.raises(EvaluatorError, match="'Crop' follows 'KonfAIInference'"):
+        _group_steps("Output", {"KonfAIInference": {"repo_id": "a"}, "Crop": {}}, tmp_path, {}, exporter)
+
+
+def test_sam_perceptual_names_its_graph_after_the_network_it_loads(tmp_path: Path, monkeypatch) -> None:
+    import konfai.portable_evaluation as portable_evaluation
+    from konfai.metric.measure import impact
+
+    monkeypatch.setattr(impact, "_download_model", lambda _criterion, repo_id, filename: f"/cache/{repo_id}/{filename}")
+    written: list[Path] = []
+    monkeypatch.setattr(portable_evaluation, "export_sam_perceptual", lambda _model, _tile, path: written.append(path))
+    steps = [
+        portable_evaluation._sam_perceptual(impact.SAM_Perceptual(train=train), "Output", tmp_path)
+        for train in (False, True)
+    ]
+    # The metric-tuned network and the raw extractor are two networks under one file name, `SAM2.1_Small.pt`.
+    assert steps[0]["model"] != steps[1]["model"] and len(set(written)) == 2
+    assert all(step["model"] == path.stem and path.suffix == ".onnx" for step, path in zip(steps, written, strict=True))
+
+
 def test_impact_reg_has_a_portable_form_on_a_whole_volume_only(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

@@ -47,7 +47,9 @@ from konfai.portable import (
     chain_items,
     clean,
     is_save,
+    moves_the_volume,
     records_only,
+    refuse_a_late_crop,
     refuse_a_stage_konfai_does_not_carry,
     source_of,
     warn_unportable_keys,
@@ -58,9 +60,6 @@ from konfai.utils.errors import ConfigError, EvaluatorError
 EVALUATION_PROGRAM_VERSION = 1
 
 _EVALUATE = "konfai EVALUATION"
-
-#: The ONNX opset the metric graphs are exported at, the one the prediction export uses.
-_OPSET = 18
 
 
 def _saved(criterion: Any, output_group: str) -> dict[str, Any]:
@@ -92,12 +91,9 @@ def _mae(criterion: Any, output_group: str, _out: Path) -> dict[str, Any]:
     return {"metric": "mae", "reduction": criterion._reduction} | _saved(criterion, output_group)
 
 
-def _psnr(criterion: Any, _output_group: str, _out: Path) -> dict[str, Any]:
-    return {"metric": "psnr", "dynamic_range": float(criterion._dynamic_range)}
-
-
-def _ssim(criterion: Any, _output_group: str, _out: Path) -> dict[str, Any]:
-    return {"metric": "ssim", "dynamic_range": float(criterion._dynamic_range)}
+def _ranged(metric: str) -> Callable[[Any, str, Path], dict[str, Any]]:
+    """``PSNR`` and ``SSIM``: the metric and the dynamic range it is scored over."""
+    return lambda criterion, _output_group, _out: {"metric": metric, "dynamic_range": float(criterion._dynamic_range)}
 
 
 def _sam_perceptual(criterion: Any, _output_group: str, out: Path) -> dict[str, Any]:
@@ -111,7 +107,8 @@ def _sam_perceptual(criterion: Any, _output_group: str, out: Path) -> dict[str, 
             _or_konfai("Use SAM_Perceptual as konfai builds it", _EVALUATE),
         )
     tile = [int(size) for size in feature.shape]
-    model = _file_stem(f"sam_perceptual_{Path(feature.model_path).stem}")
+    # The metric-tuned network and the raw extractor share a file name (`SAM2.1_Small.pt`): the repository tells.
+    model = _file_stem(f"sam_perceptual_{Path(criterion.model_ref).with_suffix('')}")
     layers = export_sam_perceptual(feature.model_path, tile, out / f"{model}.onnx")
     return {
         "metric": "sam_perceptual",
@@ -167,8 +164,8 @@ CRITERIA: dict[str, Callable[[Any, str, Path], dict[str, Any]]] = {
     "DiceSaveMap": _dice,
     "MAE": _mae,
     "MAESaveMap": _mae,
-    "PSNR": _psnr,
-    "SSIM": _ssim,
+    "PSNR": _ranged("psnr"),
+    "SSIM": _ranged("ssim"),
     "SAM_Perceptual": _sam_perceptual,
     "IMPACTReg": _impact_reg,
 }
@@ -200,12 +197,14 @@ def _group_steps(
     reaches it (konfai reads that entry back on a later run in place of the stages before it; the runtime runs
     them again)."""
     steps: list[dict[str, Any]] = []
+    moved = None  # the first stage that may move the grid or the values a Crop finds its box in
     for name, params in chain_items(chain):
         stage = base_name(name)
         if stage == "Statistics":
             steps.append({"op": "statistics"})
         elif stage == "KonfAIInference":
             steps.append(_inference(group_dest, params, out, nested, nested_exporter))
+            moved = moved or name
         elif is_save(name):
             steps.append(_admitted({"op": "save", "destination": _write_target(name, params, group_dest)}))
         elif not records_only(name):
@@ -215,7 +214,10 @@ def _group_steps(
                     f"Transform '{name}' of group '{group_dest}' has no portable runtime op.",
                     f"Portable stages are: {', '.join(sorted(_CHAIN_OPS))}. {_or_konfai('Run it', _EVALUATE)}",
                 )
-            steps.append(_admitted(_CHAIN_OPS[stage](params)))
+            refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE)
+            step = _admitted(_CHAIN_OPS[stage](params))
+            moved = moved or (name if moves_the_volume(step) else None)
+            steps.append(step)
     return steps
 
 
@@ -240,7 +242,10 @@ def _inference(
                 f"Group '{group_dest}' is produced by a nested app, which this compiler does not resolve.",
                 "Pass nested_exporter=konfai_apps.bundle.export_nested_model, which resolves an app reference.",
             )
-        nested[key] = nested_exporter(group_dest, params, out)
+        # One artifact per nested configuration: a group whose chain runs two apps names the second after the first.
+        taken = {entry["id"] for entry in nested.values()}
+        names = (group_dest, *(f"{group_dest}_{i}" for i in range(2, len(taken) + 2)))
+        nested[key] = nested_exporter(next(name for name in names if name not in taken), params, out)
     return {"model": nested[key]["id"], "manifest": nested[key]["manifest"]}
 
 
@@ -344,14 +349,13 @@ def _sam_trunk(script: Any, tile: list[int]) -> Any:
         layer.load_state_dict(module.state_dict())
         return layer
 
-    def partition(x: torch.Tensor, window: int) -> tuple[torch.Tensor, tuple[int, int]]:
+    def partition(x: torch.Tensor, window: int) -> torch.Tensor:
         b, h, w, c = x.shape
         pad_h, pad_w = (window - h % window) % window, (window - w % window) % window
         if pad_h or pad_w:
             x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
-        hp, wp = h + pad_h, w + pad_w
-        x = x.view(b, hp // window, window, wp // window, window, c)
-        return x.permute(0, 1, 3, 2, 4, 5).reshape(-1, window, window, c), (hp, wp)
+        x = x.view(b, (h + pad_h) // window, window, (w + pad_w) // window, window, c)
+        return x.permute(0, 1, 3, 2, 4, 5).reshape(-1, window, window, c)
 
     def unpartition(x: torch.Tensor, window: int, padded: tuple[int, int], hw: tuple[int, int]) -> torch.Tensor:
         (hp, wp), (h, w) = padded, hw
@@ -388,10 +392,8 @@ def _sam_trunk(script: Any, tile: list[int]) -> Any:
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             normed = self.norm1(x)
             shortcut = x if self.proj is None else self.pool(self.proj(normed)) if self.pooled else self.proj(normed)
-            hw = tuple(normed.shape[1:3])
             if self.window > 0:
-                y, padded = partition(normed, self.window)
-                y = self.attention(y)
+                y = self.attention(partition(normed, self.window))
                 window = self.window // self.stride
                 hw = tuple(shortcut.shape[1:3])
                 padded = tuple(side + (window - side % window) % window for side in hw)
@@ -414,9 +416,8 @@ def _sam_trunk(script: Any, tile: list[int]) -> Any:
                 self.register_buffer("pos", trunk._get_pos_embed(tuple(grid)).detach().clone())
             self.blocks = nn.ModuleList(Block(block) for _, block in trunk.blocks.named_children())
             self.ends = [int(end) for end in trunk.stage_ends]
-            names = [f"channel_weights_{i}" for i in range(len(self.ends))]
-            for i, name in enumerate(names):
-                weights = getattr(script, name, None)
+            for i in range(len(self.ends)):
+                weights = getattr(script, f"channel_weights_{i}", None)
                 self.register_buffer(f"weights_{i}", None if weights is None else weights.detach().clone())
 
         def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
@@ -469,29 +470,14 @@ def sam_perceptual_graph(model_path: str | Path, tile: list[int]) -> Any:
 def export_sam_perceptual(model_path: str | Path, tile: list[int], path: Path) -> list[list[int]]:
     """Write :func:`sam_perceptual_graph` as a self-contained ONNX file at ``path``, and return ``[channels, rows]`` of
     each layer it sums, in order."""
-    import onnx
     import torch
 
+    from konfai.export import _write_onnx
+
     graph = sam_perceptual_graph(model_path, tile)
-    examples = tuple(torch.rand(1, 1, *tile) for _ in range(3))
     with torch.no_grad():
         layers = [[int(layer.shape[1]), int(layer.shape[2])] for layer in graph.trunk(torch.zeros(1, 3, *tile))]
-        torch.onnx.export(
-            graph,
-            examples,
-            str(path),
-            opset_version=_OPSET,
-            input_names=["output", "target", "mask"],
-            output_names=["layers"],
-            dynamo=True,
-        )
-    exported = onnx.load(str(path))
-    for node in exported.graph.node:
-        kept = [prop for prop in node.metadata_props if prop.key != "pkg.torch.onnx.stack_trace"]
-        del node.metadata_props[:]
-        node.metadata_props.extend(kept)
-    onnx.save(exported, str(path), save_as_external_data=False)
-    path.with_name(path.name + ".data").unlink(missing_ok=True)
+    _write_onnx(graph, tuple(torch.rand(1, 1, *tile) for _ in range(3)), path, ["output", "target", "mask"], ["layers"])
     return layers
 
 
