@@ -254,19 +254,10 @@ def export_to_onnx(
     model.eval()
     examples = example_input if isinstance(example_input, tuple) else (example_input,)
     groups = [input_group] if isinstance(input_group, str) else list(input_group)
-    # Each input past the first is bound to its group by a `reads` entry, in graph order: the caller's (which may
-    # also name companions past them), else one per group past the first.
-    stated = (extra_manifest or {}).get("reads")
-    if stated is None:
-        covered = len(groups) == len(examples)
-    else:
-        covered = len(groups) in (1, len(examples)) and len(stated) >= len(examples) - 1
-    if not covered:
+    if len(groups) != len(examples):
         raise PredictorError(
-            f"{len(examples)} example inputs, {len(groups)} input group(s), {len(stated or [])} stated reads:"
-            " give one group per example, or a read per input past the first."
+            f"{len(examples)} example inputs, {len(groups)} input group(s): give one group per example."
         )
-    read_groups = groups[1:] if stated is None else []
     if output_module is None:
         output_module = select_inference_head(model, *examples)
     available = list_output_modules(model, *examples)
@@ -326,10 +317,10 @@ def export_to_onnx(
         },
         "geometry": {"mode": "preserve_from_input"},
     }
-    if read_groups:
+    if len(examples) > 1:
         manifest["reads"] = [
             {"group": group, "channels": int(example.shape[1]), "preprocessing": []}
-            for group, example in zip(read_groups, examples[1:], strict=True)
+            for group, example in zip(groups[1:], examples[1:], strict=True)
         ]
     if extra_manifest:
         manifest.update(extra_manifest)
