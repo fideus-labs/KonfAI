@@ -168,6 +168,15 @@ CRITERIA: dict[str, Callable[[Any, str, Path], dict[str, Any]]] = {
     "SSIM": _ranged("ssim"),
     "SAM_Perceptual": _sam_perceptual,
     "IMPACTReg": _impact_reg,
+    "Mean": lambda _criterion, _output_group, _out: {"metric": "mean"},
+}
+
+#: The folds over a stack's members (``konfai.data.transform.ensemble``) an uncertainty chain runs, by the op each
+#: compiles to: one channel per member in, one out.
+_MEMBER_FOLDS: dict[str, str] = {
+    "Variance": "variance",
+    "StandardDeviation": "standard_deviation",
+    "SegmentationDisagreement": "segmentation_disagreement",
 }
 
 
@@ -207,6 +216,14 @@ def _group_steps(
             moved = moved or name
         elif is_save(name):
             steps.append(_admitted({"op": "save", "destination": _write_target(name, params, group_dest)}))
+        elif stage in _MEMBER_FOLDS:
+            if stage == "SegmentationDisagreement" and clean((params or {}).get("ignore_background")):
+                raise EvaluatorError(
+                    f"SegmentationDisagreement of group '{group_dest}' ignores the background, and the portable"
+                    " runtime counts every label.",
+                    _or_konfai("Drop ignore_background", _EVALUATE),
+                )
+            steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif not records_only(name):
             refuse_a_stage_konfai_does_not_carry(name, EvaluatorError)
             if stage not in _CHAIN_OPS:
@@ -228,12 +245,13 @@ def _inference(
     nested: dict[str, dict[str, Any]],
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None,
 ) -> dict[str, Any]:
-    """A ``KonfAIInference`` as one model step: its app's model, exported on its first use."""
-    if clean(params.get("per_channel")) or clean(params.get("number_of_tta")) or clean(params.get("config_overrides")):
+    """A ``KonfAIInference`` as one model step: its app's model, exported on its first use, run on each channel
+    as a case of its own when it runs ``per_channel``, the outputs stacked as channels."""
+    if clean(params.get("number_of_tta")) or clean(params.get("config_overrides")):
         raise EvaluatorError(
-            f"The KonfAIInference of group '{group_dest}' runs per channel, with test-time copies or with config"
-            " overrides, and the portable runtime nests one plain model.",
-            _or_konfai("Drop per_channel, number_of_tta and config_overrides", _EVALUATE),
+            f"The KonfAIInference of group '{group_dest}' runs with test-time copies or with config overrides, and"
+            " the portable runtime nests one plain model.",
+            _or_konfai("Drop number_of_tta and config_overrides", _EVALUATE),
         )
     key = json.dumps({k: clean(v) for k, v in params.items()}, sort_keys=True)
     if key not in nested:
@@ -246,7 +264,8 @@ def _inference(
         taken = {entry["id"] for entry in nested.values()}
         names = (group_dest, *(f"{group_dest}_{i}" for i in range(2, len(taken) + 2)))
         nested[key] = nested_exporter(next(name for name in names if name not in taken), params, out)
-    return {"model": nested[key]["id"], "manifest": nested[key]["manifest"]}
+    step = {"model": nested[key]["id"], "manifest": nested[key]["manifest"]}
+    return step | ({"per_channel": True} if clean(params.get("per_channel")) else {})
 
 
 def compile_evaluation(
@@ -326,6 +345,18 @@ def compile_evaluation(
         }
     output.write_text(json.dumps(program, indent=2))
     return program
+
+
+def compile_uncertainty(
+    uncertainty_file: str | Path = Path("./Uncertainty.yml"),
+    uncertainties_dir: str | Path = Path("./Uncertainties"),
+    output: str | Path = Path("./uncertainty.json"),
+    nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compile an app's ``Uncertainty.yml``, the EVALUATION konfai-apps runs on an inference stack (one channel per
+    member), into the program the portable runtime executes: :func:`compile_evaluation` writing under
+    ``Uncertainties``, as ``konfai-apps uncertainty`` does."""
+    return compile_evaluation(uncertainty_file, uncertainties_dir, output, nested_exporter)
 
 
 def _sam_trunk(script: Any, tile: list[int]) -> Any:
