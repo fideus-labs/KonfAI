@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { type MouseEvent as ReactMouseEvent, Suspense, useEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import AppZoo, { type StudioApp } from "./AppZoo";
 import Chat, { clearChat } from "./Chat";
 import { lazyWithRetry } from "./lazy";
@@ -152,15 +152,14 @@ function Meter({
 // experiments rail folds into a drawer; <768 one column, a pane bar to move between the conversation
 // and the right panel, the terminal as a sheet. A media query, not a user agent sniff.
 function useMedia(query: string): boolean {
-  const [matches, setMatches] = useState(() => (typeof window !== "undefined" ? window.matchMedia(query).matches : false));
-  useEffect(() => {
-    const mq = window.matchMedia(query);
-    const onChange = () => setMatches(mq.matches);
-    onChange();
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, [query]);
-  return matches;
+  return useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia(query);
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(query).matches,
+  );
 }
 
 export default function App() {
@@ -944,15 +943,21 @@ function Studio({ remote }: { remote: boolean }) {
                 >
                   Conversation
                 </button>
-                <button className={pane === "right" && tabReq?.tab === "config" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("config")}>
-                  Workspace
-                </button>
-                <button className={pane === "right" && tabReq?.tab === "scout" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("scout")}>
-                  Scout
-                </button>
-                <button className={pane === "right" && tabReq?.tab === "runs" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("runs")}>
-                  Runs
-                </button>
+                {(
+                  [
+                    ["config", "Workspace"],
+                    ["scout", "Scout"],
+                    ["runs", "Runs"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    key={tab}
+                    className={pane === "right" && tabReq?.tab === tab ? "pane-btn on" : "pane-btn"}
+                    onClick={() => showRight(tab)}
+                  >
+                    {label}
+                  </button>
+                ))}
                 <button
                   className={sheetOpen ? "pane-btn icon on" : "pane-btn icon"}
                   aria-label={sheetOpen ? "Close the terminal" : "Open the terminal"}
