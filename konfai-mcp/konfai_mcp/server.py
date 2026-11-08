@@ -472,9 +472,7 @@ def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
     return _job_devices(gpu, cpu)
 
 
-def _cpu_fallback_warnings(
-    gpu: list[int] | None, cluster: dict[str, Any] | None = None, *, cpu: int | None = None
-) -> list[str]:
+def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None, cpu: int | None) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
     KonfAI defaults to CPU when no gpu is given, so on a GPU host it silently trains on CPU. A SLURM job
@@ -1485,6 +1483,9 @@ _APP_REF_DESC = (
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
 _APP_CPU_DESC = "Worker processes on CPU (KonfAI --cpu; 1 is one plain process); set without gpu, the run stays on CPU."
+_RUN_CPU_DESC = (
+    "Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+)
 _APP_FORCE_UPDATE_DESC = "Re-download the app files instead of reusing the local cache."
 _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's maximum_tta)."
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
@@ -2866,12 +2867,7 @@ def run_train(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -2923,7 +2919,7 @@ def run_train(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu, cluster),
     )
-    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster, cpu=cpu)
+    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster, cpu)
     if cpu_fallback:
         payload["warnings"] = cpu_fallback
     return _launched(payload, wait, timeout_s)
@@ -2965,12 +2961,7 @@ def run_resume(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -3061,12 +3052,7 @@ def run_batch(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -3291,12 +3277,7 @@ def run_prediction(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing prediction outputs without prompting (KonfAI --overwrite).")
     ] = False,
@@ -3358,12 +3339,7 @@ def run_evaluation(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing evaluation outputs without prompting (KonfAI --overwrite).")
     ] = False,
@@ -3786,12 +3762,7 @@ def run_transform(
     gpu: Annotated[
         int | list[int] | None, Field(description="GPU index or indices; omit for CPU (excludes cpu).")
     ] = None,
-    cpu: Annotated[
-        int | None,
-        Field(
-            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
-        ),
-    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
     quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
     single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,

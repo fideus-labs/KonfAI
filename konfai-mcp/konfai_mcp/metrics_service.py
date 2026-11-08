@@ -22,6 +22,7 @@ this mixin."""
 from __future__ import annotations
 
 import json
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -83,11 +84,6 @@ def metric_run_name(metrics_path: Path, workspace: Path) -> str:
         except ValueError:
             continue
     return metrics_path.parent.name
-
-
-def _metrics_only(entry: dict[str, Any]) -> dict[str, Any]:
-    """A parsed metrics entry without its raw log line."""
-    return {key: value for key, value in entry.items() if key != "raw"}
 
 
 class MetricsServiceMixin:
@@ -164,9 +160,8 @@ class MetricsServiceMixin:
             "latest": parsed_entries[-1] if parsed_entries else None,
             # consecutive entries with the same metrics (progress lines) count once
             "recent": [
-                e
-                for i, e in enumerate(parsed_entries)
-                if i == 0 or _metrics_only(e) != _metrics_only(parsed_entries[i - 1])
+                next(run)
+                for _, run in groupby(parsed_entries, key=lambda e: {k: v for k, v in e.items() if k != "raw"})
             ][-max(max_entries, 1) :],
             "by_stage": latest_by_stage,
         }

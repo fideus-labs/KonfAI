@@ -335,10 +335,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
 
         options = self.example_options(dataset_groups, requested_workflows)
         # no template requested: the best compatible one is selected, so the plan names its seed
-        chosen = example or next(
-            (option["name"] for option in sorted(options, key=lambda o: -o["match_ratio"]) if option["compatible"]),
-            None,
-        )
+        chosen = example or next((option["name"] for option in options if option["compatible"]), None)
         return {
             "ok": True,
             "task": task_name,
