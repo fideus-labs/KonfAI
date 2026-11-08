@@ -58,6 +58,13 @@ rigid, 0.915 B-spline; Scout inspected the field) added: `run_registration_evalu
 session like every app job and reserves no GPU when it scores only label maps or landmarks; the device-conflict
 error says `gpu=[]` is a CPU-only job; a finished app job lists its outputs and carries `Evaluation_summary.json`
 when it wrote one; the `mask` parameter of `run_app` says how a registration takes its masks.
+A run fine-tuning a local MR-to-sCT app on 75 SynthRAD cases (one epoch, 64 min on the GPU; the fine-tuned
+model lost every bone, which whole-volume MAE missed and Scout caught) added: `run_app`, `fine_tune_app` and
+`run_registration_evaluate` take `wait` like the workflow launchers; `leaderboard` and `summarize_session` report
+whole metrics only (a 117-label Dice is one row, `per_label_metrics` counts the rest); a single-token classpath
+(`konfai_apps:X`) is imported when a package answers to the name instead of being mistaken for a session file; the
+server instructions name `docs://index`; `describe_app` checks a local bundle's configs against the installed KonfAI's
+schema (`config_checks`), so an obsolete key is known before the first job instead of after three failed ones.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

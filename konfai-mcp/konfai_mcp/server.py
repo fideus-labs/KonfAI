@@ -174,6 +174,19 @@ class _ToolUsage(McpMiddleware):
 mcp.add_middleware(_LeanSchemas())
 mcp.add_middleware(_ToolUsage())
 
+_WAIT_DESC = (
+    "Block until the job ends (or timeout_s expires) and return its final status instead of the launch payload."
+)
+_WAIT_TIMEOUT_DESC = "wait: seconds before returning the current status with timed_out=true."
+
+
+def _launched(payload: dict[str, Any], wait: bool, timeout_s: float | None) -> dict[str, Any]:
+    """A launch payload, or the job's final status when the caller asked to wait: one call instead of two."""
+    if wait and payload.get("job_id"):
+        return _tool_wait_for_job(str(payload["job_id"]), timeout_s)
+    return payload
+
+
 KONFAI_VERSION = konfai_pkg.__version__
 konfai_get_available_devices = konfai_pkg.get_available_devices
 konfai_get_ram = konfai_pkg.get_ram
@@ -1482,6 +1495,8 @@ def run_app(
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Run a published KonfAI app on the user's data, as published, as a tracked job (local / HuggingFace)."""
     given = {
@@ -1534,7 +1549,7 @@ def run_app(
             spec = APP_SERVICE.prepare_pipeline(
                 **common, **model, gt=gt, mask=mask, uncertainty=uncertainty is not False
             )
-    return _launch_app_job(spec)
+    return _launched(_launch_app_job(spec), wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_registration_evaluate"]))
@@ -1565,22 +1580,28 @@ def run_registration_evaluate(
     ] = None,
     gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Score a registration through its transform (impact-reg-konfai eval), as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_registration_evaluate(
-            transforms=transforms,
-            fixed_images=fixed_images,
-            moving_images=moving_images,
-            fixed_seg=fixed_seg,
-            moving_seg=moving_seg,
-            fixed_landmarks=fixed_landmarks,
-            moving_landmarks=moving_landmarks,
-            mask=mask,
-            output=output,
-            gpu=gpu,
-            cpu=cpu,
-        )
+    return _launched(
+        _launch_app_job(
+            APP_SERVICE.prepare_registration_evaluate(
+                transforms=transforms,
+                fixed_images=fixed_images,
+                moving_images=moving_images,
+                fixed_seg=fixed_seg,
+                moving_seg=moving_seg,
+                fixed_landmarks=fixed_landmarks,
+                moving_landmarks=moving_landmarks,
+                mask=mask,
+                output=output,
+                gpu=gpu,
+                cpu=cpu,
+            )
+        ),
+        wait,
+        timeout_s,
     )
 
 
@@ -1749,26 +1770,32 @@ def fine_tune_app(
     ] = "Config.yml",
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_finetune(
-            ref=ref,
-            dataset=dataset,
-            output=output,
-            name=name,
-            epochs=epochs,
-            it_validation=it_validation,
-            models=models,
-            lr=lr,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            gpu=gpu,
-            cpu=cpu,
-            config_file=config_file,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
+    return _launched(
+        _launch_app_job(
+            APP_SERVICE.prepare_finetune(
+                ref=ref,
+                dataset=dataset,
+                output=output,
+                name=name,
+                epochs=epochs,
+                it_validation=it_validation,
+                models=models,
+                lr=lr,
+                batch_size=batch_size,
+                config_overrides=_config_overrides(set_parameters),
+                gpu=gpu,
+                cpu=cpu,
+                config_file=config_file,
+                allow_untrusted_code=allow_untrusted_code,
+                force_update=force_update,
+            )
+        ),
+        wait,
+        timeout_s,
     )
 
 
@@ -2621,7 +2648,16 @@ def summarize_session(
     latest = summary["latest_job"]
     if latest is not None and (job := JOB_REGISTRY.get(latest.get("job_id"))) is not None:
         # the last parsed metric line of the job's log: a training's final losses without another call
-        payload["latest_job"]["latest_metrics"] = SESSION.read_live_metrics_payload(job, 1)["latest"]
+        latest_entry = SESSION.read_live_metrics_payload(job, 1)["latest"]
+        payload["latest_job"]["latest_metrics"] = (
+            {
+                "stage": latest_entry.get("stage"),
+                "metrics": top_level_metrics(latest_entry.get("flat_metrics") or {}),
+                "progress": latest_entry.get("progress"),
+            }
+            if latest_entry
+            else None
+        )
     if include_validation:
         validation = SESSION.validate_session_payload()
         # readiness/active_jobs/next_actions already sit at the top level of this payload.
@@ -2698,19 +2734,6 @@ def leaderboard(
     return round_floats(
         SESSION.leaderboard_payload(metric=metric, split=split, limit=limit, direction=direction, session=session)
     )
-
-
-_WAIT_DESC = (
-    "Block until the job ends (or timeout_s expires) and return its final status instead of the launch payload."
-)
-_WAIT_TIMEOUT_DESC = "wait: seconds before returning the current status with timed_out=true."
-
-
-def _launched(payload: dict[str, Any], wait: bool, timeout_s: float | None) -> dict[str, Any]:
-    """A launch payload, or the job's final status when the caller asked to wait: one call instead of two."""
-    if wait and payload.get("job_id"):
-        return _tool_wait_for_job(str(payload["job_id"]), timeout_s)
-    return payload
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_train"]))

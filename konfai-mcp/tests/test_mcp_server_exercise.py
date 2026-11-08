@@ -106,3 +106,74 @@ def test_a_registration_evaluation_stays_in_the_session_and_off_the_gpu(
     workspace = mcp_server.WORKSPACE_LAYOUT.workspace_dir()
     assert Path(spec["output"]) == (workspace / "AppEvaluations/baseline").resolve()
     assert spec["kwargs"]["gpu"] == []
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_a_package_classpath_is_not_mistaken_for_a_session_file(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            result = await client.call_tool("inspect_object_signature", {"classpath": "konfai_apps:KonfAIInference"})
+            return result.structured_content
+
+    payload = asyncio.run(scenario())
+    assert payload["source"] == "imported"  # not "local": no konfai_apps.py sits in the session
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_every_launcher_can_wait(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict[str, set[str]]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return {t.name: set(t.input_schema.get("properties", {})) for t in await client.list_tools()}
+
+    params = asyncio.run(scenario())
+    launchers = [
+        "run_train",
+        "run_resume",
+        "run_prediction",
+        "run_evaluation",
+        "run_transform",
+        "run_app",
+        "fine_tune_app",
+        "run_registration_evaluate",
+    ]
+    assert all({"wait", "timeout_s"} <= params[name] for name in launchers), params
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_describe_app_checks_a_local_bundle_against_the_schema(
+    tmp_path: Path, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    import json
+
+    app_dir = tmp_path / "Stale"
+    app_dir.mkdir()
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Stale",
+                "description": "d",
+                "short_description": "s",
+                "task": "synthesis",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": ["w.safetensors"],
+                "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
+                "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
+            }
+        )
+    )
+    (app_dir / "w.safetensors").write_bytes(b"")
+    (app_dir / "Config.yml").write_text("Trainer:\n  Dataset:\n    use_cache: true\n")
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return (await client.call_tool("describe_app", {"ref": str(app_dir)})).structured_content
+
+    payload = asyncio.run(scenario())
+    assert any("use_cache" in line for line in payload["config_checks"]["Config.yml"])
+    assert payload["next_actions"][0] == "fetch_app"

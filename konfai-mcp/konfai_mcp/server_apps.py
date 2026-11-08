@@ -43,6 +43,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from konfai_mcp.config_io import schema_mistakes, validate_yaml_content
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .server_support import WorkspaceLayout
 
@@ -392,6 +394,25 @@ class AppService:
                 }
                 for key, slots in evaluations.items()
             ]
+        if source == "local":
+            root = Path(info.get_name())
+            if root.is_dir():
+                # the bundle's configs against the installed KonfAI's schema: a key it no longer accepts fails
+                # the first job otherwise, and nothing before that says so
+                checks: dict[str, list[str]] = {}
+                for config_path in sorted(root.glob("*.yml")):
+                    try:
+                        data = validate_yaml_content(config_path.read_text(encoding="utf-8"), config_path.name)
+                        checks[config_path.name] = [f"{m.path}: {m.message}" for m in schema_mistakes(data)]
+                    except ValueError as exc:
+                        checks[config_path.name] = [str(exc)]
+                payload["config_checks"] = checks
+                payload["config_checks_note"] = (
+                    "KonfAI core's schema: a key or component it does not know fails the job unless an app package "
+                    "(konfai_apps transforms, the bundle's own model.py) provides it."
+                )
+                if any(checks.values()):
+                    payload["next_actions"] = list(dict.fromkeys(["fetch_app", *payload.get("next_actions", [])]))
         return payload
 
     def list_parameters(

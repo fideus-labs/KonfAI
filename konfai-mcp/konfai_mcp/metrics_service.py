@@ -356,7 +356,9 @@ class MetricsServiceMixin:
         result: dict[str, Any] = {
             "session": layout.current_session,
             "split": split.upper(),
-            "available_metrics": sorted(available_metrics),
+            # whole metrics only: a 117-label Dice is one row, its labels are get_run_metrics' detail
+            "available_metrics": sorted(top_level_metrics(dict.fromkeys(available_metrics))),
+            "per_label_metrics": len(available_metrics) - len(top_level_metrics(dict.fromkeys(available_metrics))),
             "available_splits": self._available_metric_splits(layout),
             "warnings": sorted(set(warnings)),
             "next_actions": ["summarize_session", "get_run_metrics", "run_train", "run_prediction", "run_evaluation"],
@@ -369,7 +371,7 @@ class MetricsServiceMixin:
             result["best"] = by_metric[selected_metric][0] if by_metric[selected_metric] else None
         else:
             result["common_metric_prefix"] = self._common_metric_prefix(sorted(available_metrics))
-            result["leaderboards"] = by_metric
+            result["leaderboards"] = top_level_metrics(by_metric)
         return result
 
     def read_metrics_payload(self) -> dict[str, Any]:

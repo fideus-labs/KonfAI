@@ -41,7 +41,8 @@ SERVER_INSTRUCTIONS = (
     "read_live_metrics, and read_job_log when it fails. A tool that imports an app's code or installs its "
     "requirements needs allow_untrusted_code=True; initialize_session(overwrite=True), delete_run and "
     "session(action='delete') destroy data. Resources: docs://* hold the detailed guides, session://current/* the "
-    "current session, job://{job_id}/* one job, guide://tool-index every tool with its parameters; read_file(uri) "
+    "current session, job://{job_id}/* one job, guide://tool-index every tool with its parameters, docs://index the "
+    "list of guides; read_file(uri) "
     "reads any of them when the client cannot."
 )
 

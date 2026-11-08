@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import inspect
 import math
 import re
@@ -964,6 +965,9 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         and "." not in normalized.split(":", 1)[0]
         and workspace_dir is not None
         and len(module_name.split(".")) == 1
+        # a session file when it exists, or when no installed package answers to the name ('Model:UNet' with the
+        # file missing stays a local matter); 'konfai_apps:X' names a package and is imported
+        and ((workspace_dir / f"{module_name}.py").is_file() or importlib.util.find_spec(module_name) is None)
     )
 
     if local_candidate:
