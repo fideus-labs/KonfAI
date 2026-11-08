@@ -33,7 +33,7 @@ import random
 import re
 import warnings
 from collections.abc import Callable, Collection, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain, combinations, islice, repeat, takewhile
 from pathlib import Path
@@ -726,8 +726,9 @@ def config_environment(config_file: Path, *, root: str | None = None, state: str
     """Read a KonfAI config with the environment its builders need, the config's directory on ``sys.path`` so
     a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards. Reading rewrites a config,
     so the block is handed a private copy beside the file (a relative model YAML resolves against that directory),
-    removed afterwards: the caller's file is never written. A config missing or in a directory that refuses a new
-    file is left to the builders, which refuse it. ``root`` and ``state`` serve a caller that builds no workflow."""
+    removed afterwards: the caller's file is never written. A missing config is left to the builders, which refuse
+    it; a private copy that cannot be made is refused here. ``root`` and ``state`` serve a caller that builds no
+    workflow."""
     import os
     import shutil
     import sys
@@ -735,8 +736,14 @@ def config_environment(config_file: Path, *, root: str | None = None, state: str
     previous = {key: value for key, value in os.environ.items() if key.startswith("KONFAI_")}
     private = config_file.with_name(f".{config_file.stem}.{os.getpid()}{config_file.suffix}")
     working = config_file
-    with suppress(OSError):
-        shutil.copyfile(config_file, private)
+    if config_file.exists():
+        try:
+            shutil.copyfile(config_file, private)
+        except OSError as error:
+            raise ConfigError(
+                f"Cannot make a private copy of '{config_file}' to compile from ({error}).",
+                "Free the name or make the config's folder writable: the caller's file is never compiled in place.",
+            ) from error
         working = private
     os.environ["KONFAI_config_file"] = str(working)
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
@@ -753,7 +760,8 @@ def config_environment(config_file: Path, *, root: str | None = None, state: str
             if key not in previous:
                 del os.environ[key]
         os.environ.update(previous)
-        private.unlink(missing_ok=True)
+        if working == private:
+            private.unlink(missing_ok=True)
 
 
 def compile_chain(

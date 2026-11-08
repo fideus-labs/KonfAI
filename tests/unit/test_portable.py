@@ -159,6 +159,22 @@ def test_a_missing_config_keeps_the_builders_refusal(tmp_path: Path) -> None:
         compile_transform(tmp_path / "Missing.yml", tmp_path / "Transforms")
 
 
+def test_a_private_copy_that_cannot_be_made_is_refused_and_the_config_kept(tmp_path: Path) -> None:
+    # Falling back to the caller's file would let the builders rewrite it, and the cleanup take a file not ours.
+    import os
+
+    from konfai.portable import config_environment
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    (tmp_path / f".Prediction.{os.getpid()}.yml").mkdir()
+    with pytest.raises(ConfigError, match="private copy"):
+        with config_environment(config, root="Predictor", state="PREDICTION"):
+            pass
+    assert config.read_text() == "Predictor: {}\n"
+    assert (tmp_path / f".Prediction.{os.getpid()}.yml").is_dir()
+
+
 def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
     # konfai's Statistics records Image* keys on the case and hands its input back (alters_values False):
     # the values and the grid are the chain's without it, and the keys are the attribute sidecar the
