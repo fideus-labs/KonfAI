@@ -27,8 +27,13 @@ def private_record(attributes: dict[str, Any] | None) -> dict[str, Any]:
     return dict(record)
 
 
-def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, translation: list[float]) -> None:
-    """Declare the intrinsic-to-world mapping; the intrinsic grid starts at zero."""
+def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None) -> None:
+    """Declare the intrinsic-to-world mapping: the grid's rotation about its origin.
+
+    The dataset-level scale and translation stay the grid's axis-aligned view, exact spacing and origin, which
+    is all a scale/translation reader (a viewer, ngff-zarr's ``NgffImage``) takes; the standard transformation
+    turns the intrinsic frame about that origin, so an axis-aligned grid declares the identity.
+    """
     from ngff_zarr.rfc4 import LPS
     from ngff_zarr.v06.zarr_metadata import (
         Affine,
@@ -70,10 +75,11 @@ def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, transl
             dataclasses.replace(a, orientation=LPS.get(a.name) if a.type == "space" else None) for a in intrinsic.axes
         ],
     )
+    origin = np.array([image.translation.get(d, 0.0) for d in image.dims])
     transform = TransformSequence(
         input=CoordinateSystemIdentifier(name=intrinsic.name),
         output=CoordinateSystemIdentifier(name=world.name),
-        transformations=[linear_transform, Translation(translation=translation)],
+        transformations=[linear_transform, Translation(translation=(origin - matrix @ origin).tolist())],
         name="intrinsic_to_world",
     )
     multiscales.metadata = dataclasses.replace(

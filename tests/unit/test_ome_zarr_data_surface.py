@@ -194,13 +194,16 @@ def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path)
 
 
 def test_a_translation_moved_by_another_ngff_tool_is_the_origin_read(tmp_path: Path) -> None:
-    """A standard translation changed by another tool is the physical origin KonfAI reads."""
+    """The dataset-level translation is what a scale/translation tool moves: the origin KonfAI reads follows it."""
     root = tmp_path / "cases"
     Dataset(str(root), "omezarr").write("CT", "case_1", _volume(), geometry((5.0, 6.0, 7.0)))
     metadata_path = root / "case_1" / "CT.ome.zarr" / "zarr.json"
     metadata = json.loads(metadata_path.read_text())
-    transform = metadata["attributes"]["ome"]["multiscales"][0]["coordinateTransformations"][0]
-    transform["transformations"][-1]["translation"] = [0.0, 100.0, 200.0, 300.0]
+    for level in metadata["attributes"]["ome"]["multiscales"][0]["datasets"]:
+        for transform in level["coordinateTransformations"]:
+            for part in transform.get("transformations", [transform]):  # NGFF 0.6 wraps them in a sequence
+                if part["type"] == "translation":
+                    part["translation"] = [0.0, 100.0, 200.0, 300.0]  # c, z, y, x
     metadata_path.write_text(json.dumps(metadata))
     clear_ome_zarr_cache(root / "case_1" / "CT.ome.zarr")
 

@@ -126,10 +126,11 @@ patch, patch_attributes = dataset.read_data_slice(
 `Dataset("Dataset", "omezarr@1")` reads pyramid level 1. `konfai.utils.ome_zarr.get_ome_zarr_info` gives a
 store's axes, shape, chunks, scale and levels without reading pixels.
 
-KonfAI writes NGFF 0.6 (zarr v3). The intrinsic voxel spacing and per-level offsets feed a standard
-RFC-5 transformation into physical space: rotation followed by translation, or an affine for a
-reflection or a unit-scaled frame that cannot be represented as a pure rotation. The physical axes
-carry RFC-4 LPS orientation. Reading resolves that mapping into KonfAI's internal
+KonfAI writes NGFF 0.6 (zarr v3). Each level's scale and translation are the grid's axis-aligned view,
+exact spacing and origin, which is all a scale/translation reader (a viewer, ngff-zarr) takes. A
+standard RFC-5 transformation adds the grid's rotation about that origin: a rotation followed by a
+translation, or an affine for a reflection or a unit-scaled frame that cannot be represented as a pure
+rotation; an axis-aligned grid declares the identity. The physical axes carry RFC-4 LPS orientation. Reading resolves that mapping into KonfAI's internal
 `Origin`/`Spacing`/`Direction`; it does not resample the voxels. Crops and pyramid levels use the same
 mapping, including their offsets along rotated axes.
 

@@ -105,6 +105,7 @@ def test_store_is_readable_before_any_region_is_written(tmp_path: Path) -> None:
     # of the store geometry reads back reversed. Asserting the reversal rather than a symmetric value
     # is the point: a transposed geometry is the failure this test exists to catch.
     np.testing.assert_allclose(info["scale"][1:], SPACING[::-1])
+    np.testing.assert_allclose(info["translation"][1:], ORIGIN[::-1])
     np.testing.assert_allclose(info["standard_geometry"]["Origin"], ORIGIN)
 
 

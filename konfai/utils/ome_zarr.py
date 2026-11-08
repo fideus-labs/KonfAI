@@ -1229,9 +1229,7 @@ def create_ome_zarr_store(
 
     axis_aligned_field = displacement_field and _grid_is_axis_aligned(attributes)
     data = dask.array.zeros(tuple(shape), dtype=np.dtype(dtype), chunks=chunks)
-    image = ngff_zarr.to_ngff_image(
-        data, dims=dims, scale=scale, translation=translation if axis_aligned_field else None, axes_units=units
-    )
+    image = ngff_zarr.to_ngff_image(data, dims=dims, scale=scale, translation=translation, axes_units=units)
     version = _DEFAULT_VERSION
     if displacement_field:
         # Typing the component axis (NGFF RFC-5, so version 0.6) declares the channels a field.
@@ -1239,7 +1237,7 @@ def create_ome_zarr_store(
         version = _RFC5_VERSION
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], chunks=chunks, cache=False)
     if not axis_aligned_field:
-        declare_geometry(multiscales, attributes, [translation[d] for d in dims])
+        declare_geometry(multiscales, attributes)
     stored_attributes = private_record(attributes)
     if displacement_field:
         # One layout for every field: components in the spec's order, marked so nothing guesses.

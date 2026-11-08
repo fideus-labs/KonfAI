@@ -45,7 +45,9 @@ def test_standard_geometry_maps_voxels_patches_and_levels(
     assert all(a.orientation is not None for a in world.axes if a.type == "space")
     transformation = multiscales.metadata.coordinateTransformations[0]
     assert transformation.transformations[0].type == ("affine" if flip else "rotation")
-    # A reader independent of KonfAI can apply the stored mapping to physical points.
+    # A reader independent of KonfAI applies the stored mapping to the point the dataset's scale and translation
+    # give, and a scale/translation reader stops there with the exact origin and spacing.
+    assert multiscales.images[0].translation == dict(zip(["c", *"zyx"[-dimension:]], [0.0, *origin[::-1]], strict=True))
     wasm = nz.ngff_transform_to_itk_transform(transformation, list(multiscales.images[0].dims))[0]
     matrix = np.asarray(wasm.parameters[: dimension**2]).reshape(dimension, dimension)
     offset = np.asarray(wasm.parameters[dimension**2 :])
@@ -54,7 +56,9 @@ def test_standard_geometry_maps_voxels_patches_and_levels(
     original.SetOrigin(origin.tolist())
     original.SetDirection(direction.ravel().tolist())
     index = [2] * dimension
-    np.testing.assert_allclose(matrix @ (spacing * index) + offset, original.TransformIndexToPhysicalPoint(index))
+    np.testing.assert_allclose(
+        matrix @ (spacing * index + origin) + offset, original.TransformIndexToPhysicalPoint(index)
+    )
     data, patch = Dataset(str(tmp_path), "omezarr").read_data_slice(
         "image", "case", (slice(None),) + (slice(2, 6),) * dimension
     )
