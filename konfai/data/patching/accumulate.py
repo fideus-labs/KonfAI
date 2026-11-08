@@ -23,7 +23,7 @@ from typing import cast
 
 import torch
 
-from konfai.data.patching.blend import PathCombine
+from konfai.data.patching.blend import PathCombine, outer_product
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import Placement
 
@@ -273,18 +273,12 @@ class Accumulator:
                     own.append(values)
             covering.append(axis)
 
-        def outer(vectors: list[torch.Tensor] | tuple[torch.Tensor, ...]) -> torch.Tensor:
-            result = vectors[0]
-            for vector in vectors[1:]:
-                result = result.unsqueeze(-1) * vector
-            return result
-
         total = torch.zeros(tuple(vector.numel() for vector in own), device=device)
         for combination in product(*covering):
-            total += outer([values for values, _ in combination]).clamp_min(floor) * outer(
+            total += outer_product([values for values, _ in combination]).clamp_min(floor) * outer_product(
                 [hit for _, hit in combination]
             )
-        return outer(own).clamp_min(floor) / total
+        return outer_product(own).clamp_min(floor) / total
 
     def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:
         """Index a result tensor over ``span`` on the sweep axis and whole on every other."""

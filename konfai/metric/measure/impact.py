@@ -1207,6 +1207,7 @@ class SAM_Perceptual(CriterionWithAttribute):
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
+        self.model_ref = f"{repo_id}:{filename}"
         model_path = _download_model("SAM_Perceptual", repo_id, filename)
         self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 

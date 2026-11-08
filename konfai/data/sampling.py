@@ -551,12 +551,7 @@ def gather_separable(
     fill = 0.0 if isinstance(fill, str) else fill  # past the volume an edge sample is inside: no fill lands
     if edge:  # MONAI's border: a sample clamps to the volume, so a cubic's weights see the edge too
         axes = [axis.clamp(0, source_shape_zyx[array_axis] - 1) for array_axis, axis in enumerate(axes)]
-    inside_axes = [
-        torch.full_like(axis, True, dtype=torch.bool)
-        if edge
-        else (axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5)
-        for array_axis, axis in enumerate(axes)
-    ]
+    inside_axes = [(axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5) for array_axis, axis in enumerate(axes)]
     out_shape = [int(source.shape[0]), *extent_zyx]
     if not all(bool(mask.any()) for mask in inside_axes):
         # Working dtype then cast, as the masked tail fills: a float32 detour quantizes a float64 fill.
@@ -685,7 +680,7 @@ def gather(
         upper = [source_shape_zyx[rank - 1 - axis] - 1 for axis in range(rank)]
         coordinates_xyz = torch.minimum(coordinates_xyz.clamp(min=0), coordinates_xyz.new_tensor(upper))
     inside = torch.ones(extent_zyx, dtype=torch.bool, device=device)
-    for axis in range(0 if edge else rank):
+    for axis in range(rank):
         array_axis = rank - 1 - axis
         coordinate = coordinates_xyz[..., axis]
         inside &= (coordinate >= -0.5) & (coordinate < source_shape_zyx[array_axis] - 0.5)

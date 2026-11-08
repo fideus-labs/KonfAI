@@ -18,6 +18,8 @@
 """How overlapping patches are weighted back into one volume."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from functools import reduce
 
 import torch
 
@@ -25,6 +27,11 @@ from konfai.utils.errors import ConfigError
 from konfai.utils.utils import (
     resolve_overlap,
 )
+
+
+def outer_product(vectors: Sequence[torch.Tensor]) -> torch.Tensor:
+    """The outer product of 1-D ``vectors``, one axis each in their order."""
+    return reduce(lambda acc, vector: acc.unsqueeze(-1) * vector, vectors)
 
 
 class PathCombine(ABC):
@@ -47,27 +54,19 @@ class PathCombine(ABC):
         self.overlap = max(overlaps)
         self.overlaps = overlaps
         # The per-patch weight is the outer product of one 1-D window per axis, each axis tapering over its
-        # own overlap. The factors are kept: Accumulator normalises by a per-axis sum (_weight_factors),
-        # and the all-flat case below never calls _window_1d.
-        if all(o <= 0 for o in overlaps):
-            self.windows_1d = [torch.ones(size) for size in patch_size]
-            return
-        self.windows_1d = [
-            self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
-            for size, axis_overlap in zip(patch_size, overlaps, strict=True)
-        ]
+        # own overlap. The factors are kept: Accumulator normalises by a per-axis sum (_weight_geometry). Built
+        # on a zero overlap too: a grid placed monai or spread overlaps where the stride does not, and MONAI's and
+        # nnU-Net's Gaussian weighs that band as any other.
+        self.windows_1d = [self._window_1d(size, o) for size, o in zip(patch_size, overlaps, strict=True)]
 
     @property
     def data(self) -> torch.Tensor:
         """The per-voxel window: the outer product of the per-axis factors.
 
         Derived, not stored: the object is pickled to every rank, and assembly goes through the factors
-        themselves (``_weight_factors``). :meth:`weight` caches what it builds per device and dtype.
+        themselves (``Accumulator._weight_geometry``). :meth:`weight` caches what it builds per device and dtype.
         """
-        data = self.windows_1d[0]
-        for window in self.windows_1d[1:]:
-            data = data.unsqueeze(-1) * window
-        return data
+        return outer_product(self.windows_1d)
 
     @property
     def selects(self) -> bool:
