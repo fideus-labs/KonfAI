@@ -194,7 +194,7 @@ def test_the_seed_reaches_every_map_and_a_randomseed_override_wins(
 
 
 def test_the_progress_total_is_what_elastix_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # elastix repeats a single MaximumNumberOfIterations for every level: Generic_Rigid_BSpline declared 750 of the
+    # elastix repeats a single MaximumNumberOfIterations for every level: Elastix#rigid_bspline declared 750 of the
     # 3000 iterations it runs, and the bar Slicer parses ran past 100 %. A rigid stage before an IMPACT map counted
     # nothing, and max_iterations dropped the total altogether.
     bspline = RIGID.replace("250", "500")

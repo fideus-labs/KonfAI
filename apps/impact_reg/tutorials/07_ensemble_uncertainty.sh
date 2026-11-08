@@ -28,7 +28,7 @@ cd "$(dirname "$0")"
 DEV="--gpu ${GPU-0}"
 [ -f data/fixed_ct.mha ] || python prepare_data.py data
 
-impact-reg-konfai register Generic_Rigid_BSpline FireANTs_Anatomix Elastix_IMPACT_Static \
+impact-reg-konfai register Elastix#rigid_bspline FireANTs#anatomix Elastix#impact_static \
     -f data/fixed_ct.mha -m data/moving_mr.mha --fixed-mask data/fixed_mask.mha -o out/07_ensemble --keep-fields $DEV
 ls out/07_ensemble/P000 out/07_ensemble/P000/Ensemble
 
