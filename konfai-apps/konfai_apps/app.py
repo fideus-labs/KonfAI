@@ -1114,8 +1114,8 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         backend = KonfAIApp._unit_backend(source, suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
-        # The transform backend looks an entry up as <entry>.h5 or .tfm, in lower case.
-        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix.lower() if backend == 'itktransform' else suffix}")
+        # In lower case: the transform backend looks an entry up as <entry>.h5 or .tfm, an image by its stem.
+        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix.lower()}")
         (root / _STAGED_MARKER).touch()  # konfai-apps' own root: _clear_dataset may delete it
 
     @staticmethod
@@ -1404,21 +1404,24 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         if mask is None:
             # One channel of ones, which a masked metric broadcasts over the image's, on the grid of the first of
-            # Volume_0 and Reference_0 that is an image: a transform (a registration's Volume_0) masks nothing.
+            # Volume_0 and Reference_0 that is an image and no field (a registration's Volume_0 masks nothing), else
+            # of the first image: a three-channel volume with no fixed image beside it is an image. A transform
+            # store holds no mask.
             roots = [
                 Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
                 for root in KonfAIApp._dataset_roots()
             ]
-            for dataset in roots:
-                for name in dataset.get_names("Volume_0"):
-                    for group in ("Volume_0", "Reference_0"):
-                        holder = next((root for root in roots if root.is_dataset_exist(group, name)), None)
-                        if holder is None:
-                            continue
-                        shape, attr = holder.get_infos(group, name)  # header only, no pixel read
-                        if is_an_image(attr) and not is_displacement_entry(shape, attr):
-                            KonfAIApp.write_constant(holder, "Mask_0", name, [1, *shape[1:]], attr, 1)
-                            break
+            for name in (name for dataset in roots for name in dataset.get_names("Volume_0")):
+                images = [
+                    (holder, *holder.get_infos(group, name))  # header only, no pixel read
+                    for group in ("Volume_0", "Reference_0")
+                    for holder in roots
+                    if holder.is_dataset_exist(group, name)
+                ]
+                images = [i for i in images if is_an_image(i[2]) and i[0].file_format != "itktransform"]
+                if images:
+                    holder, shape, attr = next((i for i in images if not is_displacement_entry(i[1], i[2])), images[0])
+                    KonfAIApp.write_constant(holder, "Mask_0", name, [1, *shape[1:]], attr, 1)
         else:
             KonfAIApp._stage_groups(mask, "Mask")
 

@@ -293,13 +293,16 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
 DISPLACEMENT_FIELD_ATTRIBUTE = "konfai_displacement_field"
 
 
+def _is_field_shape(shape: tuple[int, ...] | list[int]) -> bool:
+    """Whether ``shape`` is a displacement field's: channel-first, one component per spatial axis, in 2-D or 3-D."""
+    return len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
+
+
 def is_displacement_entry(shape: list[int] | tuple[int, ...], attributes: Attribute) -> bool:
     """Whether an entry read AS A TRANSFORM is a displacement field: one its store marks so, or an image with one
     component per spatial axis (``shape`` is ``[C, *spatial]``), as a field written as a vector image is (ANTs'
     ``Warp.nii.gz``). Read as a transform, such an image can be nothing else; read as an image, it stays one."""
-    return DISPLACEMENT_FIELD_ATTRIBUTE in attributes or (
-        is_an_image(attributes) and len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
-    )
+    return DISPLACEMENT_FIELD_ATTRIBUTE in attributes or (is_an_image(attributes) and _is_field_shape(shape))
 
 
 def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np.ndarray, Attribute]:

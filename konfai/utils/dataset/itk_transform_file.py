@@ -42,6 +42,7 @@ from konfai.utils.dataset.attribute import (
     TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     _encode_transform_leaves,
+    _is_field_shape,
     affine_from_attributes,
     image_to_data,
     is_an_image,
@@ -51,11 +52,6 @@ from konfai.utils.dataset.h5 import _get_h5_file_lock, _h5_read_pool, _open_h5
 from konfai.utils.dataset.staging import is_staging_entry
 from konfai.utils.dataset.stream import DataStream
 from konfai.utils.errors import DatasetManagerError
-
-
-def _is_field_shape(shape: tuple[int, ...] | list[int]) -> bool:
-    """Whether ``shape`` is a displacement field's: channel-first, one component per spatial axis, in 2-D or 3-D."""
-    return len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
 
 
 def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attribute) -> tuple[Any, Any]:
