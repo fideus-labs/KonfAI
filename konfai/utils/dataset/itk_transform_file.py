@@ -37,9 +37,11 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
+    AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
     Attribute,
     _encode_transform_leaves,
+    affine_from_attributes,
     image_to_data,
     is_an_image,
     record_region,
@@ -294,6 +296,8 @@ class ItkTransformFile(AbstractFile):
         # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
+        if attributes is not None and AFFINE_ATTRIBUTE in attributes:
+            data = affine_from_attributes(attributes)  # the map a field's header declares, in place of the field
         if sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, staging)
         else:

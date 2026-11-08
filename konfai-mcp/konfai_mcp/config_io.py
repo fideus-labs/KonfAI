@@ -159,4 +159,18 @@ def write_config(path: Path, content: str, overwrite: bool, expected_root: str |
     lint = _lint_config_data(data)
     if lint:
         result["lint"] = lint
+    errors = [f"{mistake.path}: {mistake.message}" for mistake in schema_mistakes(data, expected_root)]
+    if errors:
+        result["schema_errors"] = errors
     return result
+
+
+def schema_mistakes(data: Any, root: str | None = None) -> list[Any]:
+    """Every misspelled key, wrong type, unknown component name and missing argument at once (``ConfigMistake``),
+    without building anything: the schema reads KonfAI's own constructors, never the session's code."""
+    from konfai.config_schema import WORKFLOWS, config_errors
+
+    if root is None and isinstance(data, dict) and len(data) == 1:
+        root = next(iter(data))
+    filename = next((name for name, (key, _) in WORKFLOWS.items() if key == root), None)
+    return config_errors(data, filename) if filename else []

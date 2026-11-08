@@ -36,7 +36,7 @@ import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
 from konfai.utils.dataset import Attribute, Dataset, entry_links
-from konfai.utils.runtime import MinimalLog, State, safe_torch_load
+from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS,
@@ -1768,7 +1768,6 @@ class KonfAIApp(AbstractKonfAIApp):
         - `models` selects which checkpoint(s) to fine-tune (default: the first available).
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
-        import torch
 
         staged = Path("./Dataset")
         KonfAIApp._clear_dataset()  # before the install writes into the workspace
@@ -1811,8 +1810,8 @@ class KonfAIApp(AbstractKonfAIApp):
                 stem = Path(checkpoint_name).stem
                 train_name = f"{name}_{stem}"
 
-                sanitized_ckpt = train_root / f"{stem}_init.pt"
-                torch.save(KonfAIApp._weights_only_checkpoint(checkpoint_src), sanitized_ckpt)  # nosec B614
+                sanitized_ckpt = train_root / f"{stem}_init.safetensors"
+                save_weights(KonfAIApp._weights_only_checkpoint(checkpoint_src), sanitized_ckpt)
 
                 model_config = train_root / f"{config_path.stem}_{stem}{config_path.suffix}"
                 yaml = YAML()
@@ -1856,7 +1855,11 @@ class KonfAIApp(AbstractKonfAIApp):
                     raise AppRepositoryError(
                         f"Fine-tuning of '{checkpoint_name}' produced no checkpoint in '{produced_dir}'."
                     )
-                shutil.copy2(produced[-1], Path(checkpoint_name).name)
+                # Under the bundle's own name, so app.json still names it: published weights stay weights only.
+                if checkpoint_name.endswith(".safetensors"):
+                    save_weights(safe_torch_load(produced[-1], "cpu"), Path(checkpoint_name).name)
+                else:
+                    shutil.copy2(produced[-1], Path(checkpoint_name).name)
             # Honour `output` for every caller: the CLI passes tmp_dir=output (workspace IS the output
             # dir, nothing to do), but any other caller runs in a throwaway workspace that the decorator
             # deletes, so collect the resulting bundle files (app.json + configs + code + fine-tuned
@@ -1865,7 +1868,7 @@ class KonfAIApp(AbstractKonfAIApp):
             if Path.cwd().resolve() != output_dir:
                 output_dir.mkdir(parents=True, exist_ok=True)
                 # Walk the whole bundle so nested assets survive (a subpackaged .yml/.py, requirements.txt,
-                # app.json, and the fine-tuned .pt): a root-only iterdir silently drops everything nested.
+                # app.json, and the fine-tuned checkpoints): a root-only iterdir silently drops everything nested.
                 # The ./Dataset symlink is the user's input, not a bundle asset, so it is excluded.
                 skip = {"Dataset"}
                 for artifact in Path(".").rglob("*"):

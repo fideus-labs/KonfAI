@@ -54,8 +54,9 @@ class ExternalTool(torch.nn.Module):
         self._engine = engine
         self._masks = set(masks)
 
-    def call(self, images: list[sitk.Image | None], device_index: int) -> np.ndarray:
-        """The engine on one sample: its images in branch order, then the device index."""
+    def call(self, images: list[sitk.Image | None], device_index: int, header: Attribute) -> np.ndarray:
+        """The engine on one sample: its images in branch order, then the device index. ``header`` is the first
+        branch's attributes, which the output carries: what a subclass records there reaches the output's file."""
         return self._engine(*images, device_index)
 
     def forward(self, *tensors: torch.Tensor, attributes: list[list[Attribute]]) -> torch.Tensor:
@@ -71,7 +72,7 @@ class ExternalTool(torch.nn.Module):
                 ]
                 try:
                     with out_of_memory_as_torch(device_index >= 0):
-                        result = self.call(images, device_index)
+                        result = self.call(images, device_index, attributes[0][b])
                 finally:
                     # A tool on torch may keep CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()

@@ -34,6 +34,7 @@ leaves the file as you wrote it ({doc}`../config_guide/index`).
 | `-q`, `--quiet` | Less console output. |
 | `-tb`, `--tensorboard` | Start TensorBoard on `127.0.0.1` (needs the `tensorboard` extra). Not for `EVALUATION` or `TRANSFORM`. |
 | `--init` | Write the config file with every default resolved, and exit without running. |
+| `--check` | List every mistake of the config file and exit, without running or writing it (`pip install 'konfai[check]'`). |
 
 Per command:
 
@@ -59,6 +60,25 @@ konfai TRAIN --init -c Config.yml
 `--init` creates the file if needed, fills in every default, and exits. It reads no data, so it works in an
 empty folder. What the defaults cannot decide (an output name, a `Write` destination) is printed as what is
 left to complete.
+
+### Checking a config
+
+```bash
+pip install 'konfai[check]'
+konfai TRAIN --check -c Config.yml
+```
+
+```text
+Trainer: unknown key 'epoch' (did you mean 'epochs'?)
+Trainer.Dataset.groups_src.CT.groups_dest.CT.transforms: unknown 'Standardise' (did you mean 'Standardize'?)
+[KonfAI] 2 error(s), 0 warning(s) in 'Config.yml'.
+```
+
+`--check` lists every mistake of the file at once: misspelled keys, wrong types, unknown transforms or losses,
+missing arguments. It builds nothing, reads no data and leaves the file as written. It exits 1 when the run
+would refuse the config, so it fits a CI job. A key KonfAI does not read is only a warning, except for
+`TRANSFORM`, which refuses it, and a misspelling of a key the file leaves out, whose value the default would
+replace. Files, channels and a model's own arguments are checked when the workflow runs.
 
 ### Listing components
 

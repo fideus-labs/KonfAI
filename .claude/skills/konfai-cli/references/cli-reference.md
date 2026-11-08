@@ -26,6 +26,7 @@ EVALUATION to `konfai.evaluator.evaluate`, TRANSFORM to `konfai.transformer.tran
 | `-q`, `--quiet` | Suppress console output. |
 | `-tb`, `--tensorboard` | Launch TensorBoard on `127.0.0.1` (needs the `tensorboard` extra; remote: `ssh -N -L <port>:127.0.0.1:<port>`, or `KONFAI_TENSORBOARD_HOST=0.0.0.0` to serve every interface). Not accepted by `EVALUATION` or `TRANSFORM`. |
 | `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
+| `--check` | List every mistake of the config against its schema and exit 1 if the run would refuse it; builds nothing, writes nothing (`konfai[check]`). |
 
 `--gpu` and `--cpu` are a mutually-exclusive group. With neither, execution falls back to CPU.
 TRANSFORM declares its own set (see below): no `-tb`.
@@ -90,7 +91,7 @@ konfai EVALUATION -y --config Evaluation.yml
 ## `TRANSFORM`: prepare a dataset
 
 Reads a `Transformer:` config. The `--config` value is passed as `transform_file`. It takes
-`-c`, `-y`, `--gpu`, `--cpu`, `-q` and `--init` as above, with two differences: `-y` recomputes
+`-c`, `-y`, `--gpu`, `--cpu`, `-q`, `--init` and `--check` as above, with two differences: `-y` recomputes
 the cases whose output exists (without it such a case is skipped), and `--cpu N` shards the
 cases over `N` processes. There is no `-tb`.
 

@@ -59,6 +59,28 @@ def _engine(**overrides) -> fireants.FireANTsEngine:
     return fireants.FireANTsEngine(**{**settings, **overrides})
 
 
+def test_an_affine_is_the_linear_stages_result_and_nothing_else() -> None:
+    # A preset that declares its transform an affine gets the linear transform itself, in place of its field.
+    image = _volume()
+    result = _engine(transform_type="affine").register(image, image, -1)
+    assert isinstance(result, sitk.AffineTransform) and result.GetDimension() == 3
+    np.testing.assert_allclose(result.GetMatrix(), np.eye(3).ravel(), atol=0.05)  # one step on a pair in place
+    empty = sitk.Image(image.GetSize(), sitk.sitkUInt8)
+    empty.CopyInformation(image)
+    assert _engine(transform_type="affine").register(image, image, -1, empty).GetParameters() == (
+        *np.eye(3).ravel(),
+        0.0,
+        0.0,
+        0.0,
+    )
+    # A deformable stage's result has no affine form, nor has a run without a linear stage: refused at build time.
+    for settings in ({"deformable_method": "syn"}, {"linear_method": "none", "deformable_method": "syn"}):
+        with pytest.raises(ValueError, match="linear stages' result"):
+            _engine(transform_type="affine", **settings)
+    with pytest.raises(ValueError, match="Unknown transform_type"):
+        _engine(transform_type="matrix")
+
+
 def test_a_label_map_given_as_a_mask_reaches_fireants_as_a_region(monkeypatch: pytest.MonkeyPatch) -> None:
     # SlicerImpactReg exports segments as labels 1..N; FireANTs' masked metrics would weight voxels by them.
     seen: list[float] = []
@@ -380,8 +402,7 @@ def test_the_centre_of_mass_seed_is_not_dragged_by_a_bright_voxel() -> None:
     fixed, moving = sitk.GetImageFromArray(body), sitk.GetImageFromArray(outlier)
     for image in (fixed, moving):
         image.SetSpacing((2.0, 2.0, 2.0))
-    seed = fireants.FireANTsEngine._center_of_mass_translation(fixed, moving, None, None, "cpu")
-    assert float(seed.norm()) < 0.5  # mm
+    assert np.linalg.norm(fireants.center_of_mass_translation(fixed, moving)) < 0.5  # mm
 
 
 class _ThreeChannels(torch.nn.Module):

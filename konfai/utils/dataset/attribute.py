@@ -306,6 +306,49 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
     return image_to_data(transform.GetDisplacementField())
 
 
+# Set by a registration whose preset declares its transform an affine: the header of the field it hands
+# over carries the map (``D x (D+1)`` flat, row-major, world units, fixed -> moving points), and the
+# backends write that map in place of the field. The underscore keeps the key out of the stack renaming.
+AFFINE_ATTRIBUTE = "konfai_affine"
+
+
+def as_affine(transform: sitk.Transform) -> sitk.AffineTransform:
+    """A linear transform (a leaf of any parameterisation, or a composite of them) as the one
+    ``AffineTransform`` it is: the same world map, matrix and translation."""
+    from konfai.utils.ITK import _linear_map
+
+    linear = _linear_map(transform)
+    affine = sitk.AffineTransform(int(transform.GetDimension()))
+    affine.SetMatrix(linear.matrix.ravel().tolist())
+    affine.SetTranslation(linear.translation.tolist())
+    return affine
+
+
+def affine_to_attribute(transform: sitk.Transform) -> np.ndarray:
+    """The value ``AFFINE_ATTRIBUTE`` records for a linear transform: its matrix with the translation as the
+    last column, flat."""
+    from konfai.utils.ITK import _linear_map
+
+    linear = _linear_map(transform)
+    return np.hstack([linear.matrix, linear.translation.reshape(-1, 1)]).ravel()
+
+
+def affine_from_attributes(attributes: Attribute) -> sitk.AffineTransform:
+    """The transform ``AFFINE_ATTRIBUTE`` records: ``affine_to_attribute``'s inverse."""
+    values = attributes.get_np_array(AFFINE_ATTRIBUTE)
+    if len(values) not in (6, 12):
+        raise DatasetManagerError(
+            f"'{AFFINE_ATTRIBUTE}' holds {len(values)} values; a 2-D affine has 6 and a 3-D one 12.",
+            "Record it with affine_to_attribute.",
+        )
+    rank = 3 if len(values) == 12 else 2
+    matrix = values.reshape(rank, rank + 1)
+    affine = sitk.AffineTransform(rank)
+    affine.SetMatrix(matrix[:, :rank].ravel().tolist())
+    affine.SetTranslation(matrix[:, rank].tolist())
+    return affine
+
+
 def push_geometry(attributes: Attribute, key: str, value: Any) -> None:
     """Record ``value`` as the latest ``key`` of the geometry stack unless it already is.
 

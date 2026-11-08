@@ -28,7 +28,7 @@ import torch
 from impact_reg_konfai.models import elastix_engine as elastix_engine_module
 from impact_reg_konfai.models.elastix_engine import ElastixEngine
 from konfai.metric.measure.impact import _statistics
-from konfai.utils.dataset import Attribute
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute
 from konfai.utils.errors import MeasureError
 
 
@@ -44,7 +44,9 @@ def test_an_empty_fixed_mask_is_a_zero_field_and_never_reaches_elastix(monkeypat
     fixed.SetOrigin((3.0, -1.0, 7.0))
     empty = sitk.Image([6, 5, 4], sitk.sitkUInt8)
 
-    field = ElastixEngine.register(SimpleNamespace(), fixed, sitk.Image(fixed), 0, fixed_mask=empty)
+    field = ElastixEngine.register(
+        SimpleNamespace(_transform_type="field"), fixed, sitk.Image(fixed), 0, fixed_mask=empty
+    )
 
     assert field.shape == (3, 4, 5, 6)
     assert not field.any()
@@ -70,6 +72,8 @@ def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = 
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
         _feature_models={},
+        _moments_init="cof",
+        _transform_type="field",
         _elastix_bin="elastix",
         _elastix_root=Path("/opt/elastix-impact"),
         _stage_parameter_maps=stage,
@@ -100,6 +104,7 @@ def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impac
     monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
+        _moments_init="cof",
         _feature_models={("TS/M730.pt", "1"): object()} if impact else {},
         _unchecked=False,
         _elastix_bin="elastix",
@@ -167,7 +172,9 @@ def test_an_image_too_small_for_the_impact_grid_says_so(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError) as raised:
         _elastix_run(monkeypatch, [no_sample], 1, impact_map, brain)
-    assert "8 x 6 x 3 voxels at 6 x 6 x 6 mm (level 0), where its 11-voxel patch spans 66 mm" in str(raised.value)
+    assert "8 x 6 x 3 voxels of 6 x 6 x 6 image voxels (level 0), where its 11-voxel patch spans 66 voxels" in str(
+        raised.value
+    )
 
     # Static mode: whole images (patch 0), one voxel size per model on a line.
     static_map = "(ImpactPatchSize0 0 0 0 0 0 0)\n(ImpactVoxelSize0 6 6 6 6 6 6)\n"
@@ -315,6 +322,49 @@ def test_only_an_engine_s_cuda_out_of_memory_becomes_torch_s_class(
     assert isinstance(raised.value, torch.cuda.OutOfMemoryError) is translated
 
 
+def test_the_engine_output_is_declared_a_displacement_field() -> None:
+    """Its header is the fixed image's, so an ':omezarr' output dataset writes an RFC-5 field, not a 3-channel image."""
+    pytest.importorskip("itk")
+    from impact_reg_konfai.models.intensity import EngineRegistration
+
+    class Engine:
+        def register(self, fixed, moving, device, fixed_mask, moving_mask):
+            return np.zeros((3, 4, 4, 4), dtype=np.float32)
+
+    image, attributes = _registration_inputs()
+    EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)
+    assert DISPLACEMENT_FIELD_ATTRIBUTE in attributes[0][0]
+
+
+def test_an_engine_s_affine_is_carried_as_its_field_and_declared_in_the_header() -> None:
+    """A preset that declares its transform an affine gets the transform itself from the engine: KonfAI carries the
+    field it samples, in millimetres, and the header records the map, which the output dataset writes instead."""
+    pytest.importorskip("itk")
+    from impact_reg_konfai.models.intensity import EngineRegistration
+    from konfai.utils.dataset import AFFINE_ATTRIBUTE, affine_from_attributes
+
+    rigid = sitk.Euler3DTransform()
+    rigid.SetRotation(0.0, 0.0, 0.5)
+    rigid.SetTranslation((2.0, -1.0, 0.5))  # in voxels: the engine measures in the fixed image's finest voxel
+
+    class Engine:
+        def register(self, fixed, moving, device, fixed_mask, moving_mask):
+            return rigid
+
+    image, attributes = _registration_inputs()
+    for branch in attributes:
+        branch[0]["Spacing"] = np.array([0.5, 0.5, 2.0])  # the finest voxel is 0.5 mm
+    field = EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)[0].numpy()
+
+    assert DISPLACEMENT_FIELD_ATTRIBUTE in attributes[0][0] and AFFINE_ATTRIBUTE in attributes[0][0]
+    affine = affine_from_attributes(attributes[0][0])
+    np.testing.assert_allclose(affine.GetTranslation(), (1.0, -0.5, 0.25))  # the voxel's worth of millimetres
+    np.testing.assert_allclose(affine.GetMatrix(), rigid.GetMatrix(), atol=1e-12)
+    # The field is the affine sampled on the fixed grid, in millimetres: at the voxel (1, 1, 1), the point (0.5, 0.5, 2).
+    point = (0.5, 0.5, 2.0)
+    np.testing.assert_allclose(field[:, 1, 1, 1], np.subtract(affine.TransformPoint(point), point), atol=1e-6)
+
+
 _needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the translation is for a CUDA run")
 
 
@@ -455,6 +505,7 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field(module_name: str
     engine_class = getattr(importlib.import_module(f"impact_reg_konfai.models.{module_name}"), class_name)
     engine = engine_class.__new__(engine_class)  # unconfigured: any step past the check would raise
     engine._linear_method = "none"  # as a tile: the tile pass runs no linear stage
+    engine._transform_type = "field"
     image = sitk.GetImageFromArray(np.random.rand(4, 5, 6).astype(np.float32))
     empty = sitk.GetImageFromArray(np.zeros((4, 5, 6), dtype=np.uint8))
 
