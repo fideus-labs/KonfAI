@@ -44,8 +44,10 @@ route is named and priced against the memory budget (`STREAM`, `LOAD`,
 which stage requires it. A refused plan writes no output. `--memory-budget BYTES`
 overrides the budget the program carries.
 
-A prediction also needs the checkpoints to export. The compiler writes their
-ONNX files beside the JSON program. Keep them together when moving the program.
+A prediction also needs the checkpoints to export; a model with no parameters
+needs none. The compiler writes their ONNX files beside the JSON program. Keep
+them together when moving the program. A model whose module reads the case's
+attributes (`accepts_attributes`) runs Python on the case and is refused.
 
 ```python
 from konfai.portable import compile_prediction
