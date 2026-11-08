@@ -147,7 +147,7 @@ def _is_flat_field(path: Path) -> bool:
 
 def _is_field(path: Path) -> bool:
     """Whether a stored registration is a displacement field: an image, a field store or a field transform file. A
-    linear transform file or an RFC-5 affine store (a preset's ``transform_type: affine``) is not one."""
+    linear transform file, an RFC-5 affine store or a B-spline (a preset's native form) is not one."""
     if _is_transform_file(path):
         return _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
     from konfai.utils.ome_zarr import is_affine_store
@@ -1597,7 +1597,7 @@ class ImpactRegKonfAIApp:
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
-        slab's source window sized from the field values it reads. An affine (``transform_type: affine``) has no
+        slab's source window sized from the field values it reads. An affine (a linear preset's native form) has no
         grid of its own: the fixed image lends it, and the affine is the map KonfAI decodes (``transforms``).
 
         NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK

@@ -1946,7 +1946,8 @@ class TransformToField(Transform):
         self.group = group
         self.reference_group = reference_group
 
-    def _entry(self, name: str) -> tuple[Any, list[int], Attribute]:
+    def _entry(self, name: str) -> Any:
+        """The dataset holding the case's transform, None when it is a field (measured as it is)."""
         from konfai.utils.dataset import is_displacement_entry
 
         dataset = self.dataset_holding(self.group, name)
@@ -1955,8 +1956,7 @@ class TransformToField(Transform):
                 f"'TransformToField' found no transform for case '{name}' in group '{self.group}'.",
                 "Name the group the transform is read as: TransformToField: {group: Volume_0}.",
             )
-        shape, header = dataset.get_infos(self.group, name)
-        return (None if is_displacement_entry(shape, header) else dataset), shape, header
+        return None if is_displacement_entry(*dataset.get_infos(self.group, name)) else dataset
 
     def _grid(self, name: str) -> tuple[list[int], Attribute]:
         reference = self.dataset_holding(self.reference_group, name)
@@ -1970,7 +1970,7 @@ class TransformToField(Transform):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         del group_src, cache_attribute
-        if not name or self._entry(name)[0] is None:
+        if not name or self._entry(name) is None:
             return shape
         return [int(extent) for extent in self._grid(name)[0][1:]]
 
@@ -1981,7 +1981,7 @@ class TransformToField(Transform):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, image_to_data
 
-        dataset, _, _ = self._entry(name)
+        dataset = self._entry(name)
         if dataset is None:
             return tensor  # a field already
         transform = dataset.read_transform(self.group, name)

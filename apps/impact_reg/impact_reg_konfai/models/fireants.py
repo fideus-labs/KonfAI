@@ -727,12 +727,6 @@ class FireANTsEngine:
             # It would optimise nothing and return an identity no downstream check tells from a result.
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
         check_transform_type(transform_type)
-        if transform_type == "affine" and (deformable_method != "none" or linear_method == "none"):
-            # The affine is what the linear stages find; a deformable stage's result has no affine form.
-            raise ValueError(
-                "transform_type 'affine' is the linear stages' result: it takes a linear_method with "
-                "deformable_method 'none'; a deformable registration is written as a field."
-            )
         self._transform_type = transform_type
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
@@ -786,10 +780,8 @@ class FireANTsEngine:
 
     @property
     def _writes_affine(self) -> bool:
-        """The linear stages' affine is the result where no deformable stage follows, for 'native' as for 'affine'."""
-        return self._transform_type == "affine" or (
-            self._transform_type == "native" and self._deformable_method == "none"
-        )
+        """The linear stages' affine is the result where no deformable stage follows."""
+        return self._transform_type == "native" and self._deformable_method == "none"
 
     @staticmethod
     def _affine_to_sitk(affine_matrix: "torch.Tensor") -> sitk.AffineTransform:
@@ -927,7 +919,7 @@ class FireANTsEngine:
         moving_mask: sitk.Image | None = None,
     ) -> np.ndarray | sitk.Transform:
         """Register ``moving`` onto ``fixed``; return the displacement field, channel-first float32, on the fixed
-        grid, or with ``transform_type: affine`` the linear transform the stages found, fixed points to moving points.
+        grid, or with ``transform_type: native`` and no deformable stage the linear transform the stages found, fixed points to moving points.
         """
         # A mask is a region whatever values it holds: a label map (SlicerImpactReg exports segments as labels
         # 1..N) would otherwise weight FireANTs' masked cc/mse by the product of label values, and the stages
@@ -1288,12 +1280,11 @@ class RegistrationNet(network.Network):
             "registration. Both set to 'none' is refused: it would optimise nothing.",
         ] = "syn",
         transform_type: Annotated[
-            Literal["native", "field", "affine"],
+            Literal["native", "field"],
             "The form the transform is written in: 'native', the one the stages found (the linear stages' affine for "
-            "deformable_method 'none', a field otherwise); 'field', its displacement on the fixed grid; 'affine', the "
-            "one matrix the linear stages found, for deformable_method 'none' alone. An affine is written as an ITK "
-            "AffineTransform file or as an RFC-5 'affine' store, where a field of the same registration weighs "
-            "megabytes. A mean (TTA, an ensemble) or a tiled run writes the field whatever the form.",
+            "deformable_method 'none', written as an ITK AffineTransform file or an RFC-5 'affine' store, twelve "
+            "numbers where a field weighs megabytes; a field otherwise); 'field', its displacement on the fixed grid. "
+            "A mean (TTA, an ensemble) or a tiled run writes the field whatever the form.",
         ] = "native",
         deformable_metric: Annotated[
             Literal["cc", "mi", "mse", "impact"],

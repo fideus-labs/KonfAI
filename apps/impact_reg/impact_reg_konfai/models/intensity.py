@@ -36,12 +36,13 @@ from konfai.utils.dataset import (
     data_to_image,
     image_to_data,
 )
+from konfai.utils.dataset.attribute import _flatten_transforms
 from konfai.utils.vram import out_of_memory_as_torch
 
 #: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
-#: elastix's rigid then B-spline as such, a field for what is dense), its displacement on the fixed grid, or the affine
-#: it is. A mean (TTA, an ensemble) or a tiled run writes the field whatever the form.
-TRANSFORM_TYPES = ("native", "field", "affine")
+#: elastix's rigid then B-spline as such, a field for what is dense), or its displacement on the fixed grid. A mean
+#: (TTA, an ensemble) or a tiled run writes the field whatever the form.
+TRANSFORM_TYPES = ("native", "field")
 
 
 def check_transform_type(transform_type: str) -> None:
@@ -57,23 +58,11 @@ def displacement_on(grid: sitk.Image, transform: sitk.Transform) -> np.ndarray:
     return image_to_data(field)[0]
 
 
-def _leaves(transform: sitk.Transform) -> list[sitk.Transform]:
-    """``transform``'s leaves in their order, a composite nested in another (elastix's, with its start added back)
-    flattened."""
-    if not isinstance(transform, sitk.CompositeTransform):
-        transform = transform.Downcast()
-    if not isinstance(transform, sitk.CompositeTransform):
-        return [transform]
-    return [
-        leaf for index in range(transform.GetNumberOfTransforms()) for leaf in _leaves(transform.GetNthTransform(index))
-    ]
-
-
 def world_transform(transform: sitk.Transform, voxel: float) -> sitk.Transform:
     """``transform``, found in voxel units, in millimetres: ``voxel * T(p / voxel)``. A linear leaf keeps its matrix
     and scales its translation; a B-spline scales its control grid and its coefficients. Any other leaf raises."""
     world: list[sitk.Transform] = []
-    for leaf in _leaves(transform):
+    for leaf in _flatten_transforms(transform.Downcast()):
         if leaf.IsLinear():
             affine = as_affine(leaf)
             affine.SetTranslation([value * voxel for value in affine.GetTranslation()])
@@ -124,7 +113,7 @@ class EngineRegistration(torch.nn.Module):
     length a preset sets (a step, a grid, a smoothing, a feature model's voxel) is a number of voxels, so a step of 1.2
     is 1.2 mm on 1 mm voxels and 1.2 um on 1 um voxels.
 
-    An engine whose preset declares ``transform_type: affine`` returns the linear transform itself. The field KonfAI
+    An engine that found a linear transform (``transform_type: native``) returns it itself. The field KonfAI
     carries is that transform sampled, and the output's header records the map (``AFFINE_ATTRIBUTE``), which the
     output dataset writes in place of the field."""
 

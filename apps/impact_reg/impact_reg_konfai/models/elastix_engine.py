@@ -55,15 +55,6 @@ from .orientation import world_aligned_pair
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
 ELASTIX_CACHE = Path.home() / ".cache" / "konfai" / "elastix-impact"
 
-#: The elastix transforms an affine represents exactly: ``transform_type: affine`` takes these maps alone.
-_LINEAR_TRANSFORMS = ("TranslationTransform", "EulerTransform", "SimilarityTransform", "AffineTransform")
-
-
-def _declared_transform(text: str) -> str:
-    """The ``(Transform "...")`` entry of a parameter map, '' without one."""
-    found = re.search(r'^\s*\(Transform\s+"([^"]+)"\)', text, re.MULTILINE)
-    return found.group(1) if found else ""
-
 
 def _iterations_of(text: str) -> int:
     """The iterations elastix runs for a parameter map: ``MaximumNumberOfIterations`` over its
@@ -248,14 +239,6 @@ class ElastixEngine:
             print("[ImpactReg] note: voxel_sampling sets the IMPACT map's NumberOfSpatialSamples, not spatial_samples.")
         for key in unused:
             print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")
-        if transform_type == "affine":
-            for name, text in maps:
-                declared = _declared_transform(text)
-                if declared not in _LINEAR_TRANSFORMS:
-                    raise ValueError(
-                        f"transform_type 'affine' takes linear parameter maps ({', '.join(_LINEAR_TRANSFORMS)}); "
-                        f'{name} declares (Transform "{declared}"), which has no affine form.'
-                    )
         self._iterations = sum(_iterations_of(text) for _, text in maps)
         self._elastix_bin = self._ensure_binary()
 
@@ -431,7 +414,8 @@ class ElastixEngine:
         moving_mask: sitk.Image | None = None,
     ) -> np.ndarray | sitk.Transform:
         """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid, or
-        with ``transform_type: affine`` the linear transform the maps found, fixed points to moving points.
+        with ``transform_type: native`` the transform the maps found (an affine for linear maps), fixed points to
+        moving points.
 
         Optional ``fixed_mask`` / ``moving_mask`` restrict the similarity metric to a region (elastix
         ``-fMask`` / ``-mMask``); a mask covering the whole image is equivalent to passing none, and a

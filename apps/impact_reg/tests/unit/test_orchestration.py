@@ -1478,7 +1478,7 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
 
 
 def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
-    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    """A linear transform as a linear preset writes it (its native form): an ITK AffineTransform file, or an
     RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
     affine = sitk.AffineTransform(3)
     affine.SetTranslation(translation)
@@ -1526,7 +1526,7 @@ def test_an_averaged_affine_preset_writes_its_field(tmp_path: Path) -> None:
     B-spline) runs there and writes its field, its runs told so; alone, it keeps its native form."""
     (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
         "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
-        "    RegistrationNet:\n      transform_type: affine\n",
+        "    RegistrationNet:\n      transform_type: native\n",
         encoding="utf-8",
     )
     moving = tmp_path / "moving.mha"

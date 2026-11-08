@@ -133,7 +133,7 @@ def test_elastix_returns_the_affine_a_preset_declares_with_its_start_added_back(
         engine._elastix_root = Path("/opt/elastix-impact")
         return engine.register(fixed, moving, -1)
 
-    affine, field = registered("affine"), registered("field")
+    affine, field = registered("native"), registered("field")
 
     # One map: the same registration, as the affine the maps found or as that affine sampled on the fixed grid.
     assert isinstance(affine, sitk.AffineTransform)
@@ -144,10 +144,9 @@ def test_elastix_returns_the_affine_a_preset_declares_with_its_start_added_back(
     np.testing.assert_allclose(displacement_on(fixed, affine), field, atol=1e-9)
 
 
-def test_elastix_refuses_an_affine_for_a_map_with_no_affine_form(monkeypatch, tmp_path: Path) -> None:
-    maps = {"Rigid.txt": '(Transform "EulerTransform")\n', "BSpline.txt": '(Transform "BSplineTransform")\n'}
-    _elastix_answering(monkeypatch, tmp_path, sitk.Transform(3, sitk.sitkIdentity), maps)
-    with pytest.raises(ValueError, match=r"BSpline\.txt declares"):
-        ElastixEngine(list(maps), transform_type="affine")
+def test_elastix_refuses_an_unknown_transform_type(monkeypatch, tmp_path: Path) -> None:
+    _elastix_answering(
+        monkeypatch, tmp_path, sitk.Transform(3, sitk.sitkIdentity), {"Rigid.txt": '(Transform "EulerTransform")\n'}
+    )
     with pytest.raises(ValueError, match="Unknown transform_type 'matrix'"):
         ElastixEngine(["Rigid.txt"], transform_type="matrix")
