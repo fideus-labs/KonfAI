@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - FidOpt's own executable, argv lists, no shell
 import sys
+import uuid
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -174,6 +175,21 @@ class ScoutService:
         }
 
 
+def _gpu_of(args: list[str]) -> list[int]:
+    """The GPU ids a fidopt argv names (``--gpu 0,1`` or ``--gpu=0``), none when it names none."""
+    for index, item in enumerate(args):
+        value = (
+            item.split("=", 1)[1]
+            if item.startswith("--gpu=")
+            else args[index + 1]
+            if item == "--gpu" and index + 1 < len(args)
+            else None
+        )
+        if value is not None:
+            return [int(v) for v in value.split(",") if v.strip().isdigit()]
+    return []
+
+
 class FidoptAdapter:
     """FidOpt through its own CLI and Python; nothing reimplemented, nothing launched outside the allowed list."""
 
@@ -281,6 +297,19 @@ class FidoptAdapter:
                 f"fidopt {operation!r} is not allowed on this server (KONFAI_MCP_FIDOPT_ALLOWED={','.join(self.allowed)})."
             )
         self.available()
+        if dataset:
+            # the corpus is FidOpt's own: a job that would die on it seven seconds in is refused here instead
+            data_root = os.environ.get("FIDOPT_DATA")
+            if not data_root:
+                raise ValueError(
+                    "FIDOPT_DATA is not set in the server's environment: the folder that holds FidOpt's corpus, one "
+                    "folder per dataset. Set it where the server starts (the MCP config's env)."
+                )
+            if not (Path(data_root).expanduser() / dataset).is_dir():
+                raise ValueError(
+                    f"dataset '{dataset}' is not in the corpus at {data_root}: build it first (FidOpt's CONTRIBUTING "
+                    "says how), or pick a dataset that is there."
+                )
         args = [operation, self._check_name(method, "method")]
         if operation == "check":
             if dataset:
@@ -303,7 +332,10 @@ class FidoptAdapter:
             if not re.fullmatch(r"--[a-z][a-z0-9-]*(=[A-Za-z0-9._:/-]+)?|[A-Za-z0-9._:/-]+", item):
                 raise ValueError(f"extra argument {item!r}: flags and plain values only, no paths outside the corpus.")
             args.append(item)
-        label = self.workspace_layout.sanitize_name(f"fidopt_{operation}_{method}_{dataset or 'none'}")
+        # one folder per launch: two checks of one method must not share an output
+        label = self.workspace_layout.sanitize_name(
+            f"fidopt_{operation}_{method}_{dataset or 'none'}_{uuid.uuid4().hex[:6]}"
+        )
         output = self.workspace_layout.ensure_session_workspace() / "FidOpt" / label
         output.mkdir(parents=True, exist_ok=True)
         # FidOpt writes its rows where its own configuration says, so the job's folder only records what was asked
@@ -318,4 +350,6 @@ class FidoptAdapter:
             "command": [self.executable, *args],
             "kwargs": {"executable": self.executable, "args": args},
             "output": str(output),
+            # a FidOpt job holds the GPU its own --gpu names, none otherwise (check runs on CPU)
+            "gpu": _gpu_of(args),
         }

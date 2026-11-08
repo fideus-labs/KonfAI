@@ -65,6 +65,16 @@ whole metrics only (a 117-label Dice is one row, `per_label_metrics` counts the 
 (`konfai_apps:X`) is imported when a package answers to the name instead of being mistaken for a session file; the
 server instructions name `docs://index`; `describe_app` checks a local bundle's configs against the installed KonfAI's
 schema (`config_checks`), so an obsolete key is known before the first job instead of after three failed ones.
+Three more runs (FidOpt's catalogue, adopting an on-disk experiment and packaging it, a transform pipeline on
+Learn2Reg CT) added: tools are hinted read-only or destructive (Codex runs the read-only ones without approval);
+`fidopt_run` refuses a dataset the corpus lacks before launching, names one folder per launch, reserves no GPU
+unless `--gpu` says so, and takes `wait`; `fidopt_catalog` is one line per dataset with `task=`/`anatomy=` filters,
+the methods of the task, and the corpus state; the FidOpt adapter follows a session switch; `read_file` honours
+`offset` on dataset text files; `package_app_from_session` resolves relative config names in the session and loads
+checkpoints with KonfAI's own loader (konfai-apps); `compare_runs` pairs a metric under two names and cases by order
+when the runs named them differently; `read_training_curves` keeps one point per step, in order; `run_transform`
+takes `config_file` and reports its real devices; `inspect_dataset` names an inverted layout; a finished app job
+carries its case names; `docs://dataset-mapping` states the layout.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

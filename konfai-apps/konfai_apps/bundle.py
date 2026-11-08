@@ -553,6 +553,25 @@ def _published(name: str) -> str:
     return name.removesuffix(".pt") + ".safetensors" if name.endswith(".pt") else name
 
 
+def _konfai_scalar_globals() -> list[Any]:
+    """The non-tensor types a KonfAI run pickles into its checkpoint (epoch counters as numpy scalars, config
+    floats as ruamel scalars): let through the weights-only unpickler, which holds no code of its own."""
+    import numpy as np
+
+    multiarray = (getattr(np, "_core", None) or np.core).multiarray  # numpy 2 / numpy 1
+    allowed: list[Any] = [np.dtype, np.ndarray, multiarray.scalar, multiarray._reconstruct]
+    allowed += [getattr(np.dtypes, name) for name in dir(np.dtypes) if name.endswith("DType")]
+    try:
+        from ruamel.yaml.scalarbool import ScalarBoolean
+        from ruamel.yaml.scalarfloat import ScalarFloat
+        from ruamel.yaml.scalarint import ScalarInt
+
+        allowed += [ScalarFloat, ScalarInt, ScalarBoolean]
+    except ImportError:  # pragma: no cover - ruamel is a KonfAI dependency
+        pass
+    return allowed
+
+
 def _publish_weights(checkpoint: Path, target: Path) -> None:
     """Publish a checkpoint as weights only. A run's ``.pt`` is read without unpickling objects
     (packaging may run in a server process, and a run's checkpoint holds tensors and primitives only);
@@ -563,7 +582,10 @@ def _publish_weights(checkpoint: Path, target: Path) -> None:
 
     try:
         if checkpoint.suffix != ".safetensors":
-            save_weights(torch.load(checkpoint, map_location="cpu", weights_only=True), target)
+            # weights only, plus the scalar types a KonfAI run writes beside its tensors (numpy scalars, ruamel
+            # floats): the bare unpickler refused every run's own checkpoint; any other object is still refused
+            with torch.serialization.safe_globals(_konfai_scalar_globals()):
+                save_weights(torch.load(checkpoint, map_location="cpu", weights_only=True), target)
             return
         check_weights(checkpoint)
     except Exception as exc:

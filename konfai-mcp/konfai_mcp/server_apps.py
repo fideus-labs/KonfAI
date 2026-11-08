@@ -1217,7 +1217,10 @@ class AppService:
             prediction = self.workspace_layout.config_path("prediction")
             train = self.workspace_layout.config_path("train")
             configs = [str(path) for path in (prediction, train) if path.exists()]
-        resolved = [str(Path(path).expanduser()) for path in configs]
+        resolved = [
+            str(p if (p := Path(path).expanduser()).is_absolute() else self.workspace_layout.workspace_dir() / p)
+            for path in configs
+        ]
         if not resolved:
             raise ValueError(
                 "No config to package: no Prediction.yml/Config.yml in the session and none provided. "

@@ -117,6 +117,18 @@ def test_a_checkpoint_holding_objects_is_refused_not_unpickled(tmp_path):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
 
 
+def test_a_runs_own_checkpoint_scalars_are_published(tmp_path):
+    """A KonfAI run pickles its epoch as a numpy scalar and config floats as ruamel scalars: weights only, still."""
+    import numpy as np
+    from ruamel.yaml.scalarfloat import ScalarFloat
+
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    checkpoint = tmp_path / "CV_0.pt"
+    torch.save({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": np.int64(3), "lr": ScalarFloat(0.1)}, checkpoint)
+    bundle = assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
+    assert bundle and any((tmp_path / "out").rglob("*.safetensors"))
+
+
 def test_safetensors_weights_in_another_layout_are_refused(tmp_path):
     from safetensors.torch import save_file
 

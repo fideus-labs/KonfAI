@@ -629,6 +629,10 @@ class JobRegistry:
             if summary_path.is_file():
                 with suppress(Exception):
                     app_outputs["evaluation_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+            if job.manifest_path is not None and job.manifest_path.is_file():
+                # P000... -> the source files, recorded at launch
+                with suppress(Exception):
+                    app_outputs["cases"] = json.loads(job.manifest_path.read_text(encoding="utf-8")).get("cases")
             payload["outputs"] = app_outputs
         # Only a finished job's manifest is its own: the run directory is reused across runs of one
         # name, so while the job is queued or running the file there is a previous run's.

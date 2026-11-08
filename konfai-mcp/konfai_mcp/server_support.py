@@ -542,6 +542,14 @@ def dataset_mapping_doc() -> dict[str, Any]:
     """Explain how to reason about dataset groups and group mapping."""
     return {
         "topic": "dataset_mapping",
+        "layout": [
+            "KonfAI reads <root>/<case>/<group>.<ext>: one folder per case, one file per group (CT.mha, SEG.mha).",
+            "A flat folder (one file per case) or an inverted one (<group>/<case>.ext, as Learn2Reg ships) is not a "
+            "dataset: build the layout with one folder per case, symlinks are fine; inspect_dataset names both "
+            "layouts in layout_hint.",
+            "dataset_filenames entries read <path>:<flags>:<ext> as the templates write them (./Dataset:a:mha); the "
+            "template summaries and docs://configuration explain the flags, copy the template's form.",
+        ],
         "principles": [
             "The user should specify the task; the agent should clarify ambiguous group roles.",
             "Inspect actual dataset groups before committing to a config.",

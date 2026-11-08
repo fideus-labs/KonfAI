@@ -177,3 +177,69 @@ def test_describe_app_checks_a_local_bundle_against_the_schema(
     payload = asyncio.run(scenario())
     assert any("use_cache" in line for line in payload["config_checks"]["Config.yml"])
     assert payload["next_actions"][0] == "fetch_app"
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_read_only_and_destructive_tools_are_hinted(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return {t.name: t.annotations for t in await client.list_tools()}
+
+    annotations = asyncio.run(scenario())
+    assert set(mcp_server.READ_ONLY_TOOLS) <= set(annotations)  # every hinted name is a tool
+    assert annotations["describe_app"].read_only_hint is True
+    assert annotations["delete_run"].destructive_hint is True
+    assert not (annotations["run_train"] and annotations["run_train"].read_only_hint)
+
+
+def test_fidopt_refuses_a_dataset_the_corpus_lacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    fake = tmp_path / "fidopt"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("KONFAI_MCP_FIDOPT", str(fake))
+    monkeypatch.setenv("KONFAI_MCP_FIDOPT_ALLOWED", "check,run")
+    monkeypatch.delenv("FIDOPT_DATA", raising=False)
+    mcp_server = load_mcp_server()
+    with pytest.raises(ValueError, match="FIDOPT_DATA"):
+        mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)
+    monkeypatch.setenv("FIDOPT_DATA", str(tmp_path / "corpus"))
+    (tmp_path / "corpus").mkdir()
+    with pytest.raises(ValueError, match="not in the corpus"):
+        mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)
+    first = mcp_server.FIDOPT.prepare_run("check", "lungmask", "", None, None, False, None)
+    second = mcp_server.FIDOPT.prepare_run("check", "lungmask", "", None, None, False, ["--gpu", "1"])
+    assert first["run_name"] != second["run_name"]  # one folder per launch
+    assert first["gpu"] == [] and second["gpu"] == [1]
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    from test_mcp_server_run_records import _metric_json
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {})
+            workspace = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir())
+            for run, name, values in (
+                ("EXPERIMENT", "PRED:SEG:Dice", {"1PC006": 0.5, "1PC032": 0.6}),
+                ("BUNDLE", "Volume_0:Reference_0:Dice", {"P000": 0.7, "P001": 0.55}),
+            ):
+                metrics = workspace / "Evaluations" / run / "Metric_TRAIN.json"
+                metrics.parent.mkdir(parents=True, exist_ok=True)
+                metrics.write_text(_metric_json(name, values), encoding="utf-8")
+            result = await client.call_tool(
+                "compare_runs", {"run_a": "EXPERIMENT", "run_b": "BUNDLE", "metric": "Dice"}
+            )
+            return result.structured_content
+
+    comparison = asyncio.run(scenario())["metrics"]["PRED:SEG:Dice"]
+    assert comparison["metric_b"] == "Volume_0:Reference_0:Dice"
+    assert comparison["case_alignment"] == "by order" and comparison["cases"] == 2
+    assert comparison["per_case_delta_b_minus_a"] == {"1PC006": pytest.approx(0.2), "1PC032": pytest.approx(-0.05)}

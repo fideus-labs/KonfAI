@@ -72,7 +72,7 @@ Bring a published app into the session. Without path: import it as a normal expe
 
 ### `fidopt_catalog`
 
-FidOpt's benchmark catalogue through its own code: the datasets (optionally one task) and the methods; with dataset=<name>, that dataset's descriptor (cases, truth, labels, licence) and the methods. Downloads nothing. Next: fidopt_table, fidopt_run.
+FidOpt's benchmark catalogue through its own code: one line per dataset (task, anatomy, modalities, cases; task= and anatomy= narrow it) and the methods of the task; with dataset=<name>, that dataset's descriptor (cases, truth, labels, licence) and the methods of its task. corpus says which datasets are built here (FIDOPT_DATA): fidopt_run scores those only. Downloads nothing. Next: fidopt_table, fidopt_run.
 
 ### `fidopt_run`
 

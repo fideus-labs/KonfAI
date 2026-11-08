@@ -301,7 +301,14 @@ class DatasetInspectionMixin:
             "total_cases": len(case_dirs),
             # a flat folder (one file per case) is read as ONE case whose files are groups: say so first
             "layout_hint": (
-                None
+                "inverted layout: the case folders hold the same file names, so they are more likely GROUPS "
+                "(scans/, masks/...) and the files the cases. KonfAI reads <root>/<case>/<group>.<ext>: build that "
+                "layout with one folder per case (symlinks are fine) before training on it."
+                if per_case
+                and len(case_file_names) >= 2
+                and len({frozenset(names) for names in case_file_names}) == 1
+                and len(case_file_names[0]) >= 3
+                else None
                 if per_case or single_store_extension is not None
                 else "flat layout: the root is read as one case and each file as a group. KonfAI reads "
                 "<root>/<case>/<group>.<ext>: give each case its own folder (symlinks are fine)."

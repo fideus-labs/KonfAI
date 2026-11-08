@@ -45,6 +45,7 @@ try:
     from fastmcp.tools import Tool
     from fastmcp.tools.base import ToolResult
     from fastmcp.utilities.types import Image as FastMCPImage
+    from mcp_types import ToolAnnotations
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
 except ImportError as exc:  # pragma: no cover - depends on optional install
@@ -129,9 +130,52 @@ def _lean(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+#: Tools that change nothing a later call could not see anyway: a client that gates every other call behind an
+#: approval (Codex in a non-interactive run) lets these through on the hint alone.
+READ_ONLY_TOOLS = frozenset(
+    {
+        "describe_konfai_capabilities",
+        "list_apps",
+        "describe_app",
+        "inspect_dataset",
+        "read_file",
+        "check_component",
+        "check_config",
+        "describe_config_schema",
+        "inspect_object_signature",
+        "list_components",
+        "describe_extension_points",
+        "describe_model_outputs",
+        "design_config_strategy",
+        "get_job_status",
+        "read_live_metrics",
+        "read_job_log",
+        "read_training_curves",
+        "get_run_metrics",
+        "leaderboard",
+        "compare_runs",
+        "diff_run_configs",
+        "summarize_session",
+        "preview_volume",
+        "read_scout_report",
+        "fidopt_catalog",
+        "fidopt_table",
+    }
+)
+DESTRUCTIVE_TOOLS = frozenset({"cancel_job", "delete_run"})
+
+
+def _annotations(name: str) -> ToolAnnotations | None:
+    if name in READ_ONLY_TOOLS:
+        return ToolAnnotations(read_only_hint=True)
+    if name in DESTRUCTIVE_TOOLS:
+        return ToolAnnotations(destructive_hint=True)
+    return None
+
+
 class _LeanSchemas(McpMiddleware):
-    """What a client lists: lean input schemas, and no output schema when it is a free-form object (every tool
-    returns a dict). Calls are untouched: an explicit null is still accepted."""
+    """What a client lists: lean input schemas, no output schema when it is a free-form object (every tool
+    returns a dict), and the read-only / destructive hints. Calls are untouched: an explicit null is still accepted."""
 
     async def on_list_tools(self, context: Any, call_next: Any) -> Sequence[Tool]:
         tools = await call_next(context)
@@ -140,6 +184,7 @@ class _LeanSchemas(McpMiddleware):
                 update={
                     "parameters": _lean(tool.parameters),
                     "output_schema": tool.output_schema if (tool.output_schema or {}).get("properties") else None,
+                    "annotations": _annotations(tool.name) or tool.annotations,
                 }
             )
             for tool in tools
@@ -241,7 +286,7 @@ def _activate_session(name: str) -> None:
 
 
 def _activate_session_locked(name: str) -> None:
-    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, SCOUT_SERVICE, JOB_REGISTRY, _JOBS_LOCK, _JOBS
+    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, SCOUT_SERVICE, FIDOPT, JOB_REGISTRY, _JOBS_LOCK, _JOBS
     # Build the full replacement state locally, then swap every global in one consecutive block:
     # a concurrent tool (SSE/HTTP transports) must never observe a half-built mix (new layout
     # with the old session) during construction, which includes disk IO for persisted jobs. Readers
@@ -259,6 +304,7 @@ def _activate_session_locked(name: str) -> None:
     )
     app_service = AppService(workspace_layout=workspace_layout)
     scout_service = ScoutService(workspace_layout)
+    fidopt = FidoptAdapter(workspace_layout)
     WORKSPACE_LAYOUT = workspace_layout
     JOB_REGISTRY = job_registry
     _JOBS_LOCK = job_registry.lock
@@ -266,6 +312,7 @@ def _activate_session_locked(name: str) -> None:
     SESSION = session
     APP_SERVICE = app_service
     SCOUT_SERVICE = scout_service
+    FIDOPT = fidopt
 
 
 def _read_text_tail(path: Path, max_lines: int = MAX_LOG_TAIL_LINES) -> str:
@@ -466,6 +513,22 @@ def _resolve_train_config(config_file: str | None) -> Path:
     return config_path
 
 
+def _resolve_transform_config(config_file: str | None) -> Path:
+    """The session Transform.yml, or an alternate sibling (e.g. Transform_masks.yml): two chains need two files."""
+    if config_file is None:
+        config_path = SESSION.config_path("transform")
+        if not config_path.exists():
+            raise ValueError("Transform.yml not found. Write a transform config first.")
+        return config_path
+    if Path(config_file).name != config_file or config_file in {".", ".."}:
+        raise ValueError("config_file must be a direct child of the session workspace.")
+    config_path = SESSION.workspace_dir() / config_file
+    if not config_path.exists():
+        raise ValueError(f"{config_file} not found in the session workspace.")
+    validate_yaml_content(config_path.read_text(encoding="utf-8"), config_file, expected_root="Transformer")
+    return config_path
+
+
 def _validate_cluster(cluster: dict[str, Any] | None) -> dict[str, Any] | None:
     if cluster is None:
         return None
@@ -629,7 +692,11 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
         config_path=workspace / f"app_{kind}.ref",
         run_name=spec["run_name"],
         devices=_app_job_devices(
-            kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
+            spec["gpu"]
+            if "gpu" in spec  # the spec says (a FidOpt job): its runner takes no gpu argument
+            else kwargs.get("gpu")
+            if kwargs.get("gpu") is not None
+            else (kwargs.get("extra") or {}).get("gpu"),
             kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
         ),
         runtime_log_path=None,
@@ -1707,6 +1774,8 @@ def fidopt_run(
     extra: Annotated[
         list[str] | None, Field(description="Further fidopt flags (e.g. --family NAME, --try LABEL=SETTINGS).")
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch one allowed FidOpt operation as a tracked job."""
     if operation != "check" and not dataset:
@@ -1722,7 +1791,7 @@ def fidopt_run(
     )
     payload = _launch_app_job(spec)
     payload["next_actions"] = ["get_job_status", "read_job_log", "fidopt_table"]
-    return payload
+    return _launched(payload, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
@@ -3283,11 +3352,11 @@ def _tool_run_transform(
     overwrite: bool = False,
     quiet: bool = False,
     single_process: bool = False,
+    config_file: str | None = None,
 ) -> dict[str, Any]:
     """Launch a dataset transform job from the current session `Transform.yml`."""
-    config_path = SESSION.config_path("transform")
-    if not config_path.exists():
-        raise ValueError("Transform.yml not found. Write a transform config first.")
+    config_path = _resolve_transform_config(config_file)
+    normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
     blocked = SESSION.workflow_blocker("transform")
     if blocked is not None:
         return blocked
@@ -3304,21 +3373,20 @@ def _tool_run_transform(
         "transform",
         job_spec["command"],
         config_path,
-        extra_manifest={"devices": {"gpu": [], "cpu": cpu}},
+        extra_manifest={"devices": {"gpu": normalized_gpu or [], "cpu": cpu}},
         target=job_spec["target"],
         kwargs=job_spec["kwargs"],
-        devices=_job_devices(None, cpu),
+        devices=_job_devices(normalized_gpu, cpu),
     )
 
 
 def _tool_plan_transform(
     cpu: int | None = None,
     overwrite: bool = False,
+    config_file: str | None = None,
 ) -> dict[str, Any]:
     """Plan the transform without running it: per-case verdicts, budget, and what needs attention."""
-    config_path = SESSION.config_path("transform")
-    if not config_path.exists():
-        raise ValueError("Transform.yml not found. Write a transform config first.")
+    config_path = _resolve_transform_config(config_file)
     blocked = SESSION.workflow_blocker("transform")
     if blocked is not None:
         return blocked
@@ -3554,7 +3622,7 @@ async def read_file(
     ],
     template: Annotated[str | None, Field(description="An example template name: read one of its files.")] = None,
     max_chars: Annotated[int, Field(description="Characters returned at most.")] = 20000,
-    offset: Annotated[int, Field(description="Character offset to start from (session and template files).")] = 0,
+    offset: Annotated[int, Field(description="Character offset to start from.")] = 0,
     max_lines: Annotated[int, Field(description="Lines returned at most from a dataset file.")] = 200,
 ) -> dict[str, Any]:
     if "://" in path:
@@ -3583,7 +3651,11 @@ async def read_file(
     except ValueError:
         if not candidate.is_absolute():
             raise
-        return read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=max_chars)
+        sidecar = read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=offset + max_chars)
+        if offset and isinstance(sidecar.get("content"), str):
+            sidecar["content"] = sidecar["content"][offset : offset + max_chars]
+            sidecar["offset"] = offset
+        return sidecar
     if resolved.suffix.lower() in HDF5_SUFFIXES:
         # run_app writes a registration's Transform.h5 into the session: its summary, not a text dump.
         return read_dataset_sidecar(resolved, max_lines=max_lines, max_chars=max_chars)
@@ -3662,13 +3734,21 @@ def run_transform(
     overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
     quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
     single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,
+    config_file: Annotated[
+        str | None,
+        Field(
+            description="Alternate transform config in the session (e.g. Transform_masks.yml; default Transform.yml)."
+        ),
+    ] = None,
     wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
     timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     if dry_run:
-        return _tool_plan_transform(cpu=cpu, overwrite=overwrite)
+        return _tool_plan_transform(cpu=cpu, overwrite=overwrite, config_file=config_file)
     return _launched(
-        _tool_run_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process),
+        _tool_run_transform(
+            gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process, config_file=config_file
+        ),
         wait,
         timeout_s,
     )
@@ -3833,15 +3913,45 @@ def fidopt_catalog(
     ] = None,
     task: Annotated[
         Literal["registration", "segmentation", "synthesis"] | None,
-        Field(description="Restrict the datasets to one task."),
+        Field(description="Restrict the datasets (and the methods) to one task."),
     ] = None,
+    anatomy: Annotated[str | None, Field(description="Keep the datasets whose anatomy mentions this word.")] = None,
+    methods: Annotated[bool, Field(description="Include the methods (of the task, or of the dataset's task).")] = True,
 ) -> dict[str, Any]:
-    methods = FIDOPT.list_methods()
+    data_root = os.environ.get("FIDOPT_DATA")
+    corpus = {
+        "path": data_root,
+        # what fidopt_run can score here: the corpus is built by each user, a descriptor alone is not a dataset
+        "datasets_present": (
+            sorted(p.name for p in Path(data_root).expanduser().iterdir() if p.is_dir() and any(p.iterdir()))
+            if data_root and Path(data_root).expanduser().is_dir()
+            else []
+        ),
+    }
     if dataset:
         described = FIDOPT.describe_dataset(dataset)
-        return {"dataset": described, "methods": methods, "next_actions": ["fidopt_table", "fidopt_run"]}
+        wanted = described.get("task")
+        listed = [m for m in FIDOPT.list_methods() if not wanted or m.get("task") == wanted] if methods else []
+        return {
+            "dataset": described,
+            "methods": listed,
+            "corpus": corpus,
+            "next_actions": ["fidopt_table", "fidopt_run"],
+        }
     datasets = FIDOPT.list_datasets(task)
-    return {"datasets": datasets, "methods": methods, "next_actions": ["fidopt_catalog", "fidopt_table", "fidopt_run"]}
+    if anatomy:
+        datasets = [d for d in datasets if anatomy.lower() in str(d.get("anatomy") or "").lower()]
+    # one line per dataset: the descriptor (fidopt_catalog(dataset=...)) holds the rest
+    compact = [
+        {key: d.get(key) for key in ("name", "task", "anatomy", "modalities", "cases", "development")} for d in datasets
+    ]
+    listed = [m for m in FIDOPT.list_methods() if not task or m.get("task") == task] if methods else []
+    return {
+        "datasets": compact,
+        "methods": listed,
+        "corpus": corpus,
+        "next_actions": ["fidopt_catalog", "fidopt_table", "fidopt_run"],
+    }
 
 
 def main(

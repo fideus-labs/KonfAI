@@ -159,6 +159,9 @@ def fake_fidopt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable.chmod(executable.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("KONFAI_MCP_FIDOPT", str(executable))
     monkeypatch.setenv("KONFAI_MCP_FIDOPT_PYTHON", sys.executable)
+    corpus = tmp_path / "corpus"  # the pre-flight wants the dataset built here
+    (corpus / "AMOS_CTCT").mkdir(parents=True)
+    monkeypatch.setenv("FIDOPT_DATA", str(corpus))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "fakepkg"))
     return executable
 

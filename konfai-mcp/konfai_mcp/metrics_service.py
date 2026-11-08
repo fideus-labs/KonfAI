@@ -439,7 +439,7 @@ class MetricsServiceMixin:
                 full_tag = tag if prefix == "." else f"{prefix}/{tag}"
                 if tags and not any(wanted in full_tag for wanted in tags):
                     continue
-                events = accumulator.Scalars(tag)
+                events = sorted({e.step: e for e in accumulator.Scalars(tag)}.values(), key=lambda e: e.step)
                 stride = max(1, len(events) // max(max_points, 1))
                 sampled = events[::stride]
                 if events and sampled[-1].step != events[-1].step:
@@ -466,13 +466,22 @@ class MetricsServiceMixin:
         payload_b = self.run_metrics_payload(run_b, split=split, session=session)
         cases_a = payload_a["metrics"].get("case", {})
         cases_b = payload_b["metrics"].get("case", {})
-        common_metrics = sorted(set(cases_a) & set(cases_b))
+        pairs = [(name, name) for name in sorted(set(cases_a) & set(cases_b))]
         if metric is not None:
-            common_metrics = [name for name in common_metrics if name.lower().endswith(metric.lower())]
-            if not common_metrics:
+            wanted = metric.lower()
+            pairs = [(a, b) for a, b in pairs if a.lower().endswith(wanted)]
+            if not pairs:
+                # the same metric under two names: one match on each side pairs them
+                in_a = [n for n in cases_a if n.lower() == wanted or n.lower().endswith(":" + wanted)]
+                in_b = [n for n in cases_b if n.lower() == wanted or n.lower().endswith(":" + wanted)]
+                if len(in_a) == 1 and len(in_b) == 1:
+                    pairs = [(in_a[0], in_b[0])]
+            if not pairs:
                 raise ValueError(
-                    f"Metric '{metric}' not found in both runs. Common metrics: {sorted(set(cases_a) & set(cases_b))}"
+                    f"Metric '{metric}' not found in both runs. Run a: {sorted(cases_a)}; run b: {sorted(cases_b)}."
                 )
+        common_metrics = [a for a, _ in pairs]
+        name_b_of = dict(pairs)
         declared_a = self._declared_directions(payload_a["metrics"])
         declared_b = self._declared_directions(payload_b["metrics"])
         # Newest declaration first, the leaderboard's own rule: an old file that still says "min" for a
@@ -494,17 +503,31 @@ class MetricsServiceMixin:
                     "higher-is-better metric, the winner is inverted: re-evaluate so the metric declares "
                     "its direction, or read per-case deltas directly."
                 )
-            common_cases = sorted(set(cases_a[name]) & set(cases_b[name]))
-            deltas = {case: float(cases_b[name][case]) - float(cases_a[name][case]) for case in common_cases}
+            name_b = name_b_of[name]
+            common_cases = sorted(set(cases_a[name]) & set(cases_b[name_b]))
+            case_b_of = {case: case for case in common_cases}
+            alignment = "by name"
+            if not common_cases and len(cases_a[name]) == len(cases_b[name_b]) and cases_a[name]:
+                # two runs that named their cases differently (1PC006 vs P000): paired in sorted order, said so
+                common_cases = sorted(cases_a[name])
+                case_b_of = dict(zip(common_cases, sorted(cases_b[name_b]), strict=True))
+                alignment = "by order"
+            deltas = {
+                case: float(cases_b[name_b][case_b_of[case]]) - float(cases_a[name][case]) for case in common_cases
+            }
             better_b = sum(1 for delta in deltas.values() if (delta > 0) == (direction == "max") and delta != 0)
             better_a = sum(1 for delta in deltas.values() if (delta < 0) == (direction == "max") and delta != 0)
             mean_a = (
                 sum(float(cases_a[name][case]) for case in common_cases) / len(common_cases) if common_cases else None
             )
             mean_b = (
-                sum(float(cases_b[name][case]) for case in common_cases) / len(common_cases) if common_cases else None
+                sum(float(cases_b[name_b][case_b_of[case]]) for case in common_cases) / len(common_cases)
+                if common_cases
+                else None
             )
             comparison[name] = {
+                "metric_b": name_b,
+                "case_alignment": alignment,
                 "direction": direction,
                 "direction_source": direction_source,
                 "cases": len(common_cases),
