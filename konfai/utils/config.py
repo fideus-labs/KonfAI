@@ -68,15 +68,7 @@ class Included(_CommentedMap):
     """
 
     yaml_tag = "!include"
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.spec = ""
-
-    def __deepcopy__(self, memo: dict) -> "Included":
-        copy = super().__deepcopy__(memo)
-        copy.spec = self.spec
-        return copy
+    spec = ""
 
     @classmethod
     def to_yaml(cls, representer: Any, node: "Included") -> Any:
@@ -84,9 +76,8 @@ class Included(_CommentedMap):
 
     @classmethod
     def from_yaml(cls, constructor: Any, node: Any) -> "Included":
-        name = str(node.start_mark.name or "")
-        base = Path(name).resolve().parent if name and not name.startswith("<") else Path.cwd()
-        return _included(str(constructor.construct_scalar(node)), base)
+        # ruamel names a file stream by its path and a string "<unicode string>", whose parent is the working directory
+        return _included(str(constructor.construct_scalar(node)), Path(node.start_mark.name).resolve().parent)
 
 
 def _yaml() -> ruamel.yaml.YAML:
@@ -99,12 +90,6 @@ def _yaml() -> ruamel.yaml.YAML:
 
 
 yaml = _yaml()
-
-
-def _hub_file(reference: str, base: Path) -> re.Match[str] | None:
-    """``reference`` as a file of the Hugging Face Hub, unless a file of that name lies beside the includer."""
-    hub = _HUB_FILE.match(reference)
-    return hub if hub is not None and not (base / reference).exists() else None
 
 
 def _hub_download(spec: str, origin: _HubOrigin) -> Path:
@@ -128,12 +113,12 @@ def _hub_download(spec: str, origin: _HubOrigin) -> Path:
         ) from error
 
 
-def _resolve(spec: str, base: Path, includer: _HubOrigin | None = None) -> tuple[Path, _HubOrigin | None]:
+def _resolve(spec: str, base: Path, includer: _HubOrigin | None) -> tuple[Path, _HubOrigin | None]:
     """The file an ``!include`` names and, when it lives on the Hub, where: named there outright, or relative to an
     includer that itself came from the Hub, whose repository and revision it then shares."""
     reference = spec.partition("#")[0]
-    hub = _hub_file(reference, base)
-    if hub is not None:
+    hub = _HUB_FILE.match(reference)
+    if hub is not None and not (base / reference).exists():  # a file of that name beside the includer is a file
         origin: _HubOrigin = (hub["repo"], hub["revision"], hub["path"])
     elif includer is not None and not Path(reference).is_absolute():
         inside = posixpath.normpath(posixpath.join(posixpath.dirname(includer[2]), reference))
@@ -141,13 +126,8 @@ def _resolve(spec: str, base: Path, includer: _HubOrigin | None = None) -> tuple
             raise ConfigError(f"'!include {spec}' leaves the repository '{includer[0]}' it is read from.")
         origin = (includer[0], includer[1], inside)
     else:
-        return (Path(reference) if Path(reference).is_absolute() else base / reference).resolve(), None
+        return (base / reference).resolve(), None
     return _hub_download(spec, origin), origin
-
-
-def include_path(spec: str, base: Path) -> Path:
-    """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
-    return _resolve(spec, base)[0]
 
 
 def _included(spec: str, base: Path) -> Included:
