@@ -1,0 +1,24 @@
+# konfai-apps eval APP --evaluation-file Evaluation_with_jacobian.yml -i FIELD
+# How regular a displacement field is (Volume_0, alone: no reference), from the determinant of its Jacobian: the
+# fraction of voxels where it folds, its minimum and the spread of its log. An affine's Jacobian is its matrix,
+# everywhere: give a dense field.
+Evaluator:
+  metrics:
+    Transform:
+      targets_criterions:
+        Transform:
+          criterions_loader:
+            JacobianFolding: {}
+            JacobianMin: {}
+            JacobianLogStd: {}
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          Transform:
+            transforms: None
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg
