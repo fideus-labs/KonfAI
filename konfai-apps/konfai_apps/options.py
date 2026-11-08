@@ -23,10 +23,10 @@ from pathlib import Path
 
 
 def local_path(value: str) -> Path:
-    """An argparse type: a local path, made absolute. A URI is refused: every input is staged from the local
-    filesystem."""
+    """An argparse type: a local path, made absolute. A URI is refused: what this option names is written, or staged
+    from the local filesystem (only an OME-Zarr INPUT is read in place through a URI)."""
     if "://" in value:
-        raise argparse.ArgumentTypeError(f"{value!r} is a URI; inputs are read from local paths, so copy it first.")
+        raise argparse.ArgumentTypeError(f"{value!r} is a URI, and this option takes a local path.")
     return Path(value).resolve()
 
 
@@ -72,3 +72,20 @@ def add_device(parser: argparse.ArgumentParser, download: bool = True) -> None:
             action="store_true",
             help="Refresh required app files before running.",
         )
+
+
+def add_run_options(parser: argparse.ArgumentParser, output_format: bool = True) -> None:
+    """Add the run's own choices every app shares, each sugar over the ``--set`` it writes (``run_overrides``):
+    ``--output-format [OUTPUT=]FORMAT`` (repeatable, one output each) and ``--seed N``."""
+    if output_format:
+        parser.add_argument(
+            "--output-format",
+            "--output_format",
+            dest="output_format",
+            action="append",
+            default=None,
+            metavar="[OUTPUT=]FORMAT",
+            help="Write every output in FORMAT (mha, nii.gz, omezarr, ...), or OUTPUT=FORMAT for one output "
+            "(repeatable). Default: the app's own.",
+        )
+    parser.add_argument("--seed", type=int, default=None, help="The run's random seed. Default: the app's own.")

@@ -23,16 +23,17 @@ fiducials forward through ``T`` and compare them against the *moving* fiducials,
 near-zero TRE for a perfect transform. This test locks in that direction.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 from impact_reg_konfai import impact_reg as impact_reg_module
-from konfai.utils.dataset import read_landmarks, write_landmarks
+from konfai.utils.dataset import write_landmarks
 
 
-def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path) -> None:
     # A known transform T: fixed -> moving (translation by +5, -3, +2 in physical space).
     translation = (5.0, -3.0, 2.0)
     transform = sitk.TranslationTransform(3, translation)
@@ -47,30 +48,15 @@ def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path, monkeypatch:
     write_landmarks(fixed_pts, fixed_fid)
     write_landmarks(moving_pts, moving_fid)
 
-    captured: dict[str, object] = {}
-
-    def fake_init(self, *args, **kwargs) -> None:
-        return None
-
-    def fake_evaluate(self, *, inputs, gt, evaluation_file, **kwargs) -> None:
-        if evaluation_file == "Evaluation_with_fid.yml":
-            captured["moved"] = read_landmarks(Path(inputs[0][0]))
-            captured["reference"] = read_landmarks(Path(gt[0][0]))
-
-    monkeypatch.setattr(impact_reg_module.KonfAIApp, "__init__", fake_init)
-    monkeypatch.setattr(impact_reg_module.KonfAIApp, "evaluate", fake_evaluate)
-    monkeypatch.setattr(impact_reg_module, "_write_evaluation_summary", lambda *args: None)  # the stub scores nothing
-
     app = impact_reg_module.ImpactRegKonfAIApp()
     app.evaluate(
         transforms=[transform_path],
         gt_fixed_fid=[fixed_fid],
         gt_moving_fid=[moving_fid],
         output=tmp_path / "Output",
+        quiet=True,
     )
 
-    assert "moved" in captured, "landmark evaluation branch did not run"
-    # The reference passed to the metric is the moving fiducial set; the scored points are the
-    # fixed fiducials warped by T. For a perfect T they coincide (TRE ~ 0), not doubled.
-    np.testing.assert_allclose(captured["reference"], moving_pts, atol=1e-6)
-    np.testing.assert_allclose(captured["moved"], moving_pts, atol=1e-4)
+    # The fixed fiducials pushed through T land on the moving ones: TRE ~ 0, not doubled, as the other way round.
+    summary = json.loads((tmp_path / "Output" / "Evaluation_summary.json").read_text())
+    assert summary["case"]["FixedFid:MovingFid:TRE"]["P000"] == pytest.approx(0.0, abs=1e-4)

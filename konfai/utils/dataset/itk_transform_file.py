@@ -37,9 +37,12 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
+    AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
     Attribute,
     _encode_transform_leaves,
+    _is_field_shape,
+    affine_from_attributes,
     image_to_data,
     is_an_image,
     record_region,
@@ -55,11 +58,13 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
 
     Three datasets, as ITK's writer lays them out: the type (a variable-length ASCII string), the
     fixed parameters (size, origin, spacing, direction) and the parameters, the field buffer with
-    the component fastest, float64. Returns the open file and the parameters dataset.
+    the component fastest, float64. ``spatial`` is 2-D or 3-D, and the field has as many components.
+    Returns the open file and the parameters dataset.
     """
+    rank = len(spatial)
     fixed = np.concatenate(
         [
-            np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y, z)
+            np.asarray(spatial[::-1], dtype=np.float64),  # size, in (x, y[, z])
             attributes.get_np_array("Origin").astype(np.float64),
             attributes.get_np_array("Spacing").astype(np.float64),
             attributes.get_np_array("Direction").astype(np.float64).reshape(-1),
@@ -68,12 +73,12 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
     file = _open_h5(path, "w")
     file.create_dataset(
         "TransformGroup/0/TransformType",
-        data=[b"DisplacementFieldTransform_double_3_3"],
+        data=[f"DisplacementFieldTransform_double_{rank}_{rank}".encode()],
         dtype=h5py.string_dtype(encoding="ascii"),
     )
     file.create_dataset("TransformGroup/0/TransformFixedParameters", data=fixed)
     parameters = file.create_dataset(
-        "TransformGroup/0/TransformParameters", shape=(3 * int(np.prod(spatial)),), dtype=np.float64
+        "TransformGroup/0/TransformParameters", shape=(rank * int(np.prod(spatial)),), dtype=np.float64
     )
     return file, parameters
 
@@ -81,8 +86,9 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
 class _ItkTransformDataStream(DataStream):
     """An ITK displacement-transform file written region by region.
 
-    The buffer is ``[z][y][x]`` with the component fastest, so a full-width leading-axis slab is
-    one contiguous span of the parameters. Under a temporary name until the clean exit.
+    The buffer is ``[z][y][x]`` (``[y][x]`` in 2-D) with the component fastest, so a full-width leading-axis slab
+    is one contiguous span of the parameters. ``spatial`` is the field's shape, its components first. Under a
+    temporary name until the clean exit.
     """
 
     def __init__(self, file: Any, parameters: Any, temporary_path: str, final_path: str, spatial: list[int]) -> None:
@@ -95,7 +101,7 @@ class _ItkTransformDataStream(DataStream):
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         channels, leading, *rest = slices
-        full = (channels.start or 0) == 0 and channels.stop in (None, 3)
+        full = (channels.start or 0) == 0 and channels.stop in (None, self._spatial[0])
         for axis, part in enumerate(rest, start=2):
             full = full and (part.start or 0) == 0 and part.stop in (None, self._spatial[axis])
         if not full:
@@ -105,7 +111,7 @@ class _ItkTransformDataStream(DataStream):
             )
         # One buffer: the cast and the transpose are the same pass.
         block = np.ascontiguousarray(np.moveaxis(data, 0, -1), dtype=np.float64).ravel()
-        offset = 3 * int(leading.start or 0) * int(np.prod(self._spatial[2:], dtype=np.int64))
+        offset = self._spatial[0] * int(leading.start or 0) * int(np.prod(self._spatial[2:], dtype=np.int64))
         self._parameters[offset : offset + block.size] = block
 
     def _close(self, success: bool) -> None:
@@ -186,7 +192,7 @@ class ItkTransformFile(AbstractFile):
                     # The parameters are the field: one span off the file, read at the dtype a
                     # region read takes, so the two routes carry the same values.
                     shape, attributes = header
-                    return self._field_region(file, shape[1:], (slice(None),) * 4), attributes
+                    return self._field_region(file, shape[1:], (slice(None),) * len(shape)), attributes
         path = self._read_path(name)
         if sitk is None:  # a displacement field reads through h5py above; any other transform needs ITK
             raise DatasetManagerError(
@@ -204,7 +210,7 @@ class ItkTransformFile(AbstractFile):
 
     def bounded_region_reads(self, name: str) -> bool:
         shape, _attributes = self.get_infos("", name)
-        return len(shape) == 4 and shape[0] == 3
+        return _is_field_shape(shape)
 
     @contextlib.contextmanager
     def _field_file(self, name: str) -> Iterator[Any]:
@@ -216,18 +222,20 @@ class ItkTransformFile(AbstractFile):
     @staticmethod
     def _field_header(file: Any) -> tuple[list[int], Attribute] | None:
         """Shape and geometry of a displacement entry off its fixed parameters (size, origin,
-        spacing, direction); ``None`` for a transform of another kind."""
+        spacing, direction), in the dimension its type names (``DisplacementFieldTransform_double_2_2`` or
+        ``_3_3``); ``None`` for a transform of another kind."""
         kind = bytes(file["TransformGroup/0/TransformType"][0])
         if not kind.startswith(b"DisplacementFieldTransform"):
             return None
+        rank = int(kind.rsplit(b"_", 1)[1])
         fixed = np.asarray(file["TransformGroup/0/TransformFixedParameters"][()], dtype=np.float64)
         attributes = Attribute()
-        attributes["Origin"] = fixed[3:6]
-        attributes["Spacing"] = fixed[6:9]
-        attributes["Direction"] = fixed[9:18]
+        attributes["Origin"] = fixed[rank : 2 * rank]
+        attributes["Spacing"] = fixed[2 * rank : 3 * rank]
+        attributes["Direction"] = fixed[3 * rank : 3 * rank + rank * rank]
         attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-        size_xyz = [int(extent) for extent in fixed[0:3]]
-        return [3, *size_xyz[::-1]], attributes
+        size_xyz = [int(extent) for extent in fixed[0:rank]]
+        return [rank, *size_xyz[::-1]], attributes
 
     @staticmethod
     def _covered(item: slice, extent: int) -> tuple[int, int, slice]:
@@ -251,11 +259,15 @@ class ItkTransformFile(AbstractFile):
         The buffer is ``[z][y][x]`` with the component fastest: the rows of one plane the region
         covers are one contiguous span, and the planes it covers are such spans a stride apart. A
         forward step on the leading axis is the stride; every other step, and a reversed axis,
-        subsamples the block after the read.
+        subsamples the block after the read. A 2-D field (``[y][x]``, two components) is read as the one
+        plane of a 3-D buffer.
         """
+        components = len(spatial)
+        if components == 2:
+            spatial, slices = [1, *spatial], (slices[0], slice(None), *slices[1:])
         plane_low, plane_high, planes = cls._covered(slices[1], spatial[0])
         row_low, row_high, rows = cls._covered(slices[2], spatial[1])
-        row_length = 3 * int(spatial[2])
+        row_length = components * int(spatial[2])
         plane_length = row_length * int(spatial[1])
         if planes.step > 0:  # the hyperslab's stride
             stride, count, planes = planes.step, len(range(plane_low, plane_high, planes.step)), slice(None)
@@ -270,15 +282,18 @@ class ItkTransformFile(AbstractFile):
                 (plane_low * plane_length + row_low * row_length,), (count,), (stride * plane_length,), (block,)
             )
             parameters.id.read(h5py.h5s.create_simple((span.size,)), selection, span)
-        region = span.reshape(count, row_high - row_low, int(spatial[2]), 3)[planes, rows, slices[3], slices[0]]
-        return np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
+        region = span.reshape(count, row_high - row_low, int(spatial[2]), components)[
+            planes, rows, slices[3], slices[0]
+        ]
+        region = np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
+        return region[:, 0] if components == 2 else region
 
     def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         """A region of a displacement entry, decoded from the parameters it maps to alone."""
         if h5py.is_hdf5(self._read_path(name)):
             with self._field_file(name) as file:
                 header = self._field_header(file)
-                if header is not None and len(slices) == 4:
+                if header is not None and len(slices) == len(header[0]):
                     shape, attributes = header
                     return self._field_region(file, shape[1:], slices), record_region(attributes, shape, slices)
         data, attributes = self.file_to_data(group, name)
@@ -294,16 +309,18 @@ class ItkTransformFile(AbstractFile):
         # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
+        if attributes is not None and AFFINE_ATTRIBUTE in attributes:
+            data = affine_from_attributes(attributes)  # the map a field's header declares, in place of the field
         if sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, staging)
         else:
             if sitk is not None and isinstance(data, sitk.Image):
                 data, attributes = image_to_data(data)
             array = np.asarray(data)
-            if attributes is None or array.ndim != 4 or array.shape[0] != 3:
+            if attributes is None or not _is_field_shape(array.shape):
                 raise DatasetManagerError(
-                    f"An ':itktransform' entry is a 3-component 3-D displacement field; '{name}' has"
-                    f" shape {list(array.shape)}.",
+                    f"An ':itktransform' entry is a displacement field, one component per axis in 2-D or 3-D;"
+                    f" '{name}' has shape {list(array.shape)}.",
                     "Write the field itself (channel-first, with its geometry), or a sitk.Transform.",
                 )
             spatial = [int(extent) for extent in array.shape[1:]]
@@ -326,7 +343,7 @@ class ItkTransformFile(AbstractFile):
         region_shape: list[int] | None = None,
     ) -> DataStream | None:
         del dtype, region_shape  # the parameters are float64 whatever arrives
-        if len(shape) != 4 or shape[0] != 3 or not is_an_image(attributes):
+        if not _is_field_shape(shape) or not is_an_image(attributes):
             return None
         os.makedirs(self.filename, exist_ok=True)
         spatial = [int(extent) for extent in shape[1:]]
@@ -334,7 +351,7 @@ class ItkTransformFile(AbstractFile):
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
         file, parameters = _create_itk_transform_file(staging, spatial, attributes)
-        return _ItkTransformDataStream(file, parameters, staging, final, [3, *spatial])
+        return _ItkTransformDataStream(file, parameters, staging, final, [len(spatial), *spatial])
 
     def _entries(self) -> list[str]:
         return sorted(

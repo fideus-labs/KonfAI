@@ -36,6 +36,7 @@ from konfai.utils.runtime.distributed import setup_gpu as setup_gpu
 from konfai.utils.runtime.distributed import synchronize_data as synchronize_data
 from konfai.utils.runtime.environment import ClusterKwargs as ClusterKwargs
 from konfai.utils.runtime.environment import NeedDevice as NeedDevice
+from konfai.utils.runtime.environment import check_weights as check_weights
 from konfai.utils.runtime.environment import checkpoint_source as checkpoint_source
 from konfai.utils.runtime.environment import clear_directory_except_logs as clear_directory_except_logs
 from konfai.utils.runtime.environment import configure_workflow_environment as configure_workflow_environment
@@ -50,6 +51,7 @@ from konfai.utils.runtime.environment import gpu_info as gpu_info
 from konfai.utils.runtime.environment import is_interactive_session as is_interactive_session
 from konfai.utils.runtime.environment import memory_forecast as memory_forecast
 from konfai.utils.runtime.environment import safe_torch_load as safe_torch_load
+from konfai.utils.runtime.environment import save_weights as save_weights
 from konfai.utils.runtime.logging import ANSI_ESCAPE_RE as ANSI_ESCAPE_RE
 from konfai.utils.runtime.logging import DataLog as DataLog
 from konfai.utils.runtime.logging import Log as Log
@@ -73,6 +75,7 @@ __all__ = [
     "TensorBoard",
     "apply_cpu_thread_budget",
     "bound_allocator_growth",
+    "check_weights",
     "checkpoint_source",
     "cleanup",
     "clear_directory_except_logs",
@@ -98,6 +101,7 @@ __all__ = [
     "return_freed_heap",
     "run_distributed_app",
     "safe_torch_load",
+    "save_weights",
     "seed_all",
     "setup_gpu",
     "synchronize_data",

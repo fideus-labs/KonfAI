@@ -88,10 +88,21 @@ def _add_common_args(parser: argparse.ArgumentParser, command: State, tensorboar
             action="store_true",
             help="Launch TensorBoard on 127.0.0.1 (KONFAI_TENSORBOARD_HOST names another address).",
         )
+    _add_config_actions(parser)
+
+
+def _add_config_actions(parser: argparse.ArgumentParser) -> None:
+    """The flags that act on the config file and exit without running."""
     parser.add_argument(
         "--init",
         action="store_true",
         help="Create the config file if missing, resolve every default into it, and exit without running.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="List every mistake of the config file against its schema and exit, without running or writing it "
+        "(needs konfai[check]).",
     )
 
 
@@ -191,11 +202,7 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         " takes back what the probe created (the entry, and the store when it did not exist). The"
         " plan is printed even with -q.",
     )
-    parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Create the config file if missing, resolve every default into it, and exit without running.",
-    )
+    _add_config_actions(parser)
     _add_dir_argument(
         parser, "transforms", "Directory where run logs are written; --plan prints and writes nothing there"
     )
@@ -299,6 +306,42 @@ def _run_init(args: dict[str, Any]) -> None:
     )
 
 
+def _run_check(args: dict[str, Any]) -> None:
+    """``--check``: every mistake of the config against its schema, each at its key, without building anything
+    or writing the file. A mistake the run would refuse exits 1; a key nothing reads is a warning, except for
+    TRANSFORM, which refuses it."""
+    from pathlib import Path
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    from konfai.config_schema import config_errors
+    from konfai.utils.errors import KonfAIError
+
+    command = args["command"]
+    default_name = _INIT_TARGETS[command][0]
+    config_path = Path(args.get(_COMMANDS[command][2]) or args.get("config") or default_name)
+    if not config_path.is_file():
+        print(f"[KonfAI] '{config_path}' does not exist: 'konfai {command} --init' writes it.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        mistakes = config_errors(YAML(typ="safe").load(config_path.read_text(encoding="utf-8")), default_name)
+    except (KonfAIError, YAMLError) as error:
+        print(f"[KonfAI] '{config_path}': {str(error).strip()}", file=sys.stderr)
+        sys.exit(1)
+    errors = 0
+    for mistake in mistakes:
+        ignored = mistake.unread and command != str(State.TRANSFORM)
+        errors += not ignored
+        print(f"{mistake.path}: {mistake.message}{' (warning: ignored)' if ignored else ''}")
+    print(
+        f"[KonfAI] {errors} error(s), {len(mistakes) - errors} warning(s) in '{config_path}'. The shape of the config"
+        " only: files, channels and a model's own arguments are checked when the workflow runs."
+    )
+    if errors:
+        sys.exit(1)
+
+
 def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
     """The ``--gpu`` choices, checked after parsing, so ``--help`` and a usage error never import torch."""
     if not gpu:
@@ -329,6 +372,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
     if args["command"] == "list":
         # Before the workflow machinery: `list` declares only its kind, none of the run flags.
         _run_list(args["kind"])
+        return
+    if args.pop("check", False):  # before the devices: a config is checked on any machine
+        if args.get("init"):
+            parser.error("--check reads the config as written: run --init first, then --check.")
+        _run_check(args)
         return
     _check_gpu_ids(parser, args["gpu"])
     module_name, function_name, config_key = _COMMANDS[args["command"]]
