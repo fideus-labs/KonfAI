@@ -75,7 +75,9 @@ def test_explicit_classes_override_the_per_model_ones():
 
 
 def test_mean_reduction_carries_no_classes():
+    # A plain same-class ensemble (logits already final, no resample) reduces straight to output.
     program = assemble_program([{"id": "a", "manifest": M}, {"id": "b", "manifest": M}], reduce="mean")
+    assert [s.get("op") for s in program["steps"] if "op" in s] == ["mean"]
     assert program["steps"][-1] == {"op": "mean", "in": ["a", "b"], "out": "output"}
 
 
@@ -265,13 +267,6 @@ def test_hoisting_does_not_mutate_the_input_manifest():
     before = json.dumps(MR, sort_keys=True)
     assemble_program([{"id": f"f{i}", "manifest": MR} for i in range(3)], reduce="mean")
     assert json.dumps(MR, sort_keys=True) == before, "assemble_program must not mutate the caller's manifest"
-
-
-def test_mean_ensemble_without_post_or_resample_has_no_tail():
-    # A plain same-class ensemble (logits already final, no resample) reduces straight to output.
-    program = assemble_program([{"id": "a", "manifest": M}, {"id": "b", "manifest": M}], reduce="mean")
-    assert [s.get("op") for s in program["steps"] if "op" in s] == ["mean"]
-    assert program["steps"][-1] == {"op": "mean", "in": ["a", "b"], "out": "output"}
 
 
 def test_non_channel_axis_post_op_cannot_be_hoisted():

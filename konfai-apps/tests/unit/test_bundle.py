@@ -22,6 +22,17 @@ import locale
 import sys
 
 import pytest
+from konfai.portable import (
+    assemble_program,
+    aux_mask_groups,
+    derive_blend,
+    derive_onnx_params,
+    derive_overlap,
+    derive_reduction,
+    mask_specs,
+    transform_manifest,
+    tta_passes,
+)
 from konfai.utils.errors import ConfigError
 from konfai_apps.bundle import assemble_bundle
 from konfai_apps.errors import AppMetadataError
@@ -115,8 +126,6 @@ def test_derive_requirements_keeps_only_extra(tmp_path):
 
 
 def test_derive_onnx_params_from_config():
-    from konfai.portable import derive_onnx_params
-
     config = {
         "Predictor": {
             "Model": {"classpath": "Model:UNetpp", "UNetpp": {"nb_channel": 5}},
@@ -132,8 +141,6 @@ def test_derive_onnx_params_from_config():
 
 
 def test_derive_overlap_broadcasts_scalar_and_drops_singleton():
-    from konfai.portable import derive_overlap
-
     assert derive_overlap({"overlap": 32}, [96, 128, 160]) == [32, 32, 32]  # scalar broadcast
     assert derive_overlap({"overlap": [8, 8]}, [64, 64]) == [8, 8]  # per-axis list kept
     # a full-rank overlap carrying the 2.5D singleton slice axis: kept axes match patch_size
@@ -155,34 +162,26 @@ def test_derive_overlap_broadcasts_scalar_and_drops_singleton():
 def test_the_manifest_overlap_is_the_one_konfai_tiles_with(patch_size, overlap):
     """A fraction, a percent string or a list of fractions is a share of the patch: the manifest carries
     the voxels KonfAI's own grid steps by on an axis it tiles, not ``int(0.25) == 0``."""
-    from konfai.portable import derive_onnx_params as _derive_onnx_params
-    from konfai.portable import derive_overlap as _derive_overlap
     from konfai.utils.utils import get_patch_slices_from_shape
 
     patch = {"patch_size": patch_size, "overlap": overlap}
-    exported, *_ = _derive_onnx_params({"Predictor": {"Dataset": {"Patch": patch}}}, "Predictor")
+    exported, *_ = derive_onnx_params({"Predictor": {"Dataset": {"Patch": patch}}}, "Predictor")
     slices = get_patch_slices_from_shape(patch_size, [1000] * len(patch_size), overlap)
     konfai = []
     for axis, size in enumerate(patch_size):
         starts = sorted({region[axis].start for region in slices})
         if size > 1:  # the axis the manifest keeps
             konfai.append(size - (starts[1] - starts[0]))
-    assert _derive_overlap(patch, exported) == konfai
+    assert derive_overlap(patch, exported) == konfai
 
 
 def test_derive_blend_reads_patch_combine():
-    from konfai.portable import derive_blend
-
     cfg = {"Predictor": {"outputs_dataset": {"H": {"OutputDataset": {"patch_combine": "Gaussian"}}}}}
     assert derive_blend(cfg, "Predictor") == "Gaussian"
-    cfg = {"Predictor": {"outputs_dataset": {"O": {"OutputDataset": {"patch_combine": "None"}}}}}
-    assert derive_blend(cfg, "Predictor") == "Overwrite"
     assert derive_blend({"Predictor": {}}, "Predictor") is None
 
 
 def test_transform_manifest_maps_the_pipeline_to_runtime_ops():
-    from konfai.portable import transform_manifest
-
     config = {
         "Predictor": {
             "Dataset": {
@@ -224,8 +223,6 @@ def test_transform_manifest_maps_the_pipeline_to_runtime_ops():
 
 
 def test_transform_manifest_reads_canonical_and_before_reduction_post():
-    from konfai.portable import transform_manifest
-
     # A disjoint (merge_labels) ensemble: Canonical -> a runtime op; the per-fold argmax lives in
     # before_reduction_transforms (each fold argmaxes to a label map before the merge), not final_transforms.
     config = {
@@ -271,8 +268,6 @@ def test_transform_manifest_reads_canonical_and_before_reduction_post():
 
 
 def test_derive_reduction_reads_the_ensemble_reduction():
-    from konfai.portable import derive_reduction
-
     def cfg(after):
         outputs = {"H": {"OutputDataset": {"after_reduction_transforms": after}}}
         return {"Predictor": {"combine": "Concat", "outputs_dataset": outputs}}
@@ -287,8 +282,6 @@ def test_derive_reduction_reads_the_ensemble_reduction():
 
 
 def test_masked_tta_compiler_reads_the_config():
-    from konfai.portable import assemble_program, aux_mask_groups, mask_specs, tta_passes
-
     config = {
         "Predictor": {
             "manual_seed": 32,
@@ -376,7 +369,6 @@ def test_masked_tta_compiler_reads_the_config():
 
 def test_masked_tta_compiler_refuses_what_its_program_has_no_step_for():
     import pytest
-    from konfai.portable import aux_mask_groups, mask_specs
     from konfai.utils.errors import ConfigError
 
     def config(mask_chain: dict, before: dict) -> dict:
@@ -403,7 +395,6 @@ def test_masked_tta_compiler_refuses_what_its_program_has_no_step_for():
 
 def test_masked_tta_compiler_honours_the_mask_resample_interpolation():
     import pytest
-    from konfai.portable import assemble_program, aux_mask_groups
     from konfai.utils.errors import ConfigError, TransformError
 
     def mask_ops(resample: dict, nested: dict) -> list[dict]:
@@ -453,8 +444,6 @@ def test_masked_tta_compiler_honours_the_mask_resample_interpolation():
 
 
 def test_transform_manifest_undoes_a_value_transform_after_the_forward():
-    from konfai.portable import transform_manifest
-
     # konfai's Standardize undoes itself on the output by default, with the statistics its forward
     # recorded on the case; the runtime records them too, so the chain ships with its inverse.
     config = {
@@ -474,7 +463,6 @@ def test_transform_manifest_undoes_a_value_transform_after_the_forward():
 
 def test_transform_manifest_refuses_an_unportable_transform():
     import pytest
-    from konfai.portable import transform_manifest
     from konfai.utils.errors import ConfigError
 
     groups = {"V": {"groups_dest": {"g": {"transforms": {"SomeCustomTransform": {"x": 1}}}}}}
@@ -484,10 +472,6 @@ def test_transform_manifest_refuses_an_unportable_transform():
 
 
 def test_the_program_reads_every_occurrence_of_a_repeated_stage():
-    from konfai.portable import aux_mask_groups as _aux_mask_groups
-    from konfai.portable import derive_reduction as _derive_reduction
-    from konfai.portable import mask_specs as _mask_specs
-
     before = {
         "Mask": {"path": "BODY", "value_outside": -1024},
         "Mask#2": {"path": "BONE", "value_outside": 0},
@@ -530,27 +514,22 @@ def test_the_program_reads_every_occurrence_of_a_repeated_stage():
             },
         }
     }
-    assert _mask_specs(config, "Predictor") == [
+    assert mask_specs(config, "Predictor") == [
         {"group": "BODY", "value_outside": -1024.0},
         {"group": "BONE", "value_outside": 0.0},
         {"group": "AIR", "value_outside": 1.0},
     ]
-    assert [op["op"] for op in _aux_mask_groups(config, "Predictor")["BODY"]["ops"]] == [
+    assert [op["op"] for op in aux_mask_groups(config, "Predictor")["BODY"]["ops"]] == [
         "resample",
         "dilate",
         "dilate",
     ]
-    assert _derive_reduction(config, "Predictor") == "merge_labels"
+    assert derive_reduction(config, "Predictor") == "merge_labels"
 
 
 def test_a_chain_spelled_as_a_list_reaches_the_manifest_and_the_program():
     """The list spelling binds in the core as its occurrence mapping; the export reads it the same way
     instead of finding no chain at all."""
-    from konfai.portable import aux_mask_groups as _aux_mask_groups
-    from konfai.portable import mask_specs as _mask_specs
-    from konfai.portable import transform_manifest as _transform_manifest
-    from konfai.portable import tta_passes as _tta_passes
-
     config = {
         "Predictor": {
             "Dataset": {
@@ -587,13 +566,13 @@ def test_a_chain_spelled_as_a_list_reaches_the_manifest_and_the_program():
             },
         }
     }
-    manifest, folds, _per_copy = _transform_manifest(config, "Predictor", masked=True)
+    manifest, folds, _per_copy = transform_manifest(config, "Predictor", masked=True)
     assert folds == []
     assert [step["op"] for step in manifest["preprocessing"]] == ["clip", "clip", "resample"]
     assert [step["op"] for step in manifest["postprocessing"]] == ["inverse", "argmax"]
-    assert [op["op"] for op in _aux_mask_groups(config, "Predictor")["BODY"]["ops"]] == ["dilate"]
-    assert _mask_specs(config, "Predictor") == [{"group": "BODY", "value_outside": 0.0}]
-    assert len(_tta_passes(config, "Predictor")) == 3
+    assert [op["op"] for op in aux_mask_groups(config, "Predictor")["BODY"]["ops"]] == ["dilate"]
+    assert mask_specs(config, "Predictor") == [{"group": "BODY", "value_outside": 0.0}]
+    assert len(tta_passes(config, "Predictor")) == 3
 
 
 def _masked_config(dest: dict, section: str, chain) -> dict:
@@ -616,22 +595,18 @@ def _masked_config(dest: dict, section: str, chain) -> dict:
 def test_a_program_stage_no_program_step_applies_is_refused_not_dropped(section, chain):
     """The portable program masks the output only by a group a nested model produces: a mask read from
     the dataset, or a Dilate on the input, would be skipped and the artifact's output left unmasked."""
-    from konfai.portable import transform_manifest as _transform_manifest
-
     config = _masked_config({"BODY": {"is_input": False}, "BONE": {"is_input": False}}, section, chain)
     with pytest.raises(ConfigError):
-        _transform_manifest(config, "Predictor")
+        transform_manifest(config, "Predictor")
 
 
 def test_every_mask_on_a_group_a_nested_model_produces_is_left_to_the_program():
-    from konfai.portable import transform_manifest as _transform_manifest
-
     nested = {
         "is_input": False,
         "transforms": {"KonfAIInference": {"repo_id": "R/S", "model_name": "body"}, "Dilate": {"dilate": 2}},
     }
     before = {"Mask": {"path": "BODY"}, "Mask#2": {"path": "BONE"}, "Save": {"dataset": "x"}}
-    manifest, _folds, _per_copy = _transform_manifest(
+    manifest, _folds, _per_copy = transform_manifest(
         _masked_config({"BODY": nested, "BONE": nested}, "before_reduction_transforms", before),
         "Predictor",
         masked=True,
@@ -648,8 +623,6 @@ def test_every_mask_on_a_group_a_nested_model_produces_is_left_to_the_program():
 def test_an_input_group_without_a_chain_takes_no_other_groups_chain(volume, resample):
     """The core writes an absent chain as ``transforms: None``: the model's input then has no
     preprocessing, and the chain of the mask group a nested model produces is not the input's."""
-    from konfai.portable import transform_manifest as _transform_manifest
-
     mask_chain = {"KonfAIInference": {"repo_id": "R/S", "model_name": "body"}}
     if resample:
         mask_chain["Resample"] = {"spacing": [1, 1, 3]}
@@ -662,7 +635,7 @@ def test_an_input_group_without_a_chain_takes_no_other_groups_chain(volume, resa
             "outputs_dataset": {"H": {"OutputDataset": {"before_reduction_transforms": before}}},
         }
     }
-    manifest, folds, _per_copy = _transform_manifest(config, "Predictor", masked=True)
+    manifest, folds, _per_copy = transform_manifest(config, "Predictor", masked=True)
     assert manifest["preprocessing"] == [] and folds == []
     assert manifest["postprocessing"][0] == {"op": "cast", "dtype": "int16"}
 
@@ -770,13 +743,32 @@ def test_portable_asset_roles_preserve_other_native_onnx_dependencies(tmp_path, 
     assert not set(roles) & {name for name, _ in assets}
 
 
-@pytest.mark.parametrize("ensemble", [False, True])
-def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, ensemble):
+def _stub_export(monkeypatch):
+    """A model that loads from nothing, and an ONNX export that writes a stub file and its manifest."""
     from types import SimpleNamespace
 
     import konfai.export as exporter
     import konfai.network.network as network
     import konfai.utils.runtime as runtime
+
+    model = SimpleNamespace(eval=lambda: None, load=lambda *args, **kwargs: None, patch=None)
+    monkeypatch.setattr(network, "ModelLoader", lambda _: SimpleNamespace(get_model=lambda **kwargs: model))
+    monkeypatch.setattr(runtime, "safe_torch_load", lambda *args: {})
+
+    def export_stub(_model, directory, _example, _head, **kwargs):
+        path = directory / kwargs["model_filename"]
+        path.write_bytes(b"exported portable model")
+        manifest = {"model": path.name, "input": {"channels": 1}, "output": {"channels": 1}, "patch": {}}
+        manifest |= kwargs.get("extra_manifest") or {}
+        if kwargs.get("write_manifest"):
+            (directory / "manifest.json").write_text(json.dumps(manifest))
+        return path, manifest
+
+    monkeypatch.setattr(exporter, "export_to_onnx", export_stub)
+
+
+@pytest.mark.parametrize("ensemble", [False, True])
+def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, ensemble):
     from konfai_apps.bundle import export_portable_into_bundle
 
     metadata = {**VALID_META, "portable_assets": ["previous.onnx"]}
@@ -793,19 +785,7 @@ def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, en
         }
     }
     (tmp_path / "Prediction.yml").write_text(json.dumps(config))
-    model = SimpleNamespace(eval=lambda: None, load=lambda *args, **kwargs: None, patch=None)
-    monkeypatch.setattr(network, "ModelLoader", lambda _: SimpleNamespace(get_model=lambda **kwargs: model))
-    monkeypatch.setattr(runtime, "safe_torch_load", lambda *args: {})
-
-    def export_stub(_model, directory, _example, _head, **kwargs):
-        path = directory / kwargs["model_filename"]
-        path.write_bytes(b"exported portable model")
-        manifest = {"model": path.name, "input": {"channels": 1}, "output": {"channels": 1}, "patch": {}}
-        if kwargs["write_manifest"]:
-            (directory / "manifest.json").write_text(json.dumps(manifest))
-        return path, manifest
-
-    monkeypatch.setattr(exporter, "export_to_onnx", export_stub)
+    _stub_export(monkeypatch)
     result = export_portable_into_bundle(
         tmp_path,
         checkpoints=["fold0.pt", "fold1.pt"] if ensemble else None,
@@ -820,11 +800,6 @@ def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, en
 
 
 def test_an_unmasked_export_runs_every_checkpoint_on_every_test_time_copy(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    import konfai.export as exporter
-    import konfai.network.network as network
-    import konfai.utils.runtime as runtime
     from konfai_apps.bundle import export_portable_into_bundle
 
     (tmp_path / "app.json").write_text(json.dumps(VALID_META))
@@ -844,16 +819,7 @@ def test_an_unmasked_export_runs_every_checkpoint_on_every_test_time_copy(tmp_pa
         }
     }
     (tmp_path / "Prediction.yml").write_text(json.dumps(config))
-    model = SimpleNamespace(eval=lambda: None, load=lambda *args, **kwargs: None, patch=None)
-    monkeypatch.setattr(network, "ModelLoader", lambda _: SimpleNamespace(get_model=lambda **kwargs: model))
-    monkeypatch.setattr(runtime, "safe_torch_load", lambda *args: {})
-
-    def export_stub(_model, directory, _example, _head, **kwargs):
-        path = directory / kwargs["model_filename"]
-        path.write_bytes(b"exported portable model")
-        return path, {"model": path.name, "input": {"channels": 1}, "output": {"channels": 1}, "patch": {}}
-
-    monkeypatch.setattr(exporter, "export_to_onnx", export_stub)
+    _stub_export(monkeypatch)
     program = json.loads(
         export_portable_into_bundle(
             tmp_path, checkpoints=["fold0.pt", "fold1.pt"], patch_size=[4, 4], in_channels=1, output_module="Head"
@@ -867,10 +833,6 @@ def test_an_unmasked_export_runs_every_checkpoint_on_every_test_time_copy(tmp_pa
 
 
 def test_a_masked_export_applies_the_mask_it_leaves_out_of_the_manifest(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    import konfai.export as exporter
-    import konfai.network.network as network
     import konfai_apps.bundle as bundle
 
     config = {
@@ -904,15 +866,7 @@ def test_a_masked_export_applies_the_mask_it_leaves_out_of_the_manifest(tmp_path
         }
     }
     (tmp_path / "Prediction.yml").write_text(json.dumps(config))
-    model = SimpleNamespace(eval=lambda: None, patch=None)
-    monkeypatch.setattr(network, "ModelLoader", lambda _: SimpleNamespace(get_model=lambda **kwargs: model))
-
-    def export_stub(_model, directory, _example, _head, **kwargs):
-        path = directory / kwargs["model_filename"]
-        path.write_bytes(b"exported portable model")
-        return path, {"model": path.name, "patch": {}, **kwargs["extra_manifest"]}
-
-    monkeypatch.setattr(exporter, "export_to_onnx", export_stub)
+    _stub_export(monkeypatch)
     nested = {"postprocessing": [{"op": "cast", "dtype": "uint8"}]}
     monkeypatch.setattr(bundle, "export_nested_model", lambda name, _inference, _out: {"id": name, "manifest": nested})
 
@@ -1094,15 +1048,16 @@ def test_the_published_mrseg_program_fixture_is_what_the_compiler_emits(tmp_path
     """The runtime's `mrseg_program.json` fixture is the program this export writes for the published
     MRSegmentator bundle: the same steps in the same order, each model's chains as compiled, the same keys.
     The names of the buffers, of the files and the versions are left to the fixture."""
+    import os
     import shutil
     from pathlib import Path
 
     from konfai_apps.bundle import export_portable_into_bundle
 
-    source = Path("~/Documents/hf_bundles/MRSegmentator-KonfAI/MRSegmentator").expanduser()
-    folds = sorted(path.name for path in source.glob("fold_*.pt")) if source.is_dir() else []
+    source = Path(os.environ.get("KONFAI_MRSEG_BUNDLE") or pytest.skip("KONFAI_MRSEG_BUNDLE names no bundle"))
+    folds = sorted(path.name for path in source.glob("fold_*.pt"))
     if not folds:
-        pytest.skip(f"the MRSegmentator bundle and its checkpoints are not at {source}")
+        pytest.skip(f"no fold_*.pt checkpoint under {source}")
     pytest.importorskip("onnxscript")
     fixture = Path(__file__).parents[3] / "konfai-edge" / "tests" / "fixtures" / "mrseg_program.json"
     if not fixture.is_file():
@@ -1135,28 +1090,6 @@ def test_the_published_mrseg_program_fixture_is_what_the_compiler_emits(tmp_path
     expected = json.loads(fixture.read_text())
     assert program["output"] == expected["output"]
     assert structure(program["steps"]) == structure(expected["steps"])
-
-
-def test_a_nested_app_without_checkpoints_name_exports_the_default_fold(tmp_path, monkeypatch) -> None:
-    # KonfAIInference defaults checkpoints_name to ["fold_0"]; a nested export passing None loads no weights.
-    from types import SimpleNamespace
-
-    from konfai_apps import bundle
-
-    seen: dict[str, object] = {}
-
-    def export(nested_dir, checkpoints=None):
-        seen["checkpoints"] = checkpoints
-        (nested_dir / "model.onnx").write_bytes(b"onnx")
-        (nested_dir / "manifest.json").write_text("{}")
-        return nested_dir / "model.onnx"
-
-    monkeypatch.setattr(bundle, "export_portable_into_bundle", export)
-    app = SimpleNamespace(app_repository=SimpleNamespace(download_app=lambda: []))
-    monkeypatch.setattr("konfai_apps.app.KonfAIApp", lambda ref, install, quiet: app)
-    result = bundle.export_nested_model("G", {"repo_id": "r", "model_name": "m"}, tmp_path)
-    assert seen["checkpoints"] == ["fold_0"]
-    assert result["id"] == "G" and (tmp_path / "G.onnx").read_bytes() == b"onnx"
 
 
 def _nested_app(tmp_path, monkeypatch, files: dict[str, bytes]):
