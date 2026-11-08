@@ -2336,7 +2336,18 @@ def compile_prediction(
         lambda file: build_predict(models=checkpoints, prediction_file=file, predictions_dir=Path(predictions_dir)),
     ) as (built, resolved):
         predictor = cast(Predictor, built)
-        _refuse_python_on_the_case(predictor.model)
+        # A module reading the case's attributes (its geometry) runs Python on the case, which an exported graph,
+        # handed tensors alone, cannot carry: refused before anything runs.
+        reader = next(
+            (name for name, module in predictor.model.named_modules() if getattr(module, "accepts_attributes", False)),
+            None,
+        )
+        if reader is not None:
+            raise ConfigError(
+                f"the model's module '{reader}' reads the case's attributes, which an exported graph is never handed:"
+                " it runs Python on the case rather than a network the portable runtime carries.",
+                "Predict this app with konfai itself (konfai-apps infer).",
+            )
         if not checkpoints and any(parameter.numel() for parameter in predictor.model.parameters()):
             raise ConfigError(
                 "compile_prediction needs the checkpoints to export: the model has trainable weights.",
@@ -2378,20 +2389,6 @@ def compile_prediction(
 
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
-
-
-def _refuse_python_on_the_case(model: Any) -> None:
-    """Refuse, before anything runs, a graph whose module reads the case's attributes (its geometry): that
-    module runs Python on the case, which an exported graph, handed tensors alone, cannot carry."""
-    reader = next(
-        (name for name, module in model.named_modules() if getattr(module, "accepts_attributes", False)), None
-    )
-    if reader is not None:
-        raise ConfigError(
-            f"the model's module '{reader}' reads the case's attributes, which an exported graph is never handed:"
-            " it runs Python on the case rather than a network the portable runtime carries.",
-            "Predict this app with konfai itself (konfai-apps infer).",
-        )
 
 
 def _nested_models(

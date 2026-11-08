@@ -1473,16 +1473,10 @@ def test_a_weightless_model_running_python_on_the_case_is_refused_by_name(
         "    def forward(self, x, attributes):\n"
         "        raise AssertionError('a compile ran the forward')\n\n"
         "class ReaderNet(network.Network):\n"
-        "    def __init__(\n"
-        "        self,\n"
-        "        optimizer: network.OptimizerLoader = network.OptimizerLoader(),\n"
-        "        schedulers: dict[str, network.LRSchedulersLoader] = {'default:ReduceLROnPlateau': network.LRSchedulersLoader(0)},\n"
-        "        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {'default': network.TargetCriterionsLoader()},\n"
-        "    ) -> None:\n"
-        "        super().__init__(in_channels=1, optimizer=optimizer, schedulers=schedulers, outputs_criterions=outputs_criterions, dim=2)\n"
+        "    def __init__(self, outputs_criterions: dict[str, network.TargetCriterionsLoader] | None = None) -> None:\n"
+        "        super().__init__(in_channels=1, outputs_criterions=outputs_criterions, dim=2)\n"
         "        self.add_module('Tool', Geometry())\n"
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
     config = _tiny_prediction(tmp_path, monkeypatch, "Reader:ReaderNet", "Tool")
     with pytest.raises(ConfigError, match="module 'Tool' reads the case's attributes"):
         compile_prediction(config, None, tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
