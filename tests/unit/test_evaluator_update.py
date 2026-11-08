@@ -401,6 +401,25 @@ def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
     assert not any(tmp_path.iterdir())
 
 
+def test_a_map_lands_on_its_output_s_grid(tmp_path: Path) -> None:
+    """A whole-case map takes its output's header: a landmark group holding the case beside it has no geometry,
+    and the map went to a .npy whenever the groups were listed with that one first."""
+    from konfai.utils.dataset import Dataset
+
+    volumes = {"MOVED": torch.rand(1, 1, 4, 5, 6), "FIXED": torch.rand(1, 1, 4, 5, 6)}
+    batch = _batch("case", **volumes)
+    header = batch["MOVED"].attribute[0]
+    header["Origin"], header["Spacing"], header["Direction"] = np.array([1.0, 2.0, 3.0]), np.ones(3), np.eye(3).ravel()
+    evaluator = _evaluator({"MOVED": {"FIXED": {MAESaveMap(dataset=f"{tmp_path / 'Maps'}:mha"): None}}})
+    evaluator._warn_other_geometries = lambda *args: None  # reads the dataset managers this fake has not
+
+    evaluator.update(batch, Statistics(None))
+
+    assert [path.name for path in (tmp_path / "Maps" / "case").iterdir()] == ["MOVED.mha"]
+    _, header = Dataset(str(tmp_path / "Maps"), "mha").read_data("MOVED", "case")
+    np.testing.assert_allclose(header.get_np_array("Origin"), [1.0, 2.0, 3.0])
+
+
 @pytest.mark.parametrize("streamed", [False, True])
 def test_two_metrics_of_one_class_keep_a_row_each(streamed: bool) -> None:
     """Two metrics of one class keep a row each: the second does not overwrite the first."""
