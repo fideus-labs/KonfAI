@@ -1,6 +1,6 @@
 # Ensembles: one notion of member for checkpoints, TTA and presets
 
-Status: decided 2026-11-07 (see Decided); phases 1 to 4 implemented, phase 5 (Slicer) not yet. Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
+Status: decided 2026-11-07 (see Decided); phases 1 to 5 implemented (phase 5 on the `feat/ensembles` branches of SlicerKonfAI and SlicerImpactReg). Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
 registration measures (`TransformPoints`, `Resample` through stored transforms).
 
 ## The problem
