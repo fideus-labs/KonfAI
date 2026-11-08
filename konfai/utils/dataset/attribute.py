@@ -389,7 +389,9 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
     Geometry comes from RFC-5 coordinate transformations (including the selected pyramid level),
-    with RFC-4 axis orientation defining the physical frame. Private attributes carry no geometry.
+    with RFC-4 axis orientation defining the physical frame. The private record holds the rungs of
+    the geometry stack beneath that grid, as the writer left them; the grid is pushed on top, so the
+    stack reads back as it was written.
 
     Spacing and Origin come out in MILLIMETRES, whatever the store declares: they are handed to
     SimpleITK, written into NIfTI headers and composed with other volumes' frames, none of which
@@ -397,9 +399,8 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     back out restores it. A store that declares no unit is taken at its numbers, as before.
     """
     from konfai.utils.ome_zarr import NO_UNIT  # imported here: ome_zarr imports this
-    from konfai.utils.ome_zarr_geometry import without_geometry
 
-    attributes = Attribute(without_geometry(metadata.get("attributes", {})))
+    attributes = Attribute(metadata.get("attributes", {}))
     geometry = metadata["standard_geometry"]
     for key in ("Origin", "Spacing", "Direction"):
         attributes[key] = geometry[key]

@@ -46,6 +46,7 @@ import numpy as np
 
 from konfai.utils import uri
 from konfai.utils.errors import DatasetManagerError
+from konfai.utils.ome_zarr_geometry import declare_geometry, private_record, read_geometry
 from konfai.utils.runtime import map_over_rank_pool
 
 if TYPE_CHECKING:
@@ -198,12 +199,6 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
     A copy of a memoised parse."""
     root = _multiscales(str(store_path)).root_attributes or {}
     return dict(root.get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
-
-
-def _standard_geometry(store_path: str, image: Any) -> dict[str, Any]:
-    from konfai.utils.ome_zarr_geometry import read_geometry
-
-    return read_geometry(_multiscales(store_path), image)
 
 
 def _from_ngff_zarr(store_path: str | Path) -> Any:
@@ -864,7 +859,7 @@ def read_ome_zarr_data_slice(
         "translation": _ordered(dict(image.translation), dims),
         "units": _axis_units(image),
         "attributes": _read_konfai_attributes(store_path),
-        "standard_geometry": _standard_geometry(str(store_path), image),
+        "standard_geometry": read_geometry(_multiscales(str(store_path)), image),
     }
     return _native_byteorder(np.asarray(patch)), metadata
 
@@ -1232,8 +1227,6 @@ def create_ome_zarr_store(
         chunks = [min(shape[0], max(1, CHUNK_TARGET_BYTES // max(1, tile_bytes))), *spatial_chunks]
     chunks = tuple(chunks)
 
-    from konfai.utils.ome_zarr_geometry import declare_geometry, without_geometry
-
     axis_aligned_field = displacement_field and _grid_is_axis_aligned(attributes)
     data = dask.array.zeros(tuple(shape), dtype=np.dtype(dtype), chunks=chunks)
     image = ngff_zarr.to_ngff_image(
@@ -1247,7 +1240,7 @@ def create_ome_zarr_store(
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], chunks=chunks, cache=False)
     if not axis_aligned_field:
         declare_geometry(multiscales, attributes, [translation[d] for d in dims])
-    stored_attributes = without_geometry(attributes)
+    stored_attributes = private_record(attributes)
     if displacement_field:
         # One layout for every field: components in the spec's order, marked so nothing guesses.
         if axis_aligned_field:
@@ -1418,7 +1411,7 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
         },
         "n_levels": n_levels,
         "attributes": _read_konfai_attributes(store_path),
-        "standard_geometry": _standard_geometry(str(store_path), image),
+        "standard_geometry": read_geometry(_multiscales(str(store_path)), image),
     }
 
 

@@ -77,6 +77,28 @@ def test_private_geometry_is_refused_instead_of_silently_lost(tmp_path: Path) ->
         get_ome_zarr_info(tmp_path)
 
 
+def test_the_geometry_stack_beneath_the_grid_survives_a_store(tmp_path: Path) -> None:
+    """A ``Padding(apply_inverse=True)`` pushes the padded origin over the volume's and its inverse pops it back:
+    the rung beneath the grid must outlive an OME-Zarr ``Save`` for a cache hit to undo the pad."""
+    import torch
+    from konfai.data.transform import Padding
+
+    attributes = Attribute()
+    attributes["Origin"] = [10.0, 20.0, 30.0]
+    attributes["Spacing"] = [1.0, 1.0, 1.0]
+    attributes["Direction"] = np.eye(3).ravel()
+    padding = Padding(padding=[2, 0, 0, 0, 0, 0])
+    padded = padding("case", torch.zeros((1, 4, 4, 4)), attributes)
+    np.testing.assert_array_equal(attributes.get_np_array("Origin"), [8.0, 20.0, 30.0])
+    Dataset(str(tmp_path), "omezarr").write("CT", "case", padded.numpy(), attributes)
+
+    assert list(get_ome_zarr_info(tmp_path / "case" / "CT.ome.zarr")["attributes"]) == ["Origin_0"]
+    _shape, read = Dataset(str(tmp_path), "omezarr").get_infos("CT", "case")
+    assert [key for key in dict.keys(read) if key.startswith("Origin")] == ["Origin_0", "Origin_1"]
+    padding.inverse("case", padded, read)
+    np.testing.assert_array_equal(read.get_np_array("Origin"), [10.0, 20.0, 30.0])
+
+
 def test_mixed_units_with_a_rotation_keep_physical_positions(tmp_path: Path) -> None:
     attributes = Attribute()
     attributes["Direction"] = [0, -1, 0, 1, 0, 0, 0, 0, 1]

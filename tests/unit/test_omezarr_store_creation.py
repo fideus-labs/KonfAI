@@ -208,7 +208,7 @@ def test_stores_keep_the_byte_shuffled_blosc_compressor(tmp_path: Path) -> None:
         assert configuration["shuffle"] in (1, "shuffle"), (key, configuration)
 
 
-def test_levels_appended_to_a_pre_05_store_keep_its_v2_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_levels_appended_to_a_pre_05_store_keep_its_v2_layout(tmp_path: Path) -> None:
     """A store on disk keeps the layout it was written with.
 
     Stores written before the 0.5 default are zarr v2, and a reader takes a pyramid as one store: a

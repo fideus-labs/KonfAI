@@ -11,16 +11,20 @@ import numpy as np
 from konfai.utils.errors import DatasetManagerError
 
 
-def without_geometry(attributes: dict[str, Any] | None) -> dict[str, Any]:
+def private_record(attributes: dict[str, Any] | None) -> dict[str, Any]:
+    """What the ``konfai`` root attribute stores: every record but the latest rung of the geometry stack, which
+    the standard transformations carry, and the axis and unit hints the reader derives. The rungs beneath stay:
+    an inverse stage (``Padding``) pops its way back down them, on a cache hit as on a fresh run."""
     from konfai.utils.dataset.attribute import Attribute
 
-    return {
-        k: v
-        for k, v in (attributes or {}).items()
-        if not any(
-            Attribute._is_stack_member(k, key) for key in ("Origin", "Spacing", "Direction", "OMEAxes", "OMEUnits")
-        )
-    }
+    record = Attribute(attributes or {})
+    for key in ("Origin", "Spacing", "Direction"):
+        if key in record:
+            record.pop(key)
+    for key in ("OMEAxes", "OMEUnits"):
+        while key in record:
+            record.pop(key)
+    return dict(record)
 
 
 def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, translation: list[float]) -> None:
@@ -36,7 +40,7 @@ def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, transl
     )
 
     from konfai.utils.dataset.attribute import Attribute
-    from konfai.utils.ome_zarr import millimetres_per_unit
+    from konfai.utils.ome_zarr import _unit_factors
 
     image = multiscales.images[0]
     spatial = [d for d in image.dims if d in "zyx"]
@@ -48,7 +52,7 @@ def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, transl
     direction = flat.reshape(n, n)
     if not np.isfinite(direction).all() or np.linalg.det(direction) == 0:
         raise DatasetManagerError("OME-Zarr direction must be finite and invertible.")
-    factors = np.array([millimetres_per_unit(image.axes_units.get(d)) or 1.0 for d in spatial])
+    factors = _unit_factors(image.axes_units, spatial)
     # Units belong to coordinates, so a rotation between differently scaled axes is conjugated.
     linear = direction[::-1, ::-1] * factors[None, :] / factors[:, None]
     matrix = np.eye(len(image.dims))
@@ -85,7 +89,7 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
     from ngff_zarr.rfc4 import anatomical_orientation_to_itk_direction
 
     from konfai.utils.dataset.attribute import Attribute
-    from konfai.utils.ome_zarr import millimetres_per_unit
+    from konfai.utils.ome_zarr import _unit_factors
 
     dims = list(image.dims)
     xyz = [d for d in "xyz" if d in dims]
@@ -93,17 +97,20 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
     metadata = multiscales.metadata
     intrinsic = getattr(metadata, "intrinsic_coordinate_system", None)
     is_field = intrinsic is not None and any(a.type == "displacement" for a in intrinsic.axes)
+    declared = list(metadata.coordinateTransformations or [])
     transforms = [
         t
-        for t in (metadata.coordinateTransformations or [])
+        for t in declared
         if not (is_field and t.type == "displacements" and t.input is not None and t.input == t.output)
     ]
     matrix, offset = np.eye(n), np.zeros(n)
     units = {k: v for k, v in (image.axes_units or {}).items() if v}
     orientations = {k: v for k, v in (image.axes_orientations or {}).items() if v}
-    private = (multiscales.root_attributes or {}).get("konfai", {}).get("attributes", {})
-    recorded = Attribute(private)
-    if not transforms and any(key in recorded for key in ("Origin", "Spacing", "Direction")):
+    recorded = Attribute((multiscales.root_attributes or {}).get("konfai", {}).get("attributes", {}))
+    # A store written before the standard transformations declared none and kept its grid in the private
+    # record; one written since declares its grid (or, an axis-aligned field, its ``displacements`` entry) and
+    # keeps there only the rungs beneath the grid, so whatever geometry it records is history, not the grid.
+    if not declared and any(key in recorded for key in ("Origin", "Spacing", "Direction")):
         raise DatasetManagerError(
             "This OME-Zarr store keeps geometry in private KonfAI attributes.",
             "Rewrite it with RFC-5 coordinate transformations before reading it.",
@@ -133,7 +140,7 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
         matrix, offset = parameters[: n * n].reshape(n, n), parameters[n * n :]
         units = {a.name: a.unit for a in systems[0].axes if a.unit}
         orientations = {a.name: a.orientation for a in systems[0].axes if a.orientation}
-    factors = np.array([millimetres_per_unit(units.get(d)) or 1.0 for d in xyz])
+    factors = _unit_factors(units, xyz)
     basis = np.eye(n)
     for j, d in enumerate(xyz):
         if d in orientations:

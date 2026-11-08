@@ -133,7 +133,8 @@ carry RFC-4 LPS orientation. Reading resolves that mapping into KonfAI's interna
 `Origin`/`Spacing`/`Direction`; it does not resample the voxels. Crops and pyramid levels use the same
 mapping, including their offsets along rotated axes.
 
-Geometry is no longer written to the private `konfai` attributes. Files that depend on that old
+The grid is no longer written to the private `konfai` attributes; only the earlier rungs of the
+geometry stack stay there, what an inverse stage pops back to. Files that depend on that old
 representation must be rewritten from their source before use; the reader refuses them rather than
 silently losing their direction. Standard NGFF 0.4/0.5 scale/translation stores remain readable.
 A file with several competing physical mappings, or a nonlinear mapping of its image grid, is refused.
