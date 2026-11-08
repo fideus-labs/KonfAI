@@ -90,6 +90,9 @@ suppress_warnings = [
     # Whether a third-party guarded import resolves depends on the environment (torch's
     # tensorboard writer guards dateutil), so it must not fail a -W build.
     "sphinx_autodoc_typehints.guarded_import",
+    # A class inheriting a third-party constructor (Included on ruamel's CommentedMap) shows annotations
+    # that module never resolves (`Any` as a string): not a defect of these docs.
+    "sphinx_autodoc_typehints.forward_reference",
     "intersphinx.external",
 ]
 
