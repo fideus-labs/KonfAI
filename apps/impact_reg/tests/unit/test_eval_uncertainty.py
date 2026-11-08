@@ -388,10 +388,10 @@ def test_eval_reports_the_jacobian_of_a_field_transform(
         assert _main(monkeypatch, [*argv, "-o", str(tmp_path / out), "-q"]) == 0
 
     metrics = _metrics(tmp_path / "Field")
-    assert metrics["Transform:Transform:JacobianMin"] == pytest.approx(1.0)
-    assert metrics["Transform:Transform:JacobianFolding"] == 0.0
+    assert metrics["Transform:None:JacobianMin"] == pytest.approx(1.0)
+    assert metrics["Transform:None:JacobianFolding"] == 0.0
     summary = json.loads((tmp_path / "Field" / "Evaluation_summary.json").read_text())["case"]
-    assert {"Transform:Transform:JacobianLogStd", "FixedImage:MovingImage;Mask:MAE", "FixedFid:MovingFid:TRE"} <= set(
+    assert {"Transform:None:JacobianLogStd", "FixedImage:MovingImage;Mask:MAE", "FixedFid:MovingFid:TRE"} <= set(
         summary
     )
     assert not any("Jacobian" in key for key in _metrics(tmp_path / "Affine"))
@@ -411,7 +411,7 @@ def test_one_field_given_for_every_case_is_measured_once(
     original = impact_reg.KonfAIApp.evaluate
 
     def evaluate(self, *args, **kwargs):
-        if kwargs.get("evaluation_file") == "Evaluation_with_jacobian.yml":
+        if kwargs.get("evaluation_file") == "Evaluation_no_reference.yml":
             measured.append(kwargs["inputs"][0][0])
         return original(self, *args, **kwargs)
 
@@ -422,7 +422,7 @@ def test_one_field_given_for_every_case_is_measured_once(
     assert _main(monkeypatch, argv) == 0
     assert len(measured) == 1
     summary = json.loads((tmp_path / "Evaluation" / "Evaluation_summary.json").read_text())["case"]
-    assert set(summary["Transform:Transform:JacobianMin"]) == {"P000", "P001"}
+    assert set(summary["Transform:None:JacobianMin"]) == {"P000", "P001"}
 
 
 def test_eval_of_a_2d_pair_is_simpleitks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,7 +467,7 @@ def test_eval_of_a_2d_pair_is_simpleitks(tmp_path: Path, monkeypatch: pytest.Mon
     pushed = np.array([[*field.TransformPoint(point[:2].tolist()), 0.0] for point in points])
     tre = np.linalg.norm(pushed - (points + offset), axis=1).mean()
     assert metrics["FixedFid:MovingFid:TRE"] == pytest.approx(tre, abs=1e-6)
-    assert metrics["Transform:Transform:JacobianFolding"] == 0.0
+    assert metrics["Transform:None:JacobianFolding"] == 0.0
 
 
 def test_a_field_given_alone_is_measured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -479,4 +479,57 @@ def test_a_field_given_alone_is_measured(tmp_path: Path, monkeypatch: pytest.Mon
     out = tmp_path / "Evaluation"
 
     assert _main(monkeypatch, ["eval", "--transform", str(tmp_path / "Transform.h5"), "-o", str(out), "-q"]) == 0
-    assert _metrics(out)["Transform:Transform:JacobianFolding"] == 0.0
+    assert _metrics(out)["Transform:None:JacobianFolding"] == 0.0
+
+
+def test_every_modality_reports_its_measures(
+    tmp_path: Path, toy: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each modality's config scores what the evaluation guide lists, and the summary its worst 30 %."""
+    field = sitk.Image([24, 24, 24], sitk.sitkVectorFloat64, 3)
+    field.SetSpacing((2.0, 2.0, 2.0))
+    sitk.WriteTransform(sitk.DisplacementFieldTransform(field), str(tmp_path / "Transform.h5"))
+    out = tmp_path / "Evaluation"
+    argv = ["eval", "-f", str(toy["fixed"]), "-m", str(toy["moving"]), "--transform", str(tmp_path / "Transform.h5")]
+    argv += ["--gt-fixed-seg", str(toy["fixed_seg"]), "--gt-moving-seg", str(toy["moving_seg"])]
+    assert _main(monkeypatch, [*argv, "-o", str(out), "-q"]) == 0
+
+    keys = set(_metrics(out))
+    image = {f"FixedImage:MovingImage;Mask:{name}" for name in ("MAE", "NMI", "NCC", "LNCC")}
+    seg = {
+        f"MovingSeg:FixedSeg:{name}" for name in ("Dice", "Jaccard", "VolumeDifference", "HD95", "ASSD", "SurfaceDice")
+    }
+    field_alone = {f"Transform:None:{name}" for name in ("BendingEnergy", "DisplacementMean", "DisplacementP95")}
+    assert image | seg | field_alone | {"MovingFOV:None:OutsideMovingFOV"} <= keys
+    aggregates = json.loads((out / "Evaluation_summary.json").read_text())["aggregates"]
+    assert "worst30" in aggregates["MovingSeg:FixedSeg:Dice"]
+
+
+def test_a_round_trip_off_by_a_shift_reads_that_shift(tmp_path: Path, toy: dict[str, Path]) -> None:
+    """Evaluation_inverse_consistency.yml: an affine and its inverse shifted by (0.3, 0, -0.2) mm: every fixed voxel
+    ends 0.36 mm from where it started, at the grid's border too (the coordinates are read one voxel wider)."""
+    from impact_reg_konfai.impact_reg import _EVALUATION_APP
+    from konfai_apps import KonfAIApp
+
+    forward = sitk.AffineTransform(3)
+    forward.SetMatrix((1.02, 0.03, 0.0, -0.02, 0.98, 0.01, 0.0, 0.0, 1.01))
+    forward.SetTranslation((1.0, -0.5, 0.4))
+    backward = sitk.AffineTransform(forward.GetInverse())
+    backward.SetTranslation(np.add(backward.GetTranslation(), (0.3, 0.0, -0.2)).tolist())
+    sitk.WriteTransform(forward, str(tmp_path / "forward.h5"))
+    sitk.WriteTransform(backward, str(tmp_path / "backward.h5"))
+
+    KonfAIApp(str(_EVALUATION_APP), False, False).evaluate(
+        inputs=[[tmp_path / "forward.h5"]],
+        gt=[[tmp_path / "backward.h5"], [toy["fixed"]]],
+        output=tmp_path / "Evaluation",
+        evaluation_file="Evaluation_inverse_consistency.yml",
+        cpu=1,
+        quiet=True,
+        tmp_dir=tmp_path / "work",
+    )
+
+    metrics = _metrics(tmp_path / "Evaluation")
+    shift = float(np.hypot(0.3, 0.2))
+    assert metrics["RoundTrip:Start:InverseConsistencyMean"] == pytest.approx(shift, abs=1e-4)
+    assert metrics["RoundTrip:Start:InverseConsistencyP95"] == pytest.approx(shift, abs=1e-4)

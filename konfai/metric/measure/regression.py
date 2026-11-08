@@ -18,9 +18,10 @@
 """Pointwise, structural and information criteria over intensities."""
 
 import math
+import weakref
 from collections.abc import Iterator
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -39,7 +40,7 @@ from konfai.metric.measure.segmentation import Dice
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
 from konfai.utils.errors import MeasureError
-from konfai.utils.ITK import JacobianSums, field_jacobian_sums, jacobian_statistics
+from konfai.utils.ITK import JacobianSums, field_jacobian_sums, field_regularity_statistics, jacobian_statistics
 
 #: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share, written
 #: into a resolved config as a number, and what a ``dynamic_range: None`` in a published config names.
@@ -479,10 +480,202 @@ class TRE(Criterion):
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 
 
+def _selected(
+    criterion: Criterion, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The output's and the first target's voxels as two flat float64 vectors, inside the mask the other targets
+    make (every voxel without one)."""
+    criterion._require_target(targets)
+    target = targets[0].to(output.device)
+    mask = MaskedLoss.get_mask(list(targets[1:]))
+    if mask is None:
+        return output.double().flatten(), target.double().flatten()
+    mask = mask.to(output.device).expand_as(output)
+    return torch.masked_select(output, mask).double(), torch.masked_select(target, mask).double()
+
+
+class NCC(Criterion):
+    """The normalised cross-correlation of the output and the target, over the image or inside a mask (a second
+    target): 1 when one is an increasing linear map of the other's intensities. For images of one modality. Its
+    sums add up over disjoint patches, so it streams."""
+
+    maximize = True
+    reducible = True
+    loss_capable = False  # a value from summed moments, no gradient
+
+    def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[float, ...]:
+        a, b = _selected(self, output, targets)  # float64: sums of squares far from 0
+        return tuple(
+            float(value) for value in (a.numel(), a.sum(), b.sum(), (a * b).sum(), (a * a).sum(), (b * b).sum())
+        )
+
+    def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
+        n, sa, sb, sab, saa, sbb = map(sum, zip(*states, strict=True))
+        if not n:  # an empty mask
+            return torch.tensor(float("nan")), float("nan")
+        covariance, var_a, var_b = sab - sa * sb / n, saa - sa * sa / n, sbb - sb * sb / n
+        ncc = covariance / math.sqrt(var_a * var_b) if var_a > 0 and var_b > 0 else float("nan")
+        return torch.tensor(1 - ncc), ncc
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        return self.combine_metric([self.partial_metric(output, *targets)])
+
+
+class NMI(Criterion):
+    """The normalised mutual information ``(H(A) + H(B)) / H(A, B)`` of the output's and the target's intensities,
+    over the image or inside a mask (a second target): 1 for independent images, 2 for one image a one-to-one map
+    of the other's, whatever their modalities. Intensities fall in ``bins`` bins over each image's own range, or
+    over ``output_range`` and ``target_range`` when both are given ([low, high], a value outside in the edge bin):
+    the joint histograms of disjoint patches then add up, and it streams."""
+
+    maximize = True
+    loss_capable = False  # a value from a histogram, no gradient
+
+    def __init__(
+        self, bins: int = 64, output_range: list[float] | None = None, target_range: list[float] | None = None
+    ) -> None:
+        super().__init__()
+        if bins < 2:
+            raise MeasureError(f"NMI needs at least two bins, got {bins}.")
+        self.bins = int(bins)
+        self.output_range, self.target_range = output_range, target_range
+        self.reducible = output_range is not None and target_range is not None
+
+    def _histogram(
+        self, a: torch.Tensor, b: torch.Tensor, a_range: tuple[float, float], b_range: tuple[float, float]
+    ) -> torch.Tensor:
+        def binned(values: torch.Tensor, low: float, high: float) -> torch.Tensor:
+            scale = self.bins / (high - low) if high > low else 0.0
+            return ((values - low) * scale).long().clamp_(0, self.bins - 1)
+
+        joint = binned(a, *a_range) * self.bins + binned(b, *b_range)
+        return torch.bincount(joint, minlength=self.bins * self.bins).double().cpu()
+
+    def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        a, b = _selected(self, output, targets)
+        return self._histogram(a, b, tuple(self.output_range), tuple(self.target_range))  # type: ignore[arg-type]
+
+    def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
+        joint = torch.stack(states).sum(0).view(self.bins, self.bins)
+        p = joint / joint.sum() if joint.sum() > 0 else joint
+
+        def entropy(q: torch.Tensor) -> float:
+            q = q[q > 0]
+            return float(-(q * q.log()).sum())
+
+        h_joint = entropy(p)
+        nmi = (entropy(p.sum(1)) + entropy(p.sum(0))) / h_joint if h_joint > 0 else float("nan")
+        return torch.tensor(2 - nmi), nmi
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        a, b = _selected(self, output, targets)
+        if not a.numel():
+            return torch.tensor(float("nan")), float("nan")
+        a_range = tuple(self.output_range) if self.output_range else (float(a.min()), float(a.max()))
+        b_range = tuple(self.target_range) if self.target_range else (float(b.min()), float(b.max()))
+        return self.combine_metric([self._histogram(a, b, a_range, b_range)])  # type: ignore[arg-type]
+
+
+class LNCC(Criterion):
+    """The local normalised cross-correlation of the output and the target: the mean, over the image or inside a mask
+    (a second target), of the squared correlation of each ``kernel``-wide cube of voxels, ``cov^2 / (var_a var_b)``
+    (ANTs' and VoxelMorph's form, in [0, 1]). For images of one modality whose intensities drift across the field.
+    A window reaches ``kernel // 2`` voxels past a patch's faces: it streams from patches read with that halo."""
+
+    maximize = True
+    reducible = True
+    loss_capable = False  # a value from pooled moments, no gradient
+
+    def __init__(self, kernel: int = 9) -> None:
+        super().__init__()
+        if kernel < 1 or kernel % 2 == 0:
+            raise MeasureError(f"LNCC takes an odd kernel, got {kernel}.", "A window centred on its voxel: 5, 7, 9...")
+        self.kernel = int(kernel)
+        self.halo = self.kernel // 2
+
+    def _map(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        """The squared local correlation at each voxel of ``a`` and ``b``, ``[N, C, (Z), Y, X]``."""
+        pool = {4: F.avg_pool2d, 5: F.avg_pool3d}.get(a.dim())
+        if pool is None:
+            raise MeasureError(f"LNCC reads 2-D or 3-D images, got {list(a.shape[1:])} (channels first).")
+
+        def total(values: torch.Tensor) -> torch.Tensor:
+            # The sum over each window, cut at the faces: padded by hand, since the pool refuses an image smaller
+            # than its kernel (a thin volume, a boundary patch).
+            return pool(F.pad(values, (self.halo,) * (2 * (a.dim() - 2))), self.kernel, stride=1, divisor_override=1)
+
+        # In float64: the moments' differences cancel in float32 on intensities far from 0 (an MR at 1000 with a
+        # local spread of a few units scored 1672 against itself plus noise).
+        a, b = a.double(), b.double()
+        count = total(torch.ones_like(a))
+        mean_a, mean_b = total(a) / count, total(b) / count
+        covariance = total(a * b) / count - mean_a * mean_b
+        variance = (total(a * a) / count - mean_a**2).clamp_min(0) * (total(b * b) / count - mean_b**2).clamp_min(0)
+        return (covariance**2 / (variance + 1e-5)).clamp_max(1.0)
+
+    def partial_metric(
+        self, output: torch.Tensor, *targets: torch.Tensor, core: tuple[slice, ...] | None = None
+    ) -> tuple[float, int]:
+        self._require_target(targets)
+        values = self._map(output, targets[0].to(output.device))
+        mask = MaskedLoss.get_mask(list(targets[1:]))
+        selected = (
+            torch.ones_like(values, dtype=torch.bool) if mask is None else mask.to(values.device).expand_as(values)
+        )
+        if core is not None:
+            values, selected = values[(slice(None), slice(None), *core)], selected[(slice(None), slice(None), *core)]
+        return float(values[selected].sum()), int(selected.sum())
+
+    def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
+        total, count = sum(state[0] for state in states), sum(state[1] for state in states)
+        lncc = total / count if count else float("nan")
+        return torch.tensor(1 - lncc), lncc
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        return self.combine_metric([self.partial_metric(output, *targets)])
+
+
+def _statistic_name(criterion: str, statistic: str, name: str | None) -> str:
+    """The name a ``criterion`` reports one ``statistic`` under (``mean``, ``p95`` or ``max``): ``name`` when given,
+    else on ``PointDistanceP95``'s pattern."""
+    if statistic not in ("mean", "p95", "max"):
+        raise MeasureError(f"{criterion} has no statistic '{statistic}'.", "Choose mean, p95 or max.")
+    return name or f"{criterion}{statistic.capitalize()}"
+
+
+class PointDistance(Criterion):
+    """The distance between the output's and the target's vectors (one per voxel, its components on the channel
+    axis): their ``mean``, 95th percentile (``p95``) or maximum (``max``) over the voxels where both are finite. On
+    two coordinate images (``WorldCoordinates``), one sent through a registration and the one registered back, it is
+    the round trip's error, in mm; a voxel the round trip leaves the grid from (``Resample``'s ``fill: .nan``) is
+    left out."""
+
+    loss_capable = False  # a percentile of a readout, no gradient
+
+    def __init__(self, statistic: str = "mean", name: str | None = None) -> None:
+        super().__init__()
+        self.statistic = statistic
+        self.name = _statistic_name("PointDistance", statistic, name)
+
+    def get_name(self) -> str:
+        return self.name
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        self._require_target(targets)
+        distance = torch.linalg.norm(output.double() - targets[0].to(output.device).double(), dim=1)
+        values = distance[torch.isfinite(distance)]
+        if not values.numel():
+            return torch.tensor(float("nan")), float("nan")
+        array = values.cpu().numpy()
+        value = {"mean": array.mean, "p95": lambda: np.percentile(array, 95), "max": array.max}[self.statistic]()
+        return torch.tensor(float(value)), float(value)
+
+
 def _field_of(field: torch.Tensor, attribute: Any, name: str) -> tuple[np.ndarray, np.ndarray]:
     """One displacement field ``[C, (Z), Y, X]`` as the ``[3, Z, Y, X]`` float64 array :func:`field_jacobian_sums`
-    takes, with the matrix taking a world offset to indices of the grid its ``attribute`` describes. A 2-D field is
-    one plane thick, with no z displacement, so its determinant is the plane's."""
+    and :func:`field_regularity_statistics` take, with the matrix taking a world offset to indices of the grid its
+    ``attribute`` describes. A 2-D field is one plane thick, with no z displacement: the z row of J is the identity's
+    and every z derivative 0."""
     rank = field.dim() - 1
     if attribute is None or rank not in (2, 3) or field.shape[0] != rank:
         raise MeasureError(
@@ -492,24 +685,30 @@ def _field_of(field: torch.Tensor, attribute: Any, name: str) -> tuple[np.ndarra
     values = field.detach().cpu().numpy().astype(np.float64)
     spacing = attribute.get_np_array("Spacing").astype(np.float64)
     direction = attribute.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
-    if rank == 2:  # one plane thick: no z displacement, so the z row of J is the identity's
+    if rank == 2:
         values = np.concatenate([values, np.zeros_like(values[:1])])[:, None]
         spacing, direction = np.append(spacing, 1.0), np.pad(direction, (0, 1))
         direction[2, 2] = 1.0
     return values, np.linalg.inv(direction @ np.diag(spacing))
 
 
-class _JacobianStatistic(CriterionWithAttribute):
-    """One statistic of the determinant of a displacement field's Jacobian ``J = I + du/dx``, as
-    :func:`konfai.utils.ITK.jacobian_statistics` takes it, over the output: the field, read with its geometry. The
-    target is not read: name the output group itself under ``targets_criterions``. Reducible under a memory budget:
-    each patch, read with one voxel of halo, carries the sums of its slot, so the field is never held whole."""
+class _FieldStatistic(CriterionWithAttribute):
+    """One statistic of a displacement field, the output, read with its geometry (:func:`_field_of`). The target is
+    not read: name it ``None`` under ``targets_criterions``."""
 
     accepts_output_attributes = True
     any_target_grid = True
+    loss_capable = False  # a statistic of a numpy pass, no gradient
+    statistic = ""
+
+
+class _JacobianStatistic(_FieldStatistic):
+    """One statistic of the determinant of a displacement field's Jacobian ``J = I + du/dx``, as
+    :func:`konfai.utils.ITK.jacobian_statistics` takes it. Reducible under a memory budget: each patch, read with one
+    voxel of halo, carries the sums of its slot, so the field is never held whole."""
+
     reducible = True
     halo = 1
-    statistic = ""
 
     def forward(  # type: ignore[override]
         self,
@@ -543,6 +742,55 @@ class _JacobianStatistic(CriterionWithAttribute):
         """The statistic of each sample from the sums of every patch, averaged over the batch."""
         per_sample = zip(*states, strict=True)
         return torch.tensor(float(np.mean([jacobian_statistics(sums)[self.statistic] for sums in per_sample])))
+
+
+class _RegularityStatistic(_FieldStatistic):
+    """One statistic of :func:`konfai.utils.ITK.field_regularity_statistics`, the field read whole: a percentile of
+    the displacements has no partial state."""
+
+    # ponytail: a one-slot memo, so the regularity criteria of one field share one pass; a case at a time, as
+    # evaluation runs.
+    _last: ClassVar[tuple[Any, list[dict[str, float]]] | None] = None
+
+    def forward(  # type: ignore[override]
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Any]],
+        output_attributes: list[Any] | None = None,
+    ) -> torch.Tensor:
+        del targets, attributes
+        last = _RegularityStatistic._last
+        if last is None or last[0]() is not output:
+            per_sample = output_attributes if output_attributes is not None else [None] * output.shape[0]
+            stats = []
+            for field, attribute in zip(output, per_sample, strict=True):
+                values, to_index = _field_of(field, attribute, self.get_name())
+                stats.append(field_regularity_statistics(values.__getitem__, list(values.shape), to_index))
+            _RegularityStatistic._last = (weakref.ref(output), stats)
+        else:
+            stats = last[1]
+        return torch.tensor(float(np.mean([case[self.statistic] for case in stats])))
+
+
+class BendingEnergy(_RegularityStatistic):
+    """The bending energy of a displacement field: the mean over its voxels of every squared second derivative, in
+    1/mm^2 for a field in mm. 0 for an affine map; how far from smooth the deformation is."""
+
+    statistic = "bending_energy"
+
+
+class Displacement(_RegularityStatistic):
+    """The length of a displacement field's vectors, in its unit (mm): their ``mean``, 95th percentile (``p95``) or
+    maximum (``max``). A registration that moved nothing, or one that went far, shows here first."""
+
+    def __init__(self, statistic: str = "mean", name: str | None = None) -> None:
+        super().__init__()
+        self.name = _statistic_name("Displacement", statistic, name)
+        self.statistic = f"displacement_{statistic}"
+
+    def get_name(self) -> str:
+        return self.name
 
 
 class JacobianFolding(_JacobianStatistic):

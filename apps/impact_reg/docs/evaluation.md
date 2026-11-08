@@ -8,13 +8,18 @@ measures the misalignment before registration).
 
 | Modality | Options | Metric | Unit |
 |---|---|---|---|
-| image | `-f` / `-m`, optional `--mask` (on the fixed grid) | MAE between the fixed image and the warped moving one, inside the mask | the images' intensity unit |
-| segmentation | `--gt-fixed-seg` / `--gt-moving-seg` | Dice of every label of the fixed segmentation, and their mean | 0 to 1 |
+| image | `-f` / `-m`, optional `--mask` (on the fixed grid) | the fixed image against the warped moving one, inside the mask: MAE (one modality, one scale), NMI (any modalities), NCC and LNCC (one modality); and the share of the fixed grid sent outside the moving image | intensity unit; 1 to 2; -1 to 1; 0 to 1; 0 to 1 |
+| segmentation | `--gt-fixed-seg` / `--gt-moving-seg` | every label of the fixed segmentation, and their mean: Dice, Jaccard, relative volume difference; HD95, ASSD; surface Dice at 2 mm | 0 to 1; mm; 0 to 1 |
 | landmarks | `--gt-fixed-fid` / `--gt-moving-fid` | TRE: each fixed landmark pushed through the transform, against its moving partner | mm |
 
-When the transform is a displacement field, `eval` also reports its **Jacobian determinant**: the fraction of folded
-voxels (determinant ≤ 0), the minimum, and the standard deviation of its logarithm. A good deformable registration has
-no folding. `--transform` given alone measures the Jacobian and nothing else.
+When the transform is a displacement field, `eval` also reports its **measures without reference**: from the
+determinant of its Jacobian, the fraction of folded voxels (determinant ≤ 0), the minimum and the standard deviation of
+its logarithm; its bending energy (the mean squared second derivative, 0 for an affine map); and the length of its
+displacements (mean, 95th percentile, maximum). A good deformable registration has no folding. `--transform` given
+alone measures these and nothing else.
+
+The cohort summary adds `worst30` to every metric: the mean of its worst 30 % of cases, the robustness Learn2Reg
+reports as DSC30 and TRE30.
 
 ```bash
 impact-reg-konfai eval --transform Output/P000/Transform.h5 \
@@ -26,8 +31,10 @@ impact-reg-konfai eval --transform Output/P000/Transform.h5 \
 
 **Without impact-reg.** Each modality is `konfai-apps eval` of the transform (`-i`) against the fixed and the moving
 data (`--gt`, in that order), through the configs every engine app ships: `Evaluation_with_images.yml`,
-`Evaluation_with_seg.yml`, `Evaluation_with_fid.yml`, and `Evaluation_with_jacobian.yml`, which takes the field alone.
-`konfai-apps pipeline` registers and scores in one call.
+`Evaluation_with_seg.yml`, `Evaluation_with_fid.yml`, and `Evaluation_no_reference.yml`, which takes the field alone.
+`Evaluation_inverse_consistency.yml` takes a registration and the one registered back (`-i FORWARD --gt BACKWARD --gt
+FIXED`): the distance each fixed voxel ends from where it started, in mm. `konfai-apps pipeline` registers and scores
+in one call.
 
 ```bash
 konfai-apps eval VBoussot/ImpactReg:ConvexAdam --evaluation-file Evaluation_with_seg.yml \
@@ -36,11 +43,11 @@ konfai-apps pipeline VBoussot/ImpactReg:ConvexAdam -i fixed.nii.gz -i moving.nii
     --gt fixed_organs.nii.gz --gt moving_organs.nii.gz --evaluation-file Evaluation_with_seg.yml -o Output
 ```
 
-**Outputs.** One folder per case and modality, `Evaluation/<case>/Evaluation/{Image,Segmentation,Landmarks,Jacobian}/`,
+**Outputs.** One folder per case and modality, `Evaluation/<case>/Evaluation/{Image,Segmentation,Landmarks,NoReference}/`,
 each holding the metrics as `ImpactReg/Metric_TRAIN.json` (and the voxel-wise map, `ImpactReg/Output/<case>/MAE_map.mha`
 or `Dice_map.mha`, where one applies), and
 `Evaluation/Evaluation_summary.json` gathering every case and the cohort's statistics (mean, median, min, max,
-quartiles).
+quartiles, worst 30 %).
 
 **Several cases.** Each option takes one entry per case (paired by position) or a single entry used for every case,
 such as one atlas or one transform. Other counts are refused.
