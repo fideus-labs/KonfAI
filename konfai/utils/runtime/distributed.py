@@ -18,6 +18,7 @@
 """The distributed runtime: one process per device, rank pools, thread budgets, the SLURM path."""
 
 import ctypes
+import gc
 import inspect
 import multiprocessing.util
 import os
@@ -797,8 +798,15 @@ def find_free_port():
 
 
 def cleanup():
-    """Destroy the active torch distributed process group when present."""
+    """Destroy the active torch distributed process group when present.
+
+    A DistributedDataParallel wrapper the run no longer references can still sit in a reference cycle, and its
+    reducer keeps the gloo process group alive past ``destroy_process_group``: the group's threads are then torn
+    down at interpreter exit, where the rank hangs or aborts ("terminate called without an active exception").
+    Collecting first frees the group here, while the interpreter still runs.
+    """
     if dist.is_initialized():
+        gc.collect()
         dist.destroy_process_group()
 
 

@@ -17,7 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from konfai.network.network import Network
 from konfai.trainer import _ddp_kwargs
-from konfai.utils.runtime.distributed import pin_gloo_to_loopback
+from konfai.utils.runtime.distributed import cleanup, pin_gloo_to_loopback
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 pytestmark = [
@@ -63,23 +63,29 @@ def _run_rank(rank: int, root: str, cadences: tuple[int, ...]) -> None:
             "gloo", init_method=(path / "rendezvous").as_uri(), rank=rank, world_size=2, timeout=timedelta(seconds=30)
         )
     try:
-        model = _Graph(cadences)
-        ddp = DDP(model, **_ddp_kwargs(model, local_rank=rank, size=1))
-        state = {"calls": 0}
-        ddp.register_comm_hook(state, _count_and_average)
-        observed: list[list[float]] = []
-        for _ in range(6):
-            with model.accumulation_sync(ddp):
-                outputs = ddp(torch.tensor([[float(rank + 1)]]))
-                for leaf, output in zip(model.children(), outputs, strict=True):
-                    # The loss surface is minimal; production Network.backward owns the scaler,
-                    # counters, optimizer boundaries and gradient reset.
-                    leaf.measure = SimpleNamespace(outputs_criterions={}, get_loss=lambda y=output: [y.square().mean()])
-                model.backward(ddp)
-            observed.append([float(leaf["Linear"].weight.detach().item()) for leaf in model.children()])
-        (path / f"rank-{rank}.json").write_text(json.dumps({"weights": observed, "reductions": state["calls"]}))
+        _train(rank, path, cadences)
     finally:
-        dist.destroy_process_group()
+        # The production teardown, once the DDP wrapper is out of scope: a wrapper still alive at interpreter exit
+        # takes the gloo group's threads down there, and the rank hangs or aborts.
+        cleanup()
+
+
+def _train(rank: int, path: Path, cadences: tuple[int, ...]) -> None:
+    model = _Graph(cadences)
+    ddp = DDP(model, **_ddp_kwargs(model, local_rank=rank, size=1))
+    state = {"calls": 0}
+    ddp.register_comm_hook(state, _count_and_average)
+    observed: list[list[float]] = []
+    for _ in range(6):
+        with model.accumulation_sync(ddp):
+            outputs = ddp(torch.tensor([[float(rank + 1)]]))
+            for leaf, output in zip(model.children(), outputs, strict=True):
+                # The loss surface is minimal; production Network.backward owns the scaler,
+                # counters, optimizer boundaries and gradient reset.
+                leaf.measure = SimpleNamespace(outputs_criterions={}, get_loss=lambda y=output: [y.square().mean()])
+            model.backward(ddp)
+        observed.append([float(leaf["Linear"].weight.detach().item()) for leaf in model.children()])
+    (path / f"rank-{rank}.json").write_text(json.dumps({"weights": observed, "reductions": state["calls"]}))
 
 
 @pytest.mark.parametrize("cadences, reductions", [((1,), 6), ((2,), 3), ((2, 3), 4)])

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from konfai import RemoteServer
+from konfai.utils import uri
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -43,7 +44,7 @@ from .app_repository import (
     get_available_apps_on_hf_repo,
 )
 from .errors import AppRepositoryError
-from .options import add_device, add_tmp_dir
+from .options import add_device, add_tmp_dir, local_path
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
@@ -88,7 +89,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-i",
         "--inputs",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         required=True,
@@ -97,7 +98,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--gt",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
@@ -105,7 +106,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--mask",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
@@ -114,7 +115,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-o",
         "--output",
-        type=lambda x: Path(x).resolve(),
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory / file",
     )
@@ -131,8 +132,10 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     return kwargs
 
 
-def _resolved_path(value: str) -> Path:
-    return Path(value).resolve()
+def _input_path(value: str) -> Path | str:
+    """An argparse type: an input, a local path made absolute, or a URI kept as it is (an OME-Zarr store the run
+    reads in place, chunk by chunk)."""
+    return value if uri.is_uri(value) else Path(value).resolve()
 
 
 def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> None:
@@ -140,22 +143,23 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
     instead of inputs and works in its output directory, so it takes no temporary directory."""
     if fine_tune:
         parser.add_argument(
-            "-d", "--dataset", type=_resolved_path, required=True, help="Dataset directory to fine-tune on."
+            "-d", "--dataset", type=local_path, required=True, help="Dataset directory to fine-tune on."
         )
     else:
         parser.add_argument(
             "-i",
             "--inputs",
-            type=_resolved_path,
+            type=_input_path,
             nargs="+",
             action="append",
             required=True,
-            help="Input path(s): one or multiple volume files, or a dataset directory.",
+            help="Input path(s): one or multiple volume files, a dataset directory, or an OME-Zarr store by URI "
+            "(s3://...), read in place.",
         )
     parser.add_argument(
         "-o",
         "--output",
-        type=_resolved_path,
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory: each case's files are listed when the run ends.",
     )
@@ -167,7 +171,7 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
 def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
     parser.add_argument(
         "--gt",
-        type=_resolved_path,
+        type=_input_path,
         nargs="+",
         action="append",
         required=required,
@@ -177,7 +181,7 @@ def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
 
 def _add_mask(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--mask", type=_resolved_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
+        "--mask", type=_input_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
     )
 
 
@@ -792,7 +796,12 @@ def main_apps() -> None:
         required=True,
         help="Config file(s), space-separated: Prediction.yml Evaluation.yml …",
     )
-    bundle_p.add_argument("--checkpoint", nargs="+", required=True, help="Checkpoint .pt file(s): CV_0.pt CV_1.pt …")
+    bundle_p.add_argument(
+        "--checkpoint",
+        nargs="+",
+        required=True,
+        help="Checkpoint file(s): CV_0.pt CV_1.pt …, written to the bundle as .safetensors weights.",
+    )
     bundle_p.add_argument("--model-py", help="Optional custom Model.py to include.")
     bundle_p.add_argument(
         "--support-file",

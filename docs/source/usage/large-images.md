@@ -57,7 +57,8 @@ reads, very small ones waste decompression time.
 A public example needs no complete local copy: with `pip install "konfai[s3]"` and `FSSPEC_S3_ANON=true`, the entry
 `s3://aind-open-data/exaSPIM_822174_2026-04-28_12-29-55_processed_2026-07-09_03-49-09:omezarr` streams
 ExaSPIM specimen `822174` (513 × 1331 × 1775, CC BY 4.0) region by region. The large-images notebook on
-{doc}`../examples/index` reads it.
+{doc}`../examples/index` reads it. A store that does not sit in a `<root>/<case>/<group>` layout is named in a
+[manifest](../reference/components/storage-backends.md#a-manifest-of-explicit-entries) instead.
 
 ## What to tune, in order
 
@@ -81,7 +82,11 @@ fixed floor.
 
 - **`Dataset.Patch`** cuts what the loader hands the model. Keys: `patch_size` (default `[128, 128, 128]`),
   `overlap` (voxels, a fraction or a per-axis list; `null` means 20%), `pad_value` (`null` pads with the
-  minimum) and `extend_slice` (2.5-D context when `patch_size[0] == 1`).
+  minimum, `edge` with the edge voxel), `extend_slice` (2.5-D context when `patch_size[0] == 1`) and
+  `placement`, where the patches of an axis sit: `pad` (the default) every `patch - overlap` voxels, the last one
+  cut at the volume's end and padded; `monai` the last one moved back to end on the volume's last voxel, as MONAI's
+  sliding window places it; `spread` evenly from the first voxel to the last, as nnU-Net does. A port declares its
+  source's placement; under `monai` and `spread` only an axis shorter than the patch is padded, on both sides.
 - **`Model.ModelPatch`** cuts again inside the network: for a heavy part of the network, or a 2-D model
   inside a 3-D workflow. `patch_combine` blends the overlaps: `Mean`, `Cosinus`, `Trim` or `Gaussian`.
 
