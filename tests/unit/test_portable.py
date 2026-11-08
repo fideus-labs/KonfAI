@@ -132,6 +132,33 @@ def test_a_stage_konfai_does_not_carry_to_its_writer_is_refused_with_what_konfai
         steps({stage: params, "Write": {"dataset": "./Out:mha"}}, "CT")
 
 
+def test_compiling_works_on_a_private_copy_and_never_writes_the_callers_config(tmp_path: Path) -> None:
+    # The builders write their defaults back: a read-only config, or one saved during a compile, stays the caller's.
+    import os
+
+    from konfai.portable import config_environment
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    config.chmod(0o444)
+    previous = os.environ.get("KONFAI_config_file")
+    with config_environment(config, root="Predictor", state="PREDICTION") as working:
+        assert Path(os.environ["KONFAI_config_file"]) == working and working.parent == tmp_path and working != config
+        working.write_text("Predictor: {resolved: true}\n")
+        config.chmod(0o644)
+        config.write_text("Predictor: {edited: true}\n")
+    assert config.read_text() == "Predictor: {edited: true}\n"
+    assert os.environ.get("KONFAI_config_file") == previous
+    assert [path.name for path in tmp_path.iterdir()] == ["Prediction.yml"]
+
+
+def test_a_missing_config_keeps_the_builders_refusal(tmp_path: Path) -> None:
+    from konfai.portable import compile_transform
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        compile_transform(tmp_path / "Missing.yml", tmp_path / "Transforms")
+
+
 def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
     # konfai's Statistics records Image* keys on the case and hands its input back (alters_values False):
     # the values and the grid are the chain's without it, and the keys are the attribute sidecar the

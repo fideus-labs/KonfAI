@@ -33,7 +33,7 @@ import random
 import re
 import warnings
 from collections.abc import Callable, Collection, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from itertools import chain, combinations, islice, repeat, takewhile
 from pathlib import Path
@@ -714,26 +714,31 @@ def _built(config_file: str | Path, build: Callable[[Path], Any]) -> Iterator[tu
     refusals run first, and the file as the build left it: every default the build bound is written in it. A
     TRANSFORM binds its stages as it builds; a PREDICTION binds them only when its dataset is prepared, so the
     stages of a prediction's file hold the parameters their author spelled and each op supplies the rest. The
-    caller's file is restored as it was once the block ends."""
+    caller's file is never written (:func:`config_environment`)."""
     config_file = Path(config_file).resolve()
-    with config_environment(config_file, keep_file=True):
-        workflow = build(config_file)
-        yield workflow, YAML(typ="safe").load(config_file.read_text())
+    with config_environment(config_file) as working:
+        workflow = build(working)
+        yield workflow, YAML(typ="safe").load(working.read_text())
 
 
 @contextmanager
-def config_environment(
-    config_file: Path, *, root: str | None = None, state: str | None = None, keep_file: bool = False
-) -> Iterator[None]:
+def config_environment(config_file: Path, *, root: str | None = None, state: str | None = None) -> Iterator[Path]:
     """Read a KonfAI config with the environment its builders need, the config's directory on ``sys.path`` so
-    a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards and, with ``keep_file``,
-    the file, which reading rewrites. ``root`` and ``state`` serve a caller that builds no workflow."""
+    a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards. Reading rewrites a config,
+    so the block is handed a private copy beside the file (a relative model YAML resolves against that directory),
+    removed afterwards: the caller's file is never written. A config missing or in a directory that refuses a new
+    file is left to the builders, which refuse it. ``root`` and ``state`` serve a caller that builds no workflow."""
     import os
+    import shutil
     import sys
 
     previous = {key: value for key, value in os.environ.items() if key.startswith("KONFAI_")}
-    snapshot = config_file.read_bytes() if keep_file else None
-    os.environ["KONFAI_config_file"] = str(config_file)
+    private = config_file.with_name(f".{config_file.stem}.{os.getpid()}{config_file.suffix}")
+    working = config_file
+    with suppress(OSError):
+        shutil.copyfile(config_file, private)
+        working = private
+    os.environ["KONFAI_config_file"] = str(working)
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
     if root is not None:
         os.environ["KONFAI_ROOT"] = root
@@ -741,15 +746,14 @@ def config_environment(
         os.environ["KONFAI_STATE"] = state
     sys.path.insert(0, str(config_file.parent))
     try:
-        yield
+        yield working
     finally:
         sys.path.remove(str(config_file.parent))
-        if snapshot is not None:
-            config_file.write_bytes(snapshot)
         for key in [key for key in os.environ if key.startswith("KONFAI_")]:
             if key not in previous:
                 del os.environ[key]
         os.environ.update(previous)
+        private.unlink(missing_ok=True)
 
 
 def compile_chain(
