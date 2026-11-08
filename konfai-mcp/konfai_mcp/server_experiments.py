@@ -134,7 +134,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         next_actions: list[str] = list(STAGE_ACTIONS.get(stage, []))
         configs_present = readiness["configs_present"]
         if configs_present.get("train"):
-            next_actions.extend(["check_config"])
+            next_actions.append("check_config")
         if readiness.get("train"):
             next_actions.append("run_train")
         if readiness.get("prediction"):
@@ -142,9 +142,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         if readiness.get("evaluation"):
             next_actions.append("run_evaluation")
         if readiness.get("transform"):
-            # The plan first, always: run_transform writes a dataset, and the plan is what says how
-            # much and how: including whether the run would refuse before writing a byte.
-            next_actions.extend(["run_transform"])
+            next_actions.append("run_transform")
         if not all(configs_present.values()):
             next_actions.append("write_workflow_config")
         if any(readiness["blocked"][workflow]["missing_paths"] for workflow in self.ordered_workflows()):

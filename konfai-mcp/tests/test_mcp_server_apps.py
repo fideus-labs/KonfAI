@@ -527,10 +527,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         tool_names = (
             "list_apps",
             "describe_app",
-            "describe_app",
             "fetch_app",
-            "fetch_app",
-            "app_sources",
             "app_sources",
             "run_app",
             "fine_tune_app",

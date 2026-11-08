@@ -244,7 +244,8 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     cleaned = module.strip()
     if not cleaned:
         raise ValueError("module must not be empty.")
-    full = cleaned.split(":", 1)[0]
+    full, _, pointed = cleaned.partition(":")
+    object_name = object_name or pointed or None
     top = full.split(".", 1)[0]
 
     try:
@@ -294,5 +295,5 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
         ),
     }
     if object_name:
-        payload["inspect_classpath"] = f"{cleaned}:{object_name}" if ":" not in cleaned else cleaned
+        payload["inspect_classpath"] = f"{full}:{object_name}"
     return payload
