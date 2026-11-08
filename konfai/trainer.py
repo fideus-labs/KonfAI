@@ -56,7 +56,7 @@ from konfai.data.data_manager.subset import case_list_encoding
 from konfai.network.network import Measure, Model, ModelLoader, NetState, Network, place_graph
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock, startup_clock
-from konfai.utils.config import apply_config, config, strict_config
+from konfai.utils.config import apply_config, config, snapshot, strict_config
 from konfai.utils.errors import ConfigError, KonfAIWarning, TrainerError
 from konfai.utils.live_control import LiveControl
 from konfai.utils.runtime import (
@@ -1286,7 +1286,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         (statistics_directory() / self.name).mkdir(exist_ok=True)
         # The snapshot traces the run's live changes, which a RESUME continues: the trace outlives the copy.
         traced = _traced_interventions(self.config_namefile) if state == State.RESUME else []
-        shutil.copyfile(self.config_path_src, self.config_namefile)
+        snapshot(self.config_path_src, self.config_namefile)
         if traced:
             _record_interventions(self.config_namefile, traced)
 

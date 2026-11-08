@@ -21,8 +21,12 @@ The storage backends live one per module and are addressed as ``Dataset.<Backend
 the package is re-exported here; the backends are public as ``Dataset.<Backend>``."""
 
 from konfai.utils.dataset.abstract import AbstractFile as AbstractFile
+from konfai.utils.dataset.attribute import AFFINE_ATTRIBUTE as AFFINE_ATTRIBUTE
 from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE as DISPLACEMENT_FIELD_ATTRIBUTE
 from konfai.utils.dataset.attribute import Attribute as Attribute
+from konfai.utils.dataset.attribute import affine_from_attributes as affine_from_attributes
+from konfai.utils.dataset.attribute import affine_to_attribute as affine_to_attribute
+from konfai.utils.dataset.attribute import as_affine as as_affine
 from konfai.utils.dataset.attribute import as_channel_first as as_channel_first
 from konfai.utils.dataset.attribute import data_to_image as data_to_image
 from konfai.utils.dataset.attribute import data_to_transform as data_to_transform
@@ -30,6 +34,7 @@ from konfai.utils.dataset.attribute import displacement_field_to_data as displac
 from konfai.utils.dataset.attribute import get_infos as get_infos
 from konfai.utils.dataset.attribute import image_to_data as image_to_data
 from konfai.utils.dataset.attribute import is_an_image as is_an_image
+from konfai.utils.dataset.attribute import is_displacement_entry as is_displacement_entry
 from konfai.utils.dataset.attribute import ome_zarr_attributes as ome_zarr_attributes
 from konfai.utils.dataset.attribute import region_geometry as region_geometry
 from konfai.utils.dataset.attribute import sitk as sitk
@@ -56,11 +61,15 @@ from konfai.utils.dataset.statistics import chunk_hull_voxels as chunk_hull_voxe
 from konfai.utils.dataset.stream import DataStream as DataStream
 
 __all__ = [
+    "AFFINE_ATTRIBUTE",
     "BACKENDS",
     "DISPLACEMENT_FIELD_ATTRIBUTE",
     "Attribute",
     "DataStream",
     "Dataset",
+    "affine_from_attributes",
+    "affine_to_attribute",
+    "as_affine",
     "as_channel_first",
     "backend_for",
     "chunk_hull_voxels",
@@ -72,6 +81,7 @@ __all__ = [
     "get_infos",
     "image_to_data",
     "is_an_image",
+    "is_displacement_entry",
     "is_staging_entry",
     "ome_zarr_attributes",
     "read_landmarks",

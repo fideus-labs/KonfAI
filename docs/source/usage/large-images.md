@@ -57,7 +57,8 @@ reads, very small ones waste decompression time.
 A public example needs no complete local copy: with `pip install "konfai[s3]"` and `FSSPEC_S3_ANON=true`, the entry
 `s3://aind-open-data/exaSPIM_822174_2026-04-28_12-29-55_processed_2026-07-09_03-49-09:omezarr` streams
 ExaSPIM specimen `822174` (513 × 1331 × 1775, CC BY 4.0) region by region. The large-images notebook on
-{doc}`../examples/index` reads it.
+{doc}`../examples/index` reads it. A store that does not sit in a `<root>/<case>/<group>` layout is named in a
+[manifest](../reference/components/storage-backends.md#a-manifest-of-explicit-entries) instead.
 
 ## What to tune, in order
 

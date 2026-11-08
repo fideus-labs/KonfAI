@@ -465,7 +465,7 @@ class Evaluator(DistributedObject):
                     true_loss = outcome.materialized()
                     if outcome.map is not None and getattr(metric, "dataset", None):
                         with self._clock.phase("map"):
-                            self._write_map(metric, output_group, name, outcome.map)
+                            self._write_map(metric, output_group, name, outcome.map, batch_sample[output_group])
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
                     Evaluator._record_value(result, statistics, base_key, true_loss, direction)
@@ -473,17 +473,13 @@ class Evaluator(DistributedObject):
             statistics.add(result, name)
         return result
 
-    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor) -> None:
-        """Write a metric's whole-case map beside the case, with the case's own geometry."""
+    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor, output: BatchDataItem) -> None:
+        """Write a metric's whole-case map beside the case, on its output's grid: the header of the first group
+        holding the case could be a landmark set's, with no geometry (the map then went to a .npy), in an order
+        that changed from one run to the next."""
         filename, _, file_format = split_path_spec(metric.dataset)
-        map_dataset = Dataset(filename, file_format)
         group = metric.group if metric.group else output_group
-        for dataset in self.dataset.datasets.values():
-            for g in dataset.get_group():
-                if dataset.is_dataset_exist(g, name):
-                    _, cache_attribute = dataset.get_infos(g, name)
-                    map_dataset.write(group, name, map_.squeeze(0).numpy(), cache_attribute)
-                    return
+        Dataset(filename, file_format).write(group, name, map_.squeeze(0).numpy(), Attribute(output.attribute[0]))
 
     def _voxelwise_pairs(self, tensors: dict[str, torch.Tensor]) -> dict[tuple[str, str], list[str]]:
         """Each output and target group a metric compares voxel to voxel, with those metrics' names. A metric
@@ -641,13 +637,12 @@ class Evaluator(DistributedObject):
                 cored = tensors if core is None else [t[(slice(None), slice(None), *core)] for t in tensors]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
+                    # Criterion declares neither the halo's core= nor output_attributes=: the reducible hooks.
+                    keywords: dict[str, Any] = {"core": core} if reads_halo else {}
+                    if getattr(metric, "accepts_output_attributes", False):  # the case's header, as call_criterion
+                        keywords["output_attributes"] = batch_sample[output_group].attribute
                     with self._clock.phase(metric.get_name()), torch.no_grad():
-                        # Criterion declares neither the halo's core= nor partial_map: the reducible hooks.
-                        state = (
-                            cast(Any, metric).partial_metric(*tensors, core=core)
-                            if reads_halo
-                            else metric.partial_metric(*cored)
-                        )
+                        state = cast(Any, metric).partial_metric(*(tensors if reads_halo else cored), **keywords)
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
                     if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):

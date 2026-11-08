@@ -33,7 +33,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
 from konfai.metric.measure.impact import ImpactFeatureModel
@@ -93,12 +93,12 @@ def _patch_size(mode: str, model: ImpactFeatureModel) -> str:
 def _voxel_size(
     spec: ModelSpec, model: ImpactFeatureModel, mode: str, native: Sequence[float], where: str
 ) -> list[float]:
-    """The grid (mm) ``spec``'s model sees the image on: its voxel_size, or the fixed image's own spacing without one.
-    Static resamples the image on its own axes, Jacobian feeds the model patches of its own dimension."""
+    """The grid (in voxels of the fixed image) ``spec``'s model sees the image on: its voxel_size, or the fixed image's
+    own spacing without one. Static resamples the image on its own axes, Jacobian feeds the model patches of its own dimension."""
     axes = model.dim if mode.lower() == "jacobian" else 3
     size = [float(v) for v in spec.voxel_size] if spec.voxel_size is not None else list(native)[:axes]
     if len(size) != axes:
-        raise ValueError(f"{where}: voxel_size needs {axes} values (mm) in {mode} mode, got {spec.voxel_size}.")
+        raise ValueError(f"{where}: voxel_size needs {axes} values (voxels) in {mode} mode, got {spec.voxel_size}.")
     return size
 
 
@@ -296,8 +296,8 @@ class RegistrationNet(network.Network):
         final_grid_spacing: Annotated[
             float,
             Range(0.0, 100.0),
-            "Final B-spline control-point spacing (mm) of the deformable map; smaller = a more flexible "
-            "deformation, 0 = keep the map's default.",
+            "Final B-spline control-point spacing of the deformable map, in voxels of the fixed image; smaller = a "
+            "more flexible deformation, 0 = keep the map's default.",
         ] = 0.0,
         spatial_samples: Annotated[
             int,
@@ -334,6 +334,20 @@ class RegistrationNet(network.Network):
             "metric's channels (subset_features), patches and 2D planes, which 0 leaves to the clock. The 'Random' "
             "sampler does not read it.",
         ] = 42,
+        moments_init: Annotated[
+            Literal["cof", "com"],
+            "Where the linear stage starts: 'cof' leaves it to the parameter map, whose "
+            "AutomaticTransformInitialization aligns the frames; 'com' starts from the subjects' centres of mass, as "
+            "FireANTs' 'com' does, for two sparse subjects that aligned frames leave side by side. Two images covering "
+            "different lengths of a body have their centres of mass apart where the anatomy is not: 'cof' there.",
+        ] = "cof",
+        transform_type: Annotated[
+            Literal["field", "affine"],
+            "The form the transform is written in: 'field', its displacement on the fixed grid, whatever the maps; "
+            "'affine', the one matrix the maps found, which takes linear maps alone (translation, Euler, similarity, "
+            "affine) and refuses a B-spline. An affine is written as an ITK AffineTransform file or as an RFC-5 "
+            "'affine' store, where a field of the same registration weighs megabytes.",
+        ] = "field",
     ) -> None:
         # The IMPACT metric is described by ``models`` / ``levels`` (config = source of truth); the download list
         # is derived from them. Global knobs override the generated map (final_grid_spacing ->
@@ -366,6 +380,8 @@ class RegistrationNet(network.Network):
                 mixed_precision,
                 voxel_sampling,
                 seed,
+                moments_init,
+                transform_type,
             ),
             in_branch=[0, 1, 2, 3],
             out_branch=["registration"],

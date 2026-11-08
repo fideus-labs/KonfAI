@@ -199,7 +199,12 @@ def _write_workflow_config(
     return {
         "written": filename,
         **result,
-        "next_actions": ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"],
+        # Written either way; a config with schema_errors is fixed and rewritten before anything runs it.
+        "next_actions": (
+            ["write_workflow_config", "describe_config_schema"]
+            if "schema_errors" in result
+            else ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"]
+        ),
     }
 
 
@@ -1390,7 +1395,10 @@ def import_app(
 
 
 # Parameter descriptions shared by the app-execution tools below (one wording, two tools).
-_APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
+_APP_REF_DESC = (
+    "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only), '#preset' after it to run "
+    "one of the app's presets (describe_app lists them)."
+)
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
 _APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."

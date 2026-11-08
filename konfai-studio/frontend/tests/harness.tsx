@@ -12,6 +12,7 @@ import { useJson } from "../src/useJson";
 import "../src/styles.css";
 
 const Viewer = lazy(() => import("../src/Viewer"));
+const Deploy = lazy(() => import("../src/Deploy"));
 
 function FolderPicker() {
   const [open, setOpen] = useState(false);
@@ -59,6 +60,7 @@ const components: Record<string, (props: any) => React.ReactElement> = {
     />
   ),
   JsonProbe: (props) => <JsonProbe url={props.url} />,
+  Deploy: (props) => <Suspense><Deploy app={{ ref: props.ref }} onClose={() => undefined} /></Suspense>,
   StreamProbe: (props) => <StreamProbe session={props.session} />,
 };
 

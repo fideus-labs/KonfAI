@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from konfai.utils.runtime import save_weights
 from konfai_apps import app_repository as app_repository_module
 from konfai_apps.errors import AppMetadataError, AppRepositoryError
 from ruamel.yaml import YAML
@@ -162,7 +164,7 @@ def test_local_hf_get_filenames_returns_relative_files_and_ignores_folders(monke
 
 
 def test_is_app_repo_requires_root_app_json() -> None:
-    assert app_repository_module.is_app_repo(["Inference.yml", "app.json", "weights/model.pt"])
+    assert app_repository_module.is_app_repo(["Inference.yml", "app.json", "weights/model.safetensors"])
     assert not app_repository_module.is_app_repo(["docs/app.json", "Inference.yml"])
 
 
@@ -207,7 +209,14 @@ def test_offline_an_unpinned_hf_app_takes_the_release_tag_a_run_cached(
 _DEMO_APP_JSON = json.dumps(
     {"display_name": "Demo", "description": "HF test app", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
 )
-_HUB_FILES = ["CBCT/app.json", "CBCT/Prediction.yml", "MR/app.json", "MR/model.pt", "SAM2.1_Small.pt", "docs/a.md"]
+_HUB_FILES = [
+    "CBCT/app.json",
+    "CBCT/Prediction.yml",
+    "MR/app.json",
+    "MR/model.safetensors",
+    "SAM2.1_Small.pt",
+    "docs/a.md",
+]
 
 
 class _HubFolder(SimpleNamespace):
@@ -280,7 +289,7 @@ def test_an_hf_catalogue_lists_every_app_of_the_hub_and_downloads_their_files_bu
 
     assert app_repository_module.get_available_apps_on_hf_repo("org/demo") == ["CBCT", "MR"]
     assert sorted(app_repository_module.get_downloaded_apps_on_hf_repo("org/demo")) == ["CBCT", "MR"]
-    assert (snapshot / "MR" / "app.json").is_file() and not (snapshot / "MR" / "model.pt").exists()
+    assert (snapshot / "MR" / "app.json").is_file() and not (snapshot / "MR" / "model.safetensors").exists()
 
 
 def test_offline_an_hf_catalogue_lists_what_the_cache_holds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -323,7 +332,7 @@ def test_a_whole_hf_app_includes_the_files_its_cache_lacks(
 
     operation(repo, tmp_path / "export")
 
-    assert ("MR/model.pt" in fetched) is whole
+    assert ("MR/model.safetensors" in fetched) is whole
 
 
 def test_local_hf_download_syncs_non_model_files_for_current_revision(
@@ -354,7 +363,7 @@ def test_local_hf_download_syncs_non_model_files_for_current_revision(
                 DummyFile("demo_app/Inference.yml"),
                 DummyFolder("demo_app/assets"),
                 DummyFile("demo_app/assets/preprocess.py"),
-                DummyFile("demo_app/model.pt"),
+                DummyFile("demo_app/model.safetensors"),
             ]
         ),
     )
@@ -398,7 +407,7 @@ def test_local_hf_initial_model_availability_comes_from_cache(
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["model.pt"],
+                "models": ["model.safetensors"],
             }
         ),
         encoding="utf-8",
@@ -409,7 +418,7 @@ def test_local_hf_initial_model_availability_comes_from_cache(
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
         "get_filenames",
-        staticmethod(lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", "model.pt"]),
+        staticmethod(lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", "model.safetensors"]),
     )
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
@@ -432,13 +441,23 @@ def test_local_hf_initial_model_availability_comes_from_cache(
 
     repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "demo_app", True)
 
-    assert repo.get_checkpoints_name() == ["model.pt"]
+    assert repo.get_checkpoints_name() == ["model.safetensors"]
     assert repo.get_checkpoints_name_available() == []
 
 
+@pytest.mark.parametrize(
+    ("declared", "files", "available"),
+    [
+        ("model.safetensors", ["weights/model.safetensors"], ["model.safetensors"]),
+        ("model.pt", ["model.pt"], ["model.pt"]),  # a bundle exported before safetensors
+    ],
+)
 def test_local_hf_nested_cached_model_is_reported_available(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    declared: str,
+    files: list[str],
+    available: list[str],
 ) -> None:
     app_json = tmp_path / "app.json"
     app_json.write_text(
@@ -449,7 +468,7 @@ def test_local_hf_nested_cached_model_is_reported_available(
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["model.pt"],
+                "models": [declared],
             }
         ),
         encoding="utf-8",
@@ -458,12 +477,12 @@ def test_local_hf_nested_cached_model_is_reported_available(
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
         "get_filenames",
-        staticmethod(lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", "weights/model.pt"]),
+        staticmethod(lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", *files]),
     )
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
         "get_cached_filenames",
-        staticmethod(lambda repo_id, app_name: ["Inference.yml", "app.json", "weights/model.pt"]),
+        staticmethod(lambda repo_id, app_name: ["Inference.yml", "app.json", *files]),
     )
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
@@ -473,7 +492,7 @@ def test_local_hf_nested_cached_model_is_reported_available(
 
     repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "demo_app", True)
 
-    assert repo.get_checkpoints_name_available() == ["model.pt"]
+    assert repo.get_checkpoints_name_available() == available
 
 
 def test_local_hf_download_inference_refreshes_selected_remote_model(
@@ -489,7 +508,7 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["CV_0.pt"],
+                "models": ["CV_0.safetensors"],
             }
         ),
         encoding="utf-8",
@@ -502,7 +521,7 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
     def fake_get_filenames(repo_id: str, app_name: str, force_update: bool) -> list[str]:
         get_filenames_calls.append(force_update)
         if force_update:
-            return ["CV_0.pt", "Inference.yml", "app.json"]
+            return ["CV_0.safetensors", "Inference.yml", "app.json"]
         return ["Inference.yml", "app.json"]
 
     monkeypatch.setattr(
@@ -533,7 +552,7 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
 
     models_path, prediction_path, codes_path = repo.download_inference(1, ["CV_0"], "Inference.yml")
 
-    assert models_path == [tmp_path / "CV_0.pt"]
+    assert models_path == [tmp_path / "CV_0.safetensors"]
     assert prediction_path == inference_yml
     # download_inference must stage every non-model bundle file (so assets like elastix parameter maps
     # are available in the run workspace, as the apps docs promise).
@@ -561,7 +580,7 @@ def test_local_directory_install_inference_preserves_nested_python_files(
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["model.pt"],
+                "models": ["model.safetensors"],
             }
         ),
         encoding="utf-8",
@@ -571,7 +590,7 @@ def test_local_directory_install_inference_preserves_nested_python_files(
         f"    batch_size: {config_batch_size}\n",
         encoding="utf-8",
     )
-    (app_root / "model.pt").write_text("weights", encoding="utf-8")
+    (app_root / "model.safetensors").write_text("weights", encoding="utf-8")
     (app_root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (app_root / "pkg" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
 
@@ -636,7 +655,7 @@ def test_install_evaluation_stages_non_python_assets(tmp_path: Path, monkeypatch
     (app_root / "Evaluation.yml").write_text("Evaluator: {}\n", encoding="utf-8")
     (app_root / "labels.csv").write_text("id,name\n1,liver\n", encoding="utf-8")
     (app_root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (app_root / "model.pt").write_text("weights", encoding="utf-8")
+    (app_root / "model.safetensors").write_text("weights", encoding="utf-8")
 
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     workspace = tmp_path / "workspace"
@@ -648,7 +667,7 @@ def test_install_evaluation_stages_non_python_assets(tmp_path: Path, monkeypatch
     assert (workspace / "Evaluation.yml").exists()
     assert (workspace / "labels.csv").exists()
     assert (workspace / "helper.py").exists()
-    assert not (workspace / "model.pt").exists()
+    assert not (workspace / "model.safetensors").exists()
 
 
 def test_install_uncertainty_stages_non_python_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -668,7 +687,7 @@ def test_install_uncertainty_stages_non_python_assets(tmp_path: Path, monkeypatc
     )
     (app_root / "Uncertainty.yml").write_text("Predictor: {}\n", encoding="utf-8")
     (app_root / "lookup.json").write_text("{}\n", encoding="utf-8")
-    (app_root / "model.pt").write_text("weights", encoding="utf-8")
+    (app_root / "model.safetensors").write_text("weights", encoding="utf-8")
 
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     workspace = tmp_path / "workspace"
@@ -679,7 +698,7 @@ def test_install_uncertainty_stages_non_python_assets(tmp_path: Path, monkeypatc
 
     assert (workspace / "Uncertainty.yml").exists()
     assert (workspace / "lookup.json").exists()
-    assert not (workspace / "model.pt").exists()
+    assert not (workspace / "model.safetensors").exists()
 
 
 def _write_two_checkpoint_app(app_root: Path) -> None:
@@ -692,7 +711,7 @@ def _write_two_checkpoint_app(app_root: Path) -> None:
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["CV_0.pt", "CV_1.pt"],
+                "models": ["CV_0.safetensors", "CV_1.safetensors"],
             }
         ),
         encoding="utf-8",
@@ -701,8 +720,8 @@ def _write_two_checkpoint_app(app_root: Path) -> None:
         "Trainer:\n  epochs: 100\n  it_validation: 2500\n  train_name: FT_0\n",
         encoding="utf-8",
     )
-    (app_root / "CV_0.pt").write_text("weights-0", encoding="utf-8")
-    (app_root / "CV_1.pt").write_text("weights-1", encoding="utf-8")
+    (app_root / "CV_0.safetensors").write_text("weights-0", encoding="utf-8")
+    (app_root / "CV_1.safetensors").write_text("weights-1", encoding="utf-8")
 
 
 def _install_fine_tune(
@@ -726,6 +745,26 @@ def _install_fine_tune(
     )
 
 
+def test_install_fine_tune_never_falls_back_past_the_first_declared_weights(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    (app_root / "CV_0.safetensors").unlink()
+    (app_root / "other.safetensors").write_text("weights", encoding="utf-8")
+
+    with pytest.raises(AppRepositoryError, match="CV_0"):
+        _install_fine_tune(app_root, tmp_path / "workspace", [])
+
+
+def test_install_fine_tune_prefers_safetensors_and_reads_a_pt(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    (app_root / "CV_0.pt").write_text("weights", encoding="utf-8")
+
+    assert [name for name, _ in _install_fine_tune(app_root, tmp_path / "both", [])] == ["CV_0.safetensors"]
+    (app_root / "CV_0.safetensors").unlink()
+    assert [name for name, _ in _install_fine_tune(app_root, tmp_path / "pt", [])] == ["CV_0.pt"]
+
+
 def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
     from ruamel.yaml import YAML
 
@@ -735,16 +774,16 @@ def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
 
     models = _install_fine_tune(app_root, workspace, [])
 
-    assert [name for name, _ in models] == ["CV_0.pt"]
-    assert models[0][1] == app_root / "CV_0.pt"
+    assert [name for name, _ in models] == ["CV_0.safetensors"]
+    assert models[0][1] == app_root / "CV_0.safetensors"
     # Shared assets are installed but checkpoints are not copied into the workspace by install.
     assert (workspace / "app.json").exists()
     assert (workspace / "Config.yml").exists()
-    assert not (workspace / "CV_0.pt").exists()
+    assert not (workspace / "CV_0.safetensors").exists()
 
     metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
     assert metadata["display_name"] == "Fine Tuned"
-    assert metadata["models"] == ["CV_0.pt"]
+    assert metadata["models"] == ["CV_0.safetensors"]
 
     with open(workspace / "Config.yml") as file:
         config = YAML().load(file)
@@ -860,9 +899,9 @@ def test_install_fine_tune_selects_requested_checkpoint(tmp_path: Path) -> None:
 
     models = _install_fine_tune(app_root, workspace, ["CV_1"])
 
-    assert [name for name, _ in models] == ["CV_1.pt"]
+    assert [name for name, _ in models] == ["CV_1.safetensors"]
     metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
-    assert metadata["models"] == ["CV_1.pt"]
+    assert metadata["models"] == ["CV_1.safetensors"]
 
 
 def test_install_fine_tune_selects_multiple_checkpoints(tmp_path: Path) -> None:
@@ -872,9 +911,9 @@ def test_install_fine_tune_selects_multiple_checkpoints(tmp_path: Path) -> None:
 
     models = _install_fine_tune(app_root, workspace, ["CV_0", "CV_1"])
 
-    assert [name for name, _ in models] == ["CV_0.pt", "CV_1.pt"]
+    assert [name for name, _ in models] == ["CV_0.safetensors", "CV_1.safetensors"]
     metadata = json.loads((workspace / "app.json").read_text(encoding="utf-8"))
-    assert metadata["models"] == ["CV_0.pt", "CV_1.pt"]
+    assert metadata["models"] == ["CV_0.safetensors", "CV_1.safetensors"]
 
 
 def test_install_fine_tune_rejects_unknown_checkpoint(tmp_path: Path) -> None:
@@ -936,6 +975,8 @@ def _capture_pip(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             return None
 
     monkeypatch.setattr(app_repository_module.subprocess, "Popen", _Pip)
+    # An environment with pip, whichever one runs the suite (an 'uv venv' has none).
+    monkeypatch.setattr(app_repository_module.importlib.util, "find_spec", lambda name: object())
     return captured
 
 
@@ -952,6 +993,39 @@ def test_install_requirements_runs_by_default(tmp_path: Path, monkeypatch: pytes
     assert len(captured) == 1
     assert captured[0][:5] == [sys.executable, "-m", "pip", "install", "-c"]
     assert captured[0][6:] == ["konfai-nonexistent-xyz==1.2.3"]
+
+
+def test_install_requirements_go_through_uv_in_an_environment_without_pip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 'uv venv' makes an environment without pip: every preset needing a package failed in it, at its first run.
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    for env in ("KONFAI_APPS_INSTALL_REQUIREMENTS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.delenv("PIP_NO_INDEX", raising=False)
+    captured = _capture_pip(monkeypatch)
+    monkeypatch.setattr(app_repository_module.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert captured[0][:6] == ["/bin/uv", "pip", "install", "--python", sys.executable, "-c"]
+    assert captured[0][-1] == "konfai-nonexistent-xyz==1.2.3"
+
+    # A private or offline source set for pip alone: uv would reach another index than the one set.
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    monkeypatch.setenv("PIP_INDEX_URL", "https://user:token@private.example/simple")
+    with pytest.raises(AppRepositoryError, match="does not read PIP_INDEX_URL") as refused:
+        app_repository_module._installer()
+    assert "token" not in str(refused.value)
+    monkeypatch.setenv("UV_INDEX_URL", "https://private.example/simple")  # uv's own setup is the operator's
+    assert app_repository_module._installer() == ["/bin/uv", "pip", "install", "--python", sys.executable]
+
+    monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: None)
+    with pytest.raises(AppRepositoryError, match="no pip and no uv"):
+        repo._install_requirements(repo._get_filenames())
 
 
 def test_install_requirements_opt_out_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1031,6 +1105,7 @@ def test_install_requirements_refuses_a_dependency_that_would_replace_torch(
     import importlib.metadata
     import zipfile
 
+    pytest.importorskip("pip", reason="a real pip run: an environment without pip installs through uv")
     links = tmp_path / "links"
     links.mkdir()
     with zipfile.ZipFile(links / "konfai_probe_dep-1.0-py3-none-any.whl", "w") as wheel:
@@ -1329,6 +1404,21 @@ def test_set_adds_a_field_the_model_declares_where_the_config_leaves_it_out(tmp_
         repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.nrom=l2"])
 
 
+def test_a_nested_model_parameter_is_dotted_from_the_model(tmp_path: Path) -> None:
+    # Predictor.Model.RegistrationNet.models.0.norm=l2 was the only spelling: a dotted name now starts at the model,
+    # checked as the full path is, and a path from the config root keeps working.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(str(prediction), ["models.0.norm=l2", "optimizer.lr=0.01"])
+    net = _net(prediction)
+    assert net["models"]["0"]["norm"] == "l2" and net["optimizer"]["lr"] == 0.01
+    with pytest.raises(AppRepositoryError, match="Did you mean 'norm'"):
+        repo._apply_config_overrides(str(prediction), ["models.0.nrom=l2"])
+    with pytest.raises(AppRepositoryError, match="outside its range"):
+        repo._apply_config_overrides(str(prediction), ["models.0.pca=-5"])
+    repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.norm=none"])
+    assert _net(prediction)["models"]["0"]["norm"] == "none"
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -1444,7 +1534,7 @@ def test_save_default_parameters_missing_config_raises(tmp_path: Path) -> None:
 
 def test_export_app_materialises_local_copy_with_overrides(tmp_path: Path) -> None:
     repo, prediction = _local_repo_with_config(tmp_path, _MODEL_CONFIG)
-    (prediction.parent / "model.pt").write_text("weights", encoding="utf-8")
+    (prediction.parent / "model.safetensors").write_text("weights", encoding="utf-8")
 
     dest = tmp_path / "exported" / "MyTunedApp"
     repo.export_app(
@@ -1454,7 +1544,7 @@ def test_export_app_materialises_local_copy_with_overrides(tmp_path: Path) -> No
     )
 
     assert (dest / "Prediction.yml").is_file()
-    assert (dest / "model.pt").is_file()  # checkpoints come along
+    assert (dest / "model.safetensors").is_file()  # checkpoints come along
     assert json.loads((dest / "app.json").read_text())["display_name"] == "My Tuned App"
 
     # Reopen the export as a local app: the tuned default is baked in.
@@ -1469,8 +1559,8 @@ def _remote_info_payload(**overrides) -> dict:
         "display_name": "Demo",
         "description": "demo",
         "short_description": "demo",
-        "checkpoints_name": ["m.pt"],
-        "checkpoints_name_available": ["m.pt"],
+        "checkpoints_name": ["m.safetensors"],
+        "checkpoints_name_available": ["m.safetensors"],
         "maximum_tta": 0,
         "mc_dropout": 0,
         "has_capabilities": [True, False, False],
@@ -1542,14 +1632,14 @@ def test_local_finetunable_requires_a_root_level_config_yml(tmp_path: Path) -> N
                 "short_description": "d",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["m.pt"],
+                "models": ["m.safetensors"],
                 "inputs": {},
                 "outputs": {},
             }
         ),
         encoding="utf-8",
     )
-    (app_dir / "m.pt").write_bytes(b"")
+    (app_dir / "m.safetensors").write_bytes(b"")
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_dir.parent, app_dir.name)
     assert repo.is_finetunable() is False
 
@@ -1602,22 +1692,22 @@ def _write_app_with_two_checkpoints(root: Path, declare: bool) -> Path:
         "mc_dropout": 0,
     }
     if declare:
-        metadata["models"] = ["new.pt"]
+        metadata["models"] = ["new.safetensors"]
     (app_root / "app.json").write_text(json.dumps(metadata))
     (app_root / "Prediction.yml").write_text("Predictor: {}\n")
-    (app_root / "first.pt").write_bytes(b"first")
-    (app_root / "new.pt").write_bytes(b"new")
+    (app_root / "first.safetensors").write_bytes(b"first")
+    (app_root / "new.safetensors").write_bytes(b"new")
     return app_root
 
 
 def test_default_inference_takes_the_checkpoints_app_json_declares(tmp_path: Path, monkeypatch) -> None:
     """A repackaged bundle can hold the previous export's checkpoint beside the declared one; the
-    default inference once enumerated the .pt files and picked the old one."""
+    default inference once enumerated the .safetensors files and picked the old one."""
     monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
     app_root = _write_app_with_two_checkpoints(tmp_path, declare=True)
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     models_path, _prediction, _codes = repo.download_inference(1, [], "Prediction.yml")
-    assert [path.name for path in models_path] == ["new.pt"]
+    assert [path.name for path in models_path] == ["new.safetensors"]
     with pytest.raises(app_repository_module.AppRepositoryError, match="declares 1"):
         repo.download_inference(2, [], "Prediction.yml")
 
@@ -1627,7 +1717,7 @@ def test_legacy_metadata_without_models_still_enumerates_the_checkpoints(tmp_pat
     app_root = _write_app_with_two_checkpoints(tmp_path, declare=False)
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     models_path, _prediction, _codes = repo.download_inference(2, [], "Prediction.yml")
-    assert sorted(path.name for path in models_path) == ["first.pt", "new.pt"]
+    assert sorted(path.name for path in models_path) == ["first.safetensors", "new.safetensors"]
 
 
 def test_native_inference_leaves_the_declared_portable_assets_in_the_repository(tmp_path: Path, monkeypatch) -> None:
@@ -1666,7 +1756,7 @@ def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspa
     (source / "helpers" / "util.py").write_text("SCALE = 3\n", encoding="utf-8")
     (source / "Model.py").write_text("from helpers.util import SCALE\n\nVALUE = SCALE * 2\n", encoding="utf-8")
     (source / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: Model:Net\n", encoding="utf-8")
-    (source / "CV_0.pt").write_bytes(b"weights")
+    save_weights({"Model": {"Net": {"weight": torch.zeros(1)}}}, source / "CV_0.safetensors")
     (source / "app.json").write_text(
         json.dumps(
             {"display_name": "Demo", "description": "Demo", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
@@ -1678,7 +1768,7 @@ def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspa
         tmp_path / "bundles",
         source / "app.json",
         [str(source / "Prediction.yml")],
-        [str(source / "CV_0.pt")],
+        [str(source / "CV_0.safetensors")],
         model_py=str(source / "Model.py"),
         support_files={"helpers": "helpers"},
         support_root=source,

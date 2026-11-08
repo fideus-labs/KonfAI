@@ -34,13 +34,20 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 import tqdm
-from konfai.utils.dataset import image_to_data
+from konfai.utils.dataset import as_affine
 from konfai.utils.vram import device_out_of_memory
 
 from .elastix import generate_impact_parameter_map, has_impact_block, sampled_spatial_samples
 from .elastix_install import cuda_upgrade_available, get_elastix_bin, install_elastix_impact, loader_env, try_elastix
 from .impact_loss import check_models, feature_model, sorted_specs
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import (
+    EngineRegistration,
+    center_of_mass_translation,
+    check_transform_type,
+    displacement_on,
+    is_partial_mask,
+    winsorized,
+)
 from .orientation import world_aligned_pair
 
 # Elastix + IMPACT binary is cached once here (with its own LibTorch when the environment's torch is another
@@ -48,19 +55,14 @@ from .orientation import world_aligned_pair
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
 ELASTIX_CACHE = Path.home() / ".cache" / "konfai" / "elastix-impact"
 
+#: The elastix transforms an affine represents exactly: ``transform_type: affine`` takes these maps alone.
+_LINEAR_TRANSFORMS = ("TranslationTransform", "EulerTransform", "SimilarityTransform", "AffineTransform")
 
-def _displacement_on(fixed: sitk.Image, transform: sitk.Transform) -> np.ndarray:
-    """``transform`` sampled as a displacement field on the grid of ``fixed``, channel-first."""
-    dvf = sitk.TransformToDisplacementField(
-        transform,
-        sitk.sitkVectorFloat64,
-        fixed.GetSize(),
-        fixed.GetOrigin(),
-        fixed.GetSpacing(),
-        fixed.GetDirection(),
-    )
-    dvf_np, _ = image_to_data(dvf)
-    return dvf_np
+
+def _declared_transform(text: str) -> str:
+    """The ``(Transform "...")`` entry of a parameter map, '' without one."""
+    found = re.search(r'^\s*\(Transform\s+"([^"]+)"\)', text, re.MULTILINE)
+    return found.group(1) if found else ""
 
 
 def _iterations_of(text: str) -> int:
@@ -146,12 +148,12 @@ def _extent_hint(captured: list[str], maps: list[Path], image: sitk.Image) -> st
     wider = [p * v for p, v, e in zip(patch, voxel, extent, strict=True) if p * v > e]
     if min(grid) >= 16 and not wider:
         return ""
-    spans = f", where its {max(patch)}-voxel patch spans {max(wider):g} mm" if wider else ""
+    spans = f", where its {max(patch)}-voxel patch spans {max(wider):g} voxels" if wider else ""
     return (
-        f"\nThe image, {' x '.join(f'{e:.1f}' for e in extent)} mm, is too small for the grid IMPACT's models see it "
-        f"on: {' x '.join(str(int(g)) for g in grid)} voxels at {' x '.join(f'{v:g}' for v in voxel)} mm (level "
-        f"{level}){spans}. The IMPACT presets are sized for CT and MR at millimetre scale: a small field of view "
-        "(microscopy, a crop) registers on its intensities (Generic_Rigid_BSpline, FireANTs_SyN), or on features at "
+        f"\nThe image, {' x '.join(f'{e:.1f}' for e in extent)} voxels, is too small for the grid IMPACT's models see it "
+        f"on: {' x '.join(str(int(g)) for g in grid)} voxels of {' x '.join(f'{v:g}' for v in voxel)} image voxels (level "
+        f"{level}){spans}. A small field of view "
+        "(a crop, a few hundred voxels) registers on its intensities (Elastix#rigid_bspline, FireANTs#syn), or on features at "
         "a finer grid, with a smaller voxel_size for each of the preset's models."
     )
 
@@ -178,7 +180,14 @@ class ElastixEngine:
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         seed: int = 42,
+        moments_init: str = "cof",
+        transform_type: str = "field",
     ) -> None:
+        if moments_init not in ("cof", "com"):
+            raise ValueError(f"Unknown moments_init '{moments_init}': 'cof' or 'com'.")
+        self._moments_init = moments_init
+        check_transform_type(transform_type)
+        self._transform_type = transform_type
         # The parameter-map .txt files are per-preset config staged into the run's working directory (KonfAIApp
         # chdir's into the app workspace before building the model), so resolve them against cwd, not this
         # module's directory, which is the installed package, not next to the .txt.
@@ -239,6 +248,14 @@ class ElastixEngine:
             print("[ImpactReg] note: voxel_sampling sets the IMPACT map's NumberOfSpatialSamples, not spatial_samples.")
         for key in unused:
             print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")
+        if transform_type == "affine":
+            for name, text in maps:
+                declared = _declared_transform(text)
+                if declared not in _LINEAR_TRANSFORMS:
+                    raise ValueError(
+                        f"transform_type 'affine' takes linear parameter maps ({', '.join(_LINEAR_TRANSFORMS)}); "
+                        f'{name} declares (Transform "{declared}"), which has no affine form.'
+                    )
         self._iterations = sum(_iterations_of(text) for _, text in maps)
         self._elastix_bin = self._ensure_binary()
 
@@ -284,7 +301,10 @@ class ElastixEngine:
             per_token["FinalGridSpacingInPhysicalUnits"] = str(float(self._final_grid_spacing))
         if self._spatial_samples > 0:
             per_token["NumberOfSpatialSamples"] = str(int(self._spatial_samples))
-        exact: list[tuple[str, str]] = []
+        # First, so that it wins: register adds its start back to the field, which holds only with this one off.
+        exact: list[tuple[str, str]] = (
+            [("AutomaticTransformInitialization", '"false"')] if self._moments_init == "com" else []
+        )
         for entry in self._parameter_overrides:
             key, sep, value = entry.partition("=")
             if not sep or not key.strip():
@@ -409,8 +429,9 @@ class ElastixEngine:
         device_index: int,
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
-    ) -> np.ndarray:
-        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid.
+    ) -> np.ndarray | sitk.Transform:
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid, or
+        with ``transform_type: affine`` the linear transform the maps found, fixed points to moving points.
 
         Optional ``fixed_mask`` / ``moving_mask`` restrict the similarity metric to a region (elastix
         ``-fMask`` / ``-mMask``); a mask covering the whole image is equivalent to passing none, and a
@@ -418,8 +439,14 @@ class ElastixEngine:
         """
         if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
             # Nothing to register: in a tiled run, a patch the tissue does not reach.
-            return _displacement_on(fixed, sitk.Transform(fixed.GetDimension(), sitk.sitkIdentity))
+            identity = sitk.AffineTransform(fixed.GetDimension())
+            return identity if self._transform_type == "affine" else displacement_on(fixed, identity)
         grid = fixed  # the field is sampled on the fixed image as it came
+        if self._feature_models and fixed.GetDimension() == 2:
+            # ponytail: elastix's IMPACT metric reads its models from the map, 3-D here; ConvexAdam swaps them
+            raise ValueError(
+                "The elastix IMPACT presets are 3-D: register a 2-D image with ConvexAdam or Elastix#rigid(_bspline)."
+            )
         if self._feature_models:
             for model in self._feature_models.values() if self._unchecked else ():
                 model.check(gradient=True)
@@ -432,6 +459,16 @@ class ElastixEngine:
             # Grey values alone, compared through mutual information: a few hot voxels no longer squeeze the tissue
             # into one bin. IMPACT's models read the intensities they were trained on, so an IMPACT run keeps them.
             fixed, moving = winsorized(fixed), winsorized(moving)
+        shift = None
+        if self._moments_init == "com":
+            # The moving image goes there by its origin, without resampling, and the shift is added back to the field.
+            regions = [mask if is_partial_mask(mask) else None for mask in (fixed_mask, moving_mask)]
+            shift = center_of_mass_translation(fixed, moving, *regions)
+            moving = sitk.Image(moving)
+            moving.SetOrigin([o - t for o, t in zip(moving.GetOrigin(), shift, strict=True)])
+            if moving_mask is not None:
+                moving_mask = sitk.Image(moving_mask)
+                moving_mask.SetOrigin([o - t for o, t in zip(moving_mask.GetOrigin(), shift, strict=True)])
         work = Path(tempfile.mkdtemp(prefix="konfai_reg_"))
         try:
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
@@ -523,7 +560,17 @@ class ElastixEngine:
             )
             if not transforms:
                 raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
-            return _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
+            transform = sitk.ReadTransform(str(transforms[-1]))
+            if self._transform_type == "affine":
+                # The one affine the maps compose to, the start added back: a moving point is T(x) + shift.
+                affine = as_affine(transform)
+                if shift is not None:
+                    affine.SetTranslation([t + s for t, s in zip(affine.GetTranslation(), shift, strict=True)])
+                return affine
+            field = displacement_on(grid, transform)
+            if shift is not None:
+                field += np.asarray(shift, dtype=field.dtype).reshape(-1, *([1] * (field.ndim - 1)))
+            return field
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -547,6 +594,8 @@ class ElastixRegistration(EngineRegistration):
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         seed: int = 42,
+        moments_init: str = "cof",
+        transform_type: str = "field",
     ) -> None:
         if engine != "elastix":
             raise NotImplementedError(f"ElastixRegistration engine '{engine}' is not implemented yet.")
@@ -565,5 +614,7 @@ class ElastixRegistration(EngineRegistration):
                 mixed_precision,
                 voxel_sampling,
                 seed,
+                moments_init,
+                transform_type,
             )
         )
