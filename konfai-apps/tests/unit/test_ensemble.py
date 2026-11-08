@@ -17,6 +17,7 @@
 """Ensembles of app references: every member of every run reduced into the output, slab by slab, and kept as one
 stack under -uncertainty."""
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +102,19 @@ def test_fields_average_into_a_transform_file_and_stack_their_components(tmp_pat
     assert list(stack.shape) == [6, 6, 5, 4] and int(float(header[MEMBERS_ATTRIBUTE])) == 2
 
 
+def test_an_output_of_several_files_moves_into_place_whole(tmp_path: Path) -> None:
+    """A MetaImage output is a header and its data file: both reach the case folder, so the output reads back."""
+    rng = np.random.default_rng(2)
+    a, b = (rng.normal(size=(7, 5, 4)).astype(np.float32) for _ in range(2))
+    sources = [_image(a, tmp_path / "r0" / "Output.mha"), _image(b, tmp_path / "r1" / "Output.mha")]
+
+    ensemble.combine(sources, "Mean", tmp_path / "out" / "P000" / "Output.mhd", "mhd")
+
+    assert sorted(path.suffix for path in (tmp_path / "out" / "P000").iterdir()) == [".mhd", ".raw"]
+    written = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "P000" / "Output.mhd")))
+    np.testing.assert_allclose(written, (a + b) / 2, atol=1e-6)
+
+
 def test_label_maps_vote(tmp_path: Path) -> None:
     labels = [np.full((4, 3, 3), value, dtype=np.uint8) for value in (2, 2, 5)]
     paths = [_image(array, tmp_path / f"r{i}" / "P000" / "Seg.nii.gz") for i, array in enumerate(labels)]
@@ -138,3 +152,27 @@ def test_a_run_hands_over_its_stack_where_it_wrote_one(tmp_path: Path) -> None:
 
     assert found[("Output", "P000", "Output")] == (case / "Output.mha", case / "InferenceStack.mha")
     assert found[("Output", "P001", "Output")] == (alone / "Output.mha", alone / "Output.mha")
+
+
+def test_the_checkpoints_an_app_runs_by_default_are_members(tmp_path: Path) -> None:
+    """An app whose config ensembles two checkpoints, run with no -ensemble: each member run still hands over its
+    stack, so a vote or a median sees both checkpoints, and the record names them."""
+    rng = np.random.default_rng(1)
+    members = {name: rng.normal(size=(2, 4, 3, 3)).astype(np.float32) for name in ("A", "B")}
+
+    class App:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def infer(self, output: Path, uncertainty: bool, **_: object) -> None:
+            case = output / "App" / "Output" / "P000"
+            _image(members[self.name].mean(0), case / "Output.mha")
+            if uncertainty:
+                _image(np.moveaxis(members[self.name], 0, -1), case / "InferenceStack.mha", vector=True)
+
+    ensemble.infer_references(["A", "B"], App, tmp_path / "out", "Median", False, lambda reference: None)
+
+    output = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "Output" / "P000" / "Output.mha")))
+    np.testing.assert_allclose(output, np.median(np.concatenate(list(members.values())), 0), atol=1e-6)
+    record = json.loads((tmp_path / "out" / "konfai-run.json").read_text(encoding="utf-8"))
+    assert record["members"] == ["A [1/2]", "A [2/2]", "B [1/2]", "B [2/2]"]
