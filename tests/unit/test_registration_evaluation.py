@@ -25,10 +25,12 @@ import torch
 
 sitk = pytest.importorskip("SimpleITK")
 
+from konfai.data.patching import DatasetPatch  # noqa: E402
 from konfai.data.transform import TransformPoints  # noqa: E402
 from konfai.metric.measure import JacobianFolding, JacobianLogStd, JacobianMin  # noqa: E402
 from konfai.utils.dataset import Attribute, Dataset, image_to_data  # noqa: E402
-from konfai.utils.ITK import jacobian_statistics  # noqa: E402
+
+_JACOBIANS = (("folded_fraction", JacobianFolding), ("min", JacobianMin), ("sd_log", JacobianLogStd))
 
 
 def _oblique_field(values: np.ndarray) -> "sitk.Image":
@@ -103,7 +105,7 @@ def _jacobian(field: "sitk.Image") -> dict[str, float]:
     tensor = torch.from_numpy(data)[None]
     return {
         name: float(criterion()(tensor, attributes=[[]], output_attributes=[attributes]))
-        for name, criterion in (("folded_fraction", JacobianFolding), ("min", JacobianMin), ("sd_log", JacobianLogStd))
+        for name, criterion in _JACOBIANS
     }
 
 
@@ -137,21 +139,73 @@ def test_jacobian_of_a_2d_linear_map_is_its_determinant() -> None:
     assert _jacobian(field)["min"] == pytest.approx(np.linalg.det(np.eye(2) + gradient))
 
 
-def test_jacobian_read_in_slabs_is_the_whole_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Slabs of one plane with their halo give the statistics of the field read whole, which the criteria give."""
+def test_jacobian_of_patches_read_with_a_halo_is_the_whole_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disjoint patches read with one voxel of halo, as the evaluator hands them under a memory budget, combine to
+    the statistics of the field read whole; so do slabs of one plane within a read."""
     field = _oblique_field(np.random.default_rng(2).normal(0.0, 1.5, (7, 6, 5, 3)))
-    dataset = _store(tmp_path / "store", "h5", sitk.DisplacementFieldTransform(sitk.Image(field)))
-    whole = jacobian_statistics(dataset, "Reg", "P000")
+    whole = _jacobian(field)
+    data, attributes = image_to_data(field)
+    tensor = torch.from_numpy(data)[None]
+    patch = DatasetPatch(patch_size=[3, 4, 2], overlap=0)
+    patch.pad_to_patch = False
+    patch.halo = 1
+    patch.load(list(data.shape[1:]), 0)
     monkeypatch.setattr("konfai.utils.ITK.FIELD_SLAB_VOXELS", 1)
 
-    assert jacobian_statistics(dataset, "Reg", "P000") == pytest.approx(whole)
-    assert _jacobian(field) == pytest.approx(whole)
+    streamed = {}
+    for name, criterion in _JACOBIANS:
+        metric = criterion()
+        states = [
+            metric.partial_metric(
+                tensor[(..., *patch.read_slices(0, index, data.shape))],
+                core=patch.core_in_read(0, index),
+                output_attributes=[attributes],
+            )
+            for index in range(patch.get_size(0))
+        ]
+        streamed[name] = float(metric.combine_metric(states))
+
+    assert patch.get_size(0) > 1 and streamed == pytest.approx(whole)
     assert 0 < whole["folded_fraction"] < 1
+
+
+def test_a_field_evaluated_under_a_budget_is_never_held_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An evaluation whose budget cannot hold the field streams it: every patch the criteria see is smaller than the
+    field, and the statistics are the whole field's."""
+    from konfai import api
+    from konfai.metric.measure import regression
+
+    field = _oblique_field(np.random.default_rng(3).normal(0.0, 1.5, (16, 12, 10, 3)))
+    _store(tmp_path / "store", "h5", sitk.DisplacementFieldTransform(sitk.Image(field)))
+    seen: list[tuple[int, ...]] = []
+    original = regression._JacobianStatistic.partial_metric
+    monkeypatch.setattr(
+        regression._JacobianStatistic,
+        "partial_metric",
+        lambda self, output, *a, **k: seen.append(tuple(output.shape)) or original(self, output, *a, **k),
+    )
+
+    result = api.evaluate(
+        "jacobian",
+        [f"{tmp_path / 'store'}:itktransform"],
+        {"Reg": {"Reg": [criterion() for _, criterion in _JACOBIANS]}},
+        dataset_options={"memory_budget": "20480b"},
+        cpu=1,
+        quiet=True,
+        overwrite=True,
+        evaluations_dir=tmp_path / "Evaluations",
+    )
+
+    assert len(seen) > 1 and all(shape[2:] < (16, 12, 10) and shape[:2] == (1, 3) for shape in seen)
+    whole = _jacobian(field)
+    for name, criterion in _JACOBIANS:
+        got = result.metrics["TRAIN"]["case"][f"Reg:Reg:{criterion.__name__}"]["P000"]
+        assert got == pytest.approx(whole[name], rel=1e-5), name
 
 
 def test_a_compressed_field_is_read_by_regions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A compressed MetaImage decoded the whole volume for every region asked of it (300 landmarks, 300 whole
-    decodes): it is read through its uncompressed twin, so the landmarks and the Jacobian slabs read regions."""
+    decodes): it is read through its uncompressed twin, so the landmarks read regions."""
     field = _oblique_field(np.random.default_rng(4).normal(0.0, 1.0, (7, 6, 5, 3)))
     dataset = _store(tmp_path / "store", "compressed.mha", sitk.Transform(), field)
     reads: list[str] = []
@@ -160,9 +214,7 @@ def test_a_compressed_field_is_read_by_regions(tmp_path: Path, monkeypatch: pyte
         monkeypatch.setattr(
             Dataset, name, lambda self, *a, _read=original, _name=name: reads.append(_name) or _read(self, *a)
         )
-    monkeypatch.setattr("konfai.utils.ITK.FIELD_SLAB_VOXELS", 1)
     _push(dataset, np.random.default_rng(5).uniform(-5.0, 15.0, (20, 3)))
-    jacobian_statistics(dataset, "Reg", "P000")
 
     assert reads and set(reads) == {"read_data_slice"}
 

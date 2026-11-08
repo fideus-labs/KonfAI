@@ -18,7 +18,6 @@
 """Pointwise, structural and information criteria over intensities."""
 
 import math
-import weakref
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
@@ -40,6 +39,7 @@ from konfai.metric.measure.segmentation import Dice
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
 from konfai.utils.errors import MeasureError
+from konfai.utils.ITK import JacobianSums, field_jacobian_sums, jacobian_statistics
 
 #: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share, written
 #: into a resolved config as a number, and what a ``dynamic_range: None`` in a published config names.
@@ -479,11 +479,10 @@ class TRE(Criterion):
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 
 
-def _jacobian_of(field: torch.Tensor, attribute: Any, name: str) -> dict[str, float]:
-    """:func:`konfai.utils.ITK.jacobian_statistics` of one displacement field ``[C, (Z), Y, X]`` on the grid its
-    ``attribute`` describes. A 2-D field is measured as a volume one plane thick, whose determinant is the plane's."""
-    from konfai.utils.ITK import field_jacobian_statistics
-
+def _field_of(field: torch.Tensor, attribute: Any, name: str) -> tuple[np.ndarray, np.ndarray]:
+    """One displacement field ``[C, (Z), Y, X]`` as the ``[3, Z, Y, X]`` float64 array :func:`field_jacobian_sums`
+    takes, with the matrix taking a world offset to indices of the grid its ``attribute`` describes. A 2-D field is
+    one plane thick, with no z displacement, so its determinant is the plane's."""
     rank = field.dim() - 1
     if attribute is None or rank not in (2, 3) or field.shape[0] != rank:
         raise MeasureError(
@@ -497,20 +496,20 @@ def _jacobian_of(field: torch.Tensor, attribute: Any, name: str) -> dict[str, fl
         values = np.concatenate([values, np.zeros_like(values[:1])])[:, None]
         spacing, direction = np.append(spacing, 1.0), np.pad(direction, (0, 1))
         direction[2, 2] = 1.0
-    to_index = np.linalg.inv(direction @ np.diag(spacing))
-    return field_jacobian_statistics(lambda region: values[region], list(values.shape), to_index)
+    return values, np.linalg.inv(direction @ np.diag(spacing))
 
 
 class _JacobianStatistic(CriterionWithAttribute):
     """One statistic of the determinant of a displacement field's Jacobian ``J = I + du/dx``, as
     :func:`konfai.utils.ITK.jacobian_statistics` takes it, over the output: the field, read with its geometry. The
-    target is not read: name the output group itself under ``targets_criterions``."""
+    target is not read: name the output group itself under ``targets_criterions``. Reducible under a memory budget:
+    each patch, read with one voxel of halo, carries the sums of its slot, so the field is never held whole."""
 
     accepts_output_attributes = True
     any_target_grid = True
+    reducible = True
+    halo = 1
     statistic = ""
-    # ponytail: a one-slot memo, so the statistics of one field share one pass; a case at a time, as evaluation runs.
-    _last: tuple[Any, list[dict[str, float]]] | None = None
 
     def forward(  # type: ignore[override]
         self,
@@ -520,17 +519,30 @@ class _JacobianStatistic(CriterionWithAttribute):
         output_attributes: list[Any] | None = None,
     ) -> torch.Tensor:
         del targets, attributes
-        last = _JacobianStatistic._last
-        if last is None or last[0]() is not output:
-            per_sample = output_attributes if output_attributes is not None else [None] * output.shape[0]
-            stats = [
-                _jacobian_of(field, attribute, self.get_name())
-                for field, attribute in zip(output, per_sample, strict=True)
-            ]
-            _JacobianStatistic._last = (weakref.ref(output), stats)
-        else:
-            stats = last[1]
-        return torch.tensor(float(np.mean([case[self.statistic] for case in stats])))
+        return self.combine_metric([self.partial_metric(output, output_attributes=output_attributes)])
+
+    def partial_metric(  # type: ignore[override]
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        core: tuple[slice, ...] | None = None,
+        output_attributes: list[Any] | None = None,
+    ) -> list[JacobianSums]:
+        """The sums of each sample's field over ``core``, its slot within a patch read with the halo (the whole
+        tensor when ``None``), the derivatives running through the voxels around it."""
+        del targets
+        per_sample = output_attributes if output_attributes is not None else [None] * output.shape[0]
+        spatial = tuple(core) if core is not None else ()
+        sums = []
+        for field, attribute in zip(output, per_sample, strict=True):
+            values, to_index = _field_of(field, attribute, self.get_name())
+            sums.append(field_jacobian_sums(values, (slice(None),) * (3 - len(spatial)) + spatial, to_index))
+        return sums
+
+    def combine_metric(self, states: list[list[JacobianSums]]) -> torch.Tensor:
+        """The statistic of each sample from the sums of every patch, averaged over the batch."""
+        per_sample = zip(*states, strict=True)
+        return torch.tensor(float(np.mean([jacobian_statistics(sums)[self.statistic] for sums in per_sample])))
 
 
 class JacobianFolding(_JacobianStatistic):
