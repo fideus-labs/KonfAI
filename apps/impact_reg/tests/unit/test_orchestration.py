@@ -33,6 +33,7 @@ from impact_reg_konfai import impact_reg as reg
 from konfai.utils.errors import KonfAIError
 from konfai.utils.ITK import field_reach, read_displacement_field
 from konfai_apps.ensemble import combine
+from konfai_apps.errors import AppRepositoryError
 
 
 @pytest.fixture(autouse=True)
@@ -926,6 +927,30 @@ def test_an_app_preset_s_set_goes_first_and_splits_between_the_passes_as_any_set
     assert reg._manifest("A#whole")["tiling"] == {"global": "Prediction.yml"}
     assert reg._manifest("A#fast")["tiling"] == _TILING
     assert reg._preset_overrides(["A#whole"], ["seed=3"]) == {"A#whole": {"global": ["seed=3"], "tile": []}}
+
+
+def test_a_hugging_face_app_s_preset_may_be_the_user_s_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preset saved with ``konfai-apps preset save`` lives in the user's presets file, not the app's ``app.json``:
+    konfai-apps runs it, so impact-reg splits its --set and keeps its tiling choice alike."""
+    local = Path(reg.IMPACT_REG_KONFAI_REPO)
+    _tiled_preset("A", _CONFIG.format(own=""), _CONFIG.format(own=""))
+    monkeypatch.setattr(reg, "IMPACT_REG_KONFAI_REPO", "org/engines@main")
+    monkeypatch.setattr(reg, "app_file", lambda repo, app, filename: local / app / filename)
+    monkeypatch.setenv("KONFAI_PRESETS_DIR", str(tmp_path))
+    (tmp_path / "org" / "engines").mkdir(parents=True)
+    (tmp_path / "org" / "engines" / "A.json").write_text(
+        json.dumps({"mine": {"description": "", "set": ["seed=7"], "tiles": False}}), encoding="utf-8"
+    )
+
+    assert reg._app_preset_sets("A#mine") == ["seed=7"]
+    assert reg._manifest("A#mine")["tiling"] == {"global": "Prediction.yml"}
+
+    # one the app publishes too is refused, as konfai-apps refuses it: the app runs bare, its --set from here
+    manifest = json.loads((local / "A" / "app.json").read_text())
+    manifest["presets"] = {"mine": {"description": "", "set": ["seed=1"]}}
+    (local / "A" / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(AppRepositoryError, match="publishes too"):
+        reg._app_preset_sets("A#mine")
 
 
 def test_an_app_preset_runs_its_app_bare_with_the_run_s_own_choices(

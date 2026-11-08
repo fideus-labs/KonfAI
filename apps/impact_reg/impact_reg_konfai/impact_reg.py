@@ -64,7 +64,7 @@ from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, c
 from konfai_apps.cli import app_file, app_id, app_names
 from konfai_apps.ensemble import STACK, combine, stack_file
 from konfai_apps.ensemble import _token as member_token
-from konfai_apps.presets import read_presets, split_preset
+from konfai_apps.presets import load_presets_file, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
@@ -205,7 +205,7 @@ def _case_key(name: str) -> tuple[int, str]:
 
 def _manifest(preset: str) -> dict:
     """The preset's ``app.json`` (its app's, for ``APP#PRESET``), from the local preset directory or the Hugging Face
-    repo; empty if unreadable.
+    repo, with the user's own presets of a Hugging Face app (konfai-apps runs them alike); empty if unreadable.
 
     Read cache first, as the preset run resolves its own files: an online read moved the cache to the newest
     preset, which only the runs that read a manifest then picked up.
@@ -215,6 +215,16 @@ def _manifest(preset: str) -> dict:
         manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    if not Path(IMPACT_REG_KONFAI_REPO).expanduser().is_dir():  # a Hugging Face app: the user's own presets too
+        own_file = user_presets_file(IMPACT_REG_KONFAI_REPO.partition("@")[0], app)
+        own = load_presets_file(own_file)
+        published = manifest.get("presets") or {}
+        if clash := sorted(set(own) & set(published)):  # refused as konfai-apps refuses it: the app runs bare here
+            raise AppRepositoryError(
+                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{app}' publishes too.",
+                "Rename yours: a preset of your own never hides a published one.",
+            )
+        manifest["presets"] = {**published, **{key: entry.to_json() for key, entry in own.items()}}
     chosen = read_presets(manifest.get("presets"), f"the app.json of '{app}'").get(name) if name else None
     if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
         manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
