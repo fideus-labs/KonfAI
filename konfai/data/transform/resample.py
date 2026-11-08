@@ -67,7 +67,7 @@ from konfai.data.transform.base import (
     sitk,
 )
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, as_member, stacked_groups
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset, is_an_image
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.utils import split_path_spec
@@ -1939,12 +1939,18 @@ class TransformToField(Transform):
     entry, which only a field holds as an image.
     """
 
-    locality = LocalityKind.WHOLE_VOLUME  # ponytail: the field is sampled whole; by slab if a case outgrows memory
-
     def __init__(self, group: str = "Volume_0", reference_group: str = "Reference_0") -> None:
         super().__init__()
         self.group = group
         self.reference_group = reference_group
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """A stored field (an image, or marked one) passes as it is, voxel by voxel; a transform with no grid of its
+        own is sampled whole."""
+        if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute or is_an_image(cache_attribute):
+            return PatchLocality(LocalityKind.POINTWISE)
+        # ponytail: sampled whole; by slab if a case outgrows memory
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="a transform with no grid of its own is sampled whole")
 
     def _entry(self, name: str) -> Any:
         """The dataset holding the case's transform, None when it is a field (measured as it is)."""
@@ -1979,7 +1985,7 @@ class TransformToField(Transform):
         return 3
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, image_to_data
+        from konfai.utils.dataset import image_to_data
 
         dataset = self._entry(name)
         if dataset is None:

@@ -25,7 +25,8 @@ import torch
 
 sitk = pytest.importorskip("SimpleITK")
 
-from konfai.data.transform import TransformToField  # noqa: E402
+from konfai.data.augmentation import Flip  # noqa: E402
+from konfai.data.transform import LocalityKind, TransformToField  # noqa: E402
 from konfai.predictor.output import OutputDataset  # noqa: E402
 from konfai.utils.dataset import (  # noqa: E402
     DENSE_TRANSFORMS_ENV,
@@ -36,6 +37,7 @@ from konfai.utils.dataset import (  # noqa: E402
     image_to_data,
 )
 from konfai.utils.errors import TransformError  # noqa: E402
+from oracle_support import geometry  # noqa: E402
 
 
 def _grid() -> sitk.Image:
@@ -89,15 +91,13 @@ def test_another_format_writes_the_field(tmp_path: Path) -> None:
     assert TRANSFORM_FILE_ATTRIBUTE not in header and not native.exists()
 
 
-class _Output:
-    """What OutputDataset.write_prediction reads: the headers of a case's copies, and the write it submits."""
-
-    def __init__(self, copies: list[Attribute]) -> None:
-        self.attributes = {0: {index: {0: attributes} for index, attributes in enumerate(copies)}}
-        self.written: Attribute | None = None
-
-    def _submit_final_write(self, name: str, layer: torch.Tensor, attribute: Attribute) -> None:
-        self.written = attribute
+def _output(copies: list[Attribute]) -> OutputDataset:
+    """An output dataset holding the headers of a case's copies, its write queue a sink: the header the final write
+    is handed is the first copy's, changed in place."""
+    output = OutputDataset.__new__(OutputDataset)
+    output.attributes = {0: {index: {0: attributes} for index, attributes in enumerate(copies)}}
+    output._submit_write = lambda operation: None  # type: ignore[method-assign]
+    return output
 
 
 @pytest.mark.parametrize(("copies", "dense"), [(1, False), (2, True)])
@@ -107,27 +107,50 @@ def test_a_mean_of_copies_writes_the_field(tmp_path: Path, copies: int, dense: b
     for index in range(copies):
         (tmp_path / str(index)).mkdir()
         headers.append(_field_with_its_transform(tmp_path / str(index))[2])
-    output = _Output(headers)
+    _output(headers).write_prediction(0, "P000", torch.zeros(1))
 
-    OutputDataset.write_prediction(output, 0, "P000", torch.zeros(1))  # type: ignore[arg-type]
-
-    assert output.written is not None and (TRANSFORM_FILE_ATTRIBUTE in output.written) is not dense
+    assert (TRANSFORM_FILE_ATTRIBUTE in headers[0]) is not dense
     assert all((tmp_path / str(index) / "native.h5").exists() is not dense for index in range(copies))
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_mean_of_copies_writes_the_field_on_either_route(tmp_path: Path, monkeypatch, drive_tta, streamed) -> None:
+    """A TTA case finalised whole or slab by slab (the streamed route, buffered: a native form cannot stream) writes
+    the same thing: the field, its copies' transform file gone."""
+    native = tmp_path / "native.h5"
+    sitk.WriteTransform(_composite(_grid()), str(native))
+    header = geometry()
+    header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+    header[TRANSFORM_FILE_ATTRIBUTE] = str(native)
+
+    written, whole_volume = drive_tta(
+        tmp_path / "out",
+        monkeypatch,
+        augmentation=Flip(f_prob=[0, 1, 1]),
+        streamed=streamed,
+        file_format="itktransform",
+        channels=3,
+        attribute=header,
+    )
+
+    assert whole_volume is not streamed
+    assert list(written.shape) == [3, 6, 4, 3] and not native.exists()
 
 
 def test_a_caller_that_averages_asks_for_the_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An ensemble's member or a tile runs alone, but its caller averages or composes it: it writes the field."""
     monkeypatch.setenv(DENSE_TRANSFORMS_ENV, "1")
-    output = _Output([_field_with_its_transform(tmp_path)[2]])
+    header = _field_with_its_transform(tmp_path)[2]
 
-    OutputDataset.write_prediction(output, 0, "P000", torch.zeros(1))  # type: ignore[arg-type]
+    _output([header]).write_prediction(0, "P000", torch.zeros(1))
 
-    assert output.written is not None and TRANSFORM_FILE_ATTRIBUTE not in output.written
+    assert TRANSFORM_FILE_ATTRIBUTE not in header
 
 
 def test_a_native_transform_is_measured_on_the_fixed_grid(tmp_path: Path) -> None:
-    """TransformToField samples a transform with no grid of its own on the fixed image's, as SimpleITK does; a field
-    passes as it is; without the fixed image, a native transform is refused."""
+    """TransformToField samples a transform with no grid of its own on the fixed image's, as SimpleITK does, and
+    declares it needs the whole volume; a field passes as it is, voxel by voxel, so it still streams; without the
+    fixed image, a native transform is refused."""
     grid = _grid()
     transform = _composite(grid)
     (tmp_path / "transforms" / "P000").mkdir(parents=True)
@@ -138,6 +161,9 @@ def test_a_native_transform_is_measured_on_the_fixed_grid(tmp_path: Path) -> Non
 
     stage = TransformToField()
     stage.set_datasets([transforms, images])
+    assert stage.patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME  # the config-time probe
+    assert stage.patch_locality(transforms.get_infos("Volume_0", "P000")[1]).kind is LocalityKind.WHOLE_VOLUME
+    assert stage.patch_locality(images.get_infos("Reference_0", "P000")[1]).kind is LocalityKind.POINTWISE
     attributes = Attribute()
     assert stage.transform_shape("Volume_0", "P000", [1512], attributes) == [16, 18, 20]
     field = stage("P000", torch.zeros(2, 1512), attributes).numpy()
