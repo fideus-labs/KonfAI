@@ -1,0 +1,32 @@
+# konfai-apps uncertainty APP -i STACK
+# How much an ensemble's registrations disagree, voxel by voxel, read off the stack of their fields (no reference):
+# the spread of their displacement vectors (the standard deviation of each component across the members, then its
+# norm, in mm; the root mean square distance of the members to their mean), written as a map, with its mean and its
+# 95th percentile.
+Evaluator:
+  metrics:
+    Uncertainty:
+      targets_criterions:
+        None:
+          criterions_loader:
+            Mean:
+              name: UncertaintyMean
+            Quantile:
+              q: 0.95
+              name: UncertaintyP95
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          Uncertainty:
+            transforms:
+              StandardDeviation: {}
+              Magnitude: {}
+              Save:
+                dataset: ./Uncertainties/ImpactReg/Output:mha
+                group: None
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

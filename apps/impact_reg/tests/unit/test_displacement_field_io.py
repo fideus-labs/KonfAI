@@ -21,7 +21,6 @@ A preset may emit its DVF in either form, and every step that follows (locating 
 beside the results, averaging an ensemble, exporting ``Transform.h5``) used to assume ``DVF.mha``.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -36,10 +35,12 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _copy_output,
     _find_outputs,
 )
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE  # noqa: E402
+from konfai.data.transform.ensemble import member_count  # noqa: E402
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Dataset  # noqa: E402
 from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
 from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr  # noqa: E402
+from konfai_apps.ensemble import combine, stack_file  # noqa: E402
 
 
 def _write_displacement_field(field: "sitk.Image", dest: Path) -> None:
@@ -239,19 +240,21 @@ def test_rerunning_in_the_other_form_leaves_one_output(tmp_path: Path) -> None:
 
 
 def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path: Path) -> None:
-    """The averaged DVF is folded by Reduce(Mean) and written through konfai's Write, in the
-    members' form, and must stay a DECLARED field: ``read_displacement_field`` refuses an
-    undeclared 3-channel store, so dropping the declaration would break ``evaluate`` right after
-    a successful register. The values are the voxel-wise mean, on the members' geometry."""
+    """The averaged DVF, combined as register does in the members' form, must stay a DECLARED field:
+    ``read_displacement_field`` refuses an undeclared 3-channel store, so dropping the declaration would break
+    ``evaluate`` right after a successful register. The values are the voxel-wise mean, on the members' geometry. Its
+    stack, a store too, holds the members as plain channels (no RFC-5 axis types two fields as one) and their count."""
     members = []
     for index in (1, 2):
         (tmp_path / f"m{index}").mkdir()
         members.append(_write_store(tmp_path / f"m{index}" / "DVF.ome.zarr", _field(index)))
-    output, work = tmp_path / "out", tmp_path / "work"
-    work.mkdir()
+    output = tmp_path / "out"
+    stack = output / "P000" / stack_file(".ome.zarr")
 
-    ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], members, output, work, [], 1, True)
+    combine(members, "Mean", output / "P000" / "DVF.ome.zarr", "omezarr", stack)
 
+    assert stack.name == "InferenceStack.ome.zarr" and not is_displacement_field(stack)
+    assert member_count(*Dataset(str(output), "omezarr").get_infos("InferenceStack", "P000")) == 2
     out = output / "P000" / "DVF.ome.zarr"
     assert is_displacement_field(out)
     averaged = sitk.GetArrayFromImage(read_displacement_field(out))
@@ -314,31 +317,34 @@ def test_a_mean_in_a_file_stands_beside_a_store_of_an_earlier_run(tmp_path: Path
         members.append(tmp_path / f"m{index}" / "DVF.mha")
         _write_displacement_field(_field(index), members[-1])
 
-    ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], members, output, work, [], 1, True)
+    from konfai_apps.ensemble import combine
+
+    combine(members, "Mean", output / "P000" / "DVF.mha", "mha")
 
     assert sorted(path.name for path in (output / "P000").iterdir()) == ["DVF.mha", "Moved.ome.zarr"]
 
 
 def test_the_uncertainty_of_declared_fields_is_an_image(tmp_path: Path) -> None:
-    """Reduce(Std) and Magnitude inherit the members' header. Their map has one channel, in mm: declared a field, a
-    reader would take it for a transformation, and the writer would convert its values to the grid's unit."""
+    """The members' header marks them fields, and so their stack's. The spread map has one channel, in mm: declared a
+    field, a reader would take it for a transformation."""
+    from konfai.utils.dataset import Dataset
+    from konfai_apps.ensemble import combine
+
     members = []
     for index in (1, 2):
-        (tmp_path / f"m{index}").mkdir()
-        members.append(_write_store(tmp_path / f"m{index}" / "DVF.ome.zarr", _field(index)))
+        (tmp_path / f"m{index}" / "P000").mkdir(parents=True)
+        members.append(_write_store(tmp_path / f"m{index}" / "P000" / "DVF.ome.zarr", _field(index)))
+    stack = tmp_path / "ensemble" / "P000" / "InferenceStack.mha"
+    combine(members, "Mean", tmp_path / "ensemble" / "P000" / "DVF.ome.zarr", "omezarr", stack)
     output, work = tmp_path / "out", tmp_path / "work"
 
-    ImpactRegKonfAIApp().uncertainty(members, output, cpu=1, quiet=True, tmp_dir=work)
+    ImpactRegKonfAIApp().uncertainty(stacks=[stack], output=output, cpu=1, quiet=True, tmp_dir=work)
 
-    out = output / "uncertainty" / "Uncertainty.ome.zarr"
-    assert not is_displacement_field(out)
-    assert (
-        DISPLACEMENT_FIELD_ATTRIBUTE
-        not in json.loads((out / "zarr.json").read_text())["attributes"]["konfai"]["attributes"]
-    )
+    written = next((output / "P000" / "Uncertainty" / "Map").rglob("Uncertainty.mha"))
+    spread, header = Dataset(str(written.parent.parent), "mha").read_data("Uncertainty", written.parent.name)
+    assert DISPLACEMENT_FIELD_ATTRIBUTE not in header
     fields = np.stack([sitk.GetArrayFromImage(_field(index)) for index in (1, 2)])
-    spread = np.asarray(ngff_zarr.from_ngff_zarr(str(out)).images[0].data)[0]
-    np.testing.assert_allclose(spread, np.linalg.norm(fields.std(axis=0, ddof=1), axis=-1), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(spread[0], np.linalg.norm(fields.std(axis=0, ddof=1), axis=-1), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])

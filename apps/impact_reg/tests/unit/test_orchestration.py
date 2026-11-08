@@ -32,6 +32,7 @@ import SimpleITK as sitk
 from impact_reg_konfai import impact_reg as reg
 from konfai.utils.errors import KonfAIError
 from konfai.utils.ITK import field_reach, read_displacement_field
+from konfai_apps.ensemble import combine
 from konfai_apps.errors import AppRepositoryError
 
 
@@ -128,19 +129,20 @@ def _write_dvf(path: Path, vector, reference: sitk.Image) -> Path:
 
 
 def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: Path) -> None:
-    """Reduce(Mean) over members-as-cases: the averaged DVF lands at <output>/<case>/DVF, on the
-    members' shared grid, which ``grid: strict`` verified rather than assumed."""
+    """konfai-apps' combine, as register calls it: the averaged DVF lands at <output>/<case>/DVF, on the members'
+    shared grid."""
     reference = sitk.GetImageFromArray(np.zeros((6, 6, 6), dtype=np.float32))
     reference.SetSpacing((1.5, 1.5, 1.5))
     reference.SetOrigin((3.0, -2.0, 1.0))
+    for member in ("a", "b"):  # as a run leaves them: <run>/<case>/<group>
+        (tmp_path / member / "P000").mkdir(parents=True)
     paths = [
-        _write_dvf(tmp_path / "a.mha", (1.0, 0.0, 0.0), reference),
-        _write_dvf(tmp_path / "b.mha", (3.0, 2.0, -4.0), reference),
+        _write_dvf(tmp_path / "a" / "P000" / "DVF.mha", (1.0, 0.0, 0.0), reference),
+        _write_dvf(tmp_path / "b" / "P000" / "DVF.mha", (3.0, 2.0, -4.0), reference),
     ]
-    output, work = tmp_path / "out", tmp_path / "work"
-    work.mkdir()
+    output = tmp_path / "out"
 
-    reg.ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], paths, output, work, [], 1, True)
+    combine(paths, "Mean", output / "P000" / "DVF.mha", "mha")
 
     avg = sitk.ReadImage(str(output / "P000" / "DVF.mha"))
     field = sitk.GetArrayFromImage(avg)
@@ -164,6 +166,45 @@ def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: 
         return "DVF", {"P000": out / "DVF.mha"}
 
     app._infer_preset = fake  # type: ignore[method-assign]
+
+
+def test_a_tta_run_hands_its_copies_to_the_stack(tmp_path: Path) -> None:
+    """Under --uncertainty a preset run with TTA is asked for its copies' stack (-uncertainty), and every copy is a
+    member: one preset's stack holds its two copies, an ensemble's its copies and the other preset's field."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.ReadImage(str(moving))
+    asked = {}
+
+    def fake(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
+        asked[preset] = kwargs.get("uncertainty")
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        if preset == "A":  # two TTA copies, (0, 0, 0) and (2, 0, 0), and their mean
+            _write_dvf(out / "DVF.mha", (1.0, 0.0, 0.0), reference)
+            copies = np.zeros((*reference.GetSize()[::-1], 6), dtype=np.float32)
+            copies[..., 3] = 2.0
+            stack = sitk.GetImageFromArray(copies, isVector=True)
+            stack.CopyInformation(reference)
+            stack.SetMetaData("konfai_members", "2")
+            stack.SetMetaData("konfai_displacement_field", "true")
+            sitk.WriteImage(stack, str(out / "InferenceStack.mha"))
+        else:
+            _write_dvf(out / "DVF.mha", (4.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = fake  # type: ignore[method-assign]
+    for presets, members, mean in ((["A"], 2, 1.0), (["A", "B"], 3, 2.0)):
+        out = tmp_path / f"Output{len(presets)}"
+        app.register(presets, [fixed], [moving], output=out, quiet=True, tta=1, uncertainty=True, fields_only=True)
+        assert asked["A"] is True
+        stack = sitk.ReadImage(str(out / "P000" / "InferenceStack.mha"))
+        assert stack.GetMetaData("konfai_members") == str(members)
+        field = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P000" / "DVF.mha")))
+        np.testing.assert_allclose(field[0, 0, 0], (mean, 0.0, 0.0), atol=1e-6)
 
 
 def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path: Path) -> None:
@@ -214,15 +255,20 @@ def test_register_multi_preset_averages_and_warps_once(tmp_path: Path) -> None:
     app = reg.ImpactRegKonfAIApp()
     _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
     out = tmp_path / "Output"
-    app.register(["A", "B"], [fixed], [moving], output=out, keep_dvf=True)
+    app.register(["A", "B"], [fixed], [moving], output=out, uncertainty=True)
 
     case = out / "P000"
     # ensemble DVF is the mean of the two constant fields
     field = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "DVF.mha")))
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 0.0, 0.0), atol=1e-6)
-    # keep_dvf persists each preset's field for a later uncertainty pass
-    assert (case / "Ensemble" / "A.mha").is_file() and (case / "Ensemble" / "B.mha").is_file()
-    assert (case / "Moved.mha").is_file()
+    # with uncertainty the members stand in the ensemble's stack, two of three components, for a later uncertainty pass
+    from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE
+    from konfai.utils.dataset import Dataset
+
+    stack, header = Dataset(str(out), "mha").read_data("InferenceStack", "P000")
+    assert stack.shape[0] == 6 and int(float(header[MEMBERS_ATTRIBUTE])) == 2
+    np.testing.assert_allclose(stack[[0, 3], 0, 0, 0], (1.0, 3.0), atol=1e-6)
+    assert (case / "Moved.mha").is_file() and not (case / "Ensemble").exists()
 
 
 def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Path) -> None:

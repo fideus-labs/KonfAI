@@ -294,3 +294,52 @@ def test_merge_labels_keeps_per_fold_post():
     for step in program["steps"][:2]:
         assert step["manifest"]["postprocessing"] == post  # untouched
     assert program["steps"][-1] == {"op": "merge_labels", "in": ["a", "b"], "out": "output", "classes": [41, 2]}
+
+
+def test_a_stack_takes_each_copy_before_its_padding_is_undone_and_records_its_members():
+    # konfai's InferenceStack (mode Seg) labels each copy before the case's inverses: the program takes each
+    # row as its copy is written, folds the copies, undoes the Padding on the fold and stacks the rows.
+    models = [{"id": "a", "manifest": MR_PADDED}, {"id": "b", "manifest": MR_PADDED}]
+    program = assemble_program(models, reduce="mean", stack="Seg", checkpoints=["fold_0.pt", "fold_1.pt"])
+    steps = [(step.get("model") or step["op"], step["out"]) for step in program["steps"]]
+    assert steps == [
+        ("a", "a"),
+        ("argmax", "a__s0"),
+        ("cast", "a__s1"),
+        ("b", "b"),
+        ("argmax", "b__s0"),
+        ("cast", "b__s1"),
+        ("mean", "r"),
+        ("pad", "t0"),
+        ("resample_linear", "t1"),
+        ("softmax", "t2"),
+        ("argmax", "t3"),
+        ("cast", "output"),
+        ("concat", "stack"),
+    ]
+    assert program["steps"][0]["manifest"]["postprocessing"] == []
+    assert program["steps"][7]["padding"] == [-32] * 6
+    assert program["stack"] == "stack"
+    assert program["members"] == {
+        "a": {"checkpoint": "fold_0.pt", "pass": 0},
+        "b": {"checkpoint": "fold_1.pt", "pass": 0},
+    }
+
+
+def test_a_seg_stack_row_masks_each_copy_before_taking_its_label():
+    # konfai's Mask runs on every logit before the InferenceStack takes the label, so a voxel outside the mask
+    # is label 0, not the mask's value_outside.
+    program = assemble_program(
+        [{"id": "a", "manifest": M}, {"id": "b", "manifest": M}],
+        reduce="mean",
+        aux={"aux": {"id": "aux", "manifest": M, "ops": []}},
+        masks=[{"group": "aux", "value_outside": -1.0}],
+        stack="Seg",
+    )
+    row = [step for step in program["steps"] if step["out"].startswith("a__s")]
+    assert [(step["op"], step["in"]) for step in row] == [
+        ("mask", ["a", "aux"]),
+        ("argmax", ["a__s0"]),
+        ("cast", ["a__s1"]),
+    ]
+    assert row[0]["value_outside"] == -1.0

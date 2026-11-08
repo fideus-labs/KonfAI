@@ -61,6 +61,8 @@ from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_toke
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
+from konfai_apps.ensemble import STACK, combine, stack_file
+from konfai_apps.ensemble import _token as member_token
 from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
@@ -70,7 +72,6 @@ from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_fie
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
 IMPACT_REG_KONFAI_REPO = PRESETS_REPO
 
-_ENSEMBLE_DIR = "Ensemble"
 
 #: The app ``evaluate`` runs: the image, segmentation and landmark evaluation configs, as package data.
 _EVALUATION_APP = Path(__file__).resolve().with_name("evaluation")
@@ -462,6 +463,11 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     return {match.parent.name: match for match in matches}
 
 
+def _stack_beside(output: Path) -> Path | None:
+    """The stack a run wrote beside ``output`` (its TTA copies, under -uncertainty), or None."""
+    return next((path for path in sorted(output.parent.iterdir()) if _is_entry(path, STACK)), None)
+
+
 def _is_entry(path: Path, stem: str) -> bool:
     """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name; never a writer's
     staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
@@ -500,18 +506,21 @@ _Header = tuple[list[int], list[float], list[float], list[float]]
 
 
 def _cases(groups: dict[str, list[Path]]) -> list[list[Path]]:
-    """``eval``'s groups, keyed by their option, each as long as the case count: the longest group.
-
-    A group holds one entry per case or one used for every case (one atlas against several movings, one
-    mask), or is empty; each modality comes as a pair (a fixed side without its moving one scores
-    nothing). Anything else is refused.
-    """
+    """``eval``'s groups, keyed by their option, each as long as the case count (:func:`_broadcast`); each modality
+    comes as a pair (a fixed side without its moving one scores nothing)."""
     for fixed, moving in (("-f", "-m"), ("--gt-fixed-seg", "--gt-moving-seg"), ("--gt-fixed-fid", "--gt-moving-fid")):
         if bool(groups[fixed]) != bool(groups[moving]):
             given, missing = (fixed, moving) if groups[fixed] else (moving, fixed)
             raise EvaluatorError(
                 f"{given} is given without {missing}.", "A modality is scored from both sides: give both, or neither."
             )
+    return _broadcast(groups)
+
+
+def _broadcast(groups: dict[str, list[Path]]) -> list[list[Path]]:
+    """``groups``, keyed by their option, each as long as the case count: the longest group. A group holds one entry
+    per case or one used for every case (one atlas against several movings, one mask), or is empty; anything else is
+    refused."""
     count = max(len(entries) for entries in groups.values())
     wrong = [f"{option} has {len(entries)}" for option, entries in groups.items() if len(entries) not in (0, 1, count)]
     if wrong:
@@ -982,6 +991,7 @@ class ImpactRegKonfAIApp:
         prediction_file: str | None = None,
         label: str | None = None,
         max_voxels: int | None = None,
+        uncertainty: bool = False,
     ) -> tuple[str, dict[str, Path]]:
         """Run one preset app on every case at once; return its output group and its transform per case.
 
@@ -1029,6 +1039,8 @@ class ImpactRegKonfAIApp:
         command += ["--tmp-dir", str(out / "workspace")]
         if tta:
             command += ["--tta", str(tta)]
+        if uncertainty:  # its copies' stack beside the field: each TTA copy is a member of the ensemble
+            command += ["-uncertainty"]
         if prediction_file:
             command += ["--prediction-file", prediction_file]
         # Preset-parameter tuning: this pass's share of --set (see _preset_overrides), for `konfai-apps infer`.
@@ -1094,7 +1106,7 @@ class ImpactRegKonfAIApp:
         cpu: int | None = None,
         quiet: bool = False,
         tta: int = 0,
-        keep_dvf: bool = False,
+        uncertainty: bool = False,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
         fields_only: bool = False,
@@ -1242,6 +1254,7 @@ class ImpactRegKonfAIApp:
                     tta,
                     overrides[preset]["global"],
                     max_voxels=budget,
+                    uncertainty=uncertainty and bool(tta) and not flat,
                 )
             groups = {group for group, _ in fields_by_preset.values()}
             if len(groups) != 1:
@@ -1275,27 +1288,21 @@ class ImpactRegKonfAIApp:
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
-                # The per-preset displacement fields are large; only persist them (under Ensemble/) when the
-                # caller asks, so `uncertainty` can measure the ensemble spread afterwards.
-                if keep_dvf:
-                    (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
-
-                dvf_paths = []
-                for preset in presets:
-                    dvf = fields_by_preset[preset][case]
-                    if keep_dvf:
-                        dvf = _copy_output(dvf, case_out / _ENSEMBLE_DIR, preset, move=True)
-                    dvf_paths.append(dvf)
-
-                if len(presets) == 1:
-                    # Kept under Ensemble/ as well when asked; otherwise it is the workspace's, deleted next.
-                    _copy_output(dvf_paths[0], case_out, group, move=not keep_dvf)
+                members = [fields_by_preset[preset][case] for preset in presets]
+                # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
+                sources = [_stack_beside(member) or member for member in members] if uncertainty else members
+                if sources == members and len(presets) == 1:
+                    _copy_output(members[0], case_out, group, move=True)
                 else:
-                    # Ensemble: fold the presets' fields (all on the fixed grid, and Reduce VERIFIES
-                    # the claim) into the averaged DVF, the one output no single preset produced.
-                    # Streamed: the fold is incremental, so the peak is one accumulator plus the
-                    # member being read, whatever the size of the ensemble.
-                    self._ensemble_mean(case, group, presets, dvf_paths, output, work, gpu, cpu, quiet)
+                    # An ensemble is konfai-apps' (docs/design/ensembles.md): every member reduced into the field,
+                    # slab by slab, the members on one grid. With --uncertainty their stack is kept beside it, built
+                    # here, or for a 2-D pair once its members are planes again (below).
+                    form = _form(members[0])
+                    stack = case_out / stack_file(form) if uncertainty and not flat else None
+                    combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
+                    _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
+                    if stack is not None:
+                        _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK))
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1313,11 +1320,19 @@ class ImpactRegKonfAIApp:
                 )
             if flat:
                 for case, moving in zip(cases, moving_units, strict=True):
-                    for field in (_the_output(output / case, group), *(output / case / _ENSEMBLE_DIR).glob("*")):
-                        project_field(field)
+                    project_field(_the_output(output / case, group))
                     if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
                         moved = _the_output(output / case, "Moved")
                         project_image(moved, moved if self._moved_format else output / case / f"Moved{_form(moving)}")
+                    if uncertainty and len(presets) > 1:
+                        # The members as planes, then their stack: a 2-D ensemble's stack holds 2-D fields.
+                        members = [fields_by_preset[preset][case] for preset in presets]
+                        for member in members:
+                            project_field(member)
+                        target = _the_output(output / case, group)
+                        stack = output / case / stack_file(_form(members[0]))
+                        combine(members, "Mean", target, member_token(members[0]), stack)
+                        _drop_other_forms(output / case, STACK, stack.name.removeprefix(STACK))
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1598,42 +1613,6 @@ class ImpactRegKonfAIApp:
         shutil.rmtree(work / _workspace(f"{preset}_tiles"), ignore_errors=True)
         return group, composed
 
-    def _ensemble_mean(
-        self,
-        case: str,
-        group: str,
-        presets: list[str],
-        dvf_paths: list[Path],
-        output: Path,
-        work: Path,
-        gpu: list[int],
-        cpu: int | None,
-        quiet: bool,
-    ) -> None:
-        """Average one case's preset fields into ``<output>/<case>/<group>``: Reduce(Mean), streamed."""
-        from konfai.data.transform import Reduce, Write
-
-        members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        # Written apart, as the moved image is: see _derive_moved.
-        root = work / f"ensemble_{case}_mean"
-        _run_transform(
-            f"impact_reg_ensemble_{case}",
-            [members],
-            {
-                "DVF": {
-                    group: [
-                        Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{root}:{_backend(dvf_paths[0])}"),
-                    ]
-                }
-            },
-            work,
-            gpu,
-            cpu,
-            quiet,
-        )
-        _copy_output(_the_output(root / case, group), output / case, group, move=True)
-
     def _derive_moved(
         self,
         cases: dict[str, Path],
@@ -1738,17 +1717,12 @@ class ImpactRegKonfAIApp:
         # landmark files expand too: .h5, .fcsv and .itk.txt are all supported extensions. A transform
         # FILE is taken as it is: ITK's text .tfm is not an extension konfai's listing knows. register's
         # output folder is not a list of transforms: beside each case's transform it holds the moved image
-        # and, with --keep-fields, every preset's field under Ensemble/, each of which would be scored as
-        # a case of its own. An ensemble member named itself, or through its Ensemble folder, is a transform.
+        # and, with --uncertainty, the ensemble's stack, each of which would be scored as a case of its own.
         expanded = [(path, unit) for path in transforms for unit in ([path] if path.is_file() else _units([path]))]
-        strays = [
-            unit
-            for path, unit in expanded
-            if _is_entry(unit, "Moved") or (unit.parent.name == _ENSEMBLE_DIR and path not in (unit, unit.parent))
-        ]
+        strays = [unit for _, unit in expanded if _is_entry(unit, "Moved") or _is_entry(unit, STACK)]
         if strays:
             raise EvaluatorError(
-                f"--transform takes in '{strays[0]}', register's moved image or ensemble member, not a case's transform.",
+                f"--transform takes in '{strays[0]}', register's moved image or ensemble stack, not a case's transform.",
                 "Name the transforms themselves, e.g. <output>/P*/Transform.h5, not register's output folder.",
             )
         transforms = [unit for _, unit in expanded]
@@ -1936,61 +1910,68 @@ class ImpactRegKonfAIApp:
 
     def uncertainty(
         self,
-        dvfs: list[Path],
+        stacks: list[Path],
+        gt_fixed_fid: list[Path] = [],
+        gt_moving_fid: list[Path] = [],
+        gt_moving_seg: list[Path] = [],
         output: Path = Path("./Output").resolve(),
         gpu: list[int] = [],
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
     ) -> None:
-        """Estimate registration uncertainty as the voxel-wise spread of an ensemble of displacement fields.
+        """How much an ensemble's registrations disagree, from the stack ``register --uncertainty`` keeps
+        (``<case>/InferenceStack.mha``, or ``.ome.zarr`` beside a store): konfai-apps' uncertainty of the stack through the configs this package ships.
 
-        The spread of the displacement VECTORS, in mm: the standard deviation of each component across
-        the members, then the norm of those three, ``sqrt(s_x^2 + s_y^2 + s_z^2)``. That is the root mean
-        square distance of the members to their mean vector (with the N-1 sample correction; two members
-        give ``|u1 - u2| / sqrt(2)``), and it does not depend on the axes the field is expressed in.
-
-        The order is the point: the standard deviation of the magnitudes would read two members that agree in
-        length but not in direction as certain. ``Reduce(Std)`` folds with running moments and ``Magnitude`` is pointwise on its result, so no member is ever
-        whole in RAM whatever the size of the ensemble. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
+        Always the spread of the displacement vectors, a map with its mean and 95th percentile (``Uncertainty.yml``);
+        with the fixed landmarks, their spread through every member (``Uncertainty_with_fid.yml``), and with the
+        moving ones too, whether that spread predicts the error (``Uncertainty_calibration.yml``); with the moving
+        segmentation, how its propagations disagree (``Uncertainty_with_seg.yml``). Each option holds one entry per case
+        or one for every case. Case ``P###`` is written to ``<output>/P###/Uncertainty/<measure>/`` (Map, Landmarks,
+        Segmentation), and the whole call to ``<output>/Uncertainty_summary.json``.
         """
-        if len(dvfs) < 2:
-            raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
-        work = _work_dir(tmp_dir, output, "impact_reg_unc_")
-        try:
-            from konfai.data.transform import Magnitude, Reduce, Write
-
-            members = _units(list(dvfs))
-            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
-            flat = _is_flat_field(members[0])
-            if flat:  # See plane.py.
-                members = [lift_field(dvf, work / "planes" / f"M{index:03d}") for index, dvf in enumerate(members)]
-            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            _run_transform(
-                "impact_reg_uncertainty",
-                [spec],
-                {
-                    "DVF": {
-                        "Uncertainty": [
-                            Reduce(operator="Std", output="uncertainty", grid="strict"),
-                            Magnitude(),
-                            Write(dataset=f"{output}:{_format_token(suffixes)}"),
-                        ]
-                    }
-                },
-                work,
-                gpu,
-                cpu,
-                quiet,
+        app = KonfAIApp(str(_EVALUATION_APP), False, False)
+        stacks, gt_fixed_fid, gt_moving_fid, gt_moving_seg = _broadcast(
+            {
+                "-i": _units(stacks),
+                "--gt-fixed-fid": _units(gt_fixed_fid),
+                "--gt-moving-fid": _units(gt_moving_fid),
+                "--gt-moving-seg": _units(gt_moving_seg),
+            }
+        )
+        if gt_moving_fid and not gt_fixed_fid:
+            raise EvaluatorError(
+                "--gt-moving-fid is given without --gt-fixed-fid.", "The spread is the fixed landmarks'."
             )
-            _drop_other_forms(output / "uncertainty", "Uncertainty", suffixes)
-            if flat:
-                written = _the_output(output / "uncertainty", "Uncertainty")
-                project_image(written, written)
-        except BaseException as error:
-            _leave(work, error)
-            raise
-        _leave(work, None)
+        scored: list[tuple[str, Path]] = []
+        for index, stack in enumerate(stacks):
+            out = output / f"P{index:03d}" / "Uncertainty"
+            work = _work_dir(tmp_dir, output, "impact_reg_unc_")
+            try:
+                runs: list[tuple[str, str, list[list[Path]] | None]] = [("Map", "Uncertainty.yml", None)]
+                if gt_fixed_fid:
+                    landmarks = [[gt_fixed_fid[index]], *([[gt_moving_fid[index]]] if gt_moving_fid else [])]
+                    config = "Uncertainty_calibration.yml" if gt_moving_fid else "Uncertainty_with_fid.yml"
+                    runs.append(("Landmarks", config, landmarks))
+                if gt_moving_seg:
+                    runs.append(("Segmentation", "Uncertainty_with_seg.yml", [[gt_moving_seg[index]]]))
+                for measure, uncertainty_file, gt in runs:
+                    app.uncertainty(
+                        inputs=[[stack]],
+                        gt=gt,
+                        output=out / measure,
+                        uncertainty_file=uncertainty_file,
+                        gpu=gpu,
+                        cpu=cpu,
+                        quiet=quiet,
+                        tmp_dir=work / measure,
+                    )
+                    scored.append((f"P{index:03d}", out / measure))
+            except BaseException as error:
+                _leave(work, error)
+                raise
+            _leave(work, None)
+        _write_evaluation_summary(output / "Uncertainty_summary.json", scored)
 
     # --------------------------------------------------------------- apply
 

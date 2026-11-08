@@ -102,6 +102,9 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `BendingEnergy` | The mean squared second derivative of a displacement field (the output, read with its geometry), in 1/mm^2: 0 for an affine map. The target is not read. | |
 | `Displacement` | The length of a displacement field's vectors: their `mean`, `p95` or `max`. The target is not read. | `statistic="mean", name=None` |
 | `PointDistance` | The distance between the output's and the target's vectors, voxel by voxel: `mean`, `p95` or `max`, NaN left out. On two `WorldCoordinates` images, a round trip's error. | `statistic="mean", name=None` |
+| `PointSpread` | The spread of landmarks pushed through every member of an ensemble (`TransformPoints` through a stack, `[B, M, N, 3]`), in mm per landmark: the root mean square distance of the members' points to their mean. The target is not read. | |
+| `SpreadCalibration` | The Spearman rank correlation, across the landmarks, between their spread and the error of the ensemble's mean point against the target's: whether the uncertainty predicts the error. | |
+| `Quantile` | The `q` quantile of the output's finite values: with `Mean`, an uncertainty map's size and tail. The target is not read. | `q=0.95, name=None` |
 | `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
 | `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
 | `Variance`, `Mean` | Variance or mean of the output (uncertainty). | |
