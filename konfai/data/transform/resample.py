@@ -1086,8 +1086,7 @@ class Resample(TransformInverse):
         region's box carried stage by stage as ngff-zarr bounds a block (:func:`region_reach`), so
         a coefficient far from the region does not widen its window; through any other map, the
         case's bound (:meth:`_pricing_bound`). Both hold every point the run samples there."""
-        stored = self._stored_map(name) if self.transforms is not None else None
-        if stored is None or not stored.spline:
+        if self.transforms is None or not self._stored_map(name).spline:
             return self._pricing_bound(name).map_box(region.world_box())
         stages = self._keep_priced(name, self._priced.get(name) or self._decode_stored(name, headers_only=True))
         return region_reach(region, stages)

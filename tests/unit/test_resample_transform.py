@@ -21,6 +21,7 @@ an axis-aligned grid passes a map that is wrong in exactly the ways this stage c
 """
 
 import sys
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 
@@ -29,6 +30,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.geometry import DisplacementStage, Grid
+from konfai.data.sampling import region_reach
 from konfai.data.transform import LocalityKind, RegionContext, Resample
 from konfai.data.transform.resample import _optional_image_filler, _SitkInput
 from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute
@@ -294,16 +296,21 @@ def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, ro
     for label, transform in _families(image):
         stage = _stage(image, transform)
         reference = stage(CASE, volume, Attribute(attribute))
-        streamed = torch.empty_like(reference)
-        for start in range(0, SIZE[0], rows):
-            stop = min(start + rows, SIZE[0])
-            target = (slice(start, stop), slice(0, SIZE[1]), slice(0, SIZE[2]))
-            source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
-            block = volume[(slice(None), *source)]
-            context = RegionContext(source, target, tuple(SIZE))
-            streamed[(slice(None), *target)] = stage.stream_region(CASE, block, context, Attribute(attribute))
         span = float((reference.max() - reference.min()).item())
-        torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * span, msg=label)
+        torch.testing.assert_close(
+            _streamed(stage, volume, attribute, rows), reference, rtol=0.0, atol=1e-5 * span, msg=label
+        )
+
+
+def _streamed(stage: Resample, volume: torch.Tensor, attribute: Attribute, rows: int) -> torch.Tensor:
+    """The volume resampled slab by slab, each from the source window the plan prices for it."""
+    slabs = []
+    for start in range(0, SIZE[0], rows):
+        target = (slice(start, min(start + rows, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2]))
+        source = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
+        context = RegionContext(source, target, tuple(SIZE))
+        slabs.append(stage.stream_region(CASE, volume[(slice(None), *source)], context, Attribute(attribute)))
+    return torch.cat(slabs, dim=1)
 
 
 def _slab_reads(stage: Resample, attribute: Attribute, rows: int) -> list[int]:
@@ -343,14 +350,7 @@ def test_a_bspline_prices_a_region_by_the_control_points_around_it():
 
     volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
     reference = stage(CASE, volume, Attribute(attribute))
-    streamed = torch.empty_like(reference)
-    for start in range(0, SIZE[0], 4):
-        target = (slice(start, min(start + 4, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2]))
-        window = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
-        context = RegionContext(window, target, tuple(SIZE))
-        streamed[(slice(None), *target)] = stage.stream_region(
-            CASE, volume[(slice(None), *window)], context, Attribute(attribute)
-        )
+    streamed = _streamed(stage, volume, attribute, 4)
     torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * float(reference.abs().max()))
 
 
@@ -372,6 +372,28 @@ def test_a_bspline_reach_holds_every_landing_point(mesh):
     landing = points.transpose(2, 1, 0, 3) + sitk.GetArrayFromImage(field)  # (z, y, x, xyz), as the field
     assert np.all(landing.reshape(-1, 3).min(axis=0) >= box.low_xyz - 1e-9)
     assert np.all(landing.reshape(-1, 3).max(axis=0) <= box.high_xyz + 1e-9)
+
+
+def test_a_long_thin_region_on_an_anisotropic_lattice_is_priced_in_bounded_memory():
+    # 10 000 control cells along x and one along y and z: within the Bernstein budget, and priced in
+    # a few tens of MB. An operator over an axis's control points at once was quadratic in them, 3 GB
+    # here for a 4 MB lattice.
+    size = (4, 4, 10003)
+    values = np.random.RandomState(0).uniform(-1.0, 1.0, (3, *size))
+    stage = DisplacementStage(Grid(size, np.zeros(3), np.ones(3), np.eye(3)), values, 3)
+    # World is index here: the region's outer faces span [1, 10001] along x and [1, 1.5] along y and z.
+    region = Grid((1, 1, 10000), np.array([1.5, 1.25, 1.25]), np.array([1.0, 0.5, 0.5]), np.eye(3))
+    tracemalloc.start()
+    try:
+        box = region_reach(region, (stage,))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 256 << 20
+    # The Bernstein form, not the range alone, bounded it.
+    range_low, range_high = stage.range_xyz
+    assert np.all(box.low_xyz > region.world_box().low_xyz + range_low)
+    assert np.all(box.high_xyz < region.world_box().high_xyz + range_high)
 
 
 def test_a_slab_pulls_a_bounded_source_window():
