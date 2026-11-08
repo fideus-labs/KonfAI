@@ -2,6 +2,7 @@
 """What real Claude Code runs against the server asked for (see CHANGELOG): the frictions they met stay fixed."""
 
 import asyncio
+import json
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -233,7 +234,10 @@ def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
             ):
                 metrics = workspace / "Evaluations" / run / "Metric_TRAIN.json"
                 metrics.parent.mkdir(parents=True, exist_ok=True)
-                metrics.write_text(_metric_json(name, values), encoding="utf-8")
+                payload = json.loads(_metric_json(name, values))
+                if run == "BUNDLE":  # only run B declares a direction, under its own name
+                    payload["directions"] = {name: "max"}
+                metrics.write_text(json.dumps(payload), encoding="utf-8")
             result = await client.call_tool(
                 "compare_runs", {"run_a": "EXPERIMENT", "run_b": "BUNDLE", "metric": "Dice"}
             )
@@ -241,6 +245,7 @@ def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
 
     comparison = asyncio.run(scenario())["metrics"]["PRED:SEG:Dice"]
     assert comparison["metric_b"] == "Volume_0:Reference_0:Dice"
+    assert comparison["direction_source"] == "declared"
     assert comparison["case_alignment"] == "by order" and comparison["cases"] == 2
     assert comparison["per_case_delta_b_minus_a"] == {"1PC006": pytest.approx(0.2), "1PC032": pytest.approx(-0.05)}
 

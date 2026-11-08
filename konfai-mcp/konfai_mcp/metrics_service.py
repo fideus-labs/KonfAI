@@ -481,16 +481,14 @@ class MetricsServiceMixin:
         declared_b = self._declared_directions(payload_b["metrics"])
         # Newest declaration first, the leaderboard's own rule: an old file that still says "min" for a
         # metric re-evaluated as "max" must not make the winner depend on which run is passed first.
-        newest_first = (
-            (declared_a, declared_b)
-            if (payload_a.get("updated_at") or "") >= (payload_b.get("updated_at") or "")
-            else (declared_b, declared_a)
-        )
+        a_is_newest = (payload_a.get("updated_at") or "") >= (payload_b.get("updated_at") or "")
         comparison: dict[str, Any] = {}
         warnings: list[str] = []
         for name in common_metrics:
+            name_b = name_b_of[name]
+            own_a, own_b = declared_a.get(name), declared_b.get(name_b)  # each run under its own name
             direction, direction_source = self._metric_direction(
-                name, newest_first[0].get(name) or newest_first[1].get(name)
+                name, (own_a or own_b) if a_is_newest else (own_b or own_a)
             )
             if direction_source == "default:min":
                 warnings.append(
@@ -498,7 +496,6 @@ class MetricsServiceMixin:
                     "higher-is-better metric, the winner is inverted: re-evaluate so the metric declares "
                     "its direction, or read per-case deltas directly."
                 )
-            name_b = name_b_of[name]
             common_cases = sorted(set(cases_a[name]) & set(cases_b[name_b]))
             case_b_of = {case: case for case in common_cases}
             alignment = "by name"
