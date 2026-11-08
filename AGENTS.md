@@ -144,7 +144,7 @@ Scout measures every flagged box itself and downgrades a confirmation nothing me
 to the case's name, notes and prior scores by default, `export` writes a report at a confidentiality level (`full`,
 `regions`, `counts`) for a reader that must not identify the case, an optional blind second reading re-reads
 every error from crops alone, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
-invented defects are counted (`examples/study_controls.py`).
+invented defects are counted (`examples/study_controls.py`; on real fields, `examples/calibrate_real.py`).
 konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
 `konfai-scout/docs/` hold the user side, the report schema and the studies.
 

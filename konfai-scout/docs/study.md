@@ -54,3 +54,21 @@ konfai-scout compare examples/out/controls/*/*          # planted, found, false_
 itself. Real data makes a stronger control: the same scan as fixed and moving under a zero field, the truth given
 as the prediction, with notes that withhold what the pair is. Report the invented errors per inspection, the planted
 defects found, and, with `--second-reading`, how many suspicions the blind reader did not reproduce.
+
+## Calibration on real registrations
+
+`examples/calibrate_real.py` plants defects in real development fields and keeps the clean copies as controls:
+
+```bash
+python examples/calibrate_real.py --cases cases.json --out calib --provider claude-code --allow-cloud-images \
+    --repeats 2 --defects-per-case 1 --max-tool-calls 25 --jobs 4
+```
+
+`cases.json` lists the cases you point it to (`[{"name", "fixed", "moving", "field", "fixed_labels"?,
+"moving_labels"?}]`; a field is a displacement image on the fixed grid or an ITK transform file), never a test case.
+Each case is inspected clean (a real field, so a non-trivial control: what Scout reports there is what a real
+registration shows, or what Scout invents) and with one defect per copy: a local fold, a local shift, a global shift.
+It writes `calibration.json` (every inspection, the planted boxes, the per-defect rates) and `calibration.md`:
+sensitivity (planted defects found) and specificity (no match on the clean copies) per defect type, and test-retest
+agreement between the two inspections of each copy. `docs/calibration/` holds a run on five L2R HippocampusMR
+development pairs registered by ConvexAdam.

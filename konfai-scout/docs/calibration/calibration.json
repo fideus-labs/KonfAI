@@ -1,0 +1,632 @@
+{
+  "provider": "claude-code",
+  "model": "claude-opus-5-5",
+  "mode": "active",
+  "blind": true,
+  "budget": {
+    "max_tool_calls": 25,
+    "max_images": 60,
+    "max_seconds": 900.0,
+    "max_usd": null,
+    "max_tokens": null
+  },
+  "repeats": 2,
+  "defects": {
+    "local_fold": {
+      "defect": "folding",
+      "amplitude_mm": 10.0,
+      "sigma_mm": 3.0
+    },
+    "local_shift": {
+      "defect": "residual_misalignment",
+      "amplitude_mm": 4.0,
+      "sigma_mm": 6.0
+    },
+    "global_shift": {
+      "defect": "residual_misalignment",
+      "amplitude_mm": 3.0
+    }
+  },
+  "cases": {
+    "0001_0000_0021_0000": {
+      "local_fold": {
+        "defect": "folding",
+        "box_mm": {
+          "min": [
+            -35.5,
+            -39.5,
+            22.5
+          ],
+          "max": [
+            -22.5,
+            -26.5,
+            35.5
+          ]
+        },
+        "min_jacobian": -1.16
+      },
+      "local_shift": {
+        "defect": "residual_misalignment",
+        "box_mm": {
+          "min": [
+            -41.5,
+            -45.5,
+            16.5
+          ],
+          "max": [
+            -16.5,
+            -20.5,
+            41.5
+          ]
+        },
+        "min_jacobian": 0.487
+      },
+      "global_shift": {
+        "defect": "residual_misalignment"
+      }
+    },
+    "0034_0000_0200_0000": {
+      "local_fold": {
+        "defect": "folding",
+        "box_mm": {
+          "min": [
+            -34.5,
+            -38.5,
+            21.5
+          ],
+          "max": [
+            -21.5,
+            -25.5,
+            34.5
+          ]
+        },
+        "min_jacobian": -1.042
+      },
+      "local_shift": {
+        "defect": "residual_misalignment",
+        "box_mm": {
+          "min": [
+            -40.5,
+            -44.5,
+            15.5
+          ],
+          "max": [
+            -15.5,
+            -19.5,
+            40.5
+          ]
+        },
+        "min_jacobian": 0.523
+      },
+      "global_shift": {
+        "defect": "residual_misalignment"
+      }
+    },
+    "0045_0000_0155_0000": {
+      "local_fold": {
+        "defect": "folding",
+        "box_mm": {
+          "min": [
+            -32.5,
+            -35.5,
+            24.5
+          ],
+          "max": [
+            -19.5,
+            -22.5,
+            37.5
+          ]
+        },
+        "min_jacobian": -0.85
+      },
+      "local_shift": {
+        "defect": "residual_misalignment",
+        "box_mm": {
+          "min": [
+            -38.5,
+            -41.5,
+            18.5
+          ],
+          "max": [
+            -13.5,
+            -16.5,
+            43.5
+          ]
+        },
+        "min_jacobian": 0.339
+      },
+      "global_shift": {
+        "defect": "residual_misalignment"
+      }
+    },
+    "0048_0000_0038_0000": {
+      "local_fold": {
+        "defect": "folding",
+        "box_mm": {
+          "min": [
+            -35.5,
+            -38.5,
+            21.5
+          ],
+          "max": [
+            -22.5,
+            -25.5,
+            34.5
+          ]
+        },
+        "min_jacobian": -0.861
+      },
+      "local_shift": {
+        "defect": "residual_misalignment",
+        "box_mm": {
+          "min": [
+            -41.5,
+            -44.5,
+            15.5
+          ],
+          "max": [
+            -16.5,
+            -19.5,
+            40.5
+          ]
+        },
+        "min_jacobian": 0.346
+      },
+      "global_shift": {
+        "defect": "residual_misalignment"
+      }
+    },
+    "0049_0000_0051_0000": {
+      "local_fold": {
+        "defect": "folding",
+        "box_mm": {
+          "min": [
+            -35.5,
+            -38.5,
+            20.5
+          ],
+          "max": [
+            -22.5,
+            -25.5,
+            33.5
+          ]
+        },
+        "min_jacobian": -0.767
+      },
+      "local_shift": {
+        "defect": "residual_misalignment",
+        "box_mm": {
+          "min": [
+            -41.5,
+            -44.5,
+            14.5
+          ],
+          "max": [
+            -16.5,
+            -19.5,
+            39.5
+          ]
+        },
+        "min_jacobian": 0.728
+      },
+      "global_shift": {
+        "defect": "residual_misalignment"
+      }
+    }
+  },
+  "failed": 0,
+  "per_defect": {
+    "local_fold": {
+      "planted_inspections": 4,
+      "found": 4,
+      "sensitivity": 1.0,
+      "clean_inspections": 10,
+      "false_alarms": 1,
+      "specificity": 0.9
+    },
+    "local_shift": {
+      "planted_inspections": 4,
+      "found": 4,
+      "sensitivity": 1.0,
+      "clean_inspections": 10,
+      "false_alarms": 9,
+      "specificity": 0.1
+    },
+    "global_shift": {
+      "planted_inspections": 2,
+      "found": 2,
+      "sensitivity": 1.0,
+      "clean_inspections": 10,
+      "false_alarms": 9,
+      "specificity": 0.1
+    }
+  },
+  "test_retest": {
+    "match_pairs": 20,
+    "match_agreement": 0.85,
+    "verdict_pairs": 10,
+    "verdict_agreement": 0.8
+  },
+  "inspections": [
+    {
+      "case": "0001_0000_0021_0000",
+      "variant": "clean",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 8,
+      "budget_exhausted": null,
+      "cost_usd": 0.13437,
+      "duration_s": 32.8,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0001_0000_0021_0000",
+      "variant": "clean",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 10,
+      "budget_exhausted": null,
+      "cost_usd": 0.19612,
+      "duration_s": 40.5,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0001_0000_0021_0000",
+      "variant": "local_fold",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 8,
+      "budget_exhausted": null,
+      "cost_usd": 0.132037,
+      "duration_s": 30.6,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0001_0000_0021_0000",
+      "variant": "local_fold",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 11,
+      "budget_exhausted": null,
+      "cost_usd": 0.17902,
+      "duration_s": 40.3,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": false,
+        "global_shift": false
+      }
+    },
+    {
+      "case": "0034_0000_0200_0000",
+      "variant": "clean",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 10,
+      "budget_exhausted": null,
+      "cost_usd": 0.154473,
+      "duration_s": 33.5,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0034_0000_0200_0000",
+      "variant": "clean",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 12,
+      "budget_exhausted": null,
+      "cost_usd": 0.194823,
+      "duration_s": 43.5,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0034_0000_0200_0000",
+      "variant": "local_shift",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 10,
+      "budget_exhausted": null,
+      "cost_usd": 0.15014,
+      "duration_s": 33.2,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0034_0000_0200_0000",
+      "variant": "local_shift",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 12,
+      "budget_exhausted": null,
+      "cost_usd": 0.193372,
+      "duration_s": 41.2,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0045_0000_0155_0000",
+      "variant": "clean",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 8,
+      "budget_exhausted": null,
+      "cost_usd": 0.131304,
+      "duration_s": 28.9,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0045_0000_0155_0000",
+      "variant": "clean",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 12,
+      "budget_exhausted": null,
+      "cost_usd": 0.196063,
+      "duration_s": 43.4,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0045_0000_0155_0000",
+      "variant": "global_shift",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 10,
+      "budget_exhausted": null,
+      "cost_usd": 0.160271,
+      "duration_s": 34.2,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0045_0000_0155_0000",
+      "variant": "global_shift",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 8,
+      "budget_exhausted": null,
+      "cost_usd": 0.129967,
+      "duration_s": 30.4,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0048_0000_0038_0000",
+      "variant": "clean",
+      "repeat": 0,
+      "verdict": "acceptable",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 0,
+      "tool_calls": 10,
+      "budget_exhausted": null,
+      "cost_usd": 0.166936,
+      "duration_s": 38.7,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0048_0000_0038_0000",
+      "variant": "clean",
+      "repeat": 1,
+      "verdict": "acceptable",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 11,
+      "budget_exhausted": null,
+      "cost_usd": 0.175675,
+      "duration_s": 38.8,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0048_0000_0038_0000",
+      "variant": "local_fold",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 11,
+      "budget_exhausted": null,
+      "cost_usd": 0.189886,
+      "duration_s": 43.0,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": false,
+        "global_shift": false
+      }
+    },
+    {
+      "case": "0048_0000_0038_0000",
+      "variant": "local_fold",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 2,
+      "confirmed": 2,
+      "tool_calls": 11,
+      "budget_exhausted": null,
+      "cost_usd": 0.172902,
+      "duration_s": 37.1,
+      "error": null,
+      "matched": {
+        "local_fold": true,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0049_0000_0051_0000",
+      "variant": "clean",
+      "repeat": 0,
+      "verdict": "acceptable",
+      "concluded_by": "model",
+      "errors": 0,
+      "confirmed": 0,
+      "tool_calls": 9,
+      "budget_exhausted": null,
+      "cost_usd": 0.136185,
+      "duration_s": 26.9,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": false,
+        "global_shift": false
+      }
+    },
+    {
+      "case": "0049_0000_0051_0000",
+      "variant": "clean",
+      "repeat": 1,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 9,
+      "budget_exhausted": null,
+      "cost_usd": 0.137561,
+      "duration_s": 29.4,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0049_0000_0051_0000",
+      "variant": "local_shift",
+      "repeat": 0,
+      "verdict": "defective",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 11,
+      "budget_exhausted": null,
+      "cost_usd": 0.188857,
+      "duration_s": 43.8,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    },
+    {
+      "case": "0049_0000_0051_0000",
+      "variant": "local_shift",
+      "repeat": 1,
+      "verdict": "acceptable",
+      "concluded_by": "model",
+      "errors": 1,
+      "confirmed": 1,
+      "tool_calls": 8,
+      "budget_exhausted": null,
+      "cost_usd": 0.132511,
+      "duration_s": 29.1,
+      "error": null,
+      "matched": {
+        "local_fold": false,
+        "local_shift": true,
+        "global_shift": true
+      }
+    }
+  ]
+}

@@ -131,7 +131,8 @@ konfai-scout compare reports/*                       # one row per report
 ```
 
 `docs/report.md` is the schema, `docs/study.md` the study protocol, `docs/integrations.md` how KonfAI Eval,
-konfai-mcp, KonfAI Studio, FidOpt and FidLab use Scout.
+konfai-mcp, KonfAI Studio, FidOpt and FidLab use Scout, `docs/calibration/` a calibration on real registrations
+(`examples/calibrate_real.py`).
 
 ## Export at a confidentiality level
 
