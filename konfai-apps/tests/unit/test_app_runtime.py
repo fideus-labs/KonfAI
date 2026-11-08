@@ -685,6 +685,22 @@ def test_run_remote_job_encodes_group_boundaries_and_preserves_order(
     assert sent_names == ["a.nii.gz", "b.nii.gz"]
 
 
+def test_a_remote_inference_carries_the_need_for_a_field(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The server runs a job in its own environment: a caller that averages or composes the output (an ensemble's
+    member, a tile) has the request say so, and only then."""
+    from konfai.utils.dataset import DENSE_TRANSFORMS_ENV
+
+    source = tmp_path / "a.nii.gz"
+    source.write_bytes(b"a")
+    captured = _stub_remote_submission(monkeypatch)
+    monkeypatch.delenv(DENSE_TRANSFORMS_ENV, raising=False)
+    captured["client"].infer(inputs=[[source]], output=tmp_path / "out")
+    assert "dense_transforms" not in captured["data"]
+    monkeypatch.setenv(DENSE_TRANSFORMS_ENV, "1")
+    captured["client"].infer(inputs=[[source]], output=tmp_path / "out")
+    assert captured["data"]["dense_transforms"] in ("True", "true", True)
+
+
 def test_run_remote_job_counts_directory_expansion_in_group_sizes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

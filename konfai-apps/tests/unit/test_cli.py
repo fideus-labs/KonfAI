@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -217,6 +218,38 @@ def test_an_app_cli_hands_uncertainty_its_references(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(sys, "argv", ["app-cli", "uncertainty", "-i", "stack.mha", "--gt", "fixed.fcsv", "--cpu", "1"])
     _app_cli_mains()["app-cli"]()
     assert [[Path(path).name for path in group] for group in seen["gt"]] == [["fixed.fcsv"]]
+
+
+def test_dense_transforms_asks_the_run_for_a_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--dense-transforms, what a server's job gets for a caller that averages: the run writes no native form."""
+    from konfai.utils.dataset import DENSE_TRANSFORMS_ENV
+
+    seen: dict[str, Any] = {}
+
+    class _App:
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def infer(self, **kwargs: Any) -> None:
+            seen["dense"] = os.environ.get(DENSE_TRANSFORMS_ENV)
+
+    monkeypatch.setenv(DENSE_TRANSFORMS_ENV, "")  # recorded, so the run's own setting goes with the test
+    monkeypatch.setattr("konfai_apps.app.KonfAIApp", _App)
+    monkeypatch.setattr(
+        sys, "argv", ["konfai-apps", "infer", "demo", "-i", "in.mha", "--dense-transforms", "--cpu", "1"]
+    )
+    apps_cli_module.main_apps()
+    assert seen["dense"] == "1"
+
+
+def test_the_server_hands_the_job_the_need_for_a_field() -> None:
+    import asyncio
+
+    from konfai_apps import app_server
+
+    command = asyncio.run(app_server.infer.__wrapped__(app_name="demo", inputs=[], dense_transforms=True))
+    assert "--dense-transforms" in command
+    assert "--dense-transforms" not in asyncio.run(app_server.infer.__wrapped__(app_name="demo", inputs=[]))
 
 
 def test_konfai_debug_keeps_the_refusal_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

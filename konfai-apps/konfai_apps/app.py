@@ -36,7 +36,14 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Attribute, Dataset, entry_links, is_an_image, is_displacement_entry
+from konfai.utils.dataset import (
+    DENSE_TRANSFORMS_ENV,
+    Attribute,
+    Dataset,
+    entry_links,
+    is_an_image,
+    is_displacement_entry,
+)
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -677,6 +684,9 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             del data["models"]
                     if "gpu" in data:
                         data["gpu"] = ",".join(str(x) for x in data["gpu"])
+                    if func.__name__ == "infer" and os.environ.get(DENSE_TRANSFORMS_ENV):
+                        # The server runs the job in its own environment: the caller's need for a field goes along.
+                        data["dense_transforms"] = "true"
                     if options:
                         data["options"] = json.dumps(options)
                     connect_timeout = 60

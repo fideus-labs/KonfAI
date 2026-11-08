@@ -133,7 +133,7 @@ Per command:
 
 | Command | Options |
 | --- | --- |
-| `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `-uncertainty`, `--prediction-file` |
+| `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `-uncertainty`, `--prediction-file`, `--dense-transforms` |
 | `eval` | `--gt` (left out for a measure of the prediction alone), `--mask`, `--evaluation-file` |
 | `uncertainty` | `--uncertainty-file` |
 | `pipeline` | those of `infer`, `eval` and `uncertainty` |
@@ -155,8 +155,11 @@ Without `#PRESET` it starts from the app's base config.
 `konfai-apps infer APP#a APP#b ... -i ...` runs an ensemble of app references: one run each (its own `--ensemble`,
 `--ensemble-models` and `--tta` members inside it), then every member reduced into `<output>/<output>/<case>/` by the
 operator the apps declare for their checkpoints (`Mean` by default, `Median`, `Vote`). With `-uncertainty` the stack
-of every member is kept beside it as `InferenceStack.mha`, and `konfai-run.json` names the members in its order. The
-references may be presets of one app or apps of matching outputs (docs/design/ensembles.md).
+of every member is kept beside it as `InferenceStack.<ext>` (the output's form where it keeps the member count:
+MetaImage, NRRD, OME-Zarr; MetaImage otherwise), and `konfai-run.json` names the members in its order. The references
+may be presets of one app or apps of matching outputs, on the same grid (docs/design/ensembles.md). Every member
+writes its field, never a registration's native form (an affine, a B-spline), since it is averaged; a run that
+another averages or composes is told so with `--dense-transforms`, which a remote server's job receives too.
 
 `konfai-apps uncertainty APP -i STACK [--gt ...]` evaluates such a stack against the app's `Uncertainty*.yml`, the
 references (an ensemble's landmarks, a segmentation it propagates) staged as `eval` stages them.

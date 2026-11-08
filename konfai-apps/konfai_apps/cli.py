@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from konfai import RemoteServer
+from konfai.utils.dataset import DENSE_TRANSFORMS_ENV
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -789,6 +790,13 @@ def main_apps() -> None:
     add_run_options(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
+        "--dense-transforms",
+        "--dense_transforms",
+        action="store_true",
+        help="Write a registration's transform as its field, never a native form (an affine, a B-spline): the "
+        "caller averages or composes it. A remote server is asked so through the request.",
+    )
+    infer_p.add_argument(
         "--prediction-file",
         "--prediction_file",
         type=str,
@@ -1025,6 +1033,8 @@ def main_apps() -> None:
 
     remote = RemoteServer(host, port, token, https, ca_cert) if host is not None else None
     output_format, seed = kwargs.pop("output_format", None), kwargs.pop("seed", None)
+    if kwargs.pop("dense_transforms", False):
+        os.environ[DENSE_TRANSFORMS_ENV] = "1"
     references = kwargs["app"] if isinstance(kwargs["app"], list) else [kwargs["app"]]
     download, force_update = kwargs.pop("download", False), kwargs.pop("force_update", False)
 
