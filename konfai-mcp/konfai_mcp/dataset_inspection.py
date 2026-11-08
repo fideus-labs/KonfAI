@@ -307,7 +307,9 @@ class DatasetInspectionMixin:
                 if per_case
                 and len(case_file_names) >= 2
                 and len({frozenset(names) for names in case_file_names}) == 1
-                and len(case_file_names[0]) >= 3
+                # ponytail: few folders, many shared names; a per-case dataset with fewer cases than groups still
+                # reads as inverted (hence "more likely")
+                and len(case_file_names[0]) > len(case_file_names)
                 else None
                 if per_case or single_store_extension is not None
                 else "flat layout: the root is read as one case and each file as a group. KonfAI reads "
@@ -464,6 +466,7 @@ class DatasetInspectionMixin:
             "ok": True,
             "path": str(dataset_dir),
             "layout": scan["layout"],
+            "layout_hint": scan["layout_hint"],
             "total_cases": scan["total_cases"],
             "groups": scan["groups"],
             "case_layouts": scan["case_layouts"],

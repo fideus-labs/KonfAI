@@ -127,6 +127,38 @@ def test_directory_backed_dataset_entries_are_discovered(
 
 
 @pytest.mark.usefixtures("workspace_root")
+def test_layout_hint_tells_a_per_case_dataset_from_an_inverted_one(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    normal = tmp_path / "normal"  # three groups in four cases: the shared names are the groups
+    for case in range(4):
+        (normal / f"CASE_{case:03d}").mkdir(parents=True)
+        for group in ("CT", "SEG", "MASK"):
+            (normal / f"CASE_{case:03d}" / f"{group}.mha").write_bytes(b"\x00")
+    inverted = tmp_path / "inverted"  # two folders holding the same five files: the folders are the groups
+    for group in ("scans", "masks"):
+        (inverted / group).mkdir(parents=True)
+        for case in range(5):
+            (inverted / group / f"case_{case:03d}.mha").write_bytes(b"\x00")
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> list[str | None]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return [
+                (
+                    await client.call_tool("inspect_dataset", {"dataset_dir": str(root), "include_stats": False})
+                ).structured_content["layout_hint"]
+                for root in (normal, inverted)
+            ]
+
+    normal_hint, inverted_hint = asyncio.run(scenario())
+    assert normal_hint is None
+    assert "inverted layout" in inverted_hint
+
+
+@pytest.mark.usefixtures("workspace_root")
 def test_h5_internal_groups_are_discovered(
     tmp_path: Path,
     load_mcp_server: Callable[[], ModuleType],
