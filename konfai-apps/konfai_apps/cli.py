@@ -46,7 +46,7 @@ from .app_repository import (
 )
 from .errors import AppRepositoryError
 from .options import add_device, add_run_options, add_tmp_dir
-from .presets import PRESET_NAME, split_preset
+from .presets import split_preset
 
 #: Where a designed refusal also writes its message, when set: the app server reads it back to answer
 #: the job's result with the refusal (422) rather than a bare exit code.
@@ -320,10 +320,6 @@ def _save_preset(app: str, name: str, description: str, overrides: list[str]) ->
     """``preset save APP[#PRESET] NAME``: the preset APP runs with (its base config without one), then ``--set``, kept
     as preset NAME of APP. The source is the preset the run is written with, so it needs no flag of its own."""
     base, source = split_preset(app)
-    if not PRESET_NAME.fullmatch(name):
-        raise AppRepositoryError(
-            f"'{name}' is not a preset name.", "Name it with letters, digits, '_' and '-': hippo, fine_grid."
-        )
     info = get_app_repository_info(base, False)
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")

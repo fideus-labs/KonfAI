@@ -21,7 +21,6 @@ from __future__ import annotations
 import copy
 import difflib
 import functools
-import hashlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -1063,17 +1062,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
     def record(self, overrides: list[str] | None) -> dict[str, Any]:
         """What a run of this app ran: the app, its revision, its preset and every ``--set`` it applied, in order
-        (the preset's, then the run's own), with an ``identity`` that every run of that configuration shares: the
-        app, its revision and the value each name ends with, whatever their order or spelling of presets."""
+        (the preset's, then the run's own)."""
         applied = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
-        last = {override.partition("=")[0].strip(): override for override in applied}
-        canonical = {"app": self.get_name(), "revision": self.get_revision(), "set": sorted(last.values())}
         return {
             "app": self.get_name(),
             "revision": self.get_revision(),
             "preset": self._preset.name if self._preset else None,
             "set": applied,
-            "identity": hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()[:16],
         }
 
     def get_presets(self) -> dict[str, Preset]:
@@ -1097,12 +1092,10 @@ class LocalAppRepository(AppRepositoryInfo):
             self._check(presets[name].overrides, f"preset '{name}'")
         super().use_preset(name)
 
-    def _check(
-        self, overrides: tuple[str, ...] | list[str], what: str, prediction_file: str = "Prediction.yml"
-    ) -> None:
+    def _check(self, overrides: tuple[str, ...] | list[str], what: str) -> None:
         """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``."""
         filenames = self._all_repo_filenames()
-        config_filename = self._find_repo_filename(prediction_file, filenames)
+        config_filename = self._find_repo_filename("Prediction.yml", filenames)
         if config_filename is None or not overrides:
             return
         with open(self._download(config_filename), encoding="utf-8") as file:
@@ -1272,25 +1265,22 @@ class LocalAppRepository(AppRepositoryInfo):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self._download(filename), dest)
 
-        if display_name is not None:
-            metadata_file = path / "app.json"
-            with open(metadata_file, encoding="utf-8") as file:
-                metadata = json.load(file)
-            metadata["display_name"] = display_name
-            with open(metadata_file, "w", encoding="utf-8") as file:
-                json.dump(metadata, file, indent=2, ensure_ascii=False)
-
-        if config_overrides or self._preset is not None:
+        tuned = bool(config_overrides) or self._preset is not None
+        if tuned:
             config = path / prediction_file
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
             self._apply_config_overrides(str(config), config_overrides)
-            # The copy's base config is now this preset and these overrides: the presets it published were
-            # relative to the old base, so they do not travel with it.
+        if display_name is not None or tuned:
             metadata_file = path / "app.json"
             metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
-            if metadata.pop("presets", None) is not None:
-                metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+            if display_name is not None:
+                metadata["display_name"] = display_name
+            if tuned:
+                # The copy's base config is now this preset and these overrides: the presets it published were
+                # relative to the old base, so they do not travel with it.
+                metadata.pop("presets", None)
+            metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def download_bundle(
         self,
