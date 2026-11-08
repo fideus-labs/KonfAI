@@ -1178,6 +1178,21 @@ def test_spread_places_the_windows_where_nnunet_does(tile_step_size):
     assert [s[0].start for s in get_patch_slices_from_shape([64], [110], 0.5, placement="spread")] == [0, 23, 46]
 
 
+@pytest.mark.parametrize("combine_cls", [Mean, Gaussian])
+def test_spread_places_a_window_once_where_nnunet_repeats_it(combine_cls):
+    """A step under a voxel (a patch of 4 at overlap 0.9) rounds nnU-Net's starts onto one another, 0, 0, 1, 1: each
+    window is placed once, so a blend sees it once (the accumulator counts a start once in its total weight; placed
+    twice, an all-ones prediction came out all twos)."""
+    slices = get_patch_slices_from_shape([4], [5], 0.9, placement="spread")
+    assert [s[0].start for s in slices] == [0, 1]
+    combine = combine_cls()
+    combine.set_patch_config([4], blend_overlap(0.9, [4]))
+    accumulator = Accumulator(slices, [4], combine, batch=False, placement="spread")
+    for index in range(len(slices)):
+        accumulator.add_layer(index, torch.ones(1, 4))
+    torch.testing.assert_close(accumulator.assemble(), torch.ones(1, 5), rtol=0, atol=1e-6)
+
+
 @pytest.mark.parametrize(
     "placement, starts",
     [("pad", [0, 64, 128, 192]), ("monai", [0, 64, 128, 172]), ("spread", [0, 57, 115, 172])],
@@ -1297,13 +1312,14 @@ def test_a_short_axis_is_padded_on_both_sides_with_its_edge():
     assert torch.equal(accumulator.assemble(), volume)
 
 
-@pytest.mark.parametrize("shape", [[21, 17, 6], [16, 30, 11]])
-def test_a_gaussian_blends_as_a_sliding_window_inference(shape):
-    """Under ``placement: monai``, ``Gaussian`` reassembles the patches as MONAI's sliding window does: each patch weighted by the importance
-    map clamped at 1e-3, divided by the sum of the maps covering the voxel, an axis shorter than the window padded
-    on both sides and cropped back."""
+@pytest.mark.parametrize("shape, overlap", [([21, 17, 6], 0.25), ([16, 30, 11], 0.25), ([16, 30, 11], 0.0)])
+def test_a_gaussian_blends_as_a_sliding_window_inference(shape, overlap):
+    """Under ``placement: monai``, ``Gaussian`` reassembles the patches as MONAI's sliding window does: each patch
+    weighted by the importance map clamped at 1e-3, divided by the sum of the maps covering the voxel, an axis shorter
+    than the window padded on both sides and cropped back. At ``overlap: 0`` too: the last window, moved back, overlaps
+    its neighbour, and MONAI's map weighs that band as any other."""
     torch.manual_seed(0)
-    size, overlap = [8, 8, 8], 0.25
+    size = [8, 8, 8]
     starts = [_monai_starts(extent, p, overlap) for extent, p in zip(shape, size, strict=True)]
     outputs = {start: torch.randn(2, *size) for start in itertools.product(*starts)}
 
