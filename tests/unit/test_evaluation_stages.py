@@ -104,6 +104,16 @@ def test_keep_labels_keeps_what_the_other_map_holds():
     assert int((kept == 3).sum()) == int((torch.from_numpy(fixed) == 3).sum())  # a kept label keeps every voxel
 
 
+@pytest.mark.parametrize("dtype", [torch.uint16, torch.bool])
+def test_keep_labels_takes_a_map_isin_has_no_kernel_for(dtype):
+    fixed = torch.zeros(1, 4, 4, 4, dtype=dtype)
+    fixed[0, :2] = 1
+    stage = KeepLabels("MOVING")
+    stage.set_datasets([_Store(MOVING=(np.zeros((1, 4, 4, 4), np.uint8), Attribute()))])  # holds 0 alone
+    kept = stage("a", fixed, Attribute())
+    assert kept.dtype == dtype and not kept.any()
+
+
 def _field(size, spacing, origin, rotation, components) -> sitk.Image:
     """A smooth random field on an oblique, anisotropic grid, as written: one component per world axis, in mm."""
     rng = np.random.default_rng(2)
@@ -184,6 +194,26 @@ def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
     mask = torch.zeros_like(reference)
     mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
     assert MissingLabels()(output, reference, mask)[1] == 0.0
+
+
+def test_missing_labels_compares_a_reference_of_another_shape():
+    # The evaluator leaves it out of its same-grid refusal, and the reference is put on the output's grid.
+    from types import SimpleNamespace
+
+    from konfai.evaluator import Evaluator
+    from konfai.metric.measure import MissingLabels
+
+    output, reference = torch.ones(1, 1, 4, 4, 4), torch.ones(1, 1, 8, 8, 8)
+    evaluator = SimpleNamespace(metrics={"Out": {"Ref": [MissingLabels()]}})
+    assert Evaluator._voxelwise_pairs(evaluator, {"Out": output, "Ref": reference}) == {}
+    assert MissingLabels()(output, reference)[1] == 0.0
+
+
+def test_missing_labels_is_weighed_by_its_items():
+    # A logged mean weighs each batch by its item count: batches of [0, 0] and [1] missing labels report 1/3.
+    from konfai.metric.measure import MissingLabels
+
+    assert MissingLabels.batch_mean
 
 
 def test_missing_labels_takes_no_loss_role():

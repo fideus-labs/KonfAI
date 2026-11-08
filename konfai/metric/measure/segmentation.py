@@ -352,6 +352,8 @@ class MissingLabels(Criterion):
     without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. Metric only."""
 
     loss_capable = False
+    batch_mean = True  # the mean of one count per item
+    resamples_target = True  # a reference of another shape is put on the output's grid (Dice.on_grid)
 
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()

@@ -342,6 +342,15 @@ class Otsu(Transform):
         return (grey > float(np.float32(calculator.GetThreshold()))).to(torch.uint8).unsqueeze(0)
 
 
+#: The types isin and where have no kernel for, and the type each is compared in, which holds all its values.
+_COMPARED_AS = {
+    torch.bool: torch.uint8,
+    torch.uint16: torch.int32,
+    torch.uint32: torch.int64,
+    torch.uint64: torch.int64,
+}
+
+
 class KeepLabels(Transform):
     """The labels another group of the case also holds; every other voxel 0.
 
@@ -351,7 +360,8 @@ class KeepLabels(Transform):
     """
 
     locality = LocalityKind.POINTWISE
-    working_multiple = 1.0
+    # a uint16 map compared as int32 (2), the mask (0.5) and the int32 result (2)
+    working_multiple = 4.5
 
     def __init__(self, group: str = "default") -> None:
         super().__init__()
@@ -375,9 +385,11 @@ class KeepLabels(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         held = self.held(name)
-        if not tensor.is_floating_point():  # a label this map's type cannot hold is not in it
-            held = held[(held >= torch.iinfo(tensor.dtype).min) & (held <= torch.iinfo(tensor.dtype).max)]
-        return torch.where(torch.isin(tensor, held.to(device=tensor.device, dtype=tensor.dtype)), tensor, 0)
+        values = tensor.to(_COMPARED_AS.get(tensor.dtype, tensor.dtype))
+        if not values.is_floating_point():  # a label this map's type cannot hold is not in it
+            held = held[(held >= torch.iinfo(values.dtype).min) & (held <= torch.iinfo(values.dtype).max)]
+        keep = torch.isin(values, held.to(device=values.device, dtype=values.dtype))
+        return torch.where(keep, values, 0).to(tensor.dtype)
 
 
 class FlatLabel(Transform):
