@@ -97,6 +97,7 @@ class _SurfaceCriterion(CriterionWithAttribute):
     ``Dice``. The spacing comes from the output's attributes."""
 
     accepts_output_attributes = True
+    loss_capable = False  # distances from a distance transform, no gradient
     missing: float  #: the value of a label the reference holds and the output lacks
 
     def __init__(self, labels: list[int] | None = None) -> None:
@@ -111,7 +112,7 @@ class _SurfaceCriterion(CriterionWithAttribute):
         """The voxel spacing in the array's axis order (``(x, y, z)`` in the attributes, ``[z, y, x]`` in memory)."""
         try:
             spacing = grid[item].get_np_array("Spacing")
-        except (IndexError, KeyError, DatasetManagerError) as error:
+        except (IndexError, DatasetManagerError) as error:
             raise MeasureError(
                 "A surface distance needs the voxel spacing, which the output's attributes do not carry.",
                 "Read the label map from a format that keeps its geometry (mha, nii, omezarr).",

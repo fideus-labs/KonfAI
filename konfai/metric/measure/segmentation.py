@@ -343,6 +343,8 @@ class MissingLabels(Criterion):
     registration's warp lost. ``labels`` restricts the count to those labels, where the reference holds them;
     without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. Metric only."""
 
+    loss_capable = False
+
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
         self._labels = labels

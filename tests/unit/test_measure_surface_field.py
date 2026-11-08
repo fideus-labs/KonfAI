@@ -19,7 +19,7 @@
 import numpy as np
 import pytest
 import torch
-from konfai.metric.measure import HausdorffDistance, Jacobian, SurfaceDice
+from konfai.metric.measure import HausdorffDistance, Jacobian, MissingLabels, SurfaceDice
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
 
@@ -171,6 +171,16 @@ class TestJacobian:
         field[0, 2, 4, :, :] = 5.0  # the same jump in the middle is seen
         assert _jacobian(field)["sdlogj"] > 0.1
 
+    def test_a_singleton_axis_reads_flat(self):
+        # one plane: the edge repeated past both faces makes every derivative along that axis 0, as it is on two
+        # identical planes
+        field = torch.zeros(1, 3, 1, 8, 8)
+        field[0, 0] = torch.linspace(0, 7, 8).view(1, 1, 8) * 0.5
+        field[0, 1] = torch.linspace(0, 7, 8).view(1, 8, 1) ** 2 * 0.1
+        values, planes = _jacobian(field), _jacobian(field.expand(1, 3, 2, 8, 8))
+        assert values["folds"] == 0.0 and values["sdlogj"] > 0.01
+        assert values == pytest.approx(planes, rel=1e-9)
+
     def test_two_dimensions(self):
         field = torch.zeros(1, 2, 10, 10)
         field[0, 0] = torch.linspace(0, 9, 10).view(1, 10).expand(10, 10) * 0.5  # u_x = 0.5 x: det 1.5
@@ -215,6 +225,11 @@ class TestJacobianFromHaloPatches:
     def test_declares_its_crop_as_halo(self):
         assert Jacobian.reducible and Jacobian.halo == 2
 
+    def test_a_partial_state_does_not_keep_the_patch(self):
+        field = torch.zeros(1, 3, 8, 8, 8)
+        _, _, on = Jacobian([""]).partial_metric(field, _ones(field), attributes=[[_attribute([1, 1, 1])]])
+        assert on.dtype == field.dtype and on.untyped_storage().nbytes() == on.element_size()
+
     @pytest.mark.parametrize(
         ("shape", "patch"), [((19, 23, 17), [8, 8, 8]), ((19, 23, 17), [5, 23, 7]), ((37, 29), [16, 13])]
     )
@@ -230,3 +245,12 @@ class TestJacobianFromHaloPatches:
         assert set(streamed) == set(whole)
         for key, value in whole.items():
             assert streamed[key] == pytest.approx(value, rel=1e-9, abs=1e-12), key
+
+
+def test_the_metric_only_criteria_take_no_loss_role():
+    from konfai.network.network.loaders import CriterionsAttr
+
+    for criterion in (Jacobian(), HausdorffDistance(), SurfaceDice(), MissingLabels()):
+        assert not criterion.loss_capable
+        with pytest.raises(MeasureError):
+            CriterionsAttr(is_loss=True).settle_role(criterion, "k")

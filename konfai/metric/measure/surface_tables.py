@@ -356,31 +356,18 @@ def create_table_neighbour_code_to_contour_length(spacing_mm):
     diag = 0.5 * math.sqrt(spacing_mm[0] ** 2 + spacing_mm[1] ** 2)
     # pyformat: disable
     neighbour_code_to_contour_length[int("0001", 2)] = diag
-
     neighbour_code_to_contour_length[int("0010", 2)] = diag
-
     neighbour_code_to_contour_length[int("0011", 2)] = horizontal
-
     neighbour_code_to_contour_length[int("0100", 2)] = diag
-
     neighbour_code_to_contour_length[int("0101", 2)] = vertical
-
     neighbour_code_to_contour_length[int("0110", 2)] = 2 * diag
-
     neighbour_code_to_contour_length[int("0111", 2)] = diag
-
     neighbour_code_to_contour_length[int("1000", 2)] = diag
-
     neighbour_code_to_contour_length[int("1001", 2)] = 2 * diag
-
     neighbour_code_to_contour_length[int("1010", 2)] = vertical
-
     neighbour_code_to_contour_length[int("1011", 2)] = diag
-
     neighbour_code_to_contour_length[int("1100", 2)] = horizontal
-
     neighbour_code_to_contour_length[int("1101", 2)] = diag
-
     neighbour_code_to_contour_length[int("1110", 2)] = diag
     # pyformat: enable
 

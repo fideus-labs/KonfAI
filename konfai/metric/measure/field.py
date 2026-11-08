@@ -45,7 +45,7 @@ def _geometry(field: list[Attribute], item: int, dimensions: int) -> tuple[np.nd
     try:
         spacing = field[item].get_np_array("Spacing")
         direction = field[item].get_np_array("Direction").reshape(dimensions, dimensions)
-    except (IndexError, KeyError, ValueError, DatasetManagerError) as error:
+    except (IndexError, ValueError, DatasetManagerError) as error:
         raise MeasureError(
             "A field's Jacobian needs its spacing and direction, which the output's attributes do not carry.",
             "Read the field from a format that keeps its geometry (mha, nii, omezarr).",
@@ -77,16 +77,11 @@ def determinants(
         own = slice(start - rows.start, stop - rows.start)
         gradient = []  # gradient[b][a]: d u_a / d x_b over the slab's own rows
         for axis in range(dimensions):
-            # central differences, the edge voxel repeated past the faces: (u[1] - u[0]) / 2h there
+            # central differences, the edge voxel repeated past the faces: (u[1] - u[0]) / 2h there, 0 along a
+            # singleton axis
             length = u.shape[axis + 1]
-            derivative = torch.empty_like(u)
-            derivative.narrow(axis + 1, 1, length - 2).copy_(u.narrow(axis + 1, 2, length - 2)).sub_(
-                u.narrow(axis + 1, 0, length - 2)
-            )
-            derivative.narrow(axis + 1, 0, 1).copy_(u.narrow(axis + 1, 1, 1)).sub_(u.narrow(axis + 1, 0, 1))
-            derivative.narrow(axis + 1, length - 1, 1).copy_(u.narrow(axis + 1, length - 1, 1)).sub_(
-                u.narrow(axis + 1, length - 2, 1)
-            )
+            padded = torch.cat([u.narrow(axis + 1, 0, 1), u, u.narrow(axis + 1, length - 1, 1)], dim=axis + 1)
+            derivative = padded.narrow(axis + 1, 2, length) - padded.narrow(axis + 1, 0, length)
             gradient.append(derivative[(slice(None), own)].div_(2 * spacing[axis]))
         j = [[gradient[b][a] for b in range(dimensions)] for a in range(dimensions)]
         for a in range(dimensions):
@@ -118,6 +113,7 @@ class Jacobian(CriterionWithAttribute):
 
     reducible = True
     halo = 2
+    loss_capable = False  # SDlogJ is read off detached running sums
 
     accepts_output_attributes = True
 
@@ -238,10 +234,11 @@ class Jacobian(CriterionWithAttribute):
         attributes: list[list[Attribute]],
         output_attributes: list[Attribute] | None = None,
     ) -> Any:
-        """The running sums of one patch's slot: (names, totals, a tensor to report on)."""
+        """The running sums of one patch's slot: (names, totals, an empty tensor of the output's dtype and device
+        to report on; a view of the patch would keep every patch of the case resident until it ends)."""
         names = self._names_for(targets)
         field = self.output_grid(attributes, output_attributes)
-        return names, self._totals(output, targets, field, core), output[:1, :1, :1].detach()
+        return names, self._totals(output, targets, field, core), output.new_empty(())
 
     def combine_metric(self, states: list[Any]) -> CriterionOutput:
         names, _, on = states[0]
