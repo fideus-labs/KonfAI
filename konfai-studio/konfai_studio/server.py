@@ -1336,11 +1336,20 @@ async def scout_report(session: str = Query("default"), name: str = Query(...)) 
         "observations": data.get("observations") or [],
         "measurements": data.get("measurements") or [],
         "views": len(data.get("views") or []),
+        # what each evidence image shows, so a caption can say it without the image: the picture itself is
+        # /api/scout/evidence
+        "views_meta": [
+            {key: view.get(key) for key in ("id", "kind", "plane", "index", "position_mm", "mode", "sent", "size_px")}
+            for view in data.get("views") or []
+        ],
         "usage": data.get("usage"),
         "budget": data.get("budget"),
         "error": data.get("error"),
         "provider": data.get("provider"),
         "mode": (data.get("config") or {}).get("mode"),
+        "created_at": data.get("created_at"),
+        "duration_s": data.get("duration_s"),
+        "second_reading": data.get("second_reading"),
         "report_md": str(folder / "report.md"),
     }
 

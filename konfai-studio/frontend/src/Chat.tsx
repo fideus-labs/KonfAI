@@ -591,14 +591,15 @@ export default function Chat({
                       ⚠ {p.text}
                     </div>
                   ) : (
-                    <div key={i} className={`tool ${p.status}`}>
-                      <div className="th">
+                    <details key={i} className={`tool ${p.status}`} open={p.status === "error" || undefined}>
+                      <summary className="th">
                         <span className="d" />
                         <span className="nm">{p.name}</span>
+                        <span className="gist">{JSON.stringify(p.input ?? {}).slice(1, -1)}</span>
                         <span className="st">{p.status === "running" ? "running…" : p.status}</span>
-                      </div>
+                      </summary>
                       <pre>{p.preview || JSON.stringify(p.input)}</pre>
-                    </div>
+                    </details>
                   ),
                 )
               )}

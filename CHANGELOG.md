@@ -90,6 +90,12 @@ as a failed run); the pane beside the file tree shrinks with its column at lapto
 answers for a session whose workspace is not made yet; the packager's weights-only load also admits ruamel's
 `Anchor` and `ScalarString`, which every checkpoint written from a YAML config carries. A plain static site for the
 ecosystem lives under `site/`.
+Studio's SCOUT tab shows the whole report: verdict band (confidence, case, task, model, mode, when, budget, cost),
+the conclusion, one card per observation (kind, severity, location in mm, notes, the blind second reading, the
+measurements it cites, a filmstrip of the views it cites with a lightbox), the uncited views collapsed, report.md on
+demand; `/api/scout/report` carries the views' metadata, the date and the duration. Studio's design rests on one
+token set (type, spacing, radii, colour roles), with a light theme following the system preference, tool-call cards
+collapsed to one line (open when the call failed), and a readable measure for the assistant's prose.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

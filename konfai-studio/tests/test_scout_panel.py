@@ -116,6 +116,19 @@ def test_reports_report_and_evidence(report: Path) -> None:
         data = client.get("/api/scout/report", params={"session": "exp", "name": "demo"}).json()
         assert data["image"] == "/data/c1/ct.mha" and data["truth_available"] is True
         assert data["observations"][0]["box_mm"]["max"] == [10, 10, 10] and data["views"] == 1
+        assert data["views_meta"] == [
+            {
+                "id": "v001",
+                "kind": "slice",
+                "plane": "axial",
+                "index": None,
+                "position_mm": [5, 5, 5],
+                "mode": "both",
+                "sent": True,
+                "size_px": None,
+            }
+        ]
+        assert data["created_at"] == "2026-11-07T10:00:00+00:00" and data["second_reading"] is None
         assert data["report_md"].endswith("report.md")
         image = client.get("/api/scout/evidence", params={"session": "exp", "name": "demo", "view": "v001"})
         assert image.status_code == 200 and image.headers["content-type"] == "image/png" and image.content == PNG
