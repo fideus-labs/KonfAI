@@ -79,7 +79,7 @@ def _forward(engine_result) -> tuple[np.ndarray, Attribute]:
     data, attributes = image_to_data(grid)
     tensor = torch.from_numpy(data).unsqueeze(0)
     branches = [[Attribute(attributes)] for _ in range(4)]
-    field = EngineRegistration(_Engine(engine_result))(tensor, tensor, tensor + 1, tensor + 1, branches)
+    field = EngineRegistration(_Engine(engine_result))(tensor, tensor, tensor + 1, tensor + 1, attributes=branches)
     return field[0].numpy(), branches[0][0]
 
 

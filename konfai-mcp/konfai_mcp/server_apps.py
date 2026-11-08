@@ -567,11 +567,8 @@ class AppService:
     def _app_label(self, ref: str) -> str:
         """Short, filesystem-safe name of the app behind a reference, used to label its runs."""
         base, preset = _import_app_repository().split_preset(ref)
-        name = (
-            base.split(":")[-1]
-            if ":" in base and not Path(base).expanduser().exists()
-            else Path(base).expanduser().name
-        )
+        path = Path(base).expanduser()
+        name = path.name if path.exists() or ":" not in base else base.split(":")[-1]
         return f"{name}-{preset}" if preset else name
 
     @staticmethod
@@ -1157,17 +1154,18 @@ class AppService:
             # The ONNX export instantiates and traces the packaged model: it imports the bundle's
             # Model.py, runs a forward pass, and may init CUDA. That must never run in the long-lived
             # server process, so route it through the spawn subprocess like every other code-executing
-            # step. Without checkpoint= the export ships an untrained model.onnx, so pick the NEWEST
-            # packaged checkpoint (mirroring discover_model_paths); pass checkpoints=[...] to override.
+            # step. Every packaged checkpoint is exported, from the weights the bundle ships (a run's .pt
+            # published as .safetensors): konfai runs them as an ensemble, and so does the program the export
+            # writes.
             from . import runner as mcp_runner
 
             onnx_path = mcp_runner.run_api_in_subprocess(
-                "konfai_apps.bundle:export_onnx_into_bundle",
+                "konfai_apps.bundle:export_portable_into_bundle",
                 {
                     "bundle": str(bundle_path),
                     "patch_size": onnx_patch_size,
                     "in_channels": onnx_in_channels,
-                    "checkpoint": max(resolved_checkpoints, key=lambda path: Path(path).stat().st_mtime),
+                    "checkpoints": list(result["checkpoints"]),
                 },
             )
             result["onnx"] = str(onnx_path)

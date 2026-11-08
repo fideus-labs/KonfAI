@@ -18,6 +18,8 @@
 """How overlapping patches are weighted back into one volume."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from functools import reduce
 
 import torch
 
@@ -27,8 +29,18 @@ from konfai.utils.utils import (
 )
 
 
+def outer_product(vectors: Sequence[torch.Tensor]) -> torch.Tensor:
+    """The outer product of 1-D ``vectors``, one axis each in their order."""
+    return reduce(lambda acc, vector: acc.unsqueeze(-1) * vector, vectors)
+
+
 class PathCombine(ABC):
     """Base class for overlap-aware weighting schemes applied during patch assembly."""
+
+    #: A floor under the patch's whole weight, the product of its per-axis windows (``Gaussian``: 1e-3), applied on a
+    #: grid placed ``monai`` only. The weight is then no longer a product of one vector per axis, and ``Accumulator``
+    #: normalises it voxel by voxel.
+    min_weight: float | None = None
 
     def __init__(self) -> None:
         self.windows_1d: list[torch.Tensor]
@@ -42,27 +54,19 @@ class PathCombine(ABC):
         self.overlap = max(overlaps)
         self.overlaps = overlaps
         # The per-patch weight is the outer product of one 1-D window per axis, each axis tapering over its
-        # own overlap. The factors are kept: Accumulator normalises by a per-axis sum (_weight_factors),
-        # and the all-flat case below never calls _window_1d.
-        if all(o <= 0 for o in overlaps):
-            self.windows_1d = [torch.ones(size) for size in patch_size]
-            return
-        self.windows_1d = [
-            self._window_1d(size, axis_overlap) if axis_overlap > 0 else torch.ones(size)
-            for size, axis_overlap in zip(patch_size, overlaps, strict=True)
-        ]
+        # own overlap. The factors are kept: Accumulator normalises by a per-axis sum (_weight_geometry). Built
+        # on a zero overlap too: a grid placed monai or spread overlaps where the stride does not, and MONAI's and
+        # nnU-Net's Gaussian weighs that band as any other.
+        self.windows_1d = [self._window_1d(size, o) for size, o in zip(patch_size, overlaps, strict=True)]
 
     @property
     def data(self) -> torch.Tensor:
         """The per-voxel window: the outer product of the per-axis factors.
 
         Derived, not stored: the object is pickled to every rank, and assembly goes through the factors
-        themselves (``_weight_factors``). :meth:`weight` caches what it builds per device and dtype.
+        themselves (``Accumulator._weight_geometry``). :meth:`weight` caches what it builds per device and dtype.
         """
-        data = self.windows_1d[0]
-        for window in self.windows_1d[1:]:
-            data = data.unsqueeze(-1) * window
-        return data
+        return outer_product(self.windows_1d)
 
     @property
     def selects(self) -> bool:
@@ -72,15 +76,6 @@ class PathCombine(ABC):
         a weighted sum (``Accumulator._blend``).
         """
         return False
-
-    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
-        """The 1-D window along ``dim`` for the patch at grid ``position`` of ``count`` on that axis.
-
-        A weighting is the same wherever the patch sits; a selection opens its border patches so the
-        kept bands still reach the volume edge (see :class:`Trim`).
-        """
-        del position, count
-        return self.windows_1d[dim]
 
     def weight(self, tensor: torch.Tensor) -> torch.Tensor:
         """The raw per-voxel window on ``tensor``'s device and dtype (cached per pair), unnormalised.
@@ -154,10 +149,11 @@ class Cosinus(PathCombine):
 class Trim(PathCombine):
     """Selection instead of weighting: each voxel comes from the patch that holds it most centrally.
 
-    An interior patch keeps its central ``patch - overlap`` band, so the kept bands tile the axis
-    exactly; the first and last patch of an axis open to the volume edge. The values are 0 or 1, so
-    the patch is selected rather than averaged: a discrete output (a label map, an argmax) survives
-    reassembly.
+    The accumulator keeps each patch up to halfway between its centre and each neighbour's
+    (``Accumulator._kept_span``), so the kept bands tile the axis exactly however the patches sit: an
+    interior patch of an even grid keeps its central ``patch - overlap`` band (the window below), the
+    first and last patch of an axis open to the volume edge. The values are 0 or 1, so the patch is
+    selected rather than averaged: a discrete output (a label map, an argmax) survives reassembly.
     """
 
     @property
@@ -173,24 +169,17 @@ class Trim(PathCombine):
         window[overlap // 2 : size - (overlap - overlap // 2)] = 1.0
         return window
 
-    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
-        overlap = self.overlaps[dim]
-        window = self.windows_1d[dim]
-        if overlap <= 0 or (position > 0 and position < count - 1):
-            return window
-        window = window.clone()
-        if position == 0:
-            window[: overlap // 2] = 1.0
-        if position == count - 1:
-            window[window.shape[0] - (overlap - overlap // 2) :] = 1.0
-        return window
-
 
 class Gaussian(PathCombine):
     """nnU-Net-style Gaussian importance weighting.
 
-    Not a partition of unity: the accumulator blends each patch in with its share of the total weight.
+    Not a partition of unity: the accumulator blends each patch in with its share of the total weight. On a grid
+    placed ``monai`` (``Patch.placement``), a patch's weight, the product of the per-axis Gaussians, is floored at
+    ``1e-3``, as MONAI's ``compute_importance_map`` clamps its map: the corners of overlapping patches then weigh as
+    much as one another.
     """
+
+    min_weight = 1e-3
 
     def __init__(self, sigma_scale: float = 0.125) -> None:
         super().__init__()

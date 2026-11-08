@@ -923,6 +923,14 @@ def test_dataset_rebase_keeps_h5_a_file_and_directory_formats_a_directory() -> N
     assert mha.is_directory is True
 
 
+def test_store_root_for_names_the_store_a_dataset_would_open(tmp_path: Path) -> None:
+    # The portable compiler names a store without building its dataset, through the same rule.
+    for filename, file_format in [("./Dataset", "h5"), ("Out.h5", "h5"), (tmp_path / "Dataset", "mha")]:
+        assert Dataset.store_root_for(filename, file_format) == Dataset(filename, file_format).store_root
+    assert Dataset.store_root_for("./Dataset", "h5") == "Dataset.h5"
+    assert Dataset.store_root_for("./Dataset", "nii.gz") == "Dataset/"
+
+
 def test_attribute_lookup_is_not_fooled_by_a_prefixing_sibling_key() -> None:
     # Values stack as {key}_{n}; a startswith(key) count treats SpacingOriginal as a second Spacing
     # entry, so a["Spacing"] raises while "Spacing" in a still answers True.
@@ -1120,7 +1128,7 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     assert dataset.is_dataset_exist("MASK", "P001")
 
 
-@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm", "nrrd.gz"])
+@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm"])
 def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, image_attributes, file_format: str) -> None:
     """A format SimpleITK has no writer for, or whose writer refuses this volume, answered with ITK's
     trace and the name of a staging file the user never asked for."""

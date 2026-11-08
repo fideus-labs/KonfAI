@@ -58,13 +58,13 @@ from konfai.utils.dataset import (
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import field_reach
-from konfai.utils.utils import format_token, path_format_token, storage_form
+from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
 from konfai_apps.ensemble import STACK, combine, stack_file
 from konfai_apps.ensemble import _token as member_token
-from konfai_apps.presets import load_presets_file, read_presets, split_preset, user_presets_file
+from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
@@ -210,17 +210,12 @@ def _manifest(preset: str) -> dict:
         manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    presets = read_presets(manifest.get("presets"), f"the app.json of '{app}'")
     if not Path(IMPACT_REG_KONFAI_REPO).expanduser().is_dir():  # a Hugging Face app: the user's own presets too
         own_file = user_presets_file(IMPACT_REG_KONFAI_REPO.partition("@")[0], app)
-        own = load_presets_file(own_file)
-        published = manifest.get("presets") or {}
-        if clash := sorted(set(own) & set(published)):  # refused as konfai-apps refuses it: the app runs bare here
-            raise AppRepositoryError(
-                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{app}' publishes too.",
-                "Rename yours: a preset of your own never hides a published one.",
-            )
-        manifest["presets"] = {**published, **{key: entry.to_json() for key, entry in own.items()}}
-    chosen = read_presets(manifest.get("presets"), f"the app.json of '{app}'").get(name) if name else None
+        presets = merge_presets(presets, own_file, app)  # a clash is refused as konfai-apps refuses it
+        manifest["presets"] = {key: entry.to_json() for key, entry in presets.items()}
+    chosen = presets.get(name) if name else None
     if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
         manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
     return manifest
@@ -962,10 +957,12 @@ class ImpactRegKonfAIApp:
         # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
         self._ran: dict[str, list[dict]] = {}
-        # The run's own choices every preset pass takes as they are: --output-format, --seed.
+        # The run's own choices every preset pass takes as they are: --output-format, --seed. The moved image is
+        # derived here, so its format (--output-format [Moved=]FORMAT) is this orchestrator's; None: the moving's.
         self._run_args: list[str] = []
         # Whether every preset pass writes its field, never a native form: an ensemble or a TTA averages them.
         self._dense = False
+        self._moved_format: str | None = None
 
     # ------------------------------------------------------------------ register
 
@@ -1012,13 +1009,8 @@ class ImpactRegKonfAIApp:
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
         # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
-        command = [
-            sys.executable,
-            "-m",
-            "konfai_apps",
-            "infer",
-            app_id(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0]),
-        ]
+        app = split_preset(preset)[0]
+        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, app)]
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:
@@ -1159,8 +1151,21 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
-        self._run_args = [arg for spec in output_format or [] for arg in ("--output-format", spec)]
-        self._run_args += ["--seed", str(seed)] if seed is not None else []
+        self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._moved_format = None
+        for spec in output_format or []:
+            name, assigned, file_format = spec.rpartition("=")
+            if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
+                if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"--output-format {spec}: '{file_format}' is not a format KonfAI writes."
+                        f"{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                        f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+                    )
+                self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
+            if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
+                self._run_args += ["--output-format", spec]
         # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
         # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
         self._dense = len(presets) > 1 or bool(tta)
@@ -1297,8 +1302,9 @@ class ImpactRegKonfAIApp:
             if flat:
                 for case, moving in zip(cases, moving_units, strict=True):
                     project_field(_the_output(output / case, group))
-                    if not fields_only:
-                        project_image(_the_output(output / case, "Moved"), output / case / f"Moved{_form(moving)}")
+                    if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
+                        moved = _the_output(output / case, "Moved")
+                        project_image(moved, moved if self._moved_format else output / case / f"Moved{_form(moving)}")
                     if uncertainty and len(presets) > 1:
                         # The members as planes, then their stack: a 2-D ensemble's stack holds 2-D fields.
                         members = [fields_by_preset[preset][case] for preset in presets]
@@ -1617,10 +1623,10 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the MOVING's own form: the fields' form may be an ITK
-        # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
+        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
-        backend = _backend(next(iter(cases.values())))
+        backend = self._moved_format or _backend(next(iter(cases.values())))
         roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
         if _is_field(next(iter(fields.values()))):
             resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")

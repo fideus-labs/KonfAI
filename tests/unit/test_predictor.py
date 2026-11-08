@@ -343,6 +343,31 @@ class ArgmaxSegNet(Network):
         self.add_module("Head", _ArgmaxHead())
 
 
+def test_the_archived_prediction_config_holds_its_included_blocks(tmp_path: Path, monkeypatch) -> None:
+    """The Prediction.yml archived beside the predictions is the record of the run: an included block is written in
+    place, so the record reads from where it lies and a changed included file is a changed recipe, refused."""
+    from konfai import api
+
+    tree = _tiny_synthesis(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_config_copy", lambda config: config)  # as under the CLI: the authored file itself
+    shared, config = tmp_path / "shared.yml", tmp_path / "Prediction.yml"
+    YAML().dump({"Dataset": tree["Predictor"].pop("Dataset")}, shared)
+    tree["Predictor"]["Dataset"] = "INCLUDED"
+    YAML().dump(tree, config)
+    config.write_text(config.read_text(encoding="utf-8").replace("INCLUDED", "!include shared.yml#Dataset"))
+    model = _tiny_checkpoint(tmp_path / "a.pt", 1.0)
+
+    def predict() -> None:
+        api.predict(model, config, cpu=1, quiet=True, predictions_dir=tmp_path / "Predictions")
+
+    predict()
+    archived = (tmp_path / "Predictions" / "RERUN" / "Prediction.yml").read_text(encoding="utf-8")
+    assert "!include" not in archived and "batch_size: 4" in archived
+    shared.write_text(shared.read_text(encoding="utf-8").replace("batch_size: 4", "batch_size: 2"), encoding="utf-8")
+    with pytest.raises(PredictorError, match="another"):
+        predict()
+
+
 def _label_map_prediction(
     root: Path, monkeypatch: pytest.MonkeyPatch, members: int, net: type[Network] = ArgmaxSegNet
 ) -> list[Path]:

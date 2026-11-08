@@ -23,10 +23,10 @@ from pathlib import Path
 
 
 def local_path(value: str) -> Path:
-    """An argparse type: a local path, made absolute. A URI is refused: every input is staged from the local
-    filesystem."""
+    """An argparse type: a local path, made absolute. A URI is refused: what this option names is written, or staged
+    from the local filesystem (only an OME-Zarr INPUT is read in place through a URI)."""
     if "://" in value:
-        raise argparse.ArgumentTypeError(f"{value!r} is a URI; inputs are read from local paths, so copy it first.")
+        raise argparse.ArgumentTypeError(f"{value!r} is a URI, and this option takes a local path.")
     return Path(value).resolve()
 
 

@@ -712,7 +712,11 @@ def _require_configured_app(app_id: str) -> None:
     local directories, or reach out to arbitrary remote servers (SSRF / exfiltration) for any token
     holder. The job endpoints already enforce the same allowlist (see the job wrapper).
     """
-    if split_preset(app_id)[0] not in _APPS:  # an allowed app, with any of its presets
+    try:
+        base = split_preset(app_id)[0]  # an allowed app, with any of its presets
+    except AppRepositoryError:
+        base = None  # a malformed preset name names no app of ours
+    if base not in _APPS:
         raise HTTPException(404, f"Unknown app '{app_id}'")
 
 
@@ -1022,8 +1026,7 @@ def submit_job():
                 raise HTTPException(429, "Server busy: too many active jobs")
 
             app_name = kwargs.get("app_name")
-            if split_preset(str(app_name))[0] not in _APPS:
-                raise HTTPException(404, f"Unknown app '{app_name}'")
+            _require_configured_app(str(app_name))
 
             # Validate before any workspace exists; an unknown or malformed tunable must be refused
             # loudly (422 naming it), never accepted and then ignored.

@@ -18,7 +18,6 @@
 read, the translation between two subjects' centres of mass, and whether a mask restricts an image."""
 
 import contextlib
-import gc
 import os
 import tempfile
 
@@ -26,6 +25,7 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from konfai.metric.measure.impact import no_texpr_fuser
+from konfai.network.external import ExternalTool
 from konfai.utils.dataset import (
     AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
@@ -33,11 +33,9 @@ from konfai.utils.dataset import (
     Attribute,
     affine_to_attribute,
     as_affine,
-    data_to_image,
     image_to_data,
 )
 from konfai.utils.dataset.attribute import _flatten_transforms
-from konfai.utils.vram import out_of_memory_as_torch
 
 #: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
 #: elastix's rigid then B-spline as such, a field for what is dense), or its displacement on the fixed grid. A mean
@@ -103,10 +101,10 @@ def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -
     return matrix.ravel()
 
 
-class EngineRegistration(torch.nn.Module):
+class EngineRegistration(ExternalTool):
     """Graph module: the fixed, moving and mask tensors with their geometry -> each sample's displacement field on the
-    fixed grid, from ``engine.register``. ``accepts_attributes`` has KonfAI hand it every branch's ``Attribute`` list,
-    since registration needs the physical geometry. A whole-image mask (the default) restricts nothing.
+    fixed grid, from ``engine.register``: KonfAI's ``ExternalTool`` with IMPACT-Reg's engines' call. A whole-image mask
+    (the default) restricts nothing; each engine reads it as such.
 
     The engine measures lengths in the fixed image's finest voxel, and its field is brought back to millimetres: every
     length a preset sets (a step, a grid, a smoothing, a feature model's voxel) is a number of voxels, so a step of 1.2
@@ -116,61 +114,38 @@ class EngineRegistration(torch.nn.Module):
     carries is that transform sampled, and the output's header records the map (``AFFINE_ATTRIBUTE``), which the
     output dataset writes in place of the field."""
 
-    accepts_attributes = True
-
     def __init__(self, engine, fuse_texpr: bool = True) -> None:
-        super().__init__()
-        self._engine = engine
+        super().__init__(engine)
         self._fuse_texpr = fuse_texpr
 
-    def forward(
-        self,
-        fixed: torch.Tensor,
-        moving: torch.Tensor,
-        fixed_mask: torch.Tensor,
-        moving_mask: torch.Tensor,
-        attributes: list[list[Attribute]],
-    ) -> torch.Tensor:
-        device_index = fixed.device.index if fixed.device.type == "cuda" else -1
-        fields = []
-        # The engines optimise with autograd, and the predictor calls forward under inference_mode, which forbids it.
-        fuser = contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser()
-        with torch.inference_mode(False), torch.enable_grad(), fuser:
-            for b in range(fixed.shape[0]):
-                # A 2-D image comes as a volume one plane thick (``plane.py``), and a tile of it without its z axis, which
-                # KonfAI drops from a patch one plane thick and adds back to what comes out: the engine registers the plane.
-                images = [
-                    data_to_image(
-                        (tensor[b] if tensor.ndim == 5 else tensor[b].unsqueeze(1)).detach().cpu().numpy(), branch[b]
-                    )
-                    for tensor, branch in zip((fixed, moving, fixed_mask, moving_mask), attributes, strict=True)
-                ]
-                flat = images[0].GetSize()[2] == 1
-                if flat:
-                    z_shift = images[1].GetOrigin()[2] - images[0].GetOrigin()[2]
-                    images = [image[:, :, 0] for image in images]
-                voxel = min(images[0].GetSpacing())
-                for image in images:  # the same voxels, measured in the fixed image's finest voxel
-                    image.SetSpacing([v / voxel for v in image.GetSpacing()])
-                    image.SetOrigin([v / voxel for v in image.GetOrigin()])
-                try:
-                    with out_of_memory_as_torch(device_index >= 0):
-                        result = self._engine.register(images[0], images[1], device_index, images[2], images[3])
-                    transform = result if isinstance(result, sitk.Transform) else None
-                    field = (displacement_on(images[0], transform) if transform is not None else result) * voxel
-                    if flat:  # the plane's (dx, dy), and along z from one plane to the other
-                        field = np.concatenate([field, np.full_like(field[:1], z_shift)])
-                finally:
-                    # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
-                    gc.collect()
-                fields.append(torch.from_numpy(field))
-                # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
-                attributes[0][b][DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-                if transform is not None and transform.IsLinear():
-                    attributes[0][b][AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
-                elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
-                    attributes[0][b][TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
-        return torch.stack(fields, dim=0).to(fixed.device)
+    def forward(self, *tensors: torch.Tensor, attributes: list[list[Attribute]]) -> torch.Tensor:
+        # A 2-D image comes as a volume one plane thick (``plane.py``), and a tile of it without its z axis, which
+        # KonfAI drops from a patch one plane thick and adds back to what comes out: ``call`` registers the plane.
+        return super().forward(*(t if t.ndim == 5 else t.unsqueeze(2) for t in tensors), attributes=attributes)
+
+    def call(self, images: list[sitk.Image | None], device_index: int, header: Attribute) -> np.ndarray:
+        flat = images[0].GetSize()[2] == 1
+        if flat:
+            z_shift = images[1].GetOrigin()[2] - images[0].GetOrigin()[2]
+            images = [image[:, :, 0] for image in images]
+        voxel = min(images[0].GetSpacing())
+        for image in images:  # the same voxels, measured in the fixed image's finest voxel
+            image.SetSpacing([v / voxel for v in image.GetSpacing()])
+            image.SetOrigin([v / voxel for v in image.GetOrigin()])
+        fixed, moving, fixed_mask, moving_mask = images
+        with contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser():
+            result = self._engine.register(fixed, moving, device_index, fixed_mask, moving_mask)
+        transform = result if isinstance(result, sitk.Transform) else None
+        field = (displacement_on(fixed, transform) if transform is not None else result) * voxel
+        if flat:  # the plane's (dx, dy), and along z from one plane to the other
+            field = np.concatenate([field, np.full_like(field[:1], z_shift)])
+        # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
+        header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        if transform is not None and transform.IsLinear():
+            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
+        elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
+            header[TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
+        return field
 
 
 def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sitk.Image:

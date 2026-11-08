@@ -353,6 +353,22 @@ def test_the_shared_options_refuse_a_uri_and_a_negative_gpu() -> None:
         local_path("s3://bucket/image.nii.gz")
 
 
+def test_an_input_keeps_a_uri_and_the_output_refuses_one() -> None:
+    """An input may be an OME-Zarr store by URI, read in place; the output and the temporary directory are
+    written, so they are local paths."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    apps_cli_module._add_app_io(parser)
+
+    args = parser.parse_args(["-i", "s3://bucket/x/fused.ome.zarr", "scan.mha", "-o", "out"])
+
+    assert args.inputs == [["s3://bucket/x/fused.ome.zarr", Path("scan.mha").resolve()]]
+    assert args.output == Path("out").resolve()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-i", "scan.mha", "-o", "s3://bucket/out"])
+
+
 def test_an_out_of_memory_run_exits_with_its_own_code() -> None:
     """IMPACT-Reg runs a preset as a child and retries smaller on EXIT_OUT_OF_MEMORY: an out-of-memory error must end
     the process with it, not with a traceback and exit code 1."""
