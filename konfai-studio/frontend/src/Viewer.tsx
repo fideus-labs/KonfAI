@@ -144,12 +144,15 @@ export default function Viewer({
   const nvA = useRef<Niivue | null>(null);
   const nvB = useRef<Niivue | null>(null);
   // A focus is applied when it arrives and again when a volume finishes loading: the volume it points into is
-  // usually still being fetched when the request comes in (a "Go to" that also loads the image).
+  // usually still being fetched when the request comes in (a "Go to" that also loads the image). The point is
+  // converted through the volume on screen, so nothing is applied before the requested path has loaded.
   const pendingFocus = useRef<{ mm: [number, number, number]; nonce: number } | null>(null);
   const appliedFocus = useRef(0);
+  const loadedPath = useRef<string | null>(null);
   const applyFocus = (nv: Niivue | null) => {
     const wanted = pendingFocus.current;
-    if (!nv || !wanted || !nv.volumes.length || appliedFocus.current === wanted.nonce) return;
+    if (!nv || !wanted || loadedPath.current !== path || !nv.volumes.length || appliedFocus.current === wanted.nonce)
+      return;
     // Scout speaks ITK's LPS; NiiVue's world is RAS: flip x and y.
     const ras = [-wanted.mm[0], -wanted.mm[1], wanted.mm[2]];
     try {
@@ -266,7 +269,10 @@ export default function Viewer({
               nvA.current = nv;
               couple();
             }}
-            onLoaded={applyFocus}
+            onLoaded={(nv) => {
+              loadedPath.current = path;
+              applyFocus(nv);
+            }}
           />
           {compare && compareTarget === "a" && targetBadge}
         </div>
