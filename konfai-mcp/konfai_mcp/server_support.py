@@ -948,6 +948,18 @@ def summarize_yaml_model_signature(reference: str, path: Path) -> dict[str, Any]
     }
 
 
+def names_installed_package(classpath: str, workspace_dir: Path | None) -> bool:
+    """True for a single-token 'pkg:Class' no session file answers to and an installed package does.
+
+    summarize_classpath_signature imports it, so the server process must keep it out ('Model:UNet' with the file
+    missing stays a local matter). find_spec only locates a top-level module, it imports nothing.
+    """
+    parts = [part for part in classpath.strip().split(":") if part]
+    if len(parts) != 2 or "." in parts[0] or workspace_dir is None:
+        return False
+    return not (workspace_dir / f"{parts[0]}.py").is_file() and importlib.util.find_spec(parts[0]) is not None
+
+
 def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = None) -> dict[str, Any]:
     """Summarize one local or imported configurable object by classpath."""
     normalized = classpath.strip()
@@ -973,9 +985,7 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         and "." not in normalized.split(":", 1)[0]
         and workspace_dir is not None
         and len(module_name.split(".")) == 1
-        # a session file when it exists, or when no installed package answers to the name ('Model:UNet' with the
-        # file missing stays a local matter); 'konfai_apps:X' names a package and is imported
-        and ((workspace_dir / f"{module_name}.py").is_file() or importlib.util.find_spec(module_name) is None)
+        and not names_installed_package(normalized, workspace_dir)
     )
 
     if local_candidate:

@@ -91,6 +91,7 @@ from .server_support import (
     docs_index,
     examples_doc,
     modeling_rules,
+    names_installed_package,
     patching_rules,
     prediction_rules,
     read_dataset_sidecar,
@@ -1305,12 +1306,13 @@ def design_config_strategy(
     return payload
 
 
-def _classpath_requires_import(classpath: str) -> bool:
+def _classpath_requires_import(classpath: str, workspace_dir: Path) -> bool:
     """True when summarize_classpath_signature would import the classpath's module in-process.
 
     A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
-    (a single-token module before the colon, resolved as a workspace .py) are parsed statically and never
-    imported. Everything else (an installed 'package.module:Class', the colon form 'package:module:Class'
+    (a single-token module before the colon, resolved as a workspace .py, no installed package of that name)
+    are parsed statically and never imported. Everything else (an installed 'package.module:Class' or
+    'package:Class', the colon form 'package:module:Class'
     (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name) triggers
     importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
     only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
@@ -1324,7 +1326,7 @@ def _classpath_requires_import(classpath: str) -> bool:
     # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
     colon_parts = [part for part in normalized.split(":") if part]
     if len(colon_parts) == 2 and "." not in colon_parts[0]:
-        return False
+        return names_installed_package(normalized, workspace_dir)
     return True
 
 
@@ -1339,7 +1341,7 @@ def inspect_object_signature(
 ) -> dict[str, Any]:
     """Inspect one configurable object classpath and return signature details when possible."""
     workspace_dir = WORKSPACE_LAYOUT.workspace_dir()
-    if _classpath_requires_import(classpath):
+    if _classpath_requires_import(classpath, workspace_dir):
         # Reading an installed-library signature imports its module; run that in a spawn subprocess so a
         # heavy/slow/crashing/OOM import cannot take down the long-lived server (AGENTS.md: code that
         # imports/executes runs isolated). Static YAML-model and local File:Class classpaths never import,

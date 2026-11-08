@@ -37,6 +37,7 @@ from .server_support import (
     available_templates,
     default_group_map,
     load_template_configs,
+    names_installed_package,
     summarize_classpath_signature,
     template_dir,
     template_groups,
@@ -533,6 +534,8 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     def _component_signature_for_classpath(self, config_path: Path, classpath: str) -> dict[str, Any] | None:
         if not isinstance(classpath, str) or not classpath.strip():
             return None
+        if names_installed_package(classpath, config_path.parent):
+            return None  # reading 'pkg:Class' would import pkg into the server; the review goes without it
         return summarize_classpath_signature(classpath, workspace_dir=config_path.parent)
 
     def _build_warning(

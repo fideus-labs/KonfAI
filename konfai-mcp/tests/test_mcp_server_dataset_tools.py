@@ -455,6 +455,7 @@ class DiceFocalLoss:
 
 @pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_inspect_object_signature_isolates_library_import(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
@@ -504,6 +505,14 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
             assert colon_form.structured_content["source"] == "imported"
             assert len(subprocess_calls) == 2
             assert subprocess_calls[1][1]["classpath"] == "json:decoder:JSONDecoder"
+
+            # A single token naming an installed package is imported too: no session json.py answers to it.
+            package = await client.call_tool("inspect_object_signature", {"classpath": "json:JSONDecoder"})
+            assert package.structured_content["source"] == "imported"
+            assert len(subprocess_calls) == 3
+
+    # The review reads no signature it would have to import into the server process.
+    assert mcp_server.SESSION._component_signature_for_classpath(tmp_path / "C.yml", "json:JSONDecoder") is None
 
     asyncio.run(scenario())
 
