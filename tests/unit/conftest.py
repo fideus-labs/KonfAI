@@ -175,6 +175,7 @@ def _drive_tta(
     file_format: str = "h5",
     worth_gate: bool = False,
     channels: int = _TTA_CHANNELS,
+    attribute: Attribute | None = None,
 ):
     """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
     against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
@@ -195,7 +196,7 @@ def _drive_tta(
 
     from oracle_support import geometry
 
-    attribute = geometry()
+    attribute = geometry() if attribute is None else attribute
     rng = np.random.default_rng(0)
     volume = torch.from_numpy(rng.standard_normal((channels, *_TTA_SHAPE)).astype(np.float32)).to(dtype)
     for transform in transforms:

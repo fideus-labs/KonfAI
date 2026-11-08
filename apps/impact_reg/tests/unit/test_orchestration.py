@@ -1522,7 +1522,7 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
 
 
 def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
-    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    """A linear transform as a linear preset writes it (its native form): an ITK AffineTransform file, or an
     RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
     affine = sitk.AffineTransform(3)
     affine.SetTranslation(translation)
@@ -1565,12 +1565,12 @@ def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name
     assert record["cases"]["P000"]["transform"].replace("\\", "/") == f"P000/{name}"  # Windows writes backslashes
 
 
-def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
-    """An ensemble and a test-time augmentation average fields: a preset declaring an affine runs alone, or is set back
-    to a field for the run."""
+def test_an_averaged_affine_preset_writes_its_field(tmp_path: Path) -> None:
+    """An ensemble and a test-time augmentation average fields: a preset declaring an affine (or elastix's native
+    B-spline) runs there and writes its field, its runs told so; alone, it keeps its native form."""
     (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
         "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
-        "    RegistrationNet:\n      transform_type: affine\n",
+        "    RegistrationNet:\n      transform_type: native\n",
         encoding="utf-8",
     )
     moving = tmp_path / "moving.mha"
@@ -1581,13 +1581,7 @@ def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
     _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
     out = tmp_path / "Output"
 
-    with pytest.raises(KonfAIError, match="an ensemble cannot average"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
-    with pytest.raises(KonfAIError, match="--tta cannot average"):
-        app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
-    # --set speaks for the run, bare or dotted from the config root: B declared an affine is refused in its turn.
-    overrides = ["A:transform_type=field", "B:Predictor.Model.RegistrationNet.transform_type=affine"]
-    with pytest.raises(KonfAIError, match="'B' writes its transform as an affine"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides)
-    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides[:1])
-    assert (out / "P000" / "Moved.mha").is_file()
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
+    assert app._dense and (out / "P000" / "Moved.mha").is_file()
+    app.register(["A"], [fixed], [moving], output=out, quiet=True)
+    assert not app._dense

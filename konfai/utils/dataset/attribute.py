@@ -325,6 +325,23 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
 # backends write that map in place of the field. The underscore keeps the key out of the stack renaming.
 AFFINE_ATTRIBUTE = "konfai_affine"
 
+# Set by a registration whose transform has no affine form and no grid of its own (elastix's rigid then B-spline): the
+# header of the field it hands over names a transform file holding it, in world units, which an ':itktransform' output
+# writes in place of the field; any other format writes the field.
+TRANSFORM_FILE_ATTRIBUTE = "konfai_transform_file"
+# Set by a caller that averages or composes the outputs of the runs it starts (an ensemble of apps, a tiled
+# registration): their predictions write the field, never a native form.
+DENSE_TRANSFORMS_ENV = "KONFAI_DENSE_TRANSFORMS"
+
+
+def drop_native_form(attributes: Attribute) -> None:
+    """Forget the native form a field's header declares (its affine, its transform file, which goes): the field
+    stands alone, as it must where several copies were averaged, or where its writer is no transform file."""
+    if AFFINE_ATTRIBUTE in attributes:
+        attributes.pop(AFFINE_ATTRIBUTE)
+    if TRANSFORM_FILE_ATTRIBUTE in attributes:
+        Path(str(attributes.pop(TRANSFORM_FILE_ATTRIBUTE))).unlink(missing_ok=True)
+
 
 def as_affine(transform: sitk.Transform) -> sitk.AffineTransform:
     """A linear transform (a leaf of any parameterisation, or a composite of them) as the one
