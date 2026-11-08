@@ -103,7 +103,6 @@ any format it reads, writes the output in any format it writes, and attaches the
 # model.py, next to Prediction.yml
 import numpy as np
 import SimpleITK as sitk
-from konfai.network import network
 from konfai.network.external import ExternalNet
 from konfai_apps.pinned import pinned_source
 
@@ -115,14 +114,9 @@ def engine(image: sitk.Image, mask: sitk.Image | None, device: int) -> np.ndarra
 
 
 class Net(ExternalNet):
-    def __init__(
-        self,
-        optimizer: network.OptimizerLoader = network.OptimizerLoader(),
-        schedulers: dict[str, network.LRSchedulersLoader] = {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
-        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
-    ) -> None:
+    def __init__(self) -> None:
         # one image and its mask (branch 1, None when it holds only ones), one output named Segmentation
-        super().__init__(engine, 2, (1,), "Segmentation", 3, optimizer, schedulers, outputs_criterions)
+        super().__init__(engine, 2, (1,), "Segmentation", 3)
 ```
 
 ```yaml
@@ -137,9 +131,8 @@ The arguments of `Net.__init__` are the configuration's keys: put the tool's set
 fixed grid.
 
 `konfai_apps.pinned` fetches what the tool needs once and reuses it from `$KONFAI_TOOLS_CACHE`: a repository at a
-commit (`pinned_source`, `built_source` for one to compile), a file or a release checked by its hash (`fetch`,
-`pinned_archive`), an environment of its own made by uv, for a tool whose pins do not fit yours
-(`pinned_environment`); `gpu_environment` runs a subprocess on the app's GPU.
+commit (`pinned_source`), a file or a release checked by its hash (`fetch`, `pinned_archive`); `gpu_environment`
+runs a subprocess on the app's GPU.
 
 By default the engine sees the whole image. With a `Patch` in `Prediction.yml`, KonfAI calls it on one patch at a
 time and blends the results, so only a patch has to fit in memory: fit for a tool whose result at a voxel depends on

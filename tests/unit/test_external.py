@@ -22,9 +22,10 @@ import torch
 
 sitk = pytest.importorskip("SimpleITK")
 
-from konfai.network import network  # noqa: E402
-from konfai.network.external import ExternalNet, ExternalTool, scalar  # noqa: E402
+from konfai.network import external  # noqa: E402
+from konfai.network.external import ExternalNet, ExternalTool  # noqa: E402
 from konfai.utils.dataset import Attribute  # noqa: E402
+from konfai.utils.errors import KonfAIError  # noqa: E402
 
 
 def _geometry() -> Attribute:
@@ -55,19 +56,11 @@ def test_the_engine_gets_each_branch_as_an_image_with_its_geometry_and_a_mask_of
 
 
 def test_the_app_s_one_output_carries_the_task_s_name() -> None:
-    net = ExternalNet(
-        lambda image, mask, device: None,
-        2,
-        (1,),
-        "Segmentation",
-        3,
-        network.OptimizerLoader(),
-        {"default:ReduceLROnPlateau": network.LRSchedulersLoader(0)},
-        {"default": network.TargetCriterionsLoader()},
-    )
+    net = ExternalNet(lambda image, mask, device: None, 2, (1,), "Segmentation", 3)
     assert isinstance(net["Segmentation"], ExternalTool) and net.full_precision_outputs
 
 
-def test_a_colour_image_is_read_as_the_mean_of_its_components() -> None:
-    colour = sitk.Compose([sitk.Image([3, 2], sitk.sitkUInt8) + v for v in (0, 30, 60)])
-    assert (sitk.GetArrayFromImage(scalar(colour)) == 30).all()
+def test_without_simpleitk_the_tool_fails_at_its_making_with_the_install_hint(monkeypatch) -> None:
+    monkeypatch.setattr(external, "sitk", None)
+    with pytest.raises(KonfAIError, match=r"konfai\[itk\]"):
+        ExternalTool(lambda image, device: image)

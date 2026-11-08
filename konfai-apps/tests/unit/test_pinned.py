@@ -23,7 +23,8 @@ def test_a_tool_s_subprocess_runs_on_the_physical_gpu_behind_the_app_s_index(mon
     # The subprocess reads CUDA_VISIBLE_DEVICES afresh: the index 1 of a process that sees GPUs 3 and 5 is GPU 5.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5")
     assert gpu_environment(1)["CUDA_VISIBLE_DEVICES"] == "5"
-    on_cpu = gpu_environment(-1, PYTHONPATH="x")
+    monkeypatch.setenv("PYTHONPATH", "x")
+    on_cpu = gpu_environment(-1)
     assert on_cpu["CUDA_VISIBLE_DEVICES"] == "" and on_cpu["PYTHONPATH"] == "x"
 
 
@@ -50,3 +51,21 @@ def test_a_release_is_unpacked_once_with_its_modes_and_a_wrong_hash_leaves_nothi
     with pytest.raises(RuntimeError, match="hash"):
         pinned_archive("other", archive.as_uri(), "0" * 64)
     assert sorted(p.name for p in (tmp_path / "cache").iterdir()) == [root.name]
+
+
+def test_a_cached_file_is_kept_when_it_matches_its_hash_and_fetched_again_when_it_does_not(tmp_path) -> None:
+    import hashlib
+
+    from konfai_apps.pinned import fetch
+
+    release = tmp_path / "release.bin"
+    release.write_bytes(b"new release")
+    sha256 = hashlib.sha256(b"new release").hexdigest()
+    target = tmp_path / "cache" / "tool.bin"
+    target.parent.mkdir()
+    target.write_bytes(b"old release")  # the pin moved on, the download path did not
+
+    assert fetch(release.as_uri(), target, sha256).read_bytes() == b"new release"
+    # A match is reused without a download: the source is gone.
+    release.unlink()
+    assert fetch(release.as_uri(), target, sha256).read_bytes() == b"new release"

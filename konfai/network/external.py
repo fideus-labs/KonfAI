@@ -29,12 +29,17 @@ import gc
 from collections.abc import Callable, Sequence
 
 import numpy as np
-import SimpleITK as sitk
 import torch
 
 from konfai.network import network
 from konfai.utils.dataset import Attribute, data_to_image
+from konfai.utils.errors import KonfAIError
 from konfai.utils.vram import out_of_memory_as_torch
+
+try:
+    import SimpleITK as sitk
+except ImportError:
+    sitk = None  # type: ignore[assignment]
 
 Engine = Callable[..., np.ndarray]
 
@@ -50,11 +55,15 @@ class ExternalTool(torch.nn.Module):
     accepts_attributes = True
 
     def __init__(self, engine: Engine, masks: Sequence[int] = ()) -> None:
+        if sitk is None:
+            raise KonfAIError(
+                "External tool", "The engine reads SimpleITK images. Install it with `pip install konfai[itk]`."
+            )
         super().__init__()
         self._engine = engine
         self._masks = set(masks)
 
-    def call(self, images: list[sitk.Image | None], device_index: int, header: Attribute) -> np.ndarray:
+    def call(self, images: list["sitk.Image | None"], device_index: int, header: Attribute) -> np.ndarray:
         """The engine on one sample: its images in branch order, then the device index. ``header`` is the first
         branch's attributes, which the output carries: what a subclass records there reaches the output's file."""
         return self._engine(*images, device_index)
@@ -96,22 +105,11 @@ class ExternalNet(network.Network):
         masks: Sequence[int],
         output: str,
         dim: int,
-        optimizer: network.OptimizerLoader,
-        schedulers: dict[str, network.LRSchedulersLoader],
-        outputs_criterions: dict[str, network.TargetCriterionsLoader],
+        optimizer: network.OptimizerLoader | None = None,
+        schedulers: dict[str, network.LRSchedulersLoader] | None = None,
+        outputs_criterions: dict[str, network.TargetCriterionsLoader] | None = None,
     ) -> None:
         super().__init__(
             in_channels=1, optimizer=optimizer, schedulers=schedulers, outputs_criterions=outputs_criterions, dim=dim
         )
         self.add_module(output, ExternalTool(engine, masks), in_branch=list(range(branches)), out_branch=["out"])
-
-
-def scalar(image: sitk.Image) -> sitk.Image:
-    """The image a tool comparing one value a voxel reads: a colour or multiband image as the mean of its components,
-    float32; a scalar image only cast."""
-    n = image.GetNumberOfComponentsPerPixel()
-    if n == 1:
-        return sitk.Cast(image, sitk.sitkFloat32)
-    return sitk.Cast(
-        sum(sitk.VectorIndexSelectionCast(image, c, sitk.sitkFloat32) for c in range(n)) / n, sitk.sitkFloat32
-    )
