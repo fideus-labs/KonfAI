@@ -61,12 +61,15 @@ def _import_app_repository() -> Any:
 
 
 def _manifest_info(ref: str, force_update: bool) -> Any:
-    """The app ``ref`` names, for a read in the server process: its preset chosen by name alone, since checking the
-    preset's overrides (``LocalAppRepository.use_preset``) imports the app's model code."""
+    """The app ``ref`` names, for a read in the server process: its preset checked for the paths a preset may not set
+    only, since resolving its overrides (``LocalAppRepository.use_preset``) imports the app's model code."""
     app_repository = _import_app_repository()
     base, preset = app_repository.split_preset(ref)
     info = app_repository.get_app_repository_info(base, force_update)
-    app_repository.AppRepositoryInfo.use_preset(info, preset)
+    if isinstance(info, app_repository.LocalAppRepository):
+        info.use_preset(preset, read_model=False)
+    else:
+        info.use_preset(preset)
     return info
 
 

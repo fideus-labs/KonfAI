@@ -1085,16 +1085,18 @@ class LocalAppRepository(AppRepositoryInfo):
         both is refused: a preset of one's own never hides a published one."""
         return merge_presets(self._published_presets, self._user_presets_file(), self.get_name())
 
-    def use_preset(self, name: str | None) -> None:
+    def use_preset(self, name: str | None, read_model: bool = True) -> None:
         """Choose preset ``name`` (None for the base config), refused here if its overrides do not resolve against the
-        app's config: a preset that no longer fits its app fails when it is chosen, not halfway through a run."""
+        app's config: a preset that no longer fits its app fails when it is chosen, not halfway through a run.
+        ``read_model=False`` only refuses the paths a preset may not set, importing no model code."""
         presets = self.get_presets() if name is not None else {}
         if name in presets:  # an unknown name is the base class's refusal, with the app's presets
-            self._check(presets[name].overrides, f"preset '{name}'")
+            self._check(presets[name].overrides, f"preset '{name}'", read_model)
         super().use_preset(name)
 
-    def _check(self, overrides: tuple[str, ...] | list[str], what: str) -> None:
-        """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``."""
+    def _check(self, overrides: tuple[str, ...] | list[str], what: str, read_model: bool = True) -> None:
+        """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``; ``read_model=False`` only
+        refuses the paths a preset may not set."""
         filenames = self._all_repo_filenames()
         config_filename = self._find_repo_filename("Prediction.yml", filenames)
         if config_filename is None or not overrides:
@@ -1103,12 +1105,15 @@ class LocalAppRepository(AppRepositoryInfo):
             data = YAML().load(file)
         root = "Predictor" if (data or {}).get("Predictor") else "Trainer"
         for name in (override.partition("=")[0].strip() for override in overrides):
-            if name.startswith((f"{root}.manual_seed", f"{root}.Dataset", f"{root}.outputs_dataset")):
+            resolved = ".".join(key for key in name.split(".") if key)  # as apply_overrides reads Predictor..Dataset
+            if resolved.startswith((f"{root}.manual_seed", f"{root}.Dataset", f"{root}.outputs_dataset")):
                 raise AppRepositoryError(
                     f"The {what} of app '{self.get_name()}' sets '{name}': a preset sets the method's parameters, "
                     "never the seed, the data or the outputs.",
                     "Pass it as --set on the run instead.",
                 )
+        if not read_model:
+            return
         try:
             apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
         except AppRepositoryError as error:

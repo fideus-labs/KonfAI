@@ -1523,3 +1523,16 @@ def test_export_app_of_a_preset_with_overrides_does_not_import_the_app_s_model(t
 
     assert not (app_dir / "imported").exists() and not (target / "imported").exists()
     assert "iterations: 3" in (target / "Prediction.yml").read_text(encoding="utf-8")
+
+
+def test_export_app_refuses_a_preset_that_sets_the_seed_without_importing_the_model(tmp_path: Path) -> None:
+    """A preset sets method parameters only: the server refuses one that sets the seed as a run would, by its path."""
+    app_dir = _app_with_a_model(tmp_path)
+    manifest = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+    manifest["presets"]["seeded"] = {"description": "", "set": ["Predictor.manual_seed=7"]}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(Exception, match="the method's parameters"):
+        _service(tmp_path).export_app(f"{app_dir}#seeded", str(tmp_path / "exported"))
+
+    assert not (app_dir / "imported").exists() and not (tmp_path / "exported").exists()
