@@ -167,6 +167,45 @@ def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: 
     app._infer_preset = fake  # type: ignore[method-assign]
 
 
+def test_a_tta_run_hands_its_copies_to_the_stack(tmp_path: Path) -> None:
+    """Under --uncertainty a preset run with TTA is asked for its copies' stack (-uncertainty), and every copy is a
+    member: one preset's stack holds its two copies, an ensemble's its copies and the other preset's field."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.ReadImage(str(moving))
+    asked = {}
+
+    def fake(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
+        asked[preset] = kwargs.get("uncertainty")
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        if preset == "A":  # two TTA copies, (0, 0, 0) and (2, 0, 0), and their mean
+            _write_dvf(out / "DVF.mha", (1.0, 0.0, 0.0), reference)
+            copies = np.zeros((*reference.GetSize()[::-1], 6), dtype=np.float32)
+            copies[..., 3] = 2.0
+            stack = sitk.GetImageFromArray(copies, isVector=True)
+            stack.CopyInformation(reference)
+            stack.SetMetaData("konfai_members", "2")
+            stack.SetMetaData("konfai_displacement_field", "true")
+            sitk.WriteImage(stack, str(out / "InferenceStack.mha"))
+        else:
+            _write_dvf(out / "DVF.mha", (4.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = fake  # type: ignore[method-assign]
+    for presets, members, mean in ((["A"], 2, 1.0), (["A", "B"], 3, 2.0)):
+        out = tmp_path / f"Output{len(presets)}"
+        app.register(presets, [fixed], [moving], output=out, quiet=True, tta=1, uncertainty=True, fields_only=True)
+        assert asked["A"] is True
+        stack = sitk.ReadImage(str(out / "P000" / "InferenceStack.mha"))
+        assert stack.GetMetaData("konfai_members") == str(members)
+        field = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P000" / "DVF.mha")))
+        np.testing.assert_allclose(field[0, 0, 0], (mean, 0.0, 0.0), atol=1e-6)
+
+
 def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path: Path) -> None:
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))

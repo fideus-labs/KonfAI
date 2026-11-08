@@ -458,6 +458,11 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     return {match.parent.name: match for match in matches}
 
 
+def _stack_beside(output: Path) -> Path | None:
+    """The stack a run wrote beside ``output`` (its TTA copies, under -uncertainty), or None."""
+    return next((path for path in sorted(output.parent.iterdir()) if _is_entry(path, STACK)), None)
+
+
 def _is_entry(path: Path, stem: str) -> bool:
     """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name; never a writer's
     staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
@@ -979,6 +984,7 @@ class ImpactRegKonfAIApp:
         prediction_file: str | None = None,
         label: str | None = None,
         max_voxels: int | None = None,
+        uncertainty: bool = False,
     ) -> tuple[str, dict[str, Path]]:
         """Run one preset app on every case at once; return its output group and its transform per case.
 
@@ -1031,6 +1037,8 @@ class ImpactRegKonfAIApp:
         command += ["--tmp-dir", str(out / "workspace")]
         if tta:
             command += ["--tta", str(tta)]
+        if uncertainty:  # its copies' stack beside the field: each TTA copy is a member of the ensemble
+            command += ["-uncertainty"]
         if prediction_file:
             command += ["--prediction-file", prediction_file]
         # Preset-parameter tuning: this pass's share of --set (see _preset_overrides), for `konfai-apps infer`.
@@ -1231,6 +1239,7 @@ class ImpactRegKonfAIApp:
                     tta,
                     overrides[preset]["global"],
                     max_voxels=budget,
+                    uncertainty=uncertainty and bool(tta) and not flat,
                 )
             groups = {group for group, _ in fields_by_preset.values()}
             if len(groups) != 1:
@@ -1265,7 +1274,9 @@ class ImpactRegKonfAIApp:
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
                 members = [fields_by_preset[preset][case] for preset in presets]
-                if len(presets) == 1:
+                # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
+                sources = [_stack_beside(member) or member for member in members] if uncertainty else members
+                if sources == members and len(presets) == 1:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
                     # An ensemble is konfai-apps' (docs/design/ensembles.md): every member reduced into the field,
@@ -1273,7 +1284,7 @@ class ImpactRegKonfAIApp:
                     # here, or for a 2-D pair once its members are planes again (below).
                     form = _form(members[0])
                     stack = case_out / stack_file(form) if uncertainty and not flat else None
-                    combine(members, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
+                    combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                     if stack is not None:
                         _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK))
