@@ -35,7 +35,7 @@ import gc
 import math
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 
@@ -47,6 +47,9 @@ from konfai.utils.utils import (
     resolve_overlap,
     size_free_axes,
 )
+
+if TYPE_CHECKING:
+    from konfai import RemoteServer
 
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
 #: transients the measured run did not exercise (mirrors the accumulation gate's margin).
@@ -104,21 +107,39 @@ def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = 
     return free_bytes * margin - resident_bytes
 
 
-def max_voxels(vram_bytes_per_voxel: float | None, ram_bytes_per_voxel: float | None, gpu: int | None) -> int | None:
+def max_voxels(
+    vram_bytes_per_voxel: float | None,
+    ram_bytes_per_voxel: float | None,
+    gpu: int | None,
+    remote_server: "RemoteServer | None" = None,
+) -> int | None:
     """The voxels a pass may hold where it runs, at the peak costs per voxel it declares: the tighter of what the
     free VRAM of GPU ``gpu`` holds (the id ``--gpu`` names, read through NVML so no CUDA context is opened) under
     :func:`usable_vram`'s margin, and what this rank's host budget holds. None when no declared cost bounds it: a
-    device whose cost is not declared promises nothing."""
+    device whose cost is not declared promises nothing.
+
+    With ``remote_server`` the pass runs there: its GPU and its free RAM, under the automatic budget's share."""
     caps = []
     if gpu is not None and vram_bytes_per_voxel:
         from konfai import get_vram
 
-        used, total = get_vram([gpu])
+        used, total = get_vram([gpu], remote_server)
         caps.append(usable_vram((total - used) * 2**30) / vram_bytes_per_voxel)
     if ram_bytes_per_voxel:
-        from konfai.utils.budget import node_local_ranks, per_rank_budget_bytes, resolve_memory_budget
+        from konfai.utils.budget import (
+            AUTO_MEMORY_SAFETY_FRACTION,
+            node_local_ranks,
+            per_rank_budget_bytes,
+            resolve_memory_budget,
+        )
 
-        host = per_rank_budget_bytes() or resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
+        if remote_server is not None:
+            from konfai import get_ram
+
+            used, total = get_ram(remote_server)
+            host = (total - used) * 2**30 * AUTO_MEMORY_SAFETY_FRACTION
+        else:
+            host = per_rank_budget_bytes() or resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
         caps.append(host / ram_bytes_per_voxel)
     return max(1, int(min(caps))) if caps else None
 

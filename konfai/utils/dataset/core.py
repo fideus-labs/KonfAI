@@ -38,6 +38,7 @@ from konfai.utils import uri
 from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
+    AFFINE_ATTRIBUTE,
     Attribute,
     as_channel_first,
     data_to_image,
@@ -87,6 +88,9 @@ _T = TypeVar("_T")
 _PROBED = 16
 
 _VOLUME_FILES = tuple(f".{extension}" for extension in SUPPORTED_EXTENSIONS)
+
+#: The formats that hold a linear transform: an ITK transform file, an OME-Zarr store of RFC-5 metadata.
+_AFFINE_FORMATS = ("itktransform", "omezarr")
 
 
 def _local_store_form(root: str) -> str | None:
@@ -349,6 +353,11 @@ class Dataset:
         attributes: Attribute | None = None,
     ) -> None:
         attributes = attributes if attributes is not None else Attribute()
+        if AFFINE_ATTRIBUTE in attributes and self.file_format not in _AFFINE_FORMATS:
+            raise DatasetManagerError(
+                f"An affine transform has no image form: it cannot be written as '{self.file_format}'.",
+                f"Write it to one of {', '.join(_AFFINE_FORMATS)}.",
+            )
         if isinstance(data, np.ndarray):
             data = as_channel_first(data, attributes)
         target, entry = self._write_target(group, name)
@@ -359,7 +368,9 @@ class Dataset:
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format: H5 and OME-Zarr always;
         ``mha``, ``nii`` and ``itktransform`` (a displacement field) with image geometry; every other
-        format only writes whole volumes."""
+        format only writes whole volumes. An affine is metadata alone: written whole, by ``write``."""
+        if AFFINE_ATTRIBUTE in attributes:
+            return False
         return self._backend.can_stream(self.file_format, attributes)
 
     def open_data_stream(
@@ -480,6 +491,12 @@ class Dataset:
         return self._resolve_entry(
             groups, name, lambda file, group, entry: file.file_to_data_slice(group, entry, slices)
         )
+
+    def level_count(self, groups: str, name: str) -> int:
+        """How many resolution levels ``(groups, name)`` is stored at. Raises when it is not there, as reading it does:
+        a backend of one level would answer 1 for anything."""
+        self.get_infos(groups, name)
+        return self._resolve_entry(groups, name, lambda file, group, entry: file.level_count(entry))
 
     def read_granularity(self, groups: str, name: str) -> tuple[int, ...] | None:
         """The stored block reads of ``(groups, name)`` are served in, or ``None`` when a read costs

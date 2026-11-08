@@ -22,9 +22,9 @@ Every route (including `/health`) is behind a bearer-token dependency:
   can read or write (see Job submission below).
 
 ```{warning}
-The server speaks **plain HTTP**: the token and the uploaded medical volumes
-travel unencrypted. Terminate TLS with a reverse proxy before exposing it beyond
-localhost, and keep the `--apps` allowlist tightly scoped (it is the trust
+Without `--ssl-certfile` and `--ssl-keyfile` the server speaks **plain HTTP**: the
+token and the uploaded medical volumes travel unencrypted. Serve HTTPS (or put a TLS
+reverse proxy in front) before exposing it beyond localhost, and keep the `--apps` allowlist tightly scoped (it is the trust
 boundary that stops a token holder from making the resolver fetch arbitrary
 repos). See {doc}`../usage/python-api`.
 ```
@@ -46,7 +46,7 @@ repos). See {doc}`../usage/python-api`.
 | --- | --- | --- |
 | `GET` | `/repo_apps_list` | `{"apps":[str,…]}`: the configured allowlist |
 | `GET` | `/repo_apps/{app_id}` | App metadata & capabilities (display name, description, `checkpoints_name`, `maximum_tta`, `mc_dropout`, `patch_size`, `inputs`/`outputs`, `terminology`, …). 404 if not allowlisted. |
-| `GET` | `/repo_apps_config/{app_id}` | `application/zip` of the app's config files (no `.pt`). |
+| `GET` | `/repo_apps_config/{app_id}` | `application/zip` of the app's config files (no weights). |
 
 ### Job submission
 

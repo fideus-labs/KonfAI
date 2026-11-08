@@ -18,6 +18,7 @@
 
 import datetime
 import os
+import ssl
 from importlib import metadata
 from pathlib import Path
 
@@ -74,10 +75,15 @@ def konfai_root() -> str:
 class RemoteServer:
     """Connection settings for a remote KonfAI Apps server."""
 
-    def __init__(self, host: str, port: int, token: str | None) -> None:
+    def __init__(
+        self, host: str, port: int, token: str | None, https: bool = False, ca_cert: str | None = None
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
+        # A certificate to trust is only ever an HTTPS server's.
+        self.https = https or ca_cert is not None
+        self.ca_cert = ca_cert
         self.timeout = 10
 
     def __str__(self) -> str:
@@ -91,19 +97,34 @@ class RemoteServer:
 
     def get_url(self) -> str:
         """Return the base URL of the remote server."""
-        return f"http://{self.host}:{self.port}"
+        return f"{'https' if self.https else 'http'}://{self.host}:{self.port}"
+
+    @property
+    def verify(self) -> str | bool:
+        """What an HTTPS server's certificate is checked against: ``ca_cert``, else the system's authorities."""
+        return self.ca_cert or True
+
+    def ssl_context(self) -> ssl.SSLContext | None:
+        """The context ``urlopen`` checks an HTTPS server's certificate in, as :attr:`verify` says; None over HTTP."""
+        return ssl.create_default_context(cafile=self.ca_cert) if self.https else None
 
     def get_json(self, path: str, timeout_s: float, params: list[tuple[str, int]] | None = None) -> dict:
-        """The JSON body of ``GET <base url>/<path>``; a failed status raises (``HTTPError``)."""
+        """The JSON body of ``GET <base url>/<path>``; a failed status raises (``HTTPError``), and so does a
+        redirect: urllib would follow it with the token, to any host and over plain HTTP."""
         import json
         from urllib.parse import urlencode
-        from urllib.request import Request, urlopen
+        from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+        class _Refused(HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs) -> None:
+                return None
 
         url = f"{self.get_url()}/{path}"
         if params:
             url += "?" + urlencode(params)
-        # The scheme is this class's own constant (get_url), never caller input: no file:// reach.
-        with urlopen(Request(url, headers=self.get_headers()), timeout=timeout_s) as response:  # nosec B310
+        opener = build_opener(_Refused, HTTPSHandler(context=self.ssl_context()))
+        # The scheme is one of this class's two constants (get_url), never caller input: no file:// reach.
+        with opener.open(Request(url, headers=self.get_headers()), timeout=timeout_s) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
 
 
@@ -285,18 +306,11 @@ def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[b
     tuple[bool, str]
         A boolean success flag and a human-readable status message.
     """
-    import json
     from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
 
     try:
-        request = Request(f"{remote_server.get_url()}/health", headers=remote_server.get_headers())
-        # The scheme comes from RemoteServer.get_url (its own constant), never caller input.
-        with urlopen(request, timeout=timeout_s) as response:  # nosec B310
-            if response.status != 200:
-                return False, f"HTTP {response.status}"
-            data = json.loads(response.read().decode("utf-8"))
-
+        # Through the server object's own get_json: Slicer hands in a RemoteServer of its own.
+        data = remote_server.get_json("health", timeout_s)
         if data.get("status") != "ok":
             return False, f"Unexpected response: {data}"
 

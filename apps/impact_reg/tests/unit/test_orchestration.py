@@ -21,6 +21,7 @@ the ``register`` single-preset (reuse) vs multi-preset (ensemble-and-warp) branc
 import itertools
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -295,6 +296,41 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     assert (out / "P000" / "DVF.mha").is_file()
 
 
+@pytest.mark.parametrize("name", ["plate.zarr/C/02/1", "link"])
+def test_a_store_moving_named_without_a_suffix_keeps_its_moved_image(tmp_path: Path, name: str) -> None:
+    """An HCS well's image (``plate.zarr/C/02/1``) and a symlink, which inputs are resolved through, carry no suffix:
+    their form must still be the store's, or the moved image the writer puts down as ``Moved.ome.zarr`` is removed
+    as another form and register fails after the whole run."""
+    ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
+    volume = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)
+    store = tmp_path / "moving.ome.zarr"
+    ome_zarr.write_ome_zarr(store, volume[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+    moving = tmp_path / name
+    moving.parent.mkdir(parents=True, exist_ok=True)
+    if name == "link":
+        try:
+            moving.symlink_to(store, target_is_directory=True)
+        except OSError:
+            pytest.skip("this machine refuses symlinks (Windows without Developer Mode)")
+    else:
+        store.rename(moving)
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    assert (out / "P000" / "Moved.ome.zarr").is_dir()
+
+
 def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     """A preset names its output; the pipeline follows. An official preset calls its transform
     ``Transform`` (where Slicer looks for it), and ``register`` must not rename it ``DVF``."""
@@ -471,28 +507,87 @@ def test_register_checks_its_presets_and_inputs_before_any_preset_runs(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("name", "array", "vector"),
+    ("name", "array", "vector", "message"),
     [
-        ("flat.png", np.zeros((8, 8), dtype=np.uint8), False),
-        ("rgb.mha", np.zeros((8, 8, 8, 3), dtype=np.uint8), True),
-        ("series.nii.gz", np.zeros((2, 8, 8, 8), dtype=np.float32), False),
+        ("flat.mha", np.zeros((8, 8), dtype=np.float32), False, "mix 2-D images and 3-D volumes"),
+        ("rgb.mha", np.zeros((8, 8, 8, 3), dtype=np.uint8), True, "single-channel"),
+        ("series.nii.gz", np.zeros((2, 8, 8, 8), dtype=np.float32), False, "single-channel"),
     ],
 )
-def test_register_refuses_what_is_not_a_3d_scalar_volume(tmp_path: Path, name: str, array, vector: bool) -> None:
-    """A 2-D image, a colour volume or a time series failed deep inside an engine, after the presets before it."""
+def test_register_refuses_what_is_not_a_scalar_image_or_mixes_kinds(
+    tmp_path: Path, name: str, array, vector: bool, message: str
+) -> None:
+    """A colour volume or a time series failed deep inside an engine, after the presets before it."""
     fixed, moving = tmp_path / "fixed.mha", tmp_path / name
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
     sitk.WriteImage(sitk.GetImageFromArray(array, isVector=vector), str(moving))
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
 
-    with pytest.raises(KonfAIError, match="3-D single-channel"):
+    with pytest.raises(KonfAIError, match=message):
         app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True)
+
+
+def test_register_refuses_a_store_of_several_time_points(tmp_path: Path) -> None:
+    """KonfAI reads a time series' first time point: the same series as fixed and moving registered it onto itself."""
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    for name, times in (("series", 2), ("one", 1)):
+        image = ngff_zarr.to_ngff_image(
+            np.zeros((times, 8, 8, 8), dtype=np.float32),
+            dims=["t", "z", "y", "x"],
+            scale=dict.fromkeys("tzyx", 1.0),
+            translation=dict.fromkeys("tzyx", 0.0),
+        )
+        ngff_zarr.to_ngff_zarr(str(tmp_path / f"{name}.ome.zarr"), ngff_zarr.to_multiscales(image, scale_factors=[]))
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
+
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        app.register(
+            ["A"], [tmp_path / "series.ome.zarr"], [tmp_path / "one.ome.zarr"], output=tmp_path / "O", quiet=True
+        )
+    reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})  # one time point is an image
+    shutil.rmtree(tmp_path / "one.ome.zarr")  # the series written over it, in this process: read anew
+    shutil.copytree(tmp_path / "series.ome.zarr", tmp_path / "one.ome.zarr")
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})
 
 
 def test_case_order_is_numeric_past_p999() -> None:
     """`sorted` alone puts P1000 before P101 and pairs the wrong moving unit."""
     assert sorted(["P101", "P1000", "P099"], key=reg._case_key) == ["P099", "P101", "P1000"]
+
+
+def test_a_pair_of_very_different_physical_sizes_is_warned_of(capsys: pytest.CaptureFixture) -> None:
+    """A store in micrometres against a file whose numbers mean millimetres registered to nothing, silently."""
+
+    def case(spacing: float) -> dict:
+        header = ([1, 50, 680, 535], [spacing] * 3, [0.0] * 3, np.eye(3).ravel().tolist())
+        return {"Fixed": ([1, 50, 680, 535], [0.0002] * 3, *header[2:]), "Moving": header}
+
+    reg._warn_of_other_units([case(0.2)], quiet=False)
+    assert "x1e+03 or more in physical size" in capsys.readouterr().out
+    reg._warn_of_other_units([case(0.0002), case(0.001)], quiet=False)  # the same size, and a five times larger field
+    reg._warn_of_other_units([case(0.2)], quiet=True)
+    assert not capsys.readouterr().out
+
+    def pair(fixed: dict, moving: dict) -> dict:
+        return {"Fixed": tuple(fixed.values()), "Moving": tuple(moving.values())}
+
+    def header(shape: list[int], spacing: float, direction: np.ndarray) -> dict:
+        return {"shape": shape, "spacing": [spacing] * 3, "origin": [0.0] * 3, "direction": direction.ravel().tolist()}
+
+    # The sizes are compared along the physical axes: the moving grid swaps x and z, 20 times larger on each of them.
+    swap = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    reg._warn_of_other_units(
+        [pair(header([1, 25, 500, 500], 1.0, np.eye(3)), header([1, 10000, 10000, 500], 1.0, swap))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
+    # Exactly 20 times apart, whatever the rounding: 0.7 / 0.035 is 19.999999999999996.
+    reg._warn_of_other_units(
+        [pair(header([1, 10, 10, 10], 0.035, np.eye(3)), header([1, 10, 10, 10], 0.7, np.eye(3)))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
 
 
 def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:
@@ -845,7 +940,9 @@ def test_register_records_the_overrides_each_pass_took(tmp_path: Path, monkeypat
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": _TILING})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
 
     def fake_run(command, **kwargs):
@@ -941,7 +1038,9 @@ def test_max_voxels_pins_the_tiles_too(monkeypatch: pytest.MonkeyPatch) -> None:
     assert reg._plan(manifest, [0], 1000) == (1000, 2000)
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1150 * 575 * 10 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1150 * 575 * 10 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     assert reg._plan(manifest, [0], None) == (5750, 11500)
 
@@ -952,7 +1051,7 @@ def test_every_preset_is_sized_from_both_costs_it_declares(monkeypatch: pytest.M
     asked: list = []
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: asked.append((vram_cost, ram_cost, gpu)) or 10**6,
+        lambda vram_cost, ram_cost, gpu, remote_server=None: asked.append((vram_cost, ram_cost, gpu)) or 10**6,
     )
     manifest = {"vram_bytes_per_voxel": 100, "ram_bytes_per_voxel": 40}
     assert reg._plan(manifest, [], None) == (10**6, None) and asked == [(100.0, 40.0, None)]
@@ -982,7 +1081,9 @@ def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and
 
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = preset  # type: ignore[method-assign]
@@ -1015,7 +1116,9 @@ def test_the_tiles_get_a_fixed_mask_on_the_fixed_grid(tmp_path: Path, monkeypatc
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     seen: dict = {}
 
@@ -1224,7 +1327,7 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(1000 / (vram_cost if gpu is not None else ram_cost)),
     )
     calls: list = []
 
@@ -1251,7 +1354,7 @@ def test_a_pair_that_fits_is_registered_whole_under_its_budget(tmp_path: Path, m
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(10**6 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(10**6 / (vram_cost if gpu is not None else ram_cost)),
     )
     calls: list = []
 
@@ -1278,3 +1381,75 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
     app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
     with pytest.raises(reg._OutOfMemory):
         app._infer_preset("A", *arguments, tmp_path, [], None, True)
+
+
+def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
+    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
+    affine = sitk.AffineTransform(3)
+    affine.SetTranslation(translation)
+    if path.suffix == ".h5":
+        sitk.WriteTransform(affine, str(path))
+    else:
+        from konfai.utils.ome_zarr import write_ome_zarr_affine
+
+        write_ome_zarr_affine(path, affine, {"OMEUnits": "millimeter millimeter millimeter"})
+    return path
+
+
+@pytest.mark.parametrize("name", ["Transform.h5", "Transform.ome.zarr"])
+def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name: str) -> None:
+    """A preset that writes its transform as an affine is complete too: the moved image is the moving image resampled
+    through the affine, on the fixed grid, the one the affine has none of its own."""
+    if name.endswith(".zarr"):
+        pytest.importorskip("ngff_zarr")
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+
+    def affine_only(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        return "Transform", {"P000": _write_affine(out / name, (2.0, 0.0, 0.0))}
+
+    app._infer_preset = affine_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    case = out / "P000"
+    assert (case / name).exists() and not reg._is_field(case / name)
+    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Moved.mha")))
+    np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)  # moving is z*64 + y*8 + x, shifted by +2 along x
+    np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
+    record = json.loads((out / "register.json").read_text(encoding="utf-8"))
+    assert record["cases"]["P000"]["transform"].replace("\\", "/") == f"P000/{name}"  # Windows writes backslashes
+
+
+def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
+    """An ensemble and a test-time augmentation average fields: a preset declaring an affine runs alone, or is set back
+    to a field for the run."""
+    (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
+        "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
+        "    RegistrationNet:\n      transform_type: affine\n",
+        encoding="utf-8",
+    )
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
+    out = tmp_path / "Output"
+
+    with pytest.raises(KonfAIError, match="an ensemble cannot average"):
+        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
+    with pytest.raises(KonfAIError, match="--tta cannot average"):
+        app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
+    # --set speaks for the run, bare or dotted from the config root: B declared an affine is refused in its turn.
+    overrides = ["A:transform_type=field", "B:Predictor.Model.RegistrationNet.transform_type=affine"]
+    with pytest.raises(KonfAIError, match="'B' writes its transform as an affine"):
+        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides)
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides[:1])
+    assert (out / "P000" / "Moved.mha").is_file()
