@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KonfAI Studio</title>
+<meta name="description" content="A chat web UI over the KonfAI MCP server: inspect, train, predict, evaluate, compare and view from one conversation.">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="index.html"><picture><source srcset="assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="index.html">KonfAI</a><a href="apps.html">Apps</a><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html" aria-current="page">Studio</a><a href="https://konfai.readthedocs.io/en/latest/">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main>
+
+<section class="hero small">
+  <h1>KonfAI Studio</h1>
+  <p>A single chatbot web UI, specialised for medical imaging, that drives <code>konfai-mcp</code> end to end. A clinician-researcher points it at their own dataset and, from the conversation alone, onboards the data, authors or reuses a model, trains, infers, looks at the results, compares, keeps and reproduces experiments, then deploys the frozen model privately. KonfAI jobs run on the machine hosting Studio; chat messages and tool results go to the language-model endpoint you select. It is a product surface, not a new engine: every capability maps one to one onto an existing <code>konfai-mcp</code> tool.</p>
+  <pre><code>pip install konfai-studio
+konfai-studio            # -> http://127.0.0.1:8730</code></pre>
+  <p>No API key ships with it: by default Studio uses your Claude Code subscription through the Claude Agent SDK; <code>konfai-studio[anthropic]</code> adds the Claude API with your key, <code>konfai-studio[openai]</code> any OpenAI-compatible server (vLLM, Ollama), which keeps every exchange local.</p>
+</section>
+
+<figure>
+  <img src="assets/studio-screenshot.png" alt="KonfAI Studio: a chat on the left writes, validates and launches an MR to CT synthesis training; the live training feed, loss curves of several runs and model-output samples stream on the right." width="1920" height="1089">
+  <figcaption>Studio runs an MR to CT synthesis (write the config, validate it, train) while the live feed, the curves of several runs and model-output samples stream beside the chat.</figcaption>
+</figure>
+
+<section>
+  <h2>Three ways in</h2>
+  <p>Studio exposes the three modelling entry points as top-level choices, and the agent proposes one when you only describe the task: <strong>use an app as it is</strong> (a published model on your cases), <strong>fine-tune an app</strong> on your dataset, or <strong>train from scratch</strong> from a config the agent writes and validates. Results stream live: metrics, curves, validation samples, and the volumes in the viewer.</p>
+  <table>
+    <tbody>
+      <tr><td>Bring a dataset</td><td>point at a folder; the agent reads geometry, channels, classes, splits, ambiguities</td></tr>
+      <tr><td>Just describe the task</td><td>the agent decides the route (reuse a published app, fine-tune it, train from scratch) and proposes it transparently; you can override in conversation</td></tr>
+      <tr><td>Author by conversation</td><td>the agent writes the YAML, validates it, can run a real forward and backward before spending GPU hours</td></tr>
+      <tr><td>Train, predict, evaluate</td><td>launch jobs on the GPU, resume interrupted runs, sweep cross-validation folds</td></tr>
+      <tr><td>Watch it live</td><td>live metrics and TensorBoard curves in the tab; cancel anytime</td></tr>
+      <tr><td>See the result</td><td>CT or MR with the prediction overlaid on the scan, prediction against ground truth, in a NiiVue viewer</td></tr>
+      <tr><td>Compare and rank</td><td>metric-by-metric comparison, config diff, leaderboard across runs and sessions</td></tr>
+      <tr><td>Keep and reproduce</td><td>every run is frozen (exact command, environment, config); export a Methods-grade record; a colleague re-imports and re-runs it</td></tr>
+      <tr><td>Package and deploy</td><td>turn a trained model into a shareable app; run it in Slicer, on an on-premise server, or export it to ONNX</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>See it work</h2>
+  <p>Five real sessions on real data. Each video is one continuous take, sped up but never cut.</p>
+  <article>
+    <h3>Train from your dataset</h3>
+    <p>Point Studio at your images and ask in plain words. Studio inspects the dataset, writes and validates the config, and asks before spending GPU time. Training runs with live curves and validation samples, then the held-out cases are predicted, evaluated, and opened in the viewer next to the ground truth. <a href="https://github.com/user-attachments/assets/541ba05d-a4c0-4b20-b51a-1fa134293858">Watch the take.</a></p>
+  </article>
+  <article>
+    <h3>Iterate and steer, live</h3>
+    <p>Launch one more run and steer it while it trains. Change the learning rate mid-run, stop the job when you decide, evaluate the same held-out cases, and compare every run on a leaderboard that flags optimistic numbers. <a href="https://github.com/user-attachments/assets/af68ab7d-c26f-45b5-9fca-1938058a129c">Watch the take.</a></p>
+  </article>
+  <article>
+    <h3>Use a published model</h3>
+    <p>Pick an app from the zoo and run its published weights on your own cases. GPU inference takes seconds per case, the result is scored against your reference mask, and the segmentation opens over its CT in the viewer. <a href="https://github.com/user-attachments/assets/91310a7f-973e-4098-a23d-ef6cab072c00">Watch the take.</a></p>
+  </article>
+  <article>
+    <h3>Fit a challenge task</h3>
+    <p>Studio designs a loss shaped for the task's score, writes it as a real PyTorch module, smoke tests it before any GPU hour, and plugs it into the config by classpath. It trains under a time budget, scores the result the way the challenge does, and claims nothing without a fair baseline. <a href="https://github.com/user-attachments/assets/1c5e299e-8321-43f5-bc0e-fc5d0700bfcd">Watch the take.</a></p>
+  </article>
+  <article>
+    <h3>Prepare a whole dataset</h3>
+    <p>The TRANSFORM workflow processes 75 volumes under a 512 MiB memory cap. The plan states, case by case, what will stream in slabs and what simply fits in memory. The whole dataset goes through in about a minute and comes back verified. <a href="https://github.com/user-attachments/assets/b9b4c01f-7bf0-4f61-86f6-5ae8ce784534">Watch the take.</a></p>
+  </article>
+</section>
+
+<section>
+  <h2>Sessions and reproducibility</h2>
+  <p>A session is one isolated experiment workspace (under <code>~/KonfAI_Workspaces/sessions/&lt;name&gt;/</code>, or <code>$KONFAI_MCP_WORKSPACES_ROOT</code>). It holds many runs, each with its checkpoints, statistics, predictions and evaluations. On every launch, before the process spawns, the server freezes the launch-time YAML and a manifest: the exact command, the environment, the package versions, the GPUs. Export a run's record, and a colleague imports the experiment and runs it again.</p>
+  <p>Guide: <a href="https://konfai.readthedocs.io/en/latest/usage/studio.html">KonfAI Studio</a>. Source: <a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-studio"><code>konfai-studio/</code></a> (the FastAPI bridge and the React front; the front builds into the package, <code>pip install</code> is enough).</p>
+</section>
+
+</main>
+<footer>
+  <p>KonfAI is developed by <a href="https://github.com/fideus-labs">Fideus Labs</a> and released under the <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0 licence</a>. Code, issues and pull requests: <a href="https://github.com/fideus-labs/KonfAI">github.com/fideus-labs/KonfAI</a>. For agents: <a href="llms.txt">llms.txt</a>.</p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,52 @@
+/* KonfAI site: one stylesheet, no framework, no build step. */
+:root {
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #555; --line: #e3e3e3; --code-bg: #f4f4f4; --link: #0a5bb5; --accent: #0a5bb5;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121417; --fg: #e8e8e8; --muted: #a8a8a8; --line: #2b2f36; --code-bg: #1c2027; --link: #7fb4ff; --accent: #7fb4ff; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, "Helvetica Neue", Arial, sans-serif;
+}
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+code, pre { font: 0.92em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 3px; }
+pre { background: var(--code-bg); padding: 0.9rem 1rem; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+header.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  max-width: 62rem; margin: 0 auto; padding: 0.9rem 16px; border-bottom: 1px solid var(--line);
+}
+header.top .brand img { display: block; height: 34px; width: auto; }
+header.top nav { display: flex; flex-wrap: wrap; gap: 0.2rem 1.1rem; }
+header.top nav a { color: var(--fg); text-decoration: none; padding: 0.2rem 0; border-bottom: 2px solid transparent; }
+header.top nav a:hover, header.top nav a[aria-current="page"] { border-bottom-color: var(--accent); }
+main { max-width: 62rem; margin: 0 auto; padding: 0 16px 2rem; }
+.hero { padding: 2.5rem 0 1rem; }
+.hero img { display: block; height: auto; max-width: 100%; }
+.hero h1 { font-size: clamp(1.7rem, 4.5vw, 2.5rem); line-height: 1.15; margin: 1rem 0 0.8rem; letter-spacing: -0.01em; }
+.hero p { font-size: 1.08em; max-width: 48rem; }
+.hero.small { padding-top: 1.8rem; }
+section { padding: 1.2rem 0; }
+section + section { border-top: 1px solid var(--line); }
+h2 { font-size: 1.35rem; margin: 0.6rem 0 0.4rem; }
+h3 { font-size: 1.05rem; margin: 1rem 0 0.2rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 0.4rem 2rem; }
+.grid article h2 { font-size: 1.15rem; }
+.grid article p { margin-top: 0.2rem; color: var(--fg); }
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; margin: 0.8rem 0; }
+th, td { text-align: left; vertical-align: top; padding: 0.5rem 0.7rem 0.5rem 0; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; color: var(--muted); font-size: 0.9em; }
+table.tools td:first-child { white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+figure { margin: 1.5rem 0; }
+figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; }
+figcaption { color: var(--muted); font-size: 0.92em; margin-top: 0.5rem; }
+ul { padding-left: 1.2rem; }
+li { margin: 0.3rem 0; }
+footer { max-width: 62rem; margin: 0 auto; padding: 1.2rem 16px 2.5rem; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.92em; }
