@@ -1147,6 +1147,7 @@ async def infer(
     tta: Annotated[int, Form()] = 0,
     mc: Annotated[int, Form()] = 0,
     uncertainty: Annotated[bool, Form()] = False,
+    dense_transforms: Annotated[bool, Form()] = False,
     prediction_file: Annotated[str, Form()] = "Prediction.yml",
     options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",  # CSV "0,1"
@@ -1208,6 +1209,8 @@ async def infer(
     ]
     if uncertainty:
         cmd += ["-uncertainty"]
+    if dense_transforms:  # the client's caller averages or composes it (DENSE_TRANSFORMS_ENV)
+        cmd += ["--dense-transforms"]
     if len(ensemble_models_list) > 0:
         cmd += ["--ensemble_models", *ensemble_models_list]
     else:

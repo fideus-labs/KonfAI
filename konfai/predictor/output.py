@@ -60,7 +60,7 @@ from konfai.data.transform import (
 from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset, DataStream, drop_native_form
 from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
@@ -427,8 +427,14 @@ class OutputDataset(Dataset, NeedDevice):
             return False
         return all(acc.is_full() for acc in accumulators.values())
 
-    def _submit_final_write(self, name: str, tensor: torch.Tensor, attribute: Attribute) -> None:
-        """Queue one whole-volume entry write (D2H copy included) on the write path."""
+    def _submit_final_write(self, index: int, name: str, tensor: torch.Tensor, attribute: Attribute) -> None:
+        """Queue one whole-volume entry write (D2H copy included) on the write path, the case's copies released. A
+        mean of TTA copies is no copy's transform but the field; a run whose output its caller averages or composes
+        (an ensemble's member, a tile) writes the field too: the native form their headers name goes."""
+        copies = self.attributes.pop(index)
+        if len(copies) > 1 or os.environ.get(DENSE_TRANSFORMS_ENV):
+            for header in [*(copy[0] for copy in copies.values()), attribute]:
+                drop_native_form(header)
         write = super().write
 
         def operation() -> None:
@@ -437,9 +443,7 @@ class OutputDataset(Dataset, NeedDevice):
         self._submit_write(operation)
 
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
-        attribute = self.attributes[index][0][0]
-        self.attributes.pop(index)
-        self._submit_final_write(name, layer, attribute)
+        self._submit_final_write(index, name, layer, self.attributes[index][0][0])
 
     def __str__(self) -> str:
         params = {
@@ -1051,7 +1055,7 @@ class OutputDataset(Dataset, NeedDevice):
         name = self.names[index]
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
-        self._submit_final_write(name, result, attribute)
+        self._submit_final_write(index, name, result, attribute)
 
     def _prepare_copy_slab(
         self,

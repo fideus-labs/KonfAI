@@ -12,11 +12,12 @@ measures the misalignment before registration).
 | segmentation | `--gt-fixed-seg` / `--gt-moving-seg` | every label of the fixed segmentation, and their mean: Dice, Jaccard, relative volume difference; HD95, ASSD; surface Dice at 2 mm | 0 to 1; mm; 0 to 1 |
 | landmarks | `--gt-fixed-fid` / `--gt-moving-fid` | TRE: each fixed landmark pushed through the transform, against its moving partner | mm |
 
-When the transform is a displacement field, `eval` also reports its **measures without reference**: from the
+When the transform is a displacement field or a B-spline, `eval` also reports its **measures without reference**: from the
 determinant of its Jacobian, the fraction of folded voxels (determinant ≤ 0), the minimum and the standard deviation of
 its logarithm; its bending energy (the mean squared second derivative, 0 for an affine map); and the length of its
 displacements (mean, 95th percentile, maximum). A good deformable registration has no folding. `--transform` given
-alone measures these and nothing else.
+alone measures these and nothing else. A field is measured on its own grid; a B-spline (elastix's native form) has
+none and is sampled on the fixed grid, which `-f` or `--gt-fixed-seg` gives.
 
 The cohort summary adds `worst30` to every metric: the mean of its worst 30 % of cases, the robustness Learn2Reg
 reports as DSC30 and TRE30.
@@ -55,8 +56,9 @@ such as one atlas or one transform. Other counts are refused.
 **Landmark files** are 3D Slicer markups `.fcsv`. The `# CoordinateSystem` header is honoured (LPS, or RAS, which is
 converted); rows are paired by order, so both files must list the same points in the same order.
 
-**Transforms** accepted: the `Transform.h5` of `register`, a displacement-field image, or an ITK linear transform
-(`.h5`, `.tfm`, `.txt`: translation, rigid, similarity, affine).
+**Transforms** accepted: the `Transform.h5` of `register`, a displacement-field image, an ITK linear transform
+(`.h5`, `.tfm`, `.txt`: translation, rigid, similarity, affine), or an ITK B-spline or composite of these (elastix's
+rigid then B-spline).
 
 ## `uncertainty`
 
