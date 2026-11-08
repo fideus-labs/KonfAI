@@ -495,7 +495,9 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         leaf, inside = keys[-1], keys[3:] if keys[:3] == model_path else []
         model = resolved() if inside else None
         declared = _declared(model, inside) if model is not None else None
-        if not isinstance(node, dict) or (leaf not in node and declared is None):
+        # Predictor and Trainer take manual_seed and a config may omit it: the one root key --seed may add.
+        settable = keys == [model_path[0], "manual_seed"]
+        if not isinstance(node, dict) or (leaf not in node and declared is None and not settable):
             parent = _declared(model, inside[:-1]) if model is not None else None
             known = [*node, *_fields(parent)] if isinstance(node, dict) else []
             raise AppRepositoryError(
@@ -542,6 +544,11 @@ def run_overrides(config: Any, output_formats: list[str] | None = None, seed: in
             raise AppRepositoryError(
                 f"--output-format {spec}: the app has no output '{name}'.{did_you_mean(name, outputs)}",
                 f"Its outputs: {', '.join(outputs) or 'none'}.",
+            )
+        if not assigned and not outputs:
+            raise AppRepositoryError(
+                f"--output-format {spec}: the app's config names no output file to write in another format.",
+                "No outputs_dataset entry carries a dataset_filename; set one with --set.",
             )
         for output in [name] if assigned else outputs:
             key, filename = outputs[output]
@@ -1090,12 +1097,12 @@ class LocalAppRepository(AppRepositoryInfo):
         except AppRepositoryError as error:
             raise AppRepositoryError(f"The {what} of app '{self.get_name()}' does not apply: {error}") from error
 
-    def save_preset(self, name: str, description: str, overrides: list[str]) -> Path:
+    def save_preset(self, name: str, description: str, overrides: list[str], tiles: bool = True) -> Path:
         """Keep ``overrides`` as preset ``name`` of this app and return the file written: the user's presets file for
         an app of the Hugging Face cache, which is not theirs to edit, else the app's own ``app.json``.
 
         A preset is flat: ``overrides`` are relative to the base config, so a preset made from another one carries
-        that one's overrides first (``--from``). A name set twice keeps its last value, once.
+        that one's overrides first (``--from``), and its ``tiles``. A name set twice keeps its last value, once.
         """
         if not PRESET_NAME.fullmatch(name):
             raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_' and '-'.")
@@ -1105,7 +1112,7 @@ class LocalAppRepository(AppRepositoryInfo):
                 f"App '{self.get_name()}' publishes a preset '{name}' already.", "Save yours under another name."
             )
         last = {override.partition("=")[0].strip(): override for override in overrides}
-        preset = Preset(name, description, tuple(last.values()))
+        preset = Preset(name, description, tuple(last.values()), tiles)
         self._check(preset.overrides, f"preset '{name}'")
         if own_file is not None:
             write_preset(own_file, preset)

@@ -300,10 +300,12 @@ def _save_preset(app: str, name: str, description: str, overrides: list[str]) ->
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
     start: tuple[str, ...] = ()
+    tiles = True
     if source is not None:
         info.use_preset(source)
-        start = info.get_preset().overrides  # type: ignore[union-attr]
-    written = info.save_preset(name, description, [*start, *overrides])
+        chosen = info.get_preset()
+        start, tiles = chosen.overrides, chosen.tiles  # type: ignore[union-attr]
+    written = info.save_preset(name, description, [*start, *overrides], tiles)
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
 
 
