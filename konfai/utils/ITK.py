@@ -71,8 +71,7 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     axes = get_ome_zarr_info(path)["axes"]
     n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
     data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
-    # NGFF scale/translation cannot express the direction matrix, so the geometry comes from the
-    # konfai sidecar through data_to_image.
+    # Reconstruct the physical grid from RFC-5 metadata before building the ITK field.
     field = data_to_image(data, ome_zarr_attributes(metadata))
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 

@@ -149,6 +149,10 @@ def test_ome_zarr_output_is_readable_by_ngff_zarr(tmp_path: Path) -> None:
     assert tuple(img0.dims) == ("c", "z", "y", "x")
     assert img0.scale == {"c": 1.0, "z": 2.0, "y": 0.6, "x": 0.5}
     assert img0.translation == {"c": 0.0, "z": 3.0, "y": 2.0, "x": 1.0}
+    # An axis-aligned grid declares the identity: the scale and translation above are its whole geometry.
+    rotation, translation = mz.metadata.coordinateTransformations[0].transformations
+    np.testing.assert_allclose(rotation.rotation, np.eye(4))
+    assert translation.translation == [0.0, 0.0, 0.0, 0.0]
     assert np.array_equal(np.asarray(img0.data), data)
 
 
