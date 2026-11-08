@@ -803,7 +803,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
-        gt: list[list[Path]] | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         pass
 
@@ -1436,7 +1436,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 found.append((local, name, *remote.get_infos(group, name)))
         return found
 
-    def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
+    def _write_inference_stack_to_dataset(self, inputs: list[list[Path | str]]) -> None:
         """Stage the stacks as inputs are staged (``P{idx}/Volume_{i}``, an OME-Zarr store whole), each read back by its
         header and refused when it holds one channel: uncertainty reads an inference stack, its members' channels."""
         self._write_inputs_to_dataset(inputs)
@@ -1722,7 +1722,7 @@ class KonfAIApp(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
-        gt: list[list[Path]] | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         """
         Run uncertainty estimation locally: an evaluation of the stack (``Volume_0``), against the references ``gt``

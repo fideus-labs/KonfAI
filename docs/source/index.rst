@@ -99,6 +99,7 @@ KonfAI documentation
    usage/studio
    usage/mcp
    usage/packaging-apps
+   usage/portable
 
 .. toctree::
    :maxdepth: 1

@@ -2340,6 +2340,7 @@ packages:
   - onnx ; extra == 'dev'
   - onnxruntime ; extra == 'dev'
   - onnxscript ; extra == 'dev'
+  - jsonschema ; extra == 'dev'
   - nvidia-ml-py ; extra == 'dev'
   - tensorboard ; extra == 'dev'
   - pytest ; extra == 'dev'

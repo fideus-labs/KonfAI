@@ -29,7 +29,7 @@ import textwrap
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from konfai import RemoteServer
 from konfai.utils import uri
@@ -48,10 +48,6 @@ from .app_repository import (
 from .errors import AppRepositoryError
 from .options import add_device, add_run_options, add_tmp_dir, local_path
 from .presets import split_preset
-
-if TYPE_CHECKING:
-    from .app import AbstractKonfAIApp
-
 
 #: Where a designed refusal also writes its message, when set: the app server reads it back to answer
 #: the job's result with the refusal (422) rather than a bare exit code.
@@ -940,7 +936,13 @@ def main_apps() -> None:
         "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
     )
     bundle_p.add_argument(
-        "--onnx", action="store_true", help="Also export model.onnx + manifest.json (portable runtime)."
+        "--onnx",
+        action="store_true",
+        help=(
+            "Also export the portable program: model.onnx + manifest.json for one model; program.json for an"
+            " ensemble, test-time copies or a Mask reading a nested app, with one onnx per checkpoint and a"
+            " <group>.onnx per nested app."
+        ),
     )
     bundle_p.add_argument(
         "--patch-size", type=int, nargs="+", help="Override --onnx patch size (else read from config)."
@@ -1025,7 +1027,7 @@ def main_apps() -> None:
     references = kwargs["app"] if isinstance(kwargs["app"], list) else [kwargs["app"]]
     download, force_update = kwargs.pop("download", False), kwargs.pop("force_update", False)
 
-    def make_app(reference: str) -> AbstractKonfAIApp:  # KonfAIApp or KonfAIAppClient: the same methods
+    def make_app(reference: str) -> Any:  # KonfAIApp or KonfAIAppClient: the same methods
         if remote is not None:
             return app_module.KonfAIAppClient(reference, remote)
         return app_module.KonfAIApp(reference, download, force_update)
