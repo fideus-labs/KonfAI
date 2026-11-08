@@ -1223,7 +1223,11 @@ def records_only(name: str) -> bool:
     from konfai.data.transform import Save
 
     cls = _stage_class(name)
-    return cls is not None and not cls.alters_values and not issubclass(cls, Save)
+    if cls is None or cls.alters_values or issubclass(cls, Save):
+        return False
+    # A subclass that overrides __call__ inherits the declaration of code it replaced: it must restate it.
+    declaring = next(base for base in cls.__mro__ if {"__call__", "alters_values"} & vars(base).keys())
+    return "alters_values" in vars(declaring)
 
 
 def is_save(name: str) -> bool:
@@ -2314,7 +2318,11 @@ def compile_output(
 
 def _portable_root(path: str | Path) -> str:
     """A path the runtime resolves against its ``--root``: relative to the working directory when it
-    sits below it, with slashes whatever the system compiling, absolute otherwise."""
+    sits below it, with slashes whatever the system compiling, absolute otherwise. Only an output is written
+    here: a remote root is refused, as konfai refuses to write one."""
+    from konfai.utils.uri import refuse_write
+
+    refuse_write(path)
     text = str(path).rstrip("/") or "/"
     absolute, cwd = Path(text).absolute(), Path.cwd()
     return absolute.relative_to(cwd).as_posix() if absolute.is_relative_to(cwd) else text

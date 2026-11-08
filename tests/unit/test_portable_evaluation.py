@@ -180,6 +180,15 @@ def test_sam_perceptual_names_its_graph_after_the_network_it_loads(tmp_path: Pat
     assert all(step["model"] == path.stem and path.suffix == ".onnx" for step, path in zip(steps, written, strict=True))
 
 
+def test_a_remote_map_root_is_refused_as_konfai_refuses_it() -> None:
+    # POSIX would read s3://bucket/maps as the local path s3:/bucket/maps.
+    from konfai.portable import _portable_root
+    from konfai.utils.errors import DatasetManagerError
+
+    with pytest.raises(DatasetManagerError, match="remote root"):
+        _portable_root("s3://bucket/maps")
+
+
 def test_impact_reg_has_a_portable_form_on_a_whole_volume_only(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

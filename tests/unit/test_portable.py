@@ -175,6 +175,27 @@ def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
     )
 
 
+def test_a_statistics_subclass_replacing_call_must_restate_that_it_alters_no_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import konfai.portable as portable
+    from konfai.data.transform import Statistics
+
+    class Shifted(Statistics):
+        def __call__(self, name, tensors, cache_attribute):
+            return tensors + 1
+
+    class Recorded(Shifted):
+        alters_values = False
+
+    class Plain(Statistics):
+        pass
+
+    classes = {cls.__name__: cls for cls in (Shifted, Recorded, Plain)}
+    monkeypatch.setattr(portable, "_stage_class", classes.get)
+    assert [portable.records_only(name) for name in classes] == [False, True, True]
+
+
 def test_a_save_compiles_to_a_step_naming_the_destination_a_write_would() -> None:
     # Save also hands its input back, but konfai writes what reaches it and a later run reads the last
     # write already there in place of the stages before it, so the runtime needs it at its place.
