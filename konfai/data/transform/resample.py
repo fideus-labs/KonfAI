@@ -1070,11 +1070,14 @@ class Resample(TransformInverse):
         stored = self._maps.get(name)
         if stored is None:
             rank = self._source_grid(name).rank
-            # HEADERS ONLY, always: a cached region's stages are that region's, not the case's.
+            # A stack's members are maps of their own: the first stands for them (a member's view, inside one, finds
+            # no stack). HEADERS ONLY, always: a cached region's stages are that region's, not the case's.
             # What comes back is the affine part, exact, with any dense field standing as the
             # identity, which is the price the declared route puts on its field.
-            priced = self._decode_stored(name, headers_only=True)
-            has_field = self._stored_has_field(name)
+            stacked, members = stacked_groups(self, cast("dict[str, bool]", self.transforms), name)
+            with as_member(self, stacked, 0) if members else nullcontext():
+                priced = self._decode_stored(name, headers_only=True)
+                has_field = self._stored_has_field(name)
             # A BSpline decodes to an order-3 stage on its coefficients; a dense field read as a
             # transform to an order-1 one, whose windows are measured from its values at run time.
             displacements = [stage for stage in priced if isinstance(stage, DisplacementStage)]
@@ -1256,10 +1259,7 @@ class Resample(TransformInverse):
         if self.transforms is None:
             return
         try:
-            # Every member of a stack is a map of its own, read as the call reads it; the first stands for them.
-            stacked, members = stacked_groups(self, self.transforms, name)
-            with self._as_member(name, stacked, 0) if members else nullcontext():
-                self._stored_map(name)
+            self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
