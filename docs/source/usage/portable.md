@@ -114,7 +114,9 @@ criterion runs its network on the whole volume, as `IMPACTReg` does).
 | Any other | Refused by name |
 
 Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per
-channel, with test-time copies or with config overrides, and an output and a target
+channel, with test-time copies or with config overrides, a `Crop` after a stage that
+moved the grid or the values (as in a transform chain: KonfAI finds the box in the
+group as stored, the runtime in the volume it is handed), and an output and a target
 on two pixel grids (KonfAI's `Dice` puts a target of another shape on the output's
 grid; the runtime does not).
 
