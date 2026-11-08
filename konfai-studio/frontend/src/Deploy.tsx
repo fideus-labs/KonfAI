@@ -7,6 +7,7 @@
 // The volume never leaves the machine.
 import { useEffect, useRef, useState } from "react";
 import { Niivue } from "@niivue/niivue";
+import { getJson } from "./api";
 import type { StudioApp } from "./AppZoo";
 import type * as KonfaiEdge from "./konfai-edge/konfai_edge";
 
@@ -68,12 +69,11 @@ const formatOf = (name: string) => name.match(/\.(nii\.gz|nii|mha|mhd|nrrd)$/i)?
 export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const nvRef = useRef<Niivue | null>(null);
-  const edgeRef = useRef<{ engine: Engine; entry: Entry; api: KonfaiEdge.App } | null>(null);
+  // The engine, the weights' folder and the app as the engine reads it: null until the engine is ready.
+  const [edge, setEdge] = useState<{ engine: Engine; dir: string; api: KonfaiEdge.App } | null>(null);
   const [models, setModels] = useState(0);
   const [ensemble, setEnsemble] = useState(0);
   const [result, setResult] = useState<{ url: string; name: string } | null>(null);
-  // The blob URL of the result the Save link points at: freed when a new run replaces it or the pane closes.
-  const resultUrl = useRef<string | null>(null);
   const [volume, setVolume] = useState<File | null>(null);
   const [stage, setStage] = useState<Stage>("loading");
   const [message, setMessage] = useState("reading the app's in-browser build…");
@@ -85,10 +85,12 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
     const nv = new Niivue({ backColor: [0.035, 0.08, 0.09, 1], show3Dcrosshair: true, loadingText: "" });
     nv.attachToCanvas(canvasRef.current!);
     nvRef.current = nv;
-    return () => {
-      if (resultUrl.current) URL.revokeObjectURL(resultUrl.current);
-    };
   }, []);
+
+  // The blob URL of the result the Save link points at: freed when a new run replaces it or the pane closes.
+  useEffect(() => () => {
+    if (result) URL.revokeObjectURL(result.url);
+  }, [result]);
 
   // Escape leaves: this pane covers the whole app, and an app with no in-browser build offers nothing to
   // do in it, so a small ✕ was the only way back out.
@@ -103,23 +105,22 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
     let live = true;
     const refuse = (text: string) => Object.assign(new Error(text), { undeployable: true });
     (async () => {
-      const response = await fetch(`/api/apps/web?ref=${encodeURIComponent(app.ref)}`);
-      if (!response.ok)
-        throw refuse((await response.json().then((b) => b.detail, () => "")) || `the server said ${response.status}`);
-      const entry: Entry = await response.json();
+      const entry: Entry = await getJson(`/api/apps/web?ref=${encodeURIComponent(app.ref)}`).catch((e: Error) => {
+        throw refuse(e.message);
+      });
       if (entry.engine !== "konfai-edge")
         throw refuse(`This app runs on ${entry.engine ?? "no"} engine; Studio runs the KonfAI Edge apps.`);
       setMessage("loading the KonfAI Edge engine…");
       const engine = await engineOf(app.ref, entry.runtime);
-      const dir = `${entry.variants[0].weights}/`;
+      const dir = entry.variants[0].weights;
       const appJson = await (await fetched(app.ref, entry.configs.find((c) => c.name === "app.json")!.url)).text();
       const programs = entry.variants.flatMap((v) => [v.program, v.uncertainty?.program, v.uncertainty?.evaluation]);
       const files = [...programs, ...(entry.evaluations ?? []).map((e) => e.program)]
-        .filter((p): p is string => !!p && p.startsWith(dir))
-        .map((p) => p.slice(dir.length));
+        .filter((p): p is string => !!p && p.startsWith(`${dir}/`))
+        .map((p) => p.slice(dir.length + 1));
       const api = new engine.App(entry.name, appJson, files);
       if (!live) return;
-      edgeRef.current = { engine, entry, api };
+      setEdge({ engine, dir, api });
       setModels(JSON.parse(api.describe()).bounds?.models?.length ?? 0);
       setStage("ready");
       setMessage("pick a volume and run: nothing leaves your machine.");
@@ -134,15 +135,13 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
   }, [app.ref]);
 
   async function run() {
-    const edge = edgeRef.current;
     if (!edge || !volume) return;
-    const { engine, entry, api } = edge;
+    const { engine, dir, api } = edge;
     let predictor: KonfaiEdge.Predictor | null = null;
     try {
       setStage("inferring");
       // What konfai-apps runs for these options: the program and the members it keeps.
       const chosen: Chosen = JSON.parse(api.run(JSON.stringify(ensemble ? { ensemble } : {})));
-      const dir = entry.variants[0].weights;
       const programText = await (await fetched(app.ref, `${dir}/${chosen.program}`)).text();
       const program = JSON.parse(programText);
       setMessage("downloading the weights…");
@@ -182,15 +181,9 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
         URL.revokeObjectURL(input);
       }
       const url = URL.createObjectURL(new Blob([output.bytes as BlobPart]));
-      if (resultUrl.current) URL.revokeObjectURL(resultUrl.current);
-      resultUrl.current = url;
-      setResult({ url, name: output.path.split("/").pop()! });
-      await nv.addVolumeFromUrl({
-        url,
-        name: output.path.split("/").pop()!,
-        colormap: "warm",
-        opacity: 0.6,
-      });
+      const name = output.path.split("/").pop()!;
+      setResult({ url, name });
+      await nv.addVolumeFromUrl({ url, name, colormap: "warm", opacity: 0.6 });
       setStage("done");
       const kept = chosen.checkpoints.length;
       setMessage(`done: ${kept} model${kept > 1 ? "s" : ""}, rendered as overlay (WebGPU).`);
@@ -242,7 +235,7 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
                   </select>
                 </label>
               )}
-              <button className="deploy-run" disabled={!volume || busy} onClick={run}>
+              <button className="deploy-run" disabled={!edge || !volume || busy} onClick={run}>
                 {stage === "inferring" ? "Inferring…" : "Run inference"}
               </button>
             </>
