@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
 
-PROMPT_VERSION = "1.2"
+PROMPT_VERSION = "1.3"
 
 SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
 write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
@@ -113,16 +113,24 @@ def system_prompt(case: InspectionCase, config: ScoutConfig) -> str:
 
 
 def case_card(
-    case: InspectionCase, prior: dict[str, object], labels_summary: dict[str, object], modes: list[str], views_text: str
+    case: InspectionCase,
+    prior: dict[str, object],
+    labels_summary: dict[str, object],
+    modes: list[str],
+    views_text: str,
+    blind: bool,
 ) -> str:
-    """The first user message: everything known about the case before any view."""
+    """The first user message: what the model may know of the case before any view. Blind, the case's name, its
+    notes (the method, the dataset) and its prior scores are withheld."""
     grid = case.grid
     size_xyz = [int(n) for n in reversed(grid.size_zyx)]
     spacing = [round(float(v), 3) for v in grid.spacing_xyz]
-    lines = [
-        f"Task: {case.task}",
-        f"Case: {case.name}",
-        f"Notes: {case.notes or 'none'}",
+    lines = [f"Task: {case.task}"]
+    if blind:
+        lines.append("Case name, notes and prior evaluation: withheld (blind inspection); judge the images.")
+    else:
+        lines += [f"Case: {case.name}", f"Notes: {case.notes or 'none'}"]
+    lines += [
         f"Truth available: {'yes' if case.truth_available else 'no'} (roles given: {', '.join(case.inputs)})",
         f"Reference grid ({case.image_role}): size_xyz {size_xyz}, spacing_mm {spacing}, "
         f"extent_mm {[round(n * s, 1) for n, s in zip(size_xyz, spacing, strict=True)]}",
@@ -133,13 +141,11 @@ def case_card(
         lines.append("Label names: " + ", ".join(f"{k}: {v}" for k, v in sorted(case.labels.items())))
     if labels_summary:
         lines.append("Labels present: " + json.dumps(labels_summary))
-    if prior:
+    if not blind:
         lines.append(
             "Prior evaluation (KonfAI Eval, whole case): "
-            + ", ".join(f"{k} = {value_text(v)}" for k, v in prior.items())
+            + (", ".join(f"{k} = {value_text(v)}" for k, v in prior.items()) or "none given.")
         )
-    else:
-        lines.append("Prior evaluation: none given.")
     lines.append("View modes available: " + ", ".join(modes))
     lines.append(
         "Statement kinds: "

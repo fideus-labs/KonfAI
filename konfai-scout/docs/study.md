@@ -33,6 +33,8 @@ case are in its `defects.json`, in millimetres, so a notebook can match observat
 - Pin the model id and the prompt version; a report names both.
 - Give both modes the same budget; the fixed mode spends fewer calls by construction, which is part of the result.
 - Keep `allow_cloud_images` explicit per run; the report records the provider as remote or local.
+- Keep `blind` (the default) unless knowing the method, the notes and the prior scores is what is studied: a model
+  told the method's name or a poor Dice looks for what it was told.
 - Repeat: a model is not deterministic. `--repeats` runs each mode several times under distinct directories.
 
 ## Negative controls and planted defects

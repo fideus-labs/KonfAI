@@ -122,9 +122,13 @@ class ToolDriver:
     inspector binds, numbered in order (a CLI may call tools in parallel; the toolbox numbers its records)."""
 
     drives_tools = True
+    #: Whether the CLI reports its usage message by message (through ``on_usage``), so ``max_usd`` can stop it
+    #: mid-loop; without it the cost is known only once the whole loop has run.
+    running_cost = False
 
     def __init__(self) -> None:
         self.execute: Executor | None = None
+        self.on_usage: Callable[[Usage], None] | None = None
         self._calls = 0
         self._lock = threading.Lock()
 

@@ -31,16 +31,28 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
         assert len([v for v in report.views if v.kind == "slice"]) >= 3  # the central slices in the secondary modes
     else:
         assert "view" in tools
-    assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(report.tool_calls)
-    assert report.case["truth_available"] and report.versions["prompt"] == "1.2"
+    explored = [c for c in report.tool_calls if c.tool not in ("note", "conclude")]  # notes are outside the budget
+    assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(explored)
+    assert report.case["truth_available"] and report.versions["prompt"] == "1.3"
     assert report.prompts["system"].startswith("You are KonfAI Scout")
     summary = report.summary()
     assert summary["verdict"] == report.conclusion.verdict and summary["observations"][0]["defect"]
     data = json.loads((tmp_path / mode / "report.json").read_text())
     assert (
-        data["schema_version"] == "1.0"
+        data["schema_version"] == "1.1"
         and data["case"]["inputs"]["image" if key == "segmentation" else next(iter(data["case"]["inputs"]))]["sha256"]
     )
+
+
+def test_the_model_is_blind_to_the_method_and_the_scores_unless_told(fixtures, tmp_path):
+    case, _ = fixtures["segmentation"]
+    prior = {"PRED:TRUTH:Dice:1": 0.912}
+    named = InspectionCase(case.task, "methodx_case07", case.inputs, case.labels, prior, notes="by MethodX")
+    for blind in (True, False):
+        provider = HeuristicProvider()
+        report = inspect(named, ScoutConfig(blind=blind, max_px=200), tmp_path / str(blind), provider=provider)
+        assert all((secret in provider.card) is not blind for secret in ("methodx_case07", "MethodX", "0.912"))
+        assert report.prior_evaluation == prior and report.config["blind"] is blind  # the report's reader sees all
 
 
 def test_without_truth_nothing_is_confirmed(fixtures, tmp_path):

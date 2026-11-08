@@ -256,7 +256,10 @@ class Renderer:
                 raise ViewError(
                     f"unknown window preset {window!r}; presets: {', '.join(WINDOW_PRESETS)}, or [low, high]"
                 )
-            return WINDOW_PRESETS[window]
+            # ponytail: a CT stored as HU + 1024 is told by its 1st percentile (no air below 0); a scan of HU with
+            # no value below 0 in 99% of it would be shifted too. Read the stored offset from the header if it matters.
+            offset = 1024.0 if self.window(role)[0] >= 0 else 0.0
+            return WINDOW_PRESETS[window][0] + offset, WINDOW_PRESETS[window][1] + offset
         values = [float(v) for v in np.asarray(window, dtype=float).ravel()]
         if len(values) != 2:
             raise ViewError("a window is a preset name or [low, high]")

@@ -14,6 +14,7 @@ def fixtures(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple]:
         "segmentation": segmentation_case(root / "seg"),
         "segmentation_oblique": segmentation_case(root / "seg_oblique", oblique=True),
         "segmentation_no_truth": segmentation_case(root / "seg_no_truth", with_truth=False),
+        "segmentation_clean": segmentation_case(root / "seg_clean", clean=True),
         "registration": registration_case(root / "reg", oblique=True),
         "registration_no_ref": registration_case(root / "reg_no_ref", with_references=False, fold=False),
         "synthesis": synthesis_case(root / "syn"),

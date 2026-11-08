@@ -15,9 +15,9 @@ from typing import Any
 import numpy as np
 from konfai.data.geometry import Grid, WorldBox
 
-from .case import InspectionCase
+from .case import MASK_ROLES, InspectionCase
 from .config import ScoutConfig
-from .evaluation import EvaluationError, RegionEvaluator
+from .evaluation import DEFAULT_THRESHOLDS, EvaluationError, RegionEvaluator
 from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
 from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
@@ -55,6 +55,7 @@ class Toolbox:
         self.config = config
         self.renderer = renderer
         self.evaluator = evaluator
+        self.thresholds = {**DEFAULT_THRESHOLDS, **config.thresholds}
         self.calls: list[ToolCallRecord] = []
         self.measurements: list[Measurement] = []
         self.observations: list[Observation] = []
@@ -72,7 +73,9 @@ class Toolbox:
                     {"type": "string", "enum": [*sorted(WINDOW_PRESETS), "auto"]},
                     {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
                 ],
-                "description": "Intensity window: a preset name or [low, high]; auto by default.",
+                "description": "Intensity window: a CT preset in HU (shifted by 1024 on a CT stored as HU + 1024, "
+                "with no value below 0), or [low, high] in the image's own values; auto (its 1st to 99th "
+                "percentile) by default.",
             }
         )
         tools: list[ToolSpec] = []
@@ -313,11 +316,15 @@ class Toolbox:
         measured = grid.world_box(window)
         out: dict[str, Any] = {"box_measured": box_to_dict(measured), "voxels": int(np.prod(np.subtract(hi, lo)))}
         task = self.case.task
+        mask = None  # the intensities are those of the case's mask when it has one, as KonfAI Eval scores them
+        if MASK_ROLES[task] in self.case.inputs:
+            mask = self.renderer.volume(MASK_ROLES[task]).region(lo, hi)[0] != 0
+            out["mask_voxels"] = int(mask.sum())
         if task == "segmentation":
             prediction = self.renderer.volume("prediction").region(lo, hi)[0]
             out["prediction_labels"] = label_stats(prediction, grid, self.case.labels, lo)
             image = self.renderer.volume("image").region(lo, hi)[0]
-            out["image"] = intensity_stats(image)
+            out["image"] = intensity_stats(image, mask)
             if prediction.any():
                 out["image_inside_prediction"] = intensity_stats(image, prediction != 0)
             if "truth" in self.case.inputs:
@@ -325,8 +332,8 @@ class Toolbox:
                 out["truth_labels"] = label_stats(truth, grid, self.case.labels, lo)
                 out["overlap_voxels_prediction_vs_truth"] = label_overlap(prediction, truth)
         elif task == "registration":
-            out["fixed"] = intensity_stats(self.renderer.volume("fixed").region(lo, hi))
-            out["warped"] = intensity_stats(self.renderer.volume("warped").region(lo, hi))
+            out["fixed"] = intensity_stats(self.renderer.volume("fixed").region(lo, hi)[0], mask)
+            out["warped"] = intensity_stats(self.renderer.volume("warped").region(lo, hi)[0], mask)
             out["displacement"] = displacement_stats(self.renderer.volume("field").region(lo, hi))
             if "fixed_labels" in self.case.inputs:
                 out["fixed_labels"] = label_stats(
@@ -348,14 +355,14 @@ class Toolbox:
                     np.sum(np.all((points >= measured.low_xyz) & (points <= measured.high_xyz), axis=1))
                 )
         else:
-            synthetic = self.renderer.volume("synthetic").region(lo, hi)
-            out["synthetic"] = intensity_stats(synthetic)
-            out["source"] = intensity_stats(self.renderer.volume("source").region(lo, hi))
+            synthetic = self.renderer.volume("synthetic").region(lo, hi)[0]
+            out["synthetic"] = intensity_stats(synthetic, mask)
+            out["source"] = intensity_stats(self.renderer.volume("source").region(lo, hi)[0], mask)
             if "target" in self.case.inputs:
-                target = self.renderer.volume("target").region(lo, hi)
-                out["target"] = intensity_stats(target)
+                target = self.renderer.volume("target").region(lo, hi)[0]
+                out["target"] = intensity_stats(target, mask)
                 out["difference_synthetic_minus_target"] = intensity_stats(
-                    synthetic.astype(np.float64) - target.astype(np.float64)
+                    synthetic.astype(np.float64) - target.astype(np.float64), mask
                 )
         # the statistics are a measurement of kind `scout`: a note cites them like one of KonfAI Eval's
         measurement = Measurement(
@@ -447,20 +454,31 @@ class Toolbox:
             notes.append("figure(s) read from the views, not measured: " + ", ".join(unsourced))
         if outside:
             notes.append("measurement(s) taken outside this box, cited as context: " + ", ".join(outside))
-        if kind == "confirmed_error":
-            if not cited:
-                kind = "suspected_error"
-                notes.append("downgraded from confirmed_error: no measurement was cited")
-            elif not any(m.reference and _informative(m) for m in inside) and not any(
-                _defect_by_definition(m) for m in inside
-            ):
-                kind = "suspected_error"
+        observation_id = f"o{len(self.observations) + 1:03d}"
+        support = _support(inside, self.thresholds)
+        if kind != "measured_property" and box is not None:
+            # Scout's own check of the box: every criterion this case allows, recorded on the observation
+            try:
+                check = self.evaluator.measure(box, None, measurement_id=f"m{len(self.measurements) + 1:03d}")
+            except (EvaluationError, ValueError) as error:
+                notes.append(f"Scout's check of the box: {error}")
+            else:
+                check.request["check_of"] = observation_id
+                self.measurements.append(check)
+                record.measurements.append(check.id)
+                measurements.append(check.id)
+                found = _support([check], self.thresholds)
+                support += found
                 notes.append(
-                    "downgraded from confirmed_error: the cited measurements hold no value against a reference "
-                    "and show no error by definition"
+                    f"Scout's check {check.id} of the box: " + ("; ".join(found) or "no value past a threshold")
                 )
+        if kind == "confirmed_error" and not support:
+            kind = "suspected_error"
+            notes.append(
+                "downgraded from confirmed_error: no measured value of the box is past its criterion's threshold"
+            )
         observation = Observation(
-            id=f"o{len(self.observations) + 1:03d}",
+            id=observation_id,
             kind=kind,
             defect=defect,
             severity=severity,
@@ -506,24 +524,26 @@ def _number(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def _informative(measurement: Measurement) -> bool:
-    """A measurement with at least one finite value: an empty one (a box outside the reference) proves nothing."""
-    return any((n := _number(v)) is not None and math.isfinite(n) for v in measurement.values.values())
+def _past(key: str, value: object, thresholds: dict[str, dict[str, float]]) -> str | None:
+    """Why a measured value is an error: past its criterion's threshold in the bad direction, or a non-finite
+    statistic of the field. ``None`` otherwise: an empty value, or one without a threshold, proves nothing."""
+    number = _number(value)
+    if number is None:
+        return None
+    parts = key.split(":")  # OUTPUT:TARGET:Criterion[:label]; a region_stats key has no criterion
+    if not math.isfinite(number):
+        return f"{key} is not finite" if parts[0] == "FIELD" else None
+    rule = thresholds.get(parts[2], {}) if len(parts) > 2 else {}
+    if "below" in rule and number < rule["below"]:
+        return f"{key} = {value_text(number)} < {rule['below']:g}"
+    if "above" in rule and number > rule["above"]:
+        return f"{key} = {value_text(number)} > {rule['above']:g}"
+    return None
 
 
-def _defect_by_definition(measurement: Measurement) -> bool:
-    """A no-reference measurement that is an error by itself: a folded field, a non-finite value."""
-    for key, value in measurement.values.items():
-        number = _number(value)
-        if number is None:
-            continue
-        if not math.isfinite(number):
-            return True
-        if "JacobianFolding" in key and number > 0:
-            return True
-        if "JacobianMin" in key and number <= 0:
-            return True
-    return False
+def _support(measurements: list[Measurement], thresholds: dict[str, dict[str, float]]) -> list[str]:
+    """The values of these measurements that are errors, with why."""
+    return [why for m in measurements for key, value in m.values.items() if (why := _past(key, value, thresholds))]
 
 
 def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:

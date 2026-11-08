@@ -20,7 +20,8 @@ DEFAULT_MODELS = {
 
 @dataclass
 class Budget:
-    """What one inspection may spend. ``None`` lifts a limit."""
+    """What one inspection may spend. ``None`` lifts a limit. ``max_tool_calls`` counts the calls that explore
+    (views, montages, measurements, statistics): a ``note`` or the ``conclude`` that records them is never refused."""
 
     max_tool_calls: int = 40
     max_images: int = 60
@@ -55,6 +56,9 @@ class ScoutConfig:
     coverage_slices: int = 9
     #: Criteria per measurement kind, KonfAI's names and arguments; ``"labels": "auto"`` becomes the labels present.
     criteria: dict[str, dict[str, dict[str, object]]] = field(default_factory=dict)
+    #: When a measured value is an error, by KonfAI's result name: ``{"Dice": {"below": 0.8}, "MAE": {"above": 100}}``,
+    #: added to ``DEFAULT_THRESHOLDS``. A value confirms an error only past its threshold; a name without one, never.
+    thresholds: dict[str, dict[str, float]] = field(default_factory=dict)
     #: Prices per million tokens, ``{model: {"input": x, "output": y, "cache_read": z}}``, added to the defaults.
     prices: dict[str, dict[str, float]] = field(default_factory=dict)
     provider_retries: int = 3
@@ -64,6 +68,9 @@ class ScoutConfig:
     anthropic_fallbacks: bool = False
     #: Keep KonfAI's evaluation workspaces of every region measurement beside the report.
     keep_evaluations: bool = True
+    #: The model is not told the case's name, its notes (the method, the dataset) or its prior evaluation: it judges
+    #: the images and its own measurements. Off (``--no-blind``) for a study of what that knowledge changes.
+    blind: bool = True
     #: Free text appended to the system prompt (a site's own rules, a study's instructions).
     extra_instructions: str = ""
     #: After the inspection, a fresh session of the same model re-reads every error observation blind: crops of its

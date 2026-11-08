@@ -11,6 +11,7 @@ from konfai_scout.report import (
     View,
     compare,
     compare_markdown,
+    export,
     match_defects,
     render_markdown,
 )
@@ -123,3 +124,40 @@ def test_planted_defects_are_found_by_overlap_and_the_rest_are_invented():
     rows = compare([report], [planted])["rows"]
     assert (rows[0]["planted"], rows[0]["found"], rows[0]["false_positives"]) == (3, 2, 1)
     assert "| false_positives |" in compare_markdown({"rows": rows}).splitlines()[0]
+
+
+def test_export_levels_show_less_and_less_of_the_case():
+    report = sample()
+    report.observations[0].second_reading = {"answer": "visible", "text": "the cube of c1 is gone", "views": ["v001"]}
+    report.measurements[0].values["prediction_labels.2.name"] = "c1 lesion"  # a label name is text: never exported
+    assert export(report, "full") == report.to_dict()
+    regions = export(report, "regions")
+    assert regions["verdict"] == "defective" and regions["task"] == "segmentation"
+    assert regions["observations"] == [
+        {
+            "id": "o001",
+            "kind": "confirmed_error",
+            "defect": "missing_structure",
+            "severity": "major",
+            "confidence": 0.9,
+            "box_mm": {"min": [0, 0, 0], "max": [1, 1, 1]},
+            "plane": "axial",
+            "measurements": [
+                {
+                    "id": "m001",
+                    "reference": True,
+                    "box_measured": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                    "values": {"PRED:TRUTH:Dice": 0.1},
+                }
+            ],
+            "second_reading": "visible",
+        }
+    ]
+    text = json.dumps(regions)
+    for secret in ("c1", "image.mha", "evidence/", "the cube is missing", "transcript", "0.5"):
+        assert secret not in text  # the name, a path, an image, a description, the prior evaluation
+    assert export(report, "counts") == {
+        "level": "counts",
+        "verdict": "defective",
+        "counts": {"confirmed_error": {"missing_structure": {"major": 1}}},
+    }

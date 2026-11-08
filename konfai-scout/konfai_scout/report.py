@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 KINDS = ("measured_property", "suspected_error", "confirmed_error")
 SEVERITIES = ("minor", "moderate", "major", "critical")
 VERDICTS = ("acceptable", "defective", "insufficient_evidence")
@@ -309,6 +309,8 @@ def render_markdown(report: Report) -> str:
         ]
     if report.budget.get("exhausted"):
         lines += [f"Budget exhausted: {report.budget['exhausted']}.", ""]
+    if report.budget.get("not_enforced"):
+        lines += [f"Not enforced: {report.budget['not_enforced']}.", ""]
     second = report.second_reading
     if second and second.get("observations"):
         lines += [
@@ -398,6 +400,59 @@ def render_markdown(report: Report) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+#: What an export may show: everything, what is wrong where, or how much is wrong.
+LEVELS = ("full", "regions", "counts")
+
+
+def export(report: Report, level: str) -> dict[str, Any]:
+    """What may be shown of an inspection at a confidentiality level, for a reader that must not identify the case.
+
+    ``full``: the report as is. ``regions``: the verdict and every observation with its kind, defect, severity, box
+    and the values of its measurements; no case name, path, image, description, transcript or prior evaluation.
+    ``counts``: the verdict and the number of observations by kind, defect and severity."""
+    if level not in LEVELS:
+        raise ValueError(f"level is one of {LEVELS}, not {level!r}")
+    if level == "full":
+        return report.to_dict()
+    verdict = report.conclusion.verdict if report.conclusion else None
+    if level == "counts":
+        counts: dict[str, dict[str, dict[str, int]]] = {}
+        for o in report.observations:
+            severities = counts.setdefault(o.kind, {}).setdefault(o.defect, {})
+            severities[o.severity] = severities.get(o.severity, 0) + 1
+        return {"level": level, "verdict": verdict, "counts": counts}
+    measurements = {m.id: m for m in report.measurements}
+    return {
+        "level": level,
+        "task": report.case.get("task"),
+        "verdict": verdict,
+        "observations": [
+            {
+                "id": o.id,
+                "kind": o.kind,
+                "defect": o.defect,
+                "severity": o.severity,
+                "confidence": o.confidence,
+                "box_mm": o.box_mm,
+                "plane": o.plane,
+                "measurements": [
+                    {
+                        "id": m.id,
+                        "reference": m.reference,
+                        "box_measured": m.box_measured,
+                        # numbers only: a statistic may carry text (a label's name), and text may name anything
+                        "values": {k: v for k, v in m.values.items() if not isinstance(v, str)},
+                    }
+                    for m in (measurements.get(mid) for mid in o.measurements)
+                    if m is not None
+                ],
+                "second_reading": (o.second_reading or {}).get("answer"),
+            }
+            for o in report.observations
+        ],
+    }
 
 
 def _overlap(a: dict[str, list[float]], b: dict[str, list[float]]) -> bool:
