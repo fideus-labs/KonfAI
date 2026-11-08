@@ -9,7 +9,7 @@ preset. The fixed image defines the output grid. This guide runs an existing pre
 ```bash
 python -m pip install impact-reg-konfai
 impact-reg-konfai list
-impact-reg-konfai show Generic_Rigid_BSpline
+impact-reg-konfai show Elastix#rigid_bspline
 ```
 
 `list` gives the available presets. `show` describes one preset's engine, requirements
@@ -23,13 +23,13 @@ before changing engines.
 For a moving image and its fixed reference:
 
 ```bash
-impact-reg-konfai register Generic_Rigid_BSpline \
+impact-reg-konfai register Elastix#rigid_bspline \
   -f ./fixed.mha -m ./moving.mha \
   -o ./Registration --cpu 1
 ```
 
 Replace the paths with your pair. This preset runs on CPU. For a feature-based
-MR/CT registration, inspect `Elastix_IMPACT_Static` with `show` and use `--gpu 0`.
+MR/CT registration, inspect `Elastix#impact_static` with `show` and use `--gpu 0`.
 When the CT includes a table or anatomy outside the MR field of view, supply its body
 mask with `--fixed-mask ./ct_body.nii.gz` to restrict the metric region.
 

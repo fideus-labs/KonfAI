@@ -944,7 +944,7 @@ class FireANTsEngine:
         if self._deformable_metric == "impact" and fixed.GetDimension() == 2:
             # ponytail: ImpactFeatureLoss lays its grids and patches out in 3-D; ConvexAdam swaps the models
             raise ValueError(
-                "The FireANTs IMPACT presets are 3-D: register a 2-D image with ConvexAdam or FireANTs_SyN."
+                "The FireANTs IMPACT presets are 3-D: register a 2-D image with ConvexAdam or FireANTs#syn."
             )
         if self._deformable_metric == "impact":
             # Feature networks compute their channels along the voxel axes they are given: both images go in with

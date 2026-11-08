@@ -475,7 +475,7 @@ class Evaluator(DistributedObject):
                     true_loss = outcome.materialized()
                     if outcome.map is not None and getattr(metric, "dataset", None):
                         with self._clock.phase("map"):
-                            self._write_map(metric, output_group, name, outcome.map)
+                            self._write_map(metric, output_group, name, outcome.map, batch_sample[output_group])
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
                     Evaluator._record_value(result, statistics, base_key, true_loss, direction)
@@ -483,17 +483,13 @@ class Evaluator(DistributedObject):
             statistics.add(result, name)
         return result
 
-    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor) -> None:
-        """Write a metric's whole-case map beside the case, with the case's own geometry."""
+    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor, output: BatchDataItem) -> None:
+        """Write a metric's whole-case map beside the case, on its output's grid: the header of the first group
+        holding the case could be a landmark set's, with no geometry (the map then went to a .npy), in an order
+        that changed from one run to the next."""
         filename, _, file_format = split_path_spec(metric.dataset)
-        map_dataset = Dataset(filename, file_format)
         group = metric.group if metric.group else output_group
-        for dataset in self.dataset.datasets.values():
-            for g in dataset.get_group():
-                if dataset.is_dataset_exist(g, name):
-                    _, cache_attribute = dataset.get_infos(g, name)
-                    map_dataset.write(group, name, map_.squeeze(0).numpy(), cache_attribute)
-                    return
+        Dataset(filename, file_format).write(group, name, map_.squeeze(0).numpy(), Attribute(output.attribute[0]))
 
     def _voxelwise_pairs(self, tensors: dict[str, torch.Tensor]) -> dict[tuple[str, str], list[str]]:
         """Each output and target group a metric compares voxel to voxel, with those metrics' names. A metric
