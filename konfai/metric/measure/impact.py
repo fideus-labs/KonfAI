@@ -1097,6 +1097,7 @@ class IMPACTReg(CriterionWithAttribute):
             loss_module, loss_class = get_module(loss, "konfai.metric.measure")
             self.loss = apply_config(os.environ.get("KONFAI_CONFIG_PATH"))(module_attribute(loss_module, loss_class))()
         self.pca = int(pca)
+        self.model_name = model_name
         self.model = ImpactFeatureModel.download(model_name, in_channels, weights, shape)
 
     def get_name(self):
@@ -1206,6 +1207,7 @@ class SAM_Perceptual(CriterionWithAttribute):
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
+        self.model_ref = f"{repo_id}:{filename}"
         model_path = _download_model("SAM_Perceptual", repo_id, filename)
         self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 
