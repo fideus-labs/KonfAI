@@ -20,7 +20,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import ClassVar
 
 import fastmcp
@@ -445,6 +445,33 @@ class _CleanDataset:
 class _DirtyDataset:
     def __init__(self) -> None:
         self.transform = lambda x: x  # lambdas cannot be pickled for spawn transfer
+
+
+def _validate_setup(tmp_path: Path, monkeypatch, config: str, dataloader: list[list[object]]) -> dict:
+    workspace_dir = tmp_path / "session"
+    workspace_dir.mkdir()
+    config_path = workspace_dir / "Config.yml"
+    config_path.write_text(config, encoding="utf-8")
+    monkeypatch.setenv("KONFAI_MCP_VALIDATE_ROOT", str(tmp_path / "validate"))
+    workflow = SimpleNamespace(name="DEMO", size=1, dataloader=dataloader, setup=lambda *_args: None)
+    monkeypatch.setattr("konfai.trainer.build_train", lambda **_kwargs: workflow)
+    return mcp_runner.validate_workflow_api(
+        workflow="train", level="setup", workspace_dir=str(workspace_dir), config=str(config_path)
+    )
+
+
+def test_validation_spawn_check_sees_the_configs_worker_request(tmp_path: Path, monkeypatch) -> None:
+    # the scratch copy asks for no worker; the check must still know the real run spawns two
+    config = "Trainer:\n  train_name: DEMO\n  Dataset:\n    num_workers: 2\n"
+    payload = _validate_setup(tmp_path, monkeypatch, config, [[_PickleLoader(_DirtyDataset())]])
+    assert payload["worker_spawn_check"]["requested_num_workers"] == 2
+    assert payload["worker_spawn_check"]["picklable"] is False
+
+
+def test_validation_counts_the_batches_of_each_rank_loader(tmp_path: Path, monkeypatch) -> None:
+    # Trainer.dataloader is one list per rank: [training, validation]
+    payload = _validate_setup(tmp_path, monkeypatch, "Trainer:\n  train_name: DEMO\n", [[[0] * 3, [0] * 2]])
+    assert payload["setup"]["iterations_per_epoch"] == [3, 2]
 
 
 def test_worker_spawn_picklability_check_catches_unpicklable_datasets() -> None:

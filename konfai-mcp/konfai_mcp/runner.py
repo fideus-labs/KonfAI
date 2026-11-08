@@ -792,22 +792,27 @@ def smoke_test_component(
         return payload
 
 
-def _force_single_process_in_config(config_path: Path) -> None:
-    """Set every ``num_workers`` of a (scratch) config to 0 and drop the worker-only loader knobs, in place."""
+def _force_single_process_in_config(config_path: Path) -> int:
+    """Set every ``num_workers`` of a (scratch) config to 0 and drop the worker-only loader knobs, in place.
+
+    Returns the largest ``num_workers`` the config asked for: the worker-spawn check still needs the request."""
     from ruamel.yaml import YAML
 
     yaml = YAML()
     try:
         data = yaml.load(config_path.read_text(encoding="utf-8"))
     except Exception:  # not our YAML to judge here: the build reports it
-        return
+        return 0
 
     changed = False
+    requested = 0
 
     def walk(node: Any) -> None:
-        nonlocal changed
+        nonlocal changed, requested
         if isinstance(node, dict):
             if node.get("num_workers") not in (None, 0):
+                if isinstance(node["num_workers"], int):
+                    requested = max(requested, node["num_workers"])
                 node["num_workers"] = 0
                 changed = True
             for key in ("prefetch_factor", "persistent_workers"):
@@ -824,6 +829,7 @@ def _force_single_process_in_config(config_path: Path) -> None:
     if changed:  # a config asking for no worker is read as written, byte for byte
         with config_path.open("w", encoding="utf-8") as handle:
             yaml.dump(data, handle)
+    return requested
 
 
 def _force_single_process_loading(workflow_object: Any) -> int:
@@ -1062,7 +1068,7 @@ def validate_workflow_api(
         _purge_workspace_modules(Path(workspace_dir))
         # This daemonic child cannot spawn loader workers: the scratch copy asks for none, whatever the
         # config says (the real run keeps its num_workers; worker_spawn_check pre-flights that path).
-        _force_single_process_in_config(scratch)
+        requested_in_config = _force_single_process_in_config(scratch)
         try:
             if single_process:
                 _apply_single_process_patches()
@@ -1107,15 +1113,17 @@ def validate_workflow_api(
             if collect_model_outputs:
                 payload["model_outputs"] = _collect_model_outputs(workflow_object, workflow)
             if level in ("setup", "train_step"):
-                requested_num_workers = _force_single_process_loading(workflow_object)
+                requested_num_workers = max(requested_in_config, _force_single_process_loading(workflow_object))
                 workflow_object.setup(1)
                 loaders = getattr(workflow_object, "dataloader", []) or []
                 payload["setup"] = {
                     "dataloaders": len(loaders),
                     "world_size": getattr(workflow_object, "size", None),  # processes the run would spawn
                     # how long a run is, before it is launched: batches per epoch of each loader, AS BUILT HERE
-                    "iterations_per_epoch": [len(loader) for loader in loaders if hasattr(loader, "__len__")],
-                    "iterations_note": "counted on the data this check built (a reduced sample when the check "
+                    # one list per rank (setup(1): one rank), training's loader then validation's when there is one
+                    "iterations_per_epoch": [len(dl) for rank in loaders for dl in rank if hasattr(dl, "__len__")],
+                    "iterations_note": "training first, then validation when the split has one; "
+                    "counted on the data this check built (a reduced sample when the check "
                     "subsamples): the run's own count is its cases times patches over the batch size",
                 }
                 payload["worker_spawn_check"] = _check_worker_spawn_picklability(workflow_object, requested_num_workers)
