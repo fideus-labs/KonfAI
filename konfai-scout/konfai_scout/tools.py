@@ -7,16 +7,19 @@ handed over; a note is checked against the epistemic rules before it enters the 
 from __future__ import annotations
 
 import json
+import math
+import re
 import time
 from typing import Any
 
 import numpy as np
+from konfai.data.geometry import Grid, WorldBox
 
 from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import EvaluationError, RegionEvaluator
 from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
-from .planes import PLANES, box_from_dict, box_to_dict, window_of, world_box_of
+from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, grid_bounds, window_of, world_box_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation
 from .report import ToolCall as ToolCallRecord
@@ -330,11 +333,15 @@ class Toolbox:
                     self.case.volume("fixed_labels").region(lo, hi)[0], grid, self.case.labels, lo
                 )
             try:
-                out["warped_labels"] = label_stats(
-                    self.renderer.volume("warped_labels").region(lo, hi)[0], grid, self.case.labels, lo
-                )
+                warped_labels = self.renderer.volume("warped_labels").region(lo, hi)[0]
             except ViewError:
-                pass
+                warped_labels = None
+            if warped_labels is not None:
+                out["warped_labels"] = label_stats(warped_labels, grid, self.case.labels, lo)
+                if "fixed_labels" in self.case.inputs:
+                    out["overlap_voxels_warped_vs_fixed_labels"] = label_overlap(
+                        warped_labels, self.case.volume("fixed_labels").region(lo, hi)[0]
+                    )
             points = self.case.landmarks("fixed_landmarks")
             if points is not None:
                 out["fixed_landmarks_inside"] = int(
@@ -350,8 +357,20 @@ class Toolbox:
                 out["difference_synthetic_minus_target"] = intensity_stats(
                     synthetic.astype(np.float64) - target.astype(np.float64)
                 )
-        record.summary = f"stats of {out['voxels']} voxels"
-        return {"region": out, "summary": record.summary}, []
+        # the statistics are a measurement of kind `scout`: a note cites them like one of KonfAI Eval's
+        measurement = Measurement(
+            id=f"m{len(self.measurements) + 1:03d}",
+            kind="scout",
+            reference=any(key.startswith(("overlap_voxels", "difference_")) for key in out),
+            box_requested=box_to_dict(box),
+            box_measured=out["box_measured"],
+            values=_flatten({k: v for k, v in out.items() if k != "box_measured"}),
+            request={"tool": "region_stats"},
+        )
+        self.measurements.append(measurement)
+        record.measurements.append(measurement.id)
+        record.summary = f"{measurement.id}: stats of {out['voxels']} voxels"
+        return {"region": out, "measurement": {"id": measurement.id}, "summary": record.summary}, []
 
     def _tool_note(
         self,
@@ -372,24 +391,70 @@ class Toolbox:
             raise ValueError(f"defect is one of {DEFECTS[self.case.task]}")
         if severity not in SEVERITIES:
             raise ValueError(f"severity is one of {SEVERITIES}")
-        known_views = {v.id for v in self.renderer.views}
-        known_measurements = {m.id for m in self.measurements}
+        known_views = {v.id: v for v in self.renderer.views}
+        known_measurements = {m.id: m for m in self.measurements}
         views = list(views or [])
         measurements = list(measurements or [])
         unknown = [v for v in views if v not in known_views] + [m for m in measurements if m not in known_measurements]
         if unknown:
-            raise ValueError(f"unknown evidence id(s) {unknown}; cite ids returned by view, montage or measure")
+            raise ValueError(
+                f"unknown evidence id(s) {unknown}; cite ids returned by view, montage, measure or region_stats"
+            )
+        box = box_from_dict(box_mm) if box_mm else None
+        cited_views = [known_views[v] for v in views]
+        cited = [known_measurements[m] for m in measurements]
+        # the hard rules: what does not enter the report at all (the model is told why and may call again)
+        if kind == "measured_property" and not cited:
+            raise ValueError(
+                "a measured_property cites the measurement that holds its figures (measure or region_stats first); "
+                "something seen but not measured is a suspected_error"
+            )
+        if kind != "measured_property":
+            if not cited_views:
+                raise ValueError("an error cites at least one view that shows it")
+            if box is not None and not any(_shows(v, box, self.renderer.grid) for v in cited_views):
+                raise ValueError(
+                    f"none of the cited views shows the box {box_to_dict(box)}: cite a view that covers it, or "
+                    "render one first (view with zoom)"
+                )
+        inside, outside = list(cited), []
+        if box is not None:
+            inside = [
+                m
+                for m in cited
+                if not m.box_measured or box_intersection(box_from_dict(m.box_measured), box) is not None
+            ]
+            outside = [m.id for m in cited if m not in inside]
+            if kind == "confirmed_error" and cited and not inside:
+                raise ValueError(
+                    f"measurement(s) {outside} were taken outside this box: a confirmation rests on a measurement "
+                    "of the region it describes; measure it"
+                )
+        grid = self.renderer.grid
+        bounds = grid_bounds(grid)
+        facts = [float(v) for v in (*grid.spacing_xyz, *grid.size_zyx, *bounds.low_xyz, *bounds.high_xyz)]
+        unsourced = _unsourced_figures(description, cited, box, facts)
+        if kind == "measured_property" and unsourced:
+            raise ValueError(
+                f"figure(s) {', '.join(unsourced)} appear in no cited measurement: write the values as the tools "
+                "returned them, or record a suspected_error"
+            )
         notes: list[str] = []
-        if kind == "confirmed_error" and not measurements:
-            kind = "suspected_error"
-            notes.append("downgraded from confirmed_error: no measurement was cited")
+        if unsourced:
+            notes.append("figure(s) read from the views, not measured: " + ", ".join(unsourced))
+        if outside:
+            notes.append("measurement(s) taken outside this box, cited as context: " + ", ".join(outside))
         if kind == "confirmed_error":
-            cited = [m for m in self.measurements if m.id in measurements]
-            if not any(m.reference for m in cited) and not any(_defect_by_definition(m) for m in cited):
+            if not cited:
+                kind = "suspected_error"
+                notes.append("downgraded from confirmed_error: no measurement was cited")
+            elif not any(m.reference and _informative(m) for m in inside) and not any(
+                _defect_by_definition(m) for m in inside
+            ):
                 kind = "suspected_error"
                 notes.append(
-                    "downgraded from confirmed_error: the cited measurements have no reference and show no "
-                    "error by definition"
+                    "downgraded from confirmed_error: the cited measurements hold no value against a reference "
+                    "and show no error by definition"
                 )
         observation = Observation(
             id=f"o{len(self.observations) + 1:03d}",
@@ -398,7 +463,7 @@ class Toolbox:
             severity=severity,
             confidence=float(min(max(confidence, 0.0), 1.0)),
             description=description,
-            box_mm=box_to_dict(box_from_dict(box_mm)) if box_mm else None,
+            box_mm=box_to_dict(box) if box is not None else None,
             plane=plane,
             views=views,
             measurements=measurements,
@@ -434,16 +499,104 @@ class Toolbox:
         return {"conclusion": {"verdict": verdict, "note": reason}, "summary": record.summary}, []
 
 
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _informative(measurement: Measurement) -> bool:
+    """A measurement with at least one finite value: an empty one (a box outside the reference) proves nothing."""
+    return any((n := _number(v)) is not None and math.isfinite(n) for v in measurement.values.values())
+
+
 def _defect_by_definition(measurement: Measurement) -> bool:
-    """A no-reference measurement that is an error by itself: a folded field, non-finite values."""
+    """A no-reference measurement that is an error by itself: a folded field, a non-finite value."""
     for key, value in measurement.values.items():
-        if "JacobianFolding" in key and isinstance(value, (int, float)) and value > 0:
+        number = _number(value)
+        if number is None:
+            continue
+        if not math.isfinite(number):
             return True
-        if "JacobianMin" in key and isinstance(value, (int, float)) and value <= 0:
+        if "JacobianFolding" in key and number > 0:
             return True
-        if value is None:
+        if "JacobianMin" in key and number <= 0:
             return True
     return False
+
+
+def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:
+    """Whether a view drew some of the box: a slice (or its crop) is one voxel thick, a montage is its tiles."""
+    if view.kind == "montage":
+        full = [slice(0, int(n)) for n in grid.size_zyx]
+        for index in view.extra.get("indices") or []:
+            window = list(full)
+            window[view.array_axis] = slice(int(index), int(index) + 1)
+            if box_intersection(world_box_of(grid, tuple(window)), box) is not None:
+                return True
+        return False
+    return box_intersection(box_from_dict(view.box_mm), box) is not None
+
+
+_NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+_UNIT_FIGURE = re.compile(
+    rf"(?<![\w.\-])({_NUMBER})(?:\s*(?:-|to)\s*({_NUMBER}))?\s*(mm³|mm3|mm²|mm2|mm|cm|%|HU|voxels?)(?![\w])"
+)
+_NOT_A_FIGURE = r"(?<!label )(?<!labels )(?<!slice )(?<!slices )(?<!index )(?<!tile )(?<!tiles )(?<!box )"
+_METRIC_FIGURE = re.compile(
+    rf"\b(?:Dice|DSC|MAE|PSNR|SSIM|TRE|HD95|Hausdorff|NCC|det\s*J|Jacobian\w*)(?::\d+)?[^\d-]{{0,16}}?\s{_NOT_A_FIGURE}"
+    rf"({_NUMBER})",
+    re.IGNORECASE,
+)
+
+
+def _figures(description: str) -> list[tuple[str, float, bool]]:
+    """The figures a description states: as written, as a number, and whether they are percentages."""
+    description = description.translate({0x2212: "-", 0x2013: "-"})  # a minus sign, an en dash: hyphens
+    out: list[tuple[str, float, bool]] = []
+    for match in _UNIT_FIGURE.finditer(description):
+        for text in (match.group(1), match.group(2)):
+            if text:
+                out.append((f"{text} {match.group(3)}", float(text), match.group(3) == "%"))
+    for match in _METRIC_FIGURE.finditer(description):
+        out.append((" ".join(match.group(0).split()), float(match.group(1)), False))
+    return out
+
+
+def _unsourced_figures(
+    description: str, cited: list[Measurement], box: WorldBox | None, facts: list[float] | None = None
+) -> list[str]:
+    """The figures of a description that no cited measurement holds, to the precision written; the coordinates of
+    the boxes and the facts of the case card (spacing, size, bounds) count as sourced."""
+    pool: list[float] = list(facts or [])
+    for m in cited:
+        pool += [n for v in m.values.values() if (n := _number(v)) is not None]
+        for b in (m.box_measured, m.box_requested):
+            if b:
+                pool += [float(x) for part in b.values() for x in part]
+    if box is not None:
+        pool += [float(x) for x in (*box.low_xyz, *box.high_xyz)]
+    unsourced = []
+    for text, value, percent in _figures(description):
+        decimals = len(text.split()[0].partition(".")[2]) if percent or text.split()[0][0].isdigit() else 0
+        candidates = [(value, decimals)] + ([(value / 100.0, decimals + 2)] if percent else [])
+        if not any(_same(c, p, d) for c, d in candidates for p in pool):
+            unsourced.append(text)
+    return unsourced
+
+
+def _same(written: float, measured: float, decimals: int) -> bool:
+    return round(measured, decimals) == round(written, decimals) or abs(written - measured) <= 0.01 * abs(measured)
+
+
+def _flatten(data: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Nested statistics as one level of dotted keys; lists (boxes) are left out."""
+    out: dict[str, Any] = {}
+    for key, value in data.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            out.update(_flatten(value, name + "."))
+        elif value is None or isinstance(value, (int, float, str)):
+            out[name] = value
+    return out
 
 
 def _view_payload(view: Any) -> dict[str, Any]:

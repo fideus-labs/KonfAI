@@ -34,3 +34,21 @@ case are in its `defects.json`, in millimetres, so a notebook can match observat
 - Give both modes the same budget; the fixed mode spends fewer calls by construction, which is part of the result.
 - Keep `allow_cloud_images` explicit per run; the report records the provider as remote or local.
 - Repeat: a model is not deterministic. `--repeats` runs each mode several times under distinct directories.
+
+## Negative controls and planted defects
+
+Whether the model invents defects is measured, not assumed. `synthetic.py` builds each case in two states: clean
+(`clean=True`: the prediction is the truth, the field is the exact one, the synthesis is the target under fresh
+noise) and planted (its `defects.json`, in millimetres). On a clean case every error observation is a false
+positive by construction; on a planted case an error observation finds a defect when its box overlaps the planted
+box (or names a defect planted without a box, like a blur). The model is told nothing of which is which.
+
+```bash
+python examples/study_controls.py --provider claude-code --allow-cloud-images --repeats 3 --second-reading
+konfai-scout compare examples/out/controls/*/*          # planted, found, false_positives, not_visible per run
+```
+
+`match_defects` in `report.py` does the matching; `compare` reads the `defects.json` beside a case's inputs by
+itself. Real data makes a stronger control: the same scan as fixed and moving under a zero field, the truth given
+as the prediction, with notes that withhold what the pair is. Report the invented errors per inspection, the planted
+defects found, and, with `--second-reading`, how many suspicions the blind reader did not reproduce.

@@ -96,7 +96,6 @@ class HeuristicProvider(ScriptedProvider):
         self.card = ""
         self.step = 0
         self.suspect: dict[str, Any] | None = None
-        self.measurement_id: str | None = None
         self.view_id: str | None = None
         self.coverage_views: list[str] = []
         self.stats_asked = False
@@ -112,6 +111,14 @@ class HeuristicProvider(ScriptedProvider):
 
     def user(self, text: str, images: list[ImageContent] | None = None) -> Turn:
         self.messages.append({"role": "user", "content": text, "images": len(images or [])})
+        if not self.tools:  # asked for a plain answer (a second reading): a heuristic does not read images
+            self.calls += 1
+            return Turn(
+                text="UNSURE\nA heuristic model does not read images.",
+                tool_calls=[],
+                stop="end_turn",
+                usage=Usage(1, 1),
+            )
         self.card = text
         match = re.search(r"Task: (\w+)", text)
         self.task = match.group(1) if match else "segmentation"
@@ -191,14 +198,13 @@ class HeuristicProvider(ScriptedProvider):
             if calls:
                 return turn(*calls, text=f"Looking closer at {self.suspect['why']}.")
         if self.suspect is not None and "note" in names and not any("observation" in r for r in self.results):
+            measurement_ids = [r["measurement"]["id"] for r in self.results if "measurement" in r]
             for r in parsed:
-                if "measurement" in r:
-                    self.measurement_id = r["measurement"]["id"]
                 if "view" in r:
                     self.view_id = r["view"]["id"]
             measured = self._measured_values()
             kind, severity = self.suspect["kind"], self.suspect["severity"]
-            if self.measurement_id and measured is not None:
+            if measured is not None:
                 kind = "confirmed_error" if measured["bad"] else "measured_property"
                 severity = severity if measured["bad"] else "minor"
             return turn(
@@ -212,7 +218,7 @@ class HeuristicProvider(ScriptedProvider):
                     box_mm=self.suspect["box"],
                     plane="axial",
                     views=[v for v in [self.view_id] if v] or self.coverage_views[:1],
-                    measurements=[m for m in [self.measurement_id] if m],
+                    measurements=measurement_ids,
                 )
             )
         kinds = [r["observation"]["kind"] for r in self.results if "observation" in r]

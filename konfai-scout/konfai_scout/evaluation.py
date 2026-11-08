@@ -98,6 +98,7 @@ class RegionEvaluator:
         self.work = Path(work) / "konfai"
         self.derived = derived
         self.count = 0
+        self._dropped: list[str] = []
 
     def criteria(self, kind: str) -> dict[str, dict[str, Any]]:
         return dict(self.config.criteria.get(kind) or DEFAULT_CRITERIA[kind])
@@ -115,9 +116,18 @@ class RegionEvaluator:
         measured = world_box_of(grid, window)
         root = self.work / identifier
         dataset = Dataset(root / "Dataset", "mha")
+        # SSIM needs 7 voxels along every axis: on a thinner box it is left out rather than refusing the whole call
+        self._dropped = (
+            ["SSIM: the box is thinner than its 7-voxel window"]
+            if min(int(part.stop - part.start) for part in window) < 7
+            else []
+        )
         tree, reference, labels_used = self._stage(dataset, window, metrics)
         if not tree:
-            raise EvaluationError("nothing to measure in this box with the roles this case has")
+            raise EvaluationError(
+                "nothing to measure in this box with the roles this case has"
+                + (f"; metrics are criterion names, for this case: {', '.join(self.available())}" if metrics else "")
+            )
         from konfai import evaluate
 
         try:
@@ -148,7 +158,12 @@ class RegionEvaluator:
             box_requested=box_to_dict(box),
             box_measured=box_to_dict(measured),
             values=values,
-            request={"metrics": tree, "labels": labels_used, "dataset": str(root / "Dataset")},
+            request={
+                "metrics": tree,
+                "labels": labels_used,
+                "dataset": str(root / "Dataset"),
+                **({"dropped": self._dropped} if self._dropped else {}),
+            },
             workspace=str(root.relative_to(self.work.parent)) if self.config.keep_evaluations else None,
             duration_s=round(time.time() - started, 2),
         )
@@ -188,14 +203,31 @@ class RegionEvaluator:
 
     @staticmethod
     def _selected(criteria: dict[str, dict[str, Any]], metrics: list[str] | None) -> dict[str, dict[str, Any]]:
+        """The criteria asked for, by KonfAI's criterion name or by a result key a model read (`WARPED:FIXED:MAE`,
+        `FIELD:None:DisplacementP95`, `PRED:TRUTH:Dice:1`)."""
         if not metrics:
             return criteria
-        wanted = {m.lower() for m in metrics}
-        return {
-            name: args
-            for name, args in criteria.items()
-            if name.lower() in wanted or name.split("#")[0].lower() in wanted
-        }
+        names = {name.lower(): name for name in criteria}
+        selected: set[str] = set()
+        for wanted in {_criterion_name(m) for m in metrics}:
+            if wanted in names:  # the exact criterion (`Displacement#2`)
+                selected.add(names[wanted])
+            elif any(name.split("#")[0].lower() == wanted for name in criteria):  # its family (`Displacement`)
+                selected |= {name for name in criteria if name.split("#")[0].lower() == wanted}
+            else:  # a result key's last part (`DisplacementP95`)
+                selected |= {name for name in criteria if wanted.startswith(name.split("#")[0].lower())}
+        return {name: args for name, args in criteria.items() if name in selected}
+
+    def _criteria_for(self, kind: str, metrics: list[str] | None) -> dict[str, dict[str, Any]]:
+        selected = self._selected(self.criteria(kind), metrics)
+        if self._dropped:
+            selected = {name: args for name, args in selected.items() if name.split("#")[0] != "SSIM"}
+        return selected
+
+    def available(self) -> list[str]:
+        """The criterion names this case can be measured with, as `measure` takes them."""
+        kinds = [k for k in DEFAULT_CRITERIA if k == self.case.task or k.startswith(self.case.task + "_")]
+        return sorted({name.split("#")[0] for kind in kinds for name in self.criteria(kind)})
 
     def _stage(
         self, dataset: Dataset, window: tuple[slice, slice, slice], metrics: list[str] | None
@@ -266,10 +298,16 @@ class RegionEvaluator:
                     reference = True
         else:
             if "target" in self.case.inputs:
-                criteria = self._selected(self.criteria("synthesis"), metrics)
+                criteria = self._criteria_for("synthesis", metrics)
                 if criteria:
                     self._write(dataset, "SYN", self.case.volume("synthetic"), window, "float32")
                     self._write(dataset, "TARGET", self.case.volume("target"), window, "float32")
                     tree["SYN"] = {f"TARGET{mask_group}": criteria}
                     reference = True
         return tree, reference, labels_used
+
+
+def _criterion_name(metric: str) -> str:
+    """A criterion as `measure` takes it, from its name or from a result key (`WARPED:FIXED:MAE`, `PRED:TRUTH:Dice:1`)."""
+    parts = [part for part in metric.split(":") if part and not part.isdigit()]
+    return (parts[-1] if parts else metric).lower()

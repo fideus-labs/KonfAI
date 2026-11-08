@@ -66,6 +66,10 @@ class ScoutConfig:
     keep_evaluations: bool = True
     #: Free text appended to the system prompt (a site's own rules, a study's instructions).
     extra_instructions: str = ""
+    #: After the inspection, a fresh session of the same model re-reads every error observation blind: crops of its
+    #: box in a few modes and the claim, without the method, the history or the measurements. Its answer (visible,
+    #: not visible, unsure) is recorded on the observation; nothing is removed.
+    second_reading: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:

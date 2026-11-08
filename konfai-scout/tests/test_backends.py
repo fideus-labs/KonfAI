@@ -36,5 +36,5 @@ def test_a_case_of_ome_zarr_stores_is_read_through_konfai(fixtures, tmp_path):
     assert (
         report.case["inputs"]["image"]["path"].endswith("IMAGE.ome.zarr") and report.case["inputs"]["image"]["sha256"]
     )
-    measured = [m for m in report.measurements if m.values]
+    measured = [m for m in report.measurements if m.kind == "konfai_eval" and m.values]
     assert measured and any(k.endswith("Dice:2") for k in measured[0].values)

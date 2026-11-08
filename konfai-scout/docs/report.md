@@ -26,12 +26,13 @@ An inspection leaves one directory:
 | `prior_evaluation` | the whole-case values read from the KonfAI Eval reports given (`{metric key: value}`) |
 | `tool_calls` | every call: number, tool, arguments, start time, duration, ok, summary, the views, measurements or observation it produced, the error |
 | `views` | every view: id, kind (slice, montage), plane, array axis, index, position (mm), the box it covers (mm), mode, window, size, `px_to_mm` (`world = origin + col * u + row * v`), path, SHA-256, whether it was sent, extras (legend, scales, montage tiles) |
-| `measurements` | every measurement: id, kind (`konfai_eval`), `reference` (measured against a truth), the box requested and the box measured (the voxels cropped), the values by KonfAI's metric keys (`PRED:TRUTH:Dice:1`), the request (criteria, labels, dataset), the workspace, duration |
-| `observations` | every note: id, kind, defect, severity, confidence, description, box (mm), plane, the view ids and measurement ids cited, notes (a downgrade and why) |
+| `measurements` | every measurement: id, kind (`konfai_eval` for `measure`, `scout` for the descriptive statistics of `region_stats`), `reference` (measured against a truth), the box requested and the box measured (the voxels cropped), the values by KonfAI's metric keys (`PRED:TRUTH:Dice:1`) or by dotted statistic names, the request (criteria, labels, dataset), the workspace, duration |
+| `observations` | every note that passed the rules: id, kind, defect, severity, confidence, description, box (mm), plane, the view ids and measurement ids cited, notes (a downgrade and why, figures read from a view rather than measured), `second_reading` when one was asked (`answer`: visible, not_visible, unsure or unparsed; the reader's sentence; the crops it saw) |
 | `conclusion` | verdict, summary, confidence, `by` (`model`, or `scout` when Scout had to conclude itself), reason |
 | `usage` | requests, input/output tokens, cache reads and writes, images sent, cost in USD when the price is known |
 | `budget` | the limits, what was spent, what exhausted the budget if anything |
 | `error` | a provider failure or a refusal, when one ended the inspection |
+| `second_reading` | when asked: the reader's model, how many error observations were re-read and the counts by answer, the path of its transcripts |
 
 ## Statements
 
@@ -44,6 +45,37 @@ Three kinds, never confused:
   recorded as `suspected_error` with the reason in `notes`.
 
 Without a truth, no reference metric exists: nothing is confirmed from appearance, and the report says so.
+
+### The rules `note` enforces
+
+A model can be wrong in two ways: it can see something that is not there, and it can write something it did not see.
+The second is caught mechanically; `note` refuses the call and tells the model why, so it can look again or cite
+properly:
+
+- an error (suspected or confirmed) cites at least one view, and when it has a box, one of the cited views shows
+  that box: a slice or a zoom whose extent intersects it, or a montage with a tile through it. A defect "seen" where
+  no cited image looks is not recorded;
+- a `measured_property` cites the measurement (`measure` or `region_stats`) that holds its figures, and every figure
+  it states with a unit or a metric name is found in a cited measurement, to the precision written. A number that
+  no tool returned does not enter the report as a measurement;
+- a confirmation rests on a measurement of the region it describes: a `confirmed_error` whose cited measurements
+  were all taken outside its box is refused. A measurement taken elsewhere may be cited beside one of the region,
+  as context; a note says which.
+
+Two softer rules downgrade or mark instead of refusing: a confirmation whose cited measurements hold no value
+against a reference (a box outside the truth gives `None`, which proves nothing) and show no error by definition
+becomes a `suspected_error`; a figure in an error's description that no cited measurement holds stays, with the note
+that it was read from a view. The Markdown rendition shows every note in italics under its observation.
+
+### The blind second reading
+
+With `second_reading` (CLI `--second-reading`), a fresh session of the same model re-reads every error observation
+that has a box: it receives crops of that box (twice its size, at least a dozen voxels) in two or three modes, the
+claim as written, and nothing else: not the method, not the history, not the measurements. It answers `VISIBLE`,
+`NOT_VISIBLE` or `UNSURE` with one sentence, recorded on the observation as `second_reading` and summed up in the
+report's `second_reading` field. Nothing is removed or re-judged: a confirmation stands on its measurement, and a
+reader can see which suspicions a second pair of eyes did not reproduce. Its transcripts are in
+`second_reading.json`, its crops among the views.
 
 Defect types per task:
 

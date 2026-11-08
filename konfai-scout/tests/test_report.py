@@ -11,6 +11,7 @@ from konfai_scout.report import (
     View,
     compare,
     compare_markdown,
+    match_defects,
     render_markdown,
 )
 
@@ -99,4 +100,26 @@ def test_compare_rows():
     rows = compare([sample("fixed", "acceptable"), sample("active")])["rows"]
     assert [r["mode"] for r in rows] == ["fixed", "active"]
     assert rows[0]["confirmed"] == 1 and rows[1]["cost_usd"] == 0.001
+    assert rows[0]["planted"] is None and rows[0]["not_visible"] is None
     assert "| case |" in compare_markdown({"rows": rows})
+
+
+def test_planted_defects_are_found_by_overlap_and_the_rest_are_invented():
+    report = sample()
+    report.observations.append(
+        Observation("o002", "suspected_error", "leak", "minor", 0.4, "far away", {"min": [5, 5, 5], "max": [6, 6, 6]})
+    )
+    report.observations.append(Observation("o003", "measured_property", "other", "minor", 0.9, "a volume", None))
+    report.observations.append(Observation("o004", "suspected_error", "blur", "minor", 0.5, "soft edges", None))
+    planted = {
+        "cube": {"defect": "missing_structure", "box_mm": {"min": [0.5, 0.5, 0.5], "max": [2, 2, 2]}},
+        "hole": {"defect": "holes", "box_mm": {"min": [3, 3, 3], "max": [4, 4, 4]}},
+        "blur": {"defect": "blur"},
+    }
+    matched = match_defects(report, planted)
+    assert matched["planted"] == 3 and matched["found_names"] == ["cube", "blur"]
+    assert matched["false_positive_ids"] == ["o002"]  # a measured property is not an error
+    assert match_defects(report, {})["false_positives"] == 3
+    rows = compare([report], [planted])["rows"]
+    assert (rows[0]["planted"], rows[0]["found"], rows[0]["false_positives"]) == (3, 2, 1)
+    assert "| false_positives |" in compare_markdown({"rows": rows}).splitlines()[0]

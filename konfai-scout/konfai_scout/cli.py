@@ -12,7 +12,7 @@ from .agent import inspect, main_version
 from .case import TASKS, CaseError, InspectionCase
 from .config import MODES, PROVIDERS, Budget, ScoutConfig
 from .providers import ProviderError
-from .report import Report, compare, compare_markdown, render_markdown
+from .report import Report, compare, compare_markdown, defects_of, render_markdown
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -50,12 +50,21 @@ def _parser() -> argparse.ArgumentParser:
         "--allow-cloud-images", action="store_true", help="Authorise sending images of the case to a cloud API."
     )
     p.add_argument("--local-provider", action="store_true", help="The base-url is a server on this machine or network.")
+    p.add_argument(
+        "--second-reading",
+        action="store_true",
+        help="Have a fresh session of the model re-read every error observation blind, from crops of its box.",
+    )
     p.add_argument("--json", action="store_true", help="Print the report's summary as JSON.")
 
     p = commands.add_parser("render", help="Rewrite report.md from report.json.")
     p.add_argument("report", type=Path, help="A report directory or report.json.")
 
-    p = commands.add_parser("compare", help="Put reports side by side (fixed views against active exploration).")
+    p = commands.add_parser(
+        "compare",
+        help="Put reports side by side (fixed views against active exploration; found and invented defects when a "
+        "defects.json sits beside a case's inputs).",
+    )
     p.add_argument("reports", type=Path, nargs="+")
     p.add_argument("--json", action="store_true")
     return parser
@@ -114,6 +123,8 @@ def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
         config.allow_cloud_images = True
     if args.local_provider:
         config.local_provider = True
+    if args.second_reading:
+        config.second_reading = True
     return config
 
 
@@ -145,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         path.write_text(render_markdown(report), encoding="utf-8")
         print(path)
         return 0
-    comparison = compare([Report.load(p) for p in args.reports])
+    reports = [Report.load(p) for p in args.reports]
+    comparison = compare(reports, [defects_of(r) for r in reports])
     print(json.dumps(comparison, indent=2) if args.json else compare_markdown(comparison))
     return 0
 

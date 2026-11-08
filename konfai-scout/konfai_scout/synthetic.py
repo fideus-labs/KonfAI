@@ -78,9 +78,11 @@ def segmentation_case(
     spacing: tuple[float, float, float] = (1.0, 1.0, 2.0),
     oblique: bool = False,
     with_truth: bool = True,
+    clean: bool = False,
 ) -> tuple[InspectionCase, dict[str, object]]:
     """An image with a sphere (label 1) and a cube (label 2). The prediction misses the cube, shifts the sphere by
-    two voxels, punches a hole in it, and adds a spurious blob of label 1 (so label 1 is in two pieces)."""
+    two voxels, punches a hole in it, and adds a spurious blob of label 1 (so label 1 is in two pieces). ``clean``
+    makes the prediction the truth itself: a negative control, where any error reported is invented."""
     folder = Path(folder)
     grid = _grid(shape, spacing, oblique)
     rng = np.random.default_rng(0)
@@ -97,6 +99,8 @@ def segmentation_case(
     prediction[hole] = 0
     blob = _sphere(shape, (shape[0] / 2 + 4, shape[1] / 2 + 14, shape[2] / 2 + 14), 3)
     prediction[blob] = 1
+    if clean:
+        prediction = truth.copy()
     inputs = {
         "image": _write(_image(image, grid), folder / "image.mha"),
         "prediction": _write(_image(prediction, grid), folder / "prediction.mha"),
@@ -110,12 +114,14 @@ def segmentation_case(
         labels={1: "sphere", 2: "cube"},
         notes="synthetic phantom: a sphere and a cube",
     )
-    defects = {
-        "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": _box_of(cube, grid)},
-        "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": _box_of(blob, grid)},
-        "hole": {"defect": "holes", "label": 1, "box_mm": _box_of(hole, grid)},
-        "shifted_sphere": {"defect": "boundary_error", "label": 1, "shift_voxels_yxz": [2, 0, 0]},
-    }
+    defects: dict[str, object] = {}
+    if not clean:
+        defects = {
+            "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": _box_of(cube, grid)},
+            "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": _box_of(blob, grid)},
+            "hole": {"defect": "holes", "label": 1, "box_mm": _box_of(hole, grid)},
+            "shifted_sphere": {"defect": "boundary_error", "label": 1, "shift_voxels_yxz": [2, 0, 0]},
+        }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))
     return case, defects
 
@@ -127,10 +133,12 @@ def registration_case(
     oblique: bool = False,
     with_references: bool = True,
     fold: bool = True,
+    clean: bool = False,
 ) -> tuple[InspectionCase, dict[str, object]]:
     """A moving image with a sphere, a cube and a gradient; the fixed image is the moving one pulled through a smooth
     known field, so that field is the exact registration. The field under inspection is the exact one with a region
-    where it is zeroed (a residual misalignment) and, with ``fold``, a sharp bump that folds the map."""
+    where it is zeroed (a residual misalignment) and, with ``fold``, a sharp bump that folds the map. ``clean``
+    inspects the exact field itself: a negative control."""
     sitk = _sitk()
     folder = Path(folder)
     grid = _grid(shape, spacing, oblique)
@@ -171,15 +179,15 @@ def registration_case(
     inspected = exact.copy()
     zeroed = np.zeros(shape, dtype=bool)
     zeroed[8:18, 26:40, 8:22] = True
-    inspected[:, zeroed] = 0.0
-    defects: dict[str, object] = {
-        "zeroed_field": {
+    defects: dict[str, object] = {}
+    if not clean:
+        inspected[:, zeroed] = 0.0
+        defects["zeroed_field"] = {
             "defect": "residual_misalignment",
             "box_mm": _box_of(zeroed, grid),
             "displacement_lost_mm": float(np.linalg.norm(exact[:, zeroed], axis=0).mean()),
         }
-    }
-    if fold:
+    if fold and not clean:
         bump = _sphere(shape, (shape[0] / 2, 10, shape[2] / 2 + 12), 3)
         inspected[0, bump] += 12.0  # a 12 mm jump over a few voxels: det J < 0 at its edges
         defects["fold"] = {"defect": "folding", "box_mm": _box_of(bump, grid)}
@@ -224,9 +232,11 @@ def synthesis_case(
     spacing: tuple[float, float, float] = (1.0, 1.0, 2.0),
     oblique: bool = False,
     with_target: bool = True,
+    clean: bool = False,
 ) -> tuple[InspectionCase, dict[str, object]]:
     """An MR-like source and a CT-like target with a sphere; the synthetic image is the target blurred, with a
-    +150 HU bias in a box and a small invented bright structure."""
+    +150 HU bias in a box and a small invented bright structure. ``clean`` makes it the target under fresh noise: a
+    negative control."""
     from scipy import ndimage
 
     folder = Path(folder)
@@ -242,6 +252,8 @@ def synthesis_case(
     synthetic[biased] += 150.0
     invented = _sphere(shape, (shape[0] / 2 + 5, shape[1] / 2 + 12, shape[2] / 2 - 14), 3)
     synthetic[invented] = 700.0
+    if clean:
+        synthetic = (target + rng.normal(0, 8, shape)).astype(np.float32)
     inputs = {
         "source": _write(_image(source, grid), folder / "source.mha"),
         "synthetic": _write(_image(synthetic, grid), folder / "synthetic.mha"),
@@ -251,11 +263,13 @@ def synthesis_case(
     case = InspectionCase(
         "synthesis", folder.name or "synthetic", inputs, notes="synthetic MR-like source to CT-like target"
     )
-    defects = {
-        "bias": {"defect": "intensity_bias", "box_mm": _box_of(biased, grid), "bias_hu": 150.0},
-        "invented": {"defect": "hallucinated_structure", "box_mm": _box_of(invented, grid)},
-        "blur": {"defect": "blur", "sigma_voxels": 1.2},
-    }
+    defects: dict[str, object] = {}
+    if not clean:
+        defects = {
+            "bias": {"defect": "intensity_bias", "box_mm": _box_of(biased, grid), "bias_hu": 150.0},
+            "invented": {"defect": "hallucinated_structure", "box_mm": _box_of(invented, grid)},
+            "blur": {"defect": "blur", "sigma_voxels": 1.2},
+        }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))
     return case, defects
 
@@ -263,9 +277,9 @@ def synthesis_case(
 MAKERS = {"segmentation": segmentation_case, "registration": registration_case, "synthesis": synthesis_case}
 
 
-def make_all(root: Path | str, oblique: bool = False) -> dict[str, InspectionCase]:
+def make_all(root: Path | str, oblique: bool = False, clean: bool = False) -> dict[str, InspectionCase]:
     root = Path(root)
-    return {task: maker(root / task, oblique=oblique)[0] for task, maker in MAKERS.items()}
+    return {task: maker(root / task, oblique=oblique, clean=clean)[0] for task, maker in MAKERS.items()}
 
 
 if __name__ == "__main__":  # pragma: no cover

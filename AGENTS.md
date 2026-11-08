@@ -137,9 +137,13 @@ and `TransformPoints` for a registration's warped data, `konfai.evaluate` for ev
 `konfai.utils.ITK.field_jacobian_determinant` for the Jacobian view. Scout adds the viewer (`views.py`,
 `planes.py`), the tools and prompts the model drives, the loop, the report and the providers (Claude through the API
 or through Claude Code's Agent SDK, GPT through the API or through the Codex CLI, any OpenAI-compatible local
-server, a mock for tests). Images leave the machine only under `allow_cloud_images`.
+server, a mock for tests). Images leave the machine only under `allow_cloud_images`. `note` enforces the epistemic
+rules mechanically (an error cites a view that shows its box, a figure comes from a cited measurement, a
+measurement covers the box; an empty measurement confirms nothing), an optional blind second reading re-reads
+every error from crops alone, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
+invented defects are counted (`examples/study_controls.py`).
 konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
-`konfai-scout/docs/` hold the user side, the report schema and the fixed-views-versus-exploration study.
+`konfai-scout/docs/` hold the user side, the report schema and the studies.
 
 ## 6. Running things
 

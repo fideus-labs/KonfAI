@@ -5,9 +5,12 @@ import json
 
 import pytest
 from konfai_scout import InspectionCase, ScoutConfig, inspect
+from konfai_scout.agent import parse_second_reading
 from konfai_scout.config import Budget
 from konfai_scout.providers.base import ProviderError, Turn, Usage
 from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, call, turn
+from konfai_scout.report import compare, defects_of, match_defects
+from konfai_scout.synthetic import registration_case, segmentation_case, synthesis_case
 
 
 @pytest.mark.parametrize("mode", ["active", "fixed"])
@@ -27,7 +30,7 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
     else:
         assert "view" in tools
     assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(report.tool_calls)
-    assert report.case["truth_available"] and report.versions["prompt"] == "1.1"
+    assert report.case["truth_available"] and report.versions["prompt"] == "1.2"
     assert report.prompts["system"].startswith("You are KonfAI Scout")
     summary = report.summary()
     assert summary["verdict"] == report.conclusion.verdict and summary["observations"][0]["defect"]
@@ -125,7 +128,7 @@ def test_tool_errors_do_not_end_the_inspection(fixtures, tmp_path):
             call(
                 "note",
                 2,
-                kind="measured_property",
+                kind="suspected_error",
                 defect="other",
                 severity="minor",
                 confidence=0.5,
@@ -165,3 +168,67 @@ def test_a_case_json_round_trip_and_a_registration_from_a_transform_file(fixture
         report.error is None
         and (tmp_path / "affine" / "work" / "derived" / "Dataset" / "affine" / "FIELD.mha").exists()
     )
+
+
+def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
+    case, _ = fixtures["segmentation"]
+    readers = []
+
+    def reader():
+        provider = ScriptedProvider(
+            [
+                Turn(
+                    text="**Not visible** — the cube is drawn.\nIn v005 and v006 the cube is there.",
+                    tool_calls=[],
+                    stop="end_turn",
+                    usage=Usage(3, 2),
+                )
+            ]
+        )
+        readers.append(provider)
+        return provider
+
+    config = ScoutConfig(provider="mock", max_px=200, second_reading=True)
+    report = inspect(case, config, tmp_path / "blind", provider=HeuristicProvider(), reader=reader)
+    errors = [o for o in report.observations if o.kind != "measured_property"]
+    assert report.error is None and errors and len(readers) == len(errors)
+    for o in errors:
+        assert o.second_reading["answer"] == "not_visible" and o.second_reading["text"].startswith("In v005")
+        assert o.second_reading["views"] and all(
+            any(v.id == i and v.sent for v in report.views) for i in o.second_reading["views"]
+        )
+    assert all(o.second_reading is None for o in report.observations if o.kind == "measured_property")
+    system, user = readers[0].messages[0], readers[0].messages[1]
+    assert system["role"] == "system" and "second reader" in system["content"] and "VISIBLE" in system["content"]
+    assert user["images"] == 3 and user["content"].startswith("Claim: ") and "Views attached" in user["content"]
+    assert "heuristic" not in user["content"] and "measure" not in user["content"].lower()
+    assert report.second_reading["observations"] == len(errors) and report.second_reading["not_visible"] == len(errors)
+    assert (tmp_path / "blind" / "second_reading.json").exists()
+    assert "Second reading (not_visible" in (tmp_path / "blind" / "report.md").read_text()
+    assert report.summary()["observations"][0]["second_reading"] == "not_visible"
+    assert compare([report])["rows"][0]["not_visible"] == len(errors)
+    assert report.usage.images_sent >= 3 + 3 * len(errors) and report.usage.requests > readers[0].calls
+    # the default reader is a fresh session of the configured provider: the heuristic one cannot see, and says so
+    report = inspect(case, config, tmp_path / "default", provider=HeuristicProvider())
+    assert [o.second_reading["answer"] for o in report.observations if o.kind != "measured_property"] == ["unsure"]
+    assert parse_second_reading("VISIBLE.\nx y") == ("visible", "x y")
+    assert parse_second_reading("Hmm, maybe") == ("unparsed", "Hmm, maybe")
+    assert parse_second_reading("") == ("unparsed", "")
+
+
+def test_a_clean_case_is_a_negative_control(tmp_path):
+    case, defects = segmentation_case(tmp_path / "clean", clean=True)
+    assert defects == {} and json.loads((tmp_path / "clean" / "defects.json").read_text()) == {}
+    report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "out")
+    assert report.error is None and report.observations
+    assert all(o.kind == "measured_property" for o in report.observations)
+    assert match_defects(report, defects) == {
+        "planted": 0,
+        "found": 0,
+        "found_names": [],
+        "false_positives": 0,
+        "false_positive_ids": [],
+    }
+    assert defects_of(report) == {}
+    assert registration_case(tmp_path / "reg", clean=True)[1] == {}
+    assert synthesis_case(tmp_path / "syn", clean=True)[1] == {}

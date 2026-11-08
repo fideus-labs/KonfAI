@@ -28,12 +28,14 @@ def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
             "mock",
             "--max-tool-calls",
             "12",
+            "--second-reading",
             "--json",
         ]
     )
     assert code == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["case"] == "c1" and summary["verdict"] and (out / "report.md").exists()
+    assert summary["second_reading"]["observations"] == 1 and summary["observations"][0]["second_reading"] == "unsure"
     case.save(tmp_path / "case.json")
     code = main(
         [
@@ -53,7 +55,8 @@ def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
     assert main(["compare", str(out), str(tmp_path / "fixed")]) == 0
     table = capsys.readouterr().out
     assert "| active |" in table and "| fixed |" in table
-    assert main(["compare", str(out), "--json"]) == 0 and json.loads(capsys.readouterr().out)["rows"]
+    rows = json.loads(capsys.readouterr().out)["rows"] if main(["compare", str(out), "--json"]) == 0 else []
+    assert rows and rows[0]["planted"] == 4 and rows[0]["found"] >= 1  # the fixture's defects.json, found by itself
 
 
 def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):

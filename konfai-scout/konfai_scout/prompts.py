@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, grid_bounds, plane_axes
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS
 
-PROMPT_VERSION = "1.1"
+PROMPT_VERSION = "1.2"
 
 SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
 write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
@@ -32,7 +32,11 @@ coronal (along y), sagittal (along x). A box is {{"min": [x, y, z], "max": [x, y
 error by definition (a folded displacement field, non-finite values).
 Without a reference you cannot confirm an error from appearance, you cannot report a metric that needs one (Dice, \
 MAE, TRE...), and you must not claim anatomical certainty: say what the image shows and how sure you are. \
-"insufficient_evidence" is a legitimate verdict. Never invent a number: every value you write comes from a tool result.
+"insufficient_evidence" is a legitimate verdict. Never invent a number: every value you write comes from a tool result. \
+`note` enforces this: an error cites at least one view that shows its box (render a zoom first if none does); a \
+measured_property cites the measurement (`measure` or `region_stats`) that holds its figures, written as returned; a \
+cited measurement covers the box of the observation; a figure that no cited measurement holds is recorded as an \
+estimate read from a view. A refused note says why: fix it and call again.
 
 ## Procedure
 {procedure}
@@ -147,6 +151,36 @@ def case_card(
     lines.append("")
     lines.append(views_text)
     return "\n".join(lines)
+
+
+SECOND_READER = """You are the second reader of a {task} result. A first reader flagged a defect in one region. You see \
+only crops of that region, in the view modes named, and the claim. You do not know which method produced the result, \
+and you must not infer anything from the wording of the claim: judge the images alone. The header of each view names \
+its plane and the position of the slice; the yellow letters on its edges give the orientation; a white bar gives the \
+scale.
+
+Answer on the first line with exactly one word: VISIBLE (the claimed defect is seen in these crops), NOT_VISIBLE (the \
+crops show the region and the defect is not there), or UNSURE (these crops do not allow a decision). On the second \
+line, one sentence naming what you see, with the view ids. A difference of contrast or intensity between two \
+modalities is not a misalignment; a smooth, plausible boundary is not an error; the edge of the field of view is a \
+defect only if the claim is about coverage."""
+
+
+def second_reader_prompt(case: InspectionCase) -> str:
+    return SECOND_READER.format(task=case.task)
+
+
+def second_reading_card(observation: object, lines: list[str]) -> str:
+    """What the second reader is handed with the crops: the claim and the region, nothing of the inspection."""
+    o = observation
+    return "\n".join(
+        [
+            f"Claim: {o.defect} ({o.severity}): {o.description}",  # type: ignore[attr-defined]
+            f"Region: {json.dumps(o.box_mm)} mm" + (f", {o.plane} plane" if o.plane else ""),  # type: ignore[attr-defined]
+            "Views attached (ids as printed on each image):",
+            *lines,
+        ]
+    )
 
 
 def _fmt(value: object) -> str:

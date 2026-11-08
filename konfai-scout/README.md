@@ -17,9 +17,13 @@ and the measurements that support them.
   with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
   and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
   the agent and the report, nothing that KonfAI already does.
-- **It keeps its statements apart.** A *measured property*, a *suspected error* (seen, not proven) and a *confirmed
-  error* (a cited measurement) are distinct, and without a truth nothing is confirmed from appearance. "Insufficient
-  evidence" is a legitimate conclusion.
+- **It keeps its statements apart, and enforces it.** A *measured property*, a *suspected error* (seen, not proven)
+  and a *confirmed error* (a cited measurement) are distinct, and without a truth nothing is confirmed from
+  appearance. `note` refuses an error that no cited view shows, a figure that no cited measurement holds, a
+  confirmation resting on measurements taken elsewhere; one resting on an empty measurement is downgraded.
+  "Insufficient evidence"
+  is a legitimate conclusion. On request, a fresh session of the model re-reads every error blind, from crops of its
+  box and the claim alone, and its answer stands in the report next to the first reader's.
 - **It leaves a record.** A versioned JSON report with versions, configuration, prompts, every tool call, every view,
   every measurement, cost and duration, and a Markdown rendition with the evidence images. Two modes, fixed views
   and active exploration, for a study of what exploration buys.
@@ -81,9 +85,9 @@ for o in report.observations:
 |---|---|
 | `view` | one slice: a plane, a position in mm or an index, a mode, a window, a zoom box, one label |
 | `montage` | equally spaced slices of a plane in one image |
-| `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria |
-| `region_stats` | labels, volumes, pieces, intensities, displacement lengths, landmarks in a box: no reference needed |
-| `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites |
+| `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria, named as KonfAI names them or by a result key; SSIM is left out of a box thinner than its 7-voxel window |
+| `region_stats` | labels, volumes, pieces, intensities, displacement lengths, landmarks in a box: no reference needed; a measurement of kind `scout`, citable |
+| `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
 | `conclude` | the verdict |
 
 Modes: segmentation `image`, `prediction`, `truth`, `both`, `disagreement`; registration `fixed`, `moving`, `warped`,
@@ -94,6 +98,7 @@ Modes: segmentation `image`, `prediction`, `truth`, `both`, `disagreement`; regi
 
 `--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
 model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why.
+`--second-reading` adds, after the inspection, one short session per error observation for the blind re-read.
 Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is local. The cost
 is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
 adds a model).
@@ -112,6 +117,7 @@ configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the ses
 ```bash
 python examples/inspect_synthetic.py                 # synthetic cases with planted defects, the free heuristic model
 python examples/study_fixed_vs_active.py             # fixed views against active exploration, side by side
+python examples/study_controls.py                    # clean cases against planted ones: invented and found defects
 konfai-scout compare reports/*                       # one row per report
 ```
 

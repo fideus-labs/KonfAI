@@ -10,28 +10,39 @@ from __future__ import annotations
 import datetime as dt
 import json
 import platform
+import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import RegionEvaluator, konfai_version, load_prior
 from .measure import label_stats
-from .planes import describe_grid
-from .prompts import PROMPT_VERSION, case_card, system_prompt
+from .planes import box_around, box_center, box_from_dict, box_size, describe_grid
+from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers.pricing import cost_usd, price_of
-from .report import Conclusion, Report, Usage
+from .report import Conclusion, Observation, Report, Usage
 from .tools import Toolbox
-from .views import DEFAULT_MODE, Renderer
+from .views import DEFAULT_MODE, Renderer, ViewError
 
 COVERAGE_EXTRA_MODES = {
     "segmentation": ["both"],
     "registration": ["field_magnitude", "jacobian", "overlay"],
     "synthesis": ["difference", "side_by_side"],
+}
+#: What the blind second reader sees of a region: the image, the result over it, a comparison when one exists.
+SECOND_READING_MODES = {
+    "segmentation": ["image", "prediction", "both"],
+    "registration": ["fixed", "warped", "checkerboard"],
+    "synthesis": ["synthetic", "target", "difference", "source"],
 }
 NOTICE_BUDGET = (
     "Budget exhausted ({exhausted}). Call `note` for anything established and not yet recorded, then `conclude` now."
@@ -89,7 +100,14 @@ class BudgetState:
 
 
 class Inspector:
-    def __init__(self, case: InspectionCase, config: ScoutConfig, out: Path, provider: Provider | None = None) -> None:
+    def __init__(
+        self,
+        case: InspectionCase,
+        config: ScoutConfig,
+        out: Path,
+        provider: Provider | None = None,
+        reader: Callable[[], Provider] | None = None,
+    ) -> None:
         self.case = case
         self.config = config
         self.out = Path(out)
@@ -97,6 +115,9 @@ class Inspector:
         if provider is None:
             check_privacy(config)
         self.provider = provider or make_provider(config)
+        #: A fresh session per blind second reading: the same model by default, never the inspecting session.
+        self.reader = reader or (lambda: make_provider(config))
+        self.second_reading: dict[str, Any] | None = None
         case.stage(
             self.out / "work" / "stage"
         )  # the case as KonfAI reads it: every read, warp and measure goes through it
@@ -129,6 +150,8 @@ class Inspector:
             self.error = f"provider error: {error}"
         except Exception as error:  # the report must still be written
             self.error = f"{type(error).__name__}: {error}"
+        if self.config.second_reading and self.error is None:
+            self._second_reading()
         return self._finish()
 
     def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
@@ -237,6 +260,66 @@ class Inspector:
             "record what is established and conclude.",
         )
 
+    # ------------------------------------------------------------------ the blind second reading
+
+    def _second_reading(self) -> None:
+        """A fresh session re-reads each error observation blind: crops of its box, the claim, no method, no history,
+        no measurement. Its answer is recorded on the observation; nothing is removed or re-judged."""
+        errors = [o for o in self.toolbox.observations if o.kind != "measured_property" and o.box_mm]
+        counts = dict.fromkeys(("visible", "not_visible", "unsure", "unparsed"), 0)
+        transcripts: list[dict[str, Any]] = []
+        model: str | None = None
+        for observation in errors:
+            try:
+                images, ids, lines = self._crops(observation)
+            except ViewError as error:
+                observation.second_reading = {"answer": "unparsed", "text": f"no crop: {error}", "views": []}
+                counts["unparsed"] += 1
+                continue
+            self.toolbox.images_sent += len(images)
+            reader = self.reader()
+            reader.start(second_reader_prompt(self.case), [])
+            card = second_reading_card(observation, lines)
+            try:
+                turn = self._request(lambda r=reader, c=card, i=images: r.user(c, i))
+                answer, text = parse_second_reading(turn.text)
+                model = turn.model or reader.model
+            except ProviderError as error:
+                answer, text = "unparsed", f"provider error: {error}"
+            observation.second_reading = {"answer": answer, "text": text, "views": ids}
+            counts[answer] += 1
+            transcripts.append({"observation": observation.id, "transcript": reader.transcript()})
+        (self.out / "second_reading.json").write_text(json.dumps(transcripts, indent=1, default=str), encoding="utf-8")
+        self.second_reading = {
+            "provider": self.provider.name,
+            "model": model,
+            "observations": len(errors),
+            **counts,
+            "transcript_path": "second_reading.json",
+        }
+
+    def _crops(self, observation: Observation) -> tuple[list[ImageContent], list[str], list[str]]:
+        """The region of an observation, twice its box (at least a dozen voxels), in the second reader's modes."""
+        box = box_from_dict(observation.box_mm)
+        spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
+        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, 12.0 * spacing))
+        plane = observation.plane or "axial"
+        modes = [m for m in SECOND_READING_MODES[self.case.task] if m in self.renderer.modes()][:3]
+        if self.case.task == "registration" and observation.defect in ("folding", "implausible_deformation"):
+            modes = [*modes[:2], "jacobian"]
+        images: list[ImageContent] = []
+        ids: list[str] = []
+        lines: list[str] = []
+        for mode in modes:
+            png, view = self.renderer.render(plane, mode, zoom=zoom)
+            images.append(ImageContent(png, f"[{view.id}]"))
+            ids.append(view.id)
+            legend = view.extra.get("legend")
+            lines.append(
+                f"- {view.id}: {plane} slice through the region, mode {mode}" + (f" ({legend})" if legend else "")
+            )
+        return images, ids, lines
+
     # ------------------------------------------------------------------ coverage
 
     def _coverage(self) -> tuple[list[ImageContent], str]:
@@ -340,9 +423,22 @@ class Inspector:
             },
             error=self.error,
             transcript_path="transcript.json",
+            second_reading=self.second_reading,
         )
         report.save(self.out)
         return report
+
+
+def parse_second_reading(text: str) -> tuple[str, str]:
+    """The second reader's answer: VISIBLE, NOT_VISIBLE or UNSURE on the first line, then its sentence."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return "unparsed", ""
+    head = re.sub(r"[^A-Z]+", "_", lines[0].upper()).strip("_")
+    for answer in ("NOT_VISIBLE", "VISIBLE", "UNSURE"):
+        if head.startswith(answer):
+            return answer.lower(), " ".join(lines[1:])[:600]
+    return "unparsed", " ".join(lines)[:600]
 
 
 def inspect(
@@ -350,9 +446,10 @@ def inspect(
     config: ScoutConfig | None = None,
     out: Path | str = "scout_report",
     provider: Provider | None = None,
+    reader: Callable[[], Provider] | None = None,
 ) -> Report:
     """Inspect one case; write ``report.json``, ``report.md``, the evidence images and the transcript under ``out``."""
-    return Inspector(case, config or ScoutConfig(), Path(out), provider).run()
+    return Inspector(case, config or ScoutConfig(), Path(out), provider, reader).run()
 
 
 def main_version() -> str:

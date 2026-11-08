@@ -74,3 +74,32 @@ def test_registration_references_are_scored_through_the_field(fixtures, tmp_path
     assert tre and tre[0] < 1.0
     moved = derived.moved_landmarks()
     assert moved is not None and np.isfinite(moved).all()
+
+
+def test_criteria_are_taken_by_name_or_by_result_key():
+    from konfai_scout.evaluation import _criterion_name
+
+    criteria = {"Dice": {}, "MAE": {}, "Displacement": {}, "Displacement#2": {}, "JacobianFolding": {}, "SSIM": {}}
+    keys = ["WARPED:FIXED:MAE", "FIELD:None:DisplacementP95", "PRED:TRUTH:Dice:1"]
+    assert list(RegionEvaluator._selected(criteria, keys)) == ["Dice", "MAE", "Displacement", "Displacement#2"]
+    assert list(RegionEvaluator._selected(criteria, ["ssim", "Displacement#2"])) == ["Displacement#2", "SSIM"]
+    assert RegionEvaluator._selected(criteria, None) is criteria
+    assert _criterion_name("PRED:TRUTH:Dice:1") == "dice" and _criterion_name("MAE") == "mae"
+
+
+def test_a_thin_box_drops_ssim_and_an_unknown_metric_names_the_criteria(fixtures, tmp_path):
+    pytest.importorskip("konfai")
+    case, _ = fixtures["synthesis"]
+    case.stage(tmp_path / "stage")
+    evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path / "work", None)
+    assert evaluator.available() == ["MAE", "PSNR", "SSIM"]
+    whole = grid_bounds(case.grid)
+    thin = box_from_dict(
+        {"min": list(whole.low_xyz), "max": [whole.high_xyz[0], whole.high_xyz[1], whole.low_xyz[2] + 3.0]}
+    )
+    measurement = evaluator.measure(thin)
+    assert "SYN:TARGET:MAE" in measurement.values and not any("SSIM" in k for k in measurement.values)
+    assert measurement.request["dropped"] == ["SSIM: the box is thinner than its 7-voxel window"]
+    with pytest.raises(EvaluationError, match="criterion names, for this case: MAE, PSNR, SSIM"):
+        evaluator.measure(whole, ["SYN:TARGET:Dice"])
+    assert "SYN:TARGET:MAE" in evaluator.measure(whole, ["SYN:TARGET:MAE"]).values
