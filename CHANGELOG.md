@@ -103,6 +103,10 @@ sheet, full-screen modals; one control height per pointer (32 px, 40 px touch), 
 page scroll at 360, 390 and 430 px (a Playwright spec at 390x844 keeps it so). The site gains a curated
 documentation section (`site/docs/`: get started, configuration, workflows, datasets, apps, agents and MCP, Scout,
 Studio, Edge) written from the repository's own docs, and a GitHub Pages workflow triggered by hand only.
+The site's landing is a designed page in the fidopt.io family: a pill bar with a search over the pages, the docs,
+the fifty tools and the apps; a hero over a canvas-drawn volume with drifting slice planes (30 fps cap, still under
+prefers-reduced-motion, stopped when hidden); one card per piece (engine, apps, Edge, Studio, MCP, Scout, FidOpt);
+how it works in three steps; interactive at-a-glance bars; a terminal-style footer. No dependency, no build.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

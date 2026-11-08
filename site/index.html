@@ -2,83 +2,122 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>KonfAI</title>
-<meta name="description" content="KonfAI: a declarative medical-imaging execution engine, its published apps, its MCP server, Scout and Studio.">
-<link rel="stylesheet" href="style.css">
+<meta name="description" content="KonfAI: a declarative medical-imaging execution engine, its published apps, KonfAI Edge in the browser, the MCP server for agents, Scout and Studio.">
+<meta name="theme-color" content="#07080c">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;680;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="landing.css">
 <link rel="icon" href="assets/konfai-logo.png">
 </head>
-<body>
-<header class="top">
-  <a class="brand" href="index.html"><picture><source srcset="assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
-  <nav><a href="index.html" aria-current="page">KonfAI</a><a href="apps.html">Apps</a><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="docs/index.html">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+<body class="landing">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="index.html"><img src="assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="docs/get-started.html">Engine</a><a href="apps.html">Apps</a><a href="docs/edge.html">Edge</a><a href="studio.html">Studio</a><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="docs/index.html">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
 </header>
 <main>
-
 <section class="hero">
-  <picture><source srcset="assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img class="wordmark" src="assets/konfai-logo-light.png" alt="" width="340" height="102"></picture>
+  <canvas id="volume" aria-hidden="true"></canvas>
+  <p class="eyebrow">Train · Prediction · Evaluation · Transform</p>
   <h1>Medical-imaging workflows, executable end to end</h1>
-  <p>KonfAI is a declarative medical-imaging execution engine. One configuration model connects storage, transforms, model graphs, losses, training, prediction, evaluation and output geometry. The resolved YAML is the experiment record: inspectable, diffable, and runnable by a researcher or a program. The same engine ships published applications, an MCP server that lets an agent drive it, a visual inspector of results and a chat web UI.</p>
-  <pre><code>pip install "konfai[imaging]"
-konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION</code></pre>
+  <p class="lead">KonfAI is a declarative medical-imaging execution engine. One configuration model connects storage, transforms, model graphs, losses, training, prediction, evaluation and output geometry. The resolved YAML is the experiment record: inspectable, diffable, and runnable by a researcher or a program.</p>
+  <div class="ctas"><a class="btn fill" href="docs/get-started.html">Get started</a><a class="btn ghost" href="apps.html">See the apps</a></div>
+  <p class="links"><a href="https://github.com/fideus-labs/KonfAI">Code</a><span>·</span><a href="docs/index.html">Docs</a><span>·</span><a href="https://huggingface.co/VBoussot">Hugging Face</a><span>·</span><a href="https://www.arxiv.org/abs/2508.09823">Paper</a></p>
 </section>
 
-<section>
-  <h2>Four workflows, four configs</h2>
-  <table>
-    <thead><tr><th>Command</th><th>Config</th><th>Does</th></tr></thead>
-    <tbody>
-      <tr><td><code>konfai TRAIN</code> / <code>RESUME</code></td><td><code>Config.yml</code> (<code>Trainer:</code>)</td><td>fit a model</td></tr>
-      <tr><td><code>konfai PREDICTION</code></td><td><code>Prediction.yml</code> (<code>Predictor:</code>)</td><td>patch, test-time augmentation and ensemble inference, written as datasets</td></tr>
-      <tr><td><code>konfai EVALUATION</code></td><td><code>Evaluation.yml</code> (<code>Evaluator:</code>)</td><td>metrics on saved predictions</td></tr>
-      <tr><td><code>konfai TRANSFORM</code></td><td><code>Transform.yml</code> (<code>Transformer:</code>)</td><td>dataset preparation: a transform chain written as datasets (1 to 1, N to 1, 1 to N)</td></tr>
-    </tbody>
-  </table>
-  <p>Dataset patches are read regionally from ITK, HDF5, DICOM and OME-Zarr stores when the preprocessing is stream-compatible; a bounded buffer preserves correctness when it is not. Prediction owns batching, test-time augmentation, ensembles, reductions, overlap reconstruction, geometry and output writing. KonfAI instantiates regular PyTorch and MONAI components, and its catalogue documents compatibility paths for selected MONAI, nnU-Net, torchvision and segmentation-models-pytorch models.</p>
-  <p>KonfAI has powered top-ranking MICCAI challenge results in segmentation, registration and synthesis: SynthRAD2025 Task 1 and Task 2, CURVAS PDACVI, TrackRAD2025, Panther and CURVAS. Paper: <a href="https://www.arxiv.org/abs/2508.09823">KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging</a> (Boussot and Dillenseger, 2025).</p>
+<section class="sec wrap">
+  <div class="head"><h2>One engine, one contract<small>The same resolved config trains, predicts, evaluates, and ships as an app an agent or a browser can run.</small></h2></div>
+  <div class="cards">
+    <a class="card" href="docs/get-started.html"><span class="kicker">Engine</span><h3>KonfAI</h3><p>Patch-native training, complete medical-image inference and a reusable application from one configuration, without giving up the PyTorch and MONAI components you already trust.</p><span class="go">Get started →</span></a>
+    <a class="card" href="apps.html"><span class="kicker">Apps</span><h3>KonfAI Apps</h3><p>Five published bundles: TotalSegmentator-KonfAI, MRSegmentator-KonfAI, ImpactSynth, ImpactSeg and IMPACT-Reg. One contract, from a local folder, a Hugging Face repository or an HTTP server; from a one-line CLI, konfai-apps or 3D Slicer.</p><span class="go">See the apps →</span></a>
+    <a class="card" href="scout.html"><span class="kicker">Inspection</span><h3>KonfAI Scout</h3><p>Looks at a segmentation, a registration or a synthesis the way a person would at a viewer, and reports where it is wrong, with the views that show it and KonfAI Eval's measurements.</p><span class="go">How it reads a result →</span></a>
+    <a class="card wide" href="studio.html"><span class="kicker">Studio</span><h3>KonfAI Studio</h3><p>A chat web UI over the MCP server. Point it at a dataset and, from the conversation, inspect, train, predict, evaluate, compare and look at the volumes. Your own model endpoint, no API key required.</p><img class="shot" src="assets/studio-screenshot.png" alt="KonfAI Studio: the conversation beside the workspace and the viewer" loading="lazy" width="1600" height="900"><span class="go">Open Studio →</span></a>
+    <a class="card" href="mcp.html"><span class="kicker">Agents</span><h3>KonfAI MCP</h3><p>Fifty tools, one per object. An agent inspects a dataset, writes and validates a config, launches and follows runs, compares them and packages the result, from Claude Code, Codex or any MCP client.</p><span class="go">The fifty tools →</span></a>
+    <a class="card wide" href="docs/edge.html"><span class="tag">coming to this site</span><span class="kicker">Edge</span><h3>KonfAI Edge</h3><p>The Rust runtime that runs KonfAI apps in a browser tab, with no server: inference, evaluation and uncertainty beside one viewer, as Web Components another page embeds with one import.</p><span class="go">What it is →</span></a>
+    <a class="card" href="https://fidopt.io/"><span class="kicker">Benchmark</span><h3>FidOpt</h3><p>One open benchmark for biomedical image registration, segmentation and synthesis, every method scored on the same test cases under the same rules. KonfAI MCP reads its catalogue and boards and launches its runs.</p><span class="go">fidopt.io ↗</span></a>
+  </div>
 </section>
 
-<section class="grid">
-  <article>
-    <h2><a href="apps.html">KonfAI Apps</a></h2>
-    <p>A stable workflow packaged as an app: local folder, Hugging Face repository or HTTP server, the same contract everywhere, usable from a one-line CLI, from <code>konfai-apps</code>, from 3D Slicer. Five published bundles: segmentation, synthesis and registration systems, not demonstration networks.</p>
-  </article>
-  <article>
-    <h2><a href="mcp.html">KonfAI MCP</a></h2>
-    <p>The server that lets an MCP client drive KonfAI: inspect a dataset, write and validate a config, launch and monitor runs, compare them, package the result. Fifty tools, one per object, grounded in the same YAML a person would run.</p>
-  </article>
-  <article>
-    <h2><a href="scout.html">KonfAI Scout</a></h2>
-    <p>An agent that looks at a segmentation, a registration or a synthesis the way a person would at a viewer, and reports where it is wrong, with the views that show it and KonfAI Eval's measurements.</p>
-  </article>
-  <article>
-    <h2><a href="studio.html">KonfAI Studio</a></h2>
-    <p>A single chat web UI over the MCP server: point it at a dataset and, from the conversation, inspect, train, predict, evaluate, compare and look at the volumes. Your own model endpoint, no API key shipped.</p>
-  </article>
-  <article>
-    <h2><a href="https://fidopt.io/">FidOpt</a></h2>
-    <p>The open benchmark of biomedical image registration, segmentation and synthesis methods, scored on the same test cases under the same rules. KonfAI MCP reads its catalogue and boards and launches its operations through FidOpt's own code.</p>
-  </article>
-  <article>
-    <h2><a href="docs/index.html">Documentation</a></h2>
-    <p>Ten short pages for a newcomer: install, the first run, configuration, workflows, datasets, apps, agents, Scout, Studio and Edge. The exhaustive reference stays on <a href="https://konfai.readthedocs.io/en/latest/">Read the Docs</a>; the repository's <code>AGENTS.md</code> is the contributor's guide.</p>
-  </article>
+<section class="sec wrap steps">
+  <div class="head"><h2>How it works<small>One config, one command per workflow, one app at the end.</small></h2></div>
+  <div class="cards">
+    <div class="card"><span class="kicker">1 · One config</span><h3>A YAML per workflow</h3><p>Config.yml for the Trainer, Prediction.yml for the Predictor, Evaluation.yml for the Evaluator, Transform.yml for the Transformer. The resolved file is the record of the run.</p><pre><code>pip install "konfai[imaging]"</code></pre></div>
+    <div class="card"><span class="kicker">2 · One command</span><h3>Train, predict, evaluate</h3><p>Dataset patches are read regionally from ITK, HDF5, DICOM and OME-Zarr stores; prediction owns batching, test-time augmentation, ensembles, overlap reconstruction, geometry and output writing.</p><pre><code>konfai TRAIN -c Config.yml --gpu 0
+konfai PREDICTION -c Prediction.yml --gpu 0
+konfai EVALUATION -c Evaluation.yml</code></pre></div>
+    <div class="card"><span class="kicker">3 · One app</span><h3>Package and run anywhere</h3><p>A trained session packages as an app: a local folder, a Hugging Face repository or an HTTP server, run from the one-line CLI, konfai-apps, 3D Slicer, an agent through MCP, and, with Edge, a browser tab.</p><pre><code>konfai-apps run VBoussot/TotalSegmentator-KonfAI:total \
+  --input ct.nii.gz --output out/</code></pre></div>
+  </div>
 </section>
 
-<section>
-  <h2>Where to start</h2>
-  <ul>
-    <li>Evaluating KonfAI: the <a href="apps.html">app benchmark table</a>, then the <a href="docs/index.html">docs</a>.</li>
-    <li>Running a published model: the <a href="apps.html">one-command app install</a>.</li>
-    <li>Adapting an experiment: the <a href="docs/get-started.html">Get started</a> page (train, then predict, then evaluate).</li>
-    <li>Letting an agent run the loop: <a href="mcp.html">KonfAI MCP</a>, or <a href="studio.html">Studio</a> for the chat.</li>
-    <li>Contributing: <a href="https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md">AGENTS.md</a>.</li>
-  </ul>
+<section class="sec wrap glance">
+  <div class="head"><h2>At a glance<small>Every bar opens the page it counts.</small></h2><a href="mcp.html">Open the tool table</a></div>
+  <div class="cards">
+    <div class="card wide"><span class="kicker">The fifty MCP tools, by stage</span>
+      <div class="rows">
+        <a href="mcp.html#discovery"><span>Discovery</span><span class="track"><span class="fill" style="width:50%"></span></span><span class="n">6</span></a>
+        <a href="mcp.html#dataset-onboarding"><span>Dataset onboarding</span><span class="track"><span class="fill" style="width:33%"></span></span><span class="n">4</span></a>
+        <a href="mcp.html#config-authoring"><span>Config authoring</span><span class="track"><span class="fill" style="width:33%"></span></span><span class="n">4</span></a>
+        <a href="mcp.html#validation-and-iteration"><span>Validation and iteration</span><span class="track"><span class="fill" style="width:67%"></span></span><span class="n">8</span></a>
+        <a href="mcp.html#execution-and-monitoring"><span>Execution and monitoring</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="n">12</span></a>
+        <a href="mcp.html#apps"><span>Apps</span><span class="track"><span class="fill" style="width:67%"></span></span><span class="n">8</span></a>
+        <a href="mcp.html#visual-inspection"><span>Visual inspection</span><span class="track"><span class="fill" style="width:17%"></span></span><span class="n">2</span></a>
+        <a href="mcp.html#fidopt"><span>FidOpt</span><span class="track"><span class="fill" style="width:25%"></span></span><span class="n">3</span></a>
+        <a href="mcp.html#session-lifecycle"><span>Session lifecycle</span><span class="track"><span class="fill" style="width:25%"></span></span><span class="n">3</span></a>
+      </div>
+    </div>
+    <div class="card"><span class="kicker">Published apps, by task</span>
+      <div class="stack">
+        <a href="apps.html" style="width:60%;background:#52b89b" data-tip="Segmentation · 3 apps" aria-label="Segmentation, 3 apps"></a>
+        <a href="apps.html" style="width:20%;background:#8fe0c6" data-tip="Synthesis · 1 app" aria-label="Synthesis, 1 app"></a>
+        <a href="apps.html" style="width:20%;background:#2f9a7e" data-tip="Registration · 1 app" aria-label="Registration, 1 app"></a>
+      </div>
+      <div class="legend"><span><i style="background:#52b89b"></i>Segmentation <b>3</b><span>TotalSegmentator, MRSegmentator, ImpactSeg</span></span><span><i style="background:#8fe0c6"></i>Synthesis <b>1</b><span>ImpactSynth</span></span><span><i style="background:#2f9a7e"></i>Registration <b>1</b><span>IMPACT-Reg</span></span></div>
+      <span class="kicker" style="margin-top:10px">The docs, one page each</span>
+      <div class="chips">
+        <a href="docs/get-started.html">Get started</a>
+        <a href="docs/configuration.html">Configuration</a>
+        <a href="docs/workflows.html">Workflows</a>
+        <a href="docs/datasets.html">Datasets</a>
+        <a href="docs/apps.html">Apps</a>
+        <a href="docs/agents-mcp.html">Agents and MCP</a>
+        <a href="docs/scout.html">Scout</a>
+        <a href="docs/studio.html">Studio</a>
+        <a href="docs/edge.html">Edge</a>
+      </div>
+    </div>
+  </div>
+  <div class="stats">
+    <div><b>4</b><strong>workflows</strong><span>TRAIN, PREDICTION, EVALUATION, TRANSFORM</span></div>
+    <div><b>5</b><strong>published apps</strong><span>segmentation, synthesis, registration</span></div>
+    <div><b>50</b><strong>MCP tools</strong><span>one per object, for any MCP client</span></div>
+    <div><b>6</b><strong>MICCAI results</strong><span>SynthRAD2025 Tasks 1 and 2, CURVAS PDACVI, TrackRAD2025, Panther, CURVAS</span></div>
+  </div>
 </section>
-
 </main>
-<footer>
-  <p>KonfAI is developed by <a href="https://github.com/fideus-labs">Fideus Labs</a> and released under the <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0 licence</a>. Code, issues and pull requests: <a href="https://github.com/fideus-labs/KonfAI">github.com/fideus-labs/KonfAI</a>. For agents: <a href="llms.txt">llms.txt</a>.</p>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
 </footer>
+<script src="landing.js" defer></script>
 </body>
 </html>

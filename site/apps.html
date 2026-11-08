@@ -25,7 +25,7 @@ konfai-apps infer VBoussot/ImpactSynth:MR -i input_mr.nii.gz -o output/</code></
 </section>
 
 <section>
-  <h2>The published bundles</h2>
+  <h2 id="the-published-bundles">The published bundles</h2>
   <p>Each figure is the medium case (249 × 246 × 246 voxels) of the bundle's own small, medium and large table, measured on an RTX PRO 5000 with <code>benchmarks/perf/bench_apps.py</code> on 2026-09-09; the ratios against the original tools span the three cases. They are evidence of executable scale, not a cross-task leaderboard; the protocol and the harness are under <a href="https://github.com/fideus-labs/KonfAI/tree/main/benchmarks"><code>benchmarks/</code></a>.</p>
   <table>
     <thead><tr><th>App</th><th>What it does</th><th>Medium case</th></tr></thead>
@@ -40,7 +40,7 @@ konfai-apps infer VBoussot/ImpactSynth:MR -i input_mr.nii.gz -o output/</code></
 </section>
 
 <section>
-  <h2>The runtime: konfai-apps</h2>
+  <h2 id="the-runtime-konfai-apps">The runtime: konfai-apps</h2>
   <p><code>konfai-apps</code> is the standalone package for packaged workflows: local inference and evaluation, reusable app packaging, remote execution through a FastAPI server, integration in external tools such as 3D Slicer. It ships three interfaces: the <code>konfai-apps</code> command for local or remote execution, <code>konfai-apps-server</code> for hosting apps behind an HTTP API, and the Python API under <code>konfai_apps</code>. It depends on <code>konfai</code> and is versioned and tested as a separate runtime surface.</p>
   <pre><code>python -m pip install konfai-apps              # run apps, locally or against a server
 python -m pip install "konfai-apps[server]"     # host apps behind an HTTP API</code></pre>

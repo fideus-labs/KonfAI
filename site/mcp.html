@@ -23,14 +23,14 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
 </section>
 
 <section>
-  <h2>Fifty tools, one per object</h2>
+  <h2 id="fifty-tools-one-per-object">Fifty tools, one per object</h2>
   <p>A variant of an operation is an argument of its tool (<code>session(action=...)</code>, <code>check_config(level=...)</code>, <code>get_job_status(wait=True)</code>), never a sibling tool. Each tool is described in one short paragraph whose first sentence is what a client's tool search matches; the server's instructions say what KonfAI does and when to search its tools; six entry tools stay loaded under Claude Code's tool search. The whole list weighs about 15k tokens for a client that loads it upfront. Every call appends one line (tool, session, outcome, duration; no argument) to <code>tool_calls.jsonl</code> in the workspaces root: the usage data the next consolidation rests on.</p>
   <p>Principles: structured tool contracts, explicit experiment workspaces, reproducible job manifests and config snapshots, staged validation before expensive runs, a clear separation between the KonfAI runtime and the MCP layer. Hardware is a resource, not a tool: <code>server://capabilities</code> reports per-GPU free VRAM and a recommended device, and every launch payload carries a VRAM pre-flight for the GPUs it will use.</p>
   <p>The table below is the registry's own text, the first sentence of each tool; the full contracts live in the <code>guide://tool-index</code> resource and in <a href="https://github.com/fideus-labs/KonfAI/blob/main/.claude/skills/konfai-experiments/references/tool-reference.md">the generated reference</a>. Guide: <a href="https://konfai.readthedocs.io/en/latest/usage/mcp.html">Automate with MCP</a>. Source: <a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-mcp"><code>konfai-mcp/</code></a>.</p>
 </section>
 
 <section>
-  <h2>Discovery</h2>
+  <h2 id="discovery">Discovery</h2>
   <p>What KonfAI can do and what a component is.</p>
   <table class="tools">
     <tbody>
@@ -44,7 +44,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Dataset onboarding</h2>
+  <h2 id="dataset-onboarding">Dataset onboarding</h2>
   <p>What a dataset holds, before a config names it.</p>
   <table class="tools">
     <tbody>
@@ -56,7 +56,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Config authoring</h2>
+  <h2 id="config-authoring">Config authoring</h2>
   <p>A session and its YAML.</p>
   <table class="tools">
     <tbody>
@@ -68,7 +68,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Validation and iteration</h2>
+  <h2 id="validation-and-iteration">Validation and iteration</h2>
   <p>Checks before GPU time, comparisons after.</p>
   <table class="tools">
     <tbody>
@@ -84,7 +84,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Execution and monitoring</h2>
+  <h2 id="execution-and-monitoring">Execution and monitoring</h2>
   <p>Jobs: launch, follow, steer, stop.</p>
   <table class="tools">
     <tbody>
@@ -104,7 +104,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Apps</h2>
+  <h2 id="apps">Apps</h2>
   <p>Published models, used as they are, fine-tuned, or produced.</p>
   <table class="tools">
     <tbody>
@@ -120,7 +120,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Visual inspection</h2>
+  <h2 id="visual-inspection">Visual inspection</h2>
   <p>KonfAI Scout as a tracked job.</p>
   <table class="tools">
     <tbody>
@@ -130,7 +130,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>FidOpt</h2>
+  <h2 id="fidopt">FidOpt</h2>
   <p>The benchmark through its own code.</p>
   <table class="tools">
     <tbody>
@@ -141,7 +141,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2>Session lifecycle</h2>
+  <h2 id="session-lifecycle">Session lifecycle</h2>
   <p>Workspaces, records, deletions.</p>
   <table class="tools">
     <tbody>
