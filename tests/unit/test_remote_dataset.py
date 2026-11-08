@@ -52,17 +52,18 @@ def _attributes() -> Attribute:
     return geometry()
 
 
-def _publish(memory_root: str, case: str, group: str, volume: np.ndarray) -> None:
-    """Write one entry into the memory root as an OME-Zarr store, through ngff-zarr itself."""
+def _store(path: str, volume: np.ndarray, **kwargs) -> None:
+    """One OME-Zarr store at ``path`` (a local path or a URI), through ngff-zarr itself."""
     from konfai.utils.ome_zarr import write_ome_zarr
 
     write_ome_zarr(
-        f"{memory_root}/{case}/{group}.ome.zarr",
-        volume,
-        spacing=[1.0, 1.0, 1.0],
-        origin=[0.0, 0.0, 0.0],
-        attributes=dict(_attributes()),
+        path, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0], attributes=dict(_attributes()), **kwargs
     )
+
+
+def _publish(memory_root: str, case: str, group: str, volume: np.ndarray) -> None:
+    """Write one entry into the memory root, laid out as ``<root>/<case>/<group>.ome.zarr``."""
+    _store(f"{memory_root}/{case}/{group}.ome.zarr", volume)
 
 
 # ---------------------------------------------------------------- telling the two kinds apart
@@ -284,15 +285,6 @@ def test_rebasing_a_remote_root_is_refused_before_it_stops_looking_remote() -> N
 
 
 # ---------------------------------------------------------------- a manifest of explicit entries
-
-
-def _store(path: str, volume: np.ndarray, **kwargs) -> None:
-    """One OME-Zarr store at ``path`` (a local path or a URI), through ngff-zarr itself."""
-    from konfai.utils.ome_zarr import write_ome_zarr
-
-    write_ome_zarr(
-        path, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0], attributes=dict(_attributes()), **kwargs
-    )
 
 
 def _manifest(tmp_path, text: str) -> str:

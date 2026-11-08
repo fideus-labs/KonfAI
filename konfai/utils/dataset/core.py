@@ -182,10 +182,6 @@ def _is_listed_name(name: str) -> bool:
     return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
-#: A root named by a file of these suffixes is a manifest of entries, not a directory to walk.
-_MANIFEST_SUFFIXES = (".yml", ".yaml", ".json")
-
-
 def _read_manifest(filename: str | Path, file_format: str) -> dict[str, dict[str, str]] | None:
     """The cases a manifest root names, each mapping its groups to where their store is, or ``None``
     when ``filename`` is a directory root.
@@ -198,8 +194,8 @@ def _read_manifest(filename: str | Path, file_format: str) -> dict[str, dict[str
     there reads as an empty root, like a directory.
     """
     path = uri.normalize(filename)
-    if not path.lower().endswith(_MANIFEST_SUFFIXES):
-        return None
+    if not path.lower().endswith((".yml", ".yaml", ".json")):
+        return None  # a directory root, not a manifest of entries
     if file_format != "omezarr":
         raise DatasetManagerError(
             f"'{path}' is a manifest of entries, which only ':omezarr' reads.",
@@ -317,19 +313,16 @@ class Dataset:
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
         #: ``(group, name)``: computed once per volume.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
-        self._seed_manifest_paths()
+        # A manifest's entries are handed to the backends, under the key they read ``resolved_paths`` by.
+        if self.manifest is not None:
+            for name, entries in self.manifest.items():
+                for group, where in entries.items():
+                    self._entry_paths[f"{self._manifest_case(name)}{group}"] = where
 
     def _manifest_case(self, name: str) -> str:
         """The key a manifest's case is opened under: no directory of its own, so the backend reads
         each entry from :attr:`_entry_paths` (``<key><group>``) and probes nothing."""
         return f"{self.filename}#{name}/"
-
-    def _seed_manifest_paths(self) -> None:
-        """Hand a manifest's entries to the backends, under the key they read ``resolved_paths`` by."""
-        if self.manifest is not None:
-            for name, entries in self.manifest.items():
-                for group, where in entries.items():
-                    self._entry_paths[f"{self._manifest_case(name)}{group}"] = where
 
     def _refuse_manifest_write(self) -> None:
         """A manifest names where entries are read from; nothing is written through it."""
