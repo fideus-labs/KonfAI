@@ -42,7 +42,7 @@ loaded whole.
 | --- | --- | --- | --- | --- | --- |
 | `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0` (or `edge`), `inverse=True` | yes | yes (the grid change) | yes |
 | `TransformPoints` | Push landmarks (`[N, 3]`, LPS) through stored transforms: the map a `Resample` with the same `transforms` pulls an image back through, so fixed landmarks land in the moving image (a registration's TRE). | `transforms` | no | no | no |
-| `Displace` | Move a point set (`.fcsv` landmarks) by the case's displacement field, read at each point as SimpleITK's `DisplacementFieldTransform` reads it, from the voxels around the point alone. | `field_group="DVF"` | no | no | no |
+| `Displace` | Move landmarks by the case's displacement field: `TransformPoints` of that one group. | `field_group="DVF"` | no | no | no |
 
 A transform group holding a stack (an ensemble's members, `InferenceStack`) is applied one member at a time: `Resample` returns one result per member, stacked with their count, over the whole volume; `TransformPoints` returns `[M, N, 3]`. `StandardDeviation`, `Variance` and `SegmentationDisagreement` read a stack's member count from its header, so a stack of fields spreads per component.
 

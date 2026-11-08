@@ -23,7 +23,7 @@ import pytest
 import SimpleITK as sitk
 import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
-from konfai.utils.dataset import Attribute
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import MeasureError
 
 
@@ -145,10 +145,14 @@ def test_displace_moves_points_as_the_whole_fields_transform_does_reading_a_bloc
     assert all(s.stop - s.start <= 2 for _, slices in store.regions for s in slices[1:])
 
 
-def test_displace_moves_the_first_two_coordinates_of_a_2d_case():
+def test_displace_moves_the_first_two_coordinates_of_a_2d_case(tmp_path):
     field = _field((40, 30), (0.5, 0.8), (3.0, -2.0), (1.0, 0.0, 0.0, 1.0), 2)
     points = np.array([[*field.TransformContinuousIndexToPhysicalPoint(p), 0.0] for p in [(5.0, 7.5), (20.2, 12.0)]])
-    moved, _ = _displaced(field, points)
+    (tmp_path / "a").mkdir()
+    sitk.WriteImage(field, str(tmp_path / "a" / "DVF.mha"))
+    stage = Displace("DVF")
+    stage.set_datasets([Dataset(str(tmp_path), "mha")])
+    moved = stage("a", torch.from_numpy(points), Attribute()).numpy()
     assert np.allclose(moved, _whole_field(field, points), atol=1e-9) and (moved[:, 2] == 0).all()
 
 

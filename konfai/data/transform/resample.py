@@ -1974,6 +1974,14 @@ class TransformPoints(Transform):
         return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
 
 
+class Displace(TransformPoints):
+    """Points carried by the case's displacement field ``field_group``: ``TransformPoints`` of that one group, not
+    inverted, so a 3-D field is read around each point alone."""
+
+    def __init__(self, field_group: str = "DVF") -> None:
+        super().__init__({field_group: False})
+
+
 class TransformToField(Transform):
     """A case's transform as a displacement field: a stored field as it is; any other transform (an affine, a
     B-spline, their composite), which has no grid of its own, sampled on the grid of ``reference_group`` (the fixed

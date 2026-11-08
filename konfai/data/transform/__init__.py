@@ -61,7 +61,7 @@ from konfai.data.transform.labels import Otsu as Otsu
 from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
-from konfai.data.transform.points import Displace as Displace
+from konfai.data.transform.resample import Displace as Displace
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
 from konfai.data.transform.resample import TransformToField as TransformToField
