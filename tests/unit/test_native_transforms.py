@@ -149,8 +149,8 @@ def test_a_caller_that_averages_asks_for_the_field(tmp_path: Path, monkeypatch: 
 
 def test_a_native_transform_is_measured_on_the_fixed_grid(tmp_path: Path) -> None:
     """TransformToField samples a transform with no grid of its own on the fixed image's, as SimpleITK does, and
-    declares it needs the whole volume; a field passes as it is, voxel by voxel, so it still streams; without the
-    fixed image, a native transform is refused."""
+    declares it needs the whole volume; a field its header marks one passes as it is, voxel by voxel, so it still
+    streams; without the fixed image, a native transform is refused."""
     grid = _grid()
     transform = _composite(grid)
     (tmp_path / "transforms" / "P000").mkdir(parents=True)
@@ -163,7 +163,12 @@ def test_a_native_transform_is_measured_on_the_fixed_grid(tmp_path: Path) -> Non
     stage.set_datasets([transforms, images])
     assert stage.patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME  # the config-time probe
     assert stage.patch_locality(transforms.get_infos("Volume_0", "P000")[1]).kind is LocalityKind.WHOLE_VOLUME
-    assert stage.patch_locality(images.get_infos("Reference_0", "P000")[1]).kind is LocalityKind.POINTWISE
+    # An image's header alone does not say it is a field; a stored field transform's does.
+    assert stage.patch_locality(images.get_infos("Reference_0", "P000")[1]).kind is LocalityKind.WHOLE_VOLUME
+    zero = sitk.Image(grid.GetSize(), sitk.sitkVectorFloat64, 3)
+    zero.CopyInformation(grid)
+    sitk.WriteTransform(sitk.DisplacementFieldTransform(zero), str(tmp_path / "transforms" / "P000" / "Field.h5"))
+    assert stage.patch_locality(transforms.get_infos("Field", "P000")[1]).kind is LocalityKind.POINTWISE
     attributes = Attribute()
     assert stage.transform_shape("Volume_0", "P000", [1512], attributes) == [16, 18, 20]
     field = stage("P000", torch.zeros(2, 1512), attributes).numpy()

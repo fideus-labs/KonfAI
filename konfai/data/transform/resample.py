@@ -72,7 +72,6 @@ from konfai.utils.dataset import (
     Attribute,
     Dataset,
     image_to_data,
-    is_an_image,
     is_displacement_entry,
 )
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
@@ -1949,9 +1948,9 @@ class TransformToField(Transform):
         self.reference_group = reference_group
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        """A stored field (an image, or marked one) passes as it is, voxel by voxel; a transform with no grid of its
-        own is sampled whole."""
-        if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute or is_an_image(cache_attribute):
+        """A stored field its header marks one passes as it is, voxel by voxel. Anything else is sampled whole: a
+        transform with no grid of its own, and an image the header alone cannot tell from a field."""
+        if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute:
             return PatchLocality(LocalityKind.POINTWISE)
         # ponytail: sampled whole; by slab if a case outgrows memory
         return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="a transform with no grid of its own is sampled whole")
