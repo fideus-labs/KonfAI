@@ -1590,7 +1590,8 @@ def test_a_weightless_model_running_python_on_the_case_is_refused_by_name(
 def _reducing_config(tmp_path: Path, transforms: str) -> Path:
     """A Transform.yml over two small MetaImage cases whose one chain runs ``transforms``."""
     import numpy as np
-    import SimpleITK as sitk
+
+    sitk = pytest.importorskip("SimpleITK")
 
     for case in ("CASE_000", "CASE_001"):
         (tmp_path / "Raw" / case).mkdir(parents=True, exist_ok=True)

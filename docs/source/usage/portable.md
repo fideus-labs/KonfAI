@@ -110,7 +110,7 @@ criterion runs its network on the whole volume, as `IMPACTReg` does).
 | `PSNR` | `psnr` |
 | `SSIM` | `ssim` |
 | `SAM_Perceptual` | `sam_perceptual`: its network as ONNX, with `L1Loss` on an input of three channels |
-| `IMPACTReg` | `impact_reg`: konfai-impact's configuration of the criterion, an encoder layer of a TotalSegmentator model normalized by fixed CT statistics (`TS/M291.pt`) on the whole volume (`shape` of zeros), with an `MSELoss` or `L1Loss` mean, no `distance` and no `pca`; KonfAI Edge scores it under its `impact` feature |
+| `IMPACTReg` | `impact_reg`: konfai-impact's configuration of the criterion, an encoder layer of a TotalSegmentator model normalized by fixed CT statistics (`TS/M291.pt`) on the whole volume (`in_channels: 1` and `shape: [0, 0, 0]`), with an `MSELoss` or `L1Loss` mean, no `distance` and no `pca`; KonfAI Edge scores it under its `impact` feature |
 | Any other | Refused by name |
 
 Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per
