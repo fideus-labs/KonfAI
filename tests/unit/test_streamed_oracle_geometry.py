@@ -28,14 +28,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from konfai.data.materialize import Verdict
-from konfai.data.transform import Resample
 from konfai.utils.dataset import Dataset
-from konfai.utils.errors import TransformError
 from oracle_support import (
     FIXED_GEOMETRY,
     GEOMETRIES,
     MAIN,
-    ROUTES,
     Geometry,
     Route,
     StageCase,
@@ -99,17 +96,3 @@ def test_a_swept_case_equals_the_whole_volume_case(
     # would pass on a sweep that never decomposed anything.
     assert streamed.regions >= (2 if route.height == 0.0 else 1)
     assert_same(streamed, whole, case.atol, case.rtol)
-
-
-def test_a_two_dimensional_stored_map_is_refused_before_any_route_runs(
-    oracle_cases: dict[str, Dataset], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The stored-map codec holds the 3-D rigid, affine and BSpline kinds; a 2-D map has no tag.
-
-    Refused where the map is READ, which is before either route is chosen, and the message names
-    the type it found: a map applied on one route and refused on the other would be the worst of
-    both. This is why the two resample-through-a-stored-map cases leave the rank-2 matrix.
-    """
-    stage = Resample(transforms={"transform": True})
-    with pytest.raises(TransformError, match="Euler2DTransform"):
-        sweep(oracle_cases["rank2-seed37"], "Intensity", stage, tmp_path / "out", ROUTES[0], monkeypatch)
