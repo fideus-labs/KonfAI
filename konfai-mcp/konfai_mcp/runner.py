@@ -153,7 +153,9 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
         # The child's own output is where a native crash or an OOM leaves its only trace: the traceback
         # says the process died, this says what it was saying when it did.
         error = str(result.get("error") or "Isolated subprocess failed.")
-        raise RuntimeError(f"{error}\n\nSubprocess output (tail):\n{printed}" if printed else error)
+        # the exception's own line first: a client reads the cause before the traceback
+        message = f"{error.strip().splitlines()[-1]}\n\n{error}" if "Traceback" in error else error
+        raise RuntimeError(f"{message}\n\nSubprocess output (tail):\n{printed}" if printed else message)
     return result["payload"]
 
 

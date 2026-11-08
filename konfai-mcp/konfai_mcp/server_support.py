@@ -28,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from .catalog import COMPONENT_BASES, model_config_reference_to_inspect_classpath
+from .catalog import COMPONENT_BASES, builtin_inspect_classpath, model_config_reference_to_inspect_classpath
 from .classpaths import public_module
 from .config_io import YAML_DUMP as YAML_DUMP
 from .config_io import YAML_SAFE
@@ -949,6 +949,15 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
     if yaml_path is not None:
         return summarize_yaml_model_signature(normalized, yaml_path)
 
+    if ":" not in normalized and "." not in normalized:
+        # a bare builtin name as a config writes it (Dice, CrossEntropyLoss): the catalog knows its classpath
+        builtin = builtin_inspect_classpath(normalized)
+        if builtin is not None:
+            resolved = summarize_classpath_signature(builtin, workspace_dir=workspace_dir)
+            resolved["classpath"] = normalized
+            resolved["resolved_classpath"] = builtin
+            return resolved
+
     module_name, object_name = _parse_classpath(normalized)
     local_candidate = (
         ":" in normalized
@@ -985,7 +994,7 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         # mapping list_components uses (catalog.model_config_reference_to_inspect_classpath) before
         # giving up; already-importable classpaths never reach here, so their behavior is unchanged.
         if ":" not in normalized:
-            builtin = model_config_reference_to_inspect_classpath(normalized)
+            builtin = model_config_reference_to_inspect_classpath(normalized) or builtin_inspect_classpath(normalized)
             if builtin is not None and builtin != normalized:
                 fallback = summarize_classpath_signature(builtin, workspace_dir=workspace_dir)
                 if fallback.get("ok"):

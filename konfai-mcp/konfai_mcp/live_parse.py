@@ -35,6 +35,7 @@ _EVAL_SPLIT_RE = re.compile(r"\bMetric\s+([A-Za-z]+)\s*:")
 _EVAL_PAIR_RE = re.compile(r"(.+):\s*([-+0-9.eE]+|nan|inf|-inf):?\s*$", re.IGNORECASE)
 # tqdm progress, with or without the |bar| glyphs: a default bar ("45%|██| 34/75 [00:12<00:14, 2.87it/s]")
 # or konfai's bar-less training tail ("… :  2% 415/21294 [01:30<1:15:29, 4.61it/s]").
+_STEP_ZERO_RE = re.compile(r"\s0%\s+0/\d+")
 _PROGRESS_RE = re.compile(
     r"(\d+)%\s*(?:\|[^|]*\|)?\s*(\d+)\s*/\s*(\d+)\s*\[([^<\]]+)<([^,\]]+),\s*([0-9.]+)\s*(it/s|s/it)\]"
 )
@@ -177,6 +178,9 @@ def parse_live_metric_line(line: str) -> dict[str, Any] | None:
     if stage_match is not None:
         metrics = parse_model_metrics(extract_parenthesized_value(clean, "Loss ("))
         metrics_ema = parse_model_metrics(extract_parenthesized_value(clean, "Loss EMA ("))
+        if _STEP_ZERO_RE.search(clean):
+            # the bar at step 0 ("0% 0/N [00:00<?, ?it/s]") still shows the previous stage's postfix
+            return None
         if metrics or metrics_ema:
             return _with_host_and_progress(
                 {

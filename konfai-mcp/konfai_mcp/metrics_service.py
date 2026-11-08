@@ -368,7 +368,6 @@ class MetricsServiceMixin:
             result["leaderboard"] = by_metric[selected_metric]
             result["best"] = by_metric[selected_metric][0] if by_metric[selected_metric] else None
         else:
-            result["leaderboard"] = []
             result["common_metric_prefix"] = self._common_metric_prefix(sorted(available_metrics))
             result["leaderboards"] = by_metric
         return result

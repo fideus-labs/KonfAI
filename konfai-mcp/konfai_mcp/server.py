@@ -1930,6 +1930,17 @@ def initialize_session(
         ),
     ] = False,
 ) -> dict[str, Any]:
+    return _tool_initialize_session(
+        overwrite=overwrite, from_example=from_example, workflows=workflows, include_support_files=include_support_files
+    )
+
+
+def _tool_initialize_session(
+    overwrite: bool = False,
+    from_example: str | None = None,
+    workflows: str | list[str] | None = None,
+    include_support_files: bool = False,
+) -> dict[str, Any]:
     """Create or reset the current session workspace, optionally seeded from one example template."""
     template = template_dir(EXAMPLES_ROOT, from_example) if from_example is not None else None
     selected_workflows = SESSION.seeded_workflows(template, workflows) if template is not None else []
@@ -3541,7 +3552,9 @@ def run_transform(
         bool,
         Field(description="Plan only: every case's verdict and the budget; nothing of the deliverable is written."),
     ] = False,
-    gpu: Annotated[int | list[int] | None, Field(description="GPU index or indices; omitted: CPU.")] = None,
+    gpu: Annotated[
+        int | list[int] | None, Field(description="GPU index or indices; omit for CPU (excludes cpu).")
+    ] = None,
     cpu: Annotated[
         int | None,
         Field(
@@ -3569,6 +3582,12 @@ def session(
     overwrite: Annotated[bool, Field(description="import: replace files already in the session.")] = False,
     switch: Annotated[bool, Field(description="create: make the new session current.")] = True,
     force: Annotated[bool, Field(description="delete: cancel the active jobs first.")] = False,
+    from_example: Annotated[
+        str | None, Field(description="create: seed the new session from this example template in the same call.")
+    ] = None,
+    workflows: Annotated[
+        str | list[str] | None, Field(description="create with from_example: the workflow configs to seed.")
+    ] = None,
 ) -> dict[str, Any]:
     if action == "list":
         return {
@@ -3578,7 +3597,13 @@ def session(
             "pinned_by_host": bool(os.environ.get("KONFAI_MCP_SESSION")),
         }
     if action == "create":
-        return _tool_create_session(_required(name, "name", action), switch=switch)
+        if from_example is not None and not switch:
+            raise ValueError("from_example seeds the new session, which needs switch=True")
+        created = _tool_create_session(_required(name, "name", action), switch=switch)
+        if from_example is not None:
+            # one intention, one call: created to be seeded
+            created["initialized"] = _tool_initialize_session(from_example=from_example, workflows=workflows)
+        return created
     if action == "switch":
         return _tool_switch_session(_required(name, "name", action))
     if action == "delete":

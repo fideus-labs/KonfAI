@@ -87,7 +87,11 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         run_name: str | None = None,
     ) -> list[Path]:
         if models:
-            return [Path(model).expanduser().resolve() for model in models]
+            # a relative path is the session's (Checkpoints/<run>/<file>.pt), not the server's cwd
+            return [
+                (path if path.is_absolute() else self.workspace_dir() / path).resolve()
+                for path in (Path(model).expanduser() for model in models)
+            ]
         return self.discover_model_paths(limit=limit, run_name=run_name)
 
     def _workflow_runtime_root(self, workflow: str) -> Path:

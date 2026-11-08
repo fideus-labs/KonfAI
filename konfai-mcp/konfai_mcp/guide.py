@@ -140,7 +140,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "and Predictions/ too; use session(action='create') for a fresh name instead. Next: write_workflow_config."
     ),
     "session": (
-        "Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it; the workspace is empty until initialize_session); 'switch' (name); 'delete' (the "
+        "Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it; from_example seeds it in the same call, else the workspace is empty until initialize_session); 'switch' (name); 'delete' (the "
         "current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its "
         "configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while "
         "a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session."

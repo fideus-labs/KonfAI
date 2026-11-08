@@ -37,7 +37,12 @@ beside the image; a clean `check_config` review suggests the matching `run_*`; l
 directories without `overwrite`; a finished train, prediction or evaluation job lists its `outputs`;
 `design_config_strategy` selects the best compatible template and names its seed; the redundant readiness flag is
 gone (`blocked.prediction.missing_models` says it); `write_workflow_config` always returns `schema_errors`; the
-CUDA notice stays quiet when `cpu` was asked for.
+CUDA notice stays quiet when `cpu` was asked for. A fourth run added: `inspect_object_signature` resolves a bare
+builtin name (`Dice`) through the catalog; a checkpoint path given to `check_config` is the session's when relative;
+`session(action='create', from_example=...)` creates and seeds in one call; the step-0 tqdm line of a stage (which
+repeats the previous stage's values) is no longer parsed as a metric; an isolated subprocess error starts with the
+exception's own line; `leaderboard` without a metric no longer carries an empty `leaderboard` list; one wording for
+every `gpu` and `cpu` parameter.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)
