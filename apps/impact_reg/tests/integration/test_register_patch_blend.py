@@ -21,7 +21,7 @@ spacing, another origin), as real pairs come.
   native tiles): the registration must recover the known smooth warp (NCC up) and the blended field must show no
   seam on any plane. A pair on one grid could not show a moving tile registered against another region of the
   fixed.
-- On the CPU, Generic_Rigid_BSpline on the whole pair: the contract the Slicer module reads, ``P000/Transform.h5``
+- On the CPU, Elastix#rigid_bspline on the whole pair: the contract the Slicer module reads, ``P000/Transform.h5``
   and ``P000/Moved.mha`` on the fixed grid, and ``register.json`` naming the inputs of the case.
 
 Gated: the presets are external apps, not shipped in this repo; point ``KONFAI_IMPACTREG_REPO`` at a local
@@ -44,7 +44,7 @@ _REPO = os.environ.get("KONFAI_IMPACTREG_REPO", "")
 
 def _skip_reasons(preset: str, gpu: bool) -> list[str]:
     reasons = []
-    if not (Path(_REPO) / preset / "app.json").is_file():
+    if not (Path(_REPO) / preset.split("#")[0] / "app.json").is_file():
         reasons.append(f"set KONFAI_IMPACTREG_REPO to a local preset directory holding {preset}")
     if gpu:
         try:
@@ -92,13 +92,13 @@ def _field(transform: Path, fixed: Path) -> np.ndarray:
 
 
 @pytest.mark.gpu
-@_requires("FireANTs_SyN", gpu=True)
+@_requires("FireANTs#syn", gpu=True)
 def test_a_patched_registration_of_a_pair_on_two_grids_is_seamless(make_reg_pair, tmp_path: Path) -> None:
     fixed, moving, baseline = make_reg_pair(side=96, amplitude=4.0, moving_spacing=1.25, moving_origin=(3.0, -2.0, 4.0))
 
     out = tmp_path / "Output"
     reg.ImpactRegKonfAIApp().register(
-        ["FireANTs_SyN"],
+        ["FireANTs#syn"],
         [fixed],
         [moving],
         output=out,
@@ -124,12 +124,12 @@ def test_a_patched_registration_of_a_pair_on_two_grids_is_seamless(make_reg_pair
         assert seam_mean < 6.0 * global_mean, f"axis {axis} patch seam: {seam_mean:.3f} vs global {global_mean:.3f}"
 
 
-@_requires("Generic_Rigid_BSpline", gpu=False)
+@_requires("Elastix#rigid_bspline", gpu=False)
 def test_register_writes_what_slicer_reads_for_a_pair_on_two_grids(make_reg_pair, tmp_path: Path) -> None:
     fixed, moving, baseline = make_reg_pair(side=64, amplitude=3.0, moving_spacing=1.25, moving_origin=(3.0, -2.0, 4.0))
 
     out = tmp_path / "Output"
-    reg.ImpactRegKonfAIApp().register(["Generic_Rigid_BSpline"], [fixed], [moving], output=out, cpu=1, quiet=True)
+    reg.ImpactRegKonfAIApp().register(["Elastix#rigid_bspline"], [fixed], [moving], output=out, cpu=1, quiet=True)
 
     fixed_a, moved_a = _arr(fixed), _arr(out / "P000" / "Moved.mha")
     assert (out / "P000" / "Transform.h5").is_file() and moved_a.shape == fixed_a.shape

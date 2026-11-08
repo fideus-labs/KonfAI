@@ -85,8 +85,8 @@ def main() -> None:
 on Hugging Face), ensemble several, evaluate a transform, and measure the spread of an ensemble.""",
         epilog=f"""examples:
   impact-reg-konfai list
-  impact-reg-konfai show FireANTs_SyN
-  impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
+  impact-reg-konfai show FireANTs#syn
+  impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
 
 The presets come from {PRESETS_REPO}. KONFAI_IMPACTREG_REPO points elsewhere: a directory
 of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback of a failure.""",
@@ -104,7 +104,7 @@ of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback
     show = subparsers.add_parser(
         "show",
         help="Say what a preset runs, what it needs and what --set tunes.",
-        epilog="example:\n  impact-reg-konfai show FireANTs_SyN",
+        epilog="example:\n  impact-reg-konfai show FireANTs#syn",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     show.add_argument("name", help="The preset.")
@@ -125,8 +125,8 @@ are ensembled, their displacement fields averaged. Each case, P000, P001, ... in
 The transform maps a point of the fixed image to the matching point of the moving image (ITK's
 convention): resampling the moving image through it gives Moved.""",
         epilog="""examples:
-  impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
-  impact-reg-konfai register -f fixed.ome.zarr -m moving.ome.zarr -p ConvexAdam_Composite FireANTs_SyN \\
+  impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
+  impact-reg-konfai register -f fixed.ome.zarr -m moving.ome.zarr -p ConvexAdam#composite FireANTs#syn \\
       --uncertainty -o Output --gpu 0""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -186,11 +186,11 @@ convention): resampling the moving image through it gives Moved.""",
         default=None,
         help="Tune a preset parameter (repeatable), checked against each preset before anything runs. NAME=VALUE "
         "applies to every preset, PRESET:NAME=VALUE to that one alone, since engines name their knobs differently: "
-        "e.g. --set FireANTs_SyN:deformable_iterations=[400,200,100] --set Generic_Rigid:max_iterations=500. "
+        "e.g. --set FireANTs#syn:deformable_iterations=[400,200,100] --set Elastix#rigid:max_iterations=500. "
         "'impact-reg-konfai show NAME' lists the parameters a preset takes. A pair registered in tiles gets it "
         "in the preset's global pass and in its tiles where their configs agree, in the global pass alone where "
         "the tile config differs (its deformable stage alone); global: or tile: gives it to that pass alone, "
-        "e.g. --set FireANTs_SyN:tile:deformable_iterations=[100,50,25].",
+        "e.g. --set FireANTs#syn:tile:deformable_iterations=[100,50,25].",
     )
     reg.add_argument(
         "--max-voxels",

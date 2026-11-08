@@ -86,7 +86,7 @@ def test_the_patch_mode_is_tile_or_resample() -> None:
 def test_an_unset_max_voxels_is_the_tighter_of_the_gpu_and_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """On a GPU, the tighter of its free VRAM (NVML, the card ``--gpu`` names, under KonfAI's margin) and the host
     budget, each at the peak bytes per voxel the prediction declares for it; on the CPU, the host alone. The
-    published Elastix_IMPACT_Static (150 B of VRAM, 950 B of RAM per voxel) on 24 GiB free of GPU and 16 GiB of RAM
+    published Elastix#impact_static (150 B of VRAM, 950 B of RAM per voxel) on 24 GiB free of GPU and 16 GiB of RAM
     is bound by its RAM: planned from its VRAM, it would have claimed 121.6 GiB of a 12.8 GiB budget."""
     import konfai
     from konfai.utils import budget, vram
