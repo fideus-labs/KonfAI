@@ -1396,6 +1396,25 @@ def _registration_app(tmp_path: Path) -> Path:
     return app_dir
 
 
+def test_describe_app_lists_the_presets_and_a_registration_preset_reaches_impact_reg(tmp_path: Path) -> None:
+    """An app's presets are named lists of --set: describe_app lists them and marks the one a ref#preset chose,
+    and a registration app run with one hands impact-reg-konfai the app and its preset as APP#PRESET."""
+    app_dir = _registration_app(tmp_path)
+    manifest = json.loads((app_dir / "app.json").read_text())
+    manifest["presets"] = {"rigid": {"description": "Rigid only", "set": []}}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    service = _service(tmp_path)
+
+    payload = service.describe_app(f"{app_dir}#rigid")
+    assert payload["presets"] == {"rigid": {"description": "Rigid only", "set": []}}
+    assert payload["preset"] == "rigid"
+    assert "presets" not in service.describe_app(str(_write_local_app(tmp_path)))
+
+    fixed, moving = (_touch(tmp_path / "data" / f"{name}.mha") for name in ("fixed", "moving"))
+    spec = service.prepare_infer(ref=f"{app_dir}#rigid", inputs=[[fixed], [moving]], allow_untrusted_code=True)
+    assert (spec["kwargs"]["repo"], spec["kwargs"]["preset"]) == (str(app_dir.parent), "TinyRigid#rigid")
+
+
 def test_a_registration_app_runs_through_impact_reg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The preset writes its field only: impact-reg-konfai derives the moved image, so the app runs through it,
     the repository being the folder that holds the preset, the groups read as fixed, moving, then the masks."""

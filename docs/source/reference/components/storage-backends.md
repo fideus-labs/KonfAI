@@ -164,8 +164,20 @@ patch, patch_attributes = dataset.read_data_slice(
 `Dataset("Dataset", "omezarr@1")` reads pyramid level 1. `konfai.utils.ome_zarr.get_ome_zarr_info` gives a
 store's axes, shape, chunks, scale and levels without reading pixels.
 
-KonfAI writes NGFF 0.5 (zarr v3); displacement fields are written as NGFF 0.6. Older KonfAI stores (zarr
-v2) are read as they are. A store written region by region is chunked like the regions the writer used,
+KonfAI writes NGFF 0.6 (zarr v3). Each level's scale and translation are the grid's axis-aligned view,
+exact spacing and origin, which is all a scale/translation reader (a viewer, ngff-zarr) takes. A
+standard RFC-5 transformation adds the grid's rotation about that origin: a rotation followed by a
+translation, or an affine for a reflection or a unit-scaled frame that cannot be represented as a pure
+rotation; an axis-aligned grid declares the identity. The physical axes carry RFC-4 LPS orientation. Reading resolves that mapping into KonfAI's internal
+`Origin`/`Spacing`/`Direction`; it does not resample the voxels. Crops and pyramid levels use the same
+mapping, including their offsets along rotated axes.
+
+The grid is no longer written to the private `konfai` attributes; only the earlier rungs of the
+geometry stack stay there, what an inverse stage pops back to. Files that depend on that old
+representation must be rewritten from their source before use; the reader refuses them rather than
+silently losing their direction. Standard NGFF 0.4/0.5 scale/translation stores remain readable.
+A file with several competing physical mappings, or a nonlinear mapping of its image grid, is refused.
+Non-geometric attributes remain in the `konfai` namespace. A store written region by region is chunked like the regions the writer used,
 which depends on the machine's memory budget; the values do not.
 
 ### Multiscale levels

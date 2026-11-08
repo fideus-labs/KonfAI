@@ -179,7 +179,7 @@ def test_an_image_too_small_for_the_impact_grid_says_so(monkeypatch) -> None:
     # Static mode: whole images (patch 0), one voxel size per model on a line.
     static_map = "(ImpactPatchSize0 0 0 0 0 0 0)\n(ImpactVoxelSize0 6 6 6 6 6 6)\n"
     rejected = "Description: ITK ERROR: IMPACT: the model TS/M730.pt rejected its input. Check the number of channels\n"
-    with pytest.raises(RuntimeError, match="FireANTs_SyN") as raised:
+    with pytest.raises(RuntimeError, match="FireANTs#syn") as raised:
         _elastix_run(monkeypatch, [rejected], 1, static_map, brain)
     assert "patch spans" not in str(raised.value)
     # A TotalSegmentator encoder's normalisation, handed a slab one voxel thick at 6 mm (an APEX brain section).
@@ -332,7 +332,7 @@ def test_the_engine_output_is_declared_a_displacement_field() -> None:
             return np.zeros((3, 4, 4, 4), dtype=np.float32)
 
     image, attributes = _registration_inputs()
-    EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)
+    EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)
     assert DISPLACEMENT_FIELD_ATTRIBUTE in attributes[0][0]
 
 
@@ -354,7 +354,7 @@ def test_an_engine_s_affine_is_carried_as_its_field_and_declared_in_the_header()
     image, attributes = _registration_inputs()
     for branch in attributes:
         branch[0]["Spacing"] = np.array([0.5, 0.5, 2.0])  # the finest voxel is 0.5 mm
-    field = EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)[0].numpy()
+    field = EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)[0].numpy()
 
     assert DISPLACEMENT_FIELD_ATTRIBUTE in attributes[0][0] and AFFINE_ATTRIBUTE in attributes[0][0]
     affine = affine_from_attributes(attributes[0][0])
@@ -379,12 +379,12 @@ def test_an_out_of_memory_inside_the_engine_reaches_konfai_as_torch_s_class() ->
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="out of memory"):
-        EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)
+        EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)
 
 
 @_needs_cuda
 def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_class() -> None:
-    from impact_reg_konfai.models.elastix_engine import ElastixRegistration
+    from impact_reg_konfai.models.intensity import EngineRegistration
 
     class Engine:
         def register(self, *pair):
@@ -394,9 +394,7 @@ def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_cl
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
-        ElastixRegistration.forward(
-            SimpleNamespace(_engine=Engine(), _fuse_texpr=True), image, image, image, image, attributes
-        )
+        EngineRegistration(Engine())(image, image, image, image, attributes=attributes)
 
 
 def test_fireants_static_mode_reaches_the_engine() -> None:

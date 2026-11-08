@@ -102,7 +102,7 @@
       "konfai": [
         "impact-reg-konfai",
         "register",
-        "FireANTs_SyN",
+        "FireANTs#syn",
         "-f",
         "{fixed}",
         "-m",

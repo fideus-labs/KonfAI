@@ -1404,6 +1404,21 @@ def test_set_adds_a_field_the_model_declares_where_the_config_leaves_it_out(tmp_
         repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.nrom=l2"])
 
 
+def test_a_nested_model_parameter_is_dotted_from_the_model(tmp_path: Path) -> None:
+    # Predictor.Model.RegistrationNet.models.0.norm=l2 was the only spelling: a dotted name now starts at the model,
+    # checked as the full path is, and a path from the config root keeps working.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(str(prediction), ["models.0.norm=l2", "optimizer.lr=0.01"])
+    net = _net(prediction)
+    assert net["models"]["0"]["norm"] == "l2" and net["optimizer"]["lr"] == 0.01
+    with pytest.raises(AppRepositoryError, match="Did you mean 'norm'"):
+        repo._apply_config_overrides(str(prediction), ["models.0.nrom=l2"])
+    with pytest.raises(AppRepositoryError, match="outside its range"):
+        repo._apply_config_overrides(str(prediction), ["models.0.pca=-5"])
+    repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.norm=none"])
+    assert _net(prediction)["models"]["0"]["norm"] == "none"
+
+
 @pytest.mark.parametrize(
     "override",
     [
