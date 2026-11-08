@@ -33,15 +33,20 @@ from konfai.metric.measure.impact import IMPACTReg as IMPACTReg
 from konfai.metric.measure.impact import IMPACTSynth as IMPACTSynth
 from konfai.metric.measure.impact import SAM_Perceptual as SAM_Perceptual
 from konfai.metric.measure.regression import BCE as BCE
+from konfai.metric.measure.regression import LNCC as LNCC
 from konfai.metric.measure.regression import LPIPS as LPIPS
 from konfai.metric.measure.regression import MAE as MAE
 from konfai.metric.measure.regression import ME as ME
 from konfai.metric.measure.regression import MSE as MSE
+from konfai.metric.measure.regression import NCC as NCC
+from konfai.metric.measure.regression import NMI as NMI
 from konfai.metric.measure.regression import PSNR as PSNR
 from konfai.metric.measure.regression import SSIM as SSIM
 from konfai.metric.measure.regression import TRE as TRE
 from konfai.metric.measure.regression import Accuracy as Accuracy
+from konfai.metric.measure.regression import BendingEnergy as BendingEnergy
 from konfai.metric.measure.regression import CrossEntropyLoss as CrossEntropyLoss
+from konfai.metric.measure.regression import Displacement as Displacement
 from konfai.metric.measure.regression import FocalLoss as FocalLoss
 from konfai.metric.measure.regression import GradientImages as GradientImages
 from konfai.metric.measure.regression import JacobianFolding as JacobianFolding
@@ -50,21 +55,33 @@ from konfai.metric.measure.regression import JacobianMin as JacobianMin
 from konfai.metric.measure.regression import KLDivergence as KLDivergence
 from konfai.metric.measure.regression import MAESaveMap as MAESaveMap
 from konfai.metric.measure.regression import Mean as Mean
+from konfai.metric.measure.regression import PointDistance as PointDistance
 from konfai.metric.measure.regression import Variance as Variance
+from konfai.metric.measure.segmentation import ASSD as ASSD
+from konfai.metric.measure.segmentation import HD95 as HD95
 from konfai.metric.measure.segmentation import Dice as Dice
 from konfai.metric.measure.segmentation import DiceSaveMap as DiceSaveMap
+from konfai.metric.measure.segmentation import Jaccard as Jaccard
 from konfai.metric.measure.segmentation import LabelSums as LabelSums
+from konfai.metric.measure.segmentation import SurfaceDice as SurfaceDice
+from konfai.metric.measure.segmentation import VolumeDifference as VolumeDifference
 
 __all__ = [
+    "ASSD",
     "BCE",
+    "HD95",
+    "LNCC",
     "LPIPS",
     "MAE",
     "ME",
     "MSE",
+    "NCC",
+    "NMI",
     "PSNR",
     "SSIM",
     "TRE",
     "Accuracy",
+    "BendingEnergy",
     "Criterion",
     "CriterionOutput",
     "CriterionResult",
@@ -74,12 +91,14 @@ __all__ = [
     "CrossEntropyLoss",
     "Dice",
     "DiceSaveMap",
+    "Displacement",
     "FocalLoss",
     "GradientImages",
     "Gram",
     "IMPACTReg",
     "IMPACTSynth",
     "ImpactFeatureModel",
+    "Jaccard",
     "JacobianFolding",
     "JacobianLogStd",
     "JacobianMin",
@@ -91,6 +110,9 @@ __all__ = [
     "Mean",
     "PatchGanLoss",
     "PerceptualLoss",
+    "PointDistance",
     "SAM_Perceptual",
+    "SurfaceDice",
     "Variance",
+    "VolumeDifference",
 ]
