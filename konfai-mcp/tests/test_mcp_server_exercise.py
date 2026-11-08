@@ -90,3 +90,19 @@ def test_the_scout_service_follows_the_session(load_mcp_server: Callable[[], Mod
     asyncio.run(scenario())
     assert mcp_server.SCOUT_SERVICE.workspace_layout.current_session == "scouted"
     assert "scouted" in str(mcp_server.SCOUT_SERVICE.root())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_a_registration_evaluation_stays_in_the_session_and_off_the_gpu(
+    tmp_path: Path, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    mcp_server = load_mcp_server()
+    fixed, moving = tmp_path / "f.nii.gz", tmp_path / "m.nii.gz"
+    fixed.write_bytes(b"x")
+    moving.write_bytes(b"x")
+    spec = mcp_server.APP_SERVICE.prepare_registration_evaluate(
+        fixed_seg=[str(fixed)], moving_seg=[str(moving)], output="AppEvaluations/baseline"
+    )
+    workspace = mcp_server.WORKSPACE_LAYOUT.workspace_dir()
+    assert Path(spec["output"]) == (workspace / "AppEvaluations/baseline").resolve()
+    assert spec["kwargs"]["gpu"] == []

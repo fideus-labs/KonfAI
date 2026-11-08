@@ -621,6 +621,15 @@ class JobRegistry:
                 # ponytail: a full walk per status call; cache it if a big run makes this slow
                 files = sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
                 payload["outputs"] = {"dir": str(out_dir), "file_count": len(files), "files": files[:20]}
+        if job.status == "done" and app_kind and job.output_path is not None and job.output_path.is_dir():
+            # an app job's output directory, and the aggregates an evaluation wrote there
+            files = sorted(str(p.relative_to(job.output_path)) for p in job.output_path.rglob("*") if p.is_file())
+            app_outputs: dict[str, Any] = {"dir": str(job.output_path), "file_count": len(files), "files": files[:20]}
+            summary_path = job.output_path / "Evaluation_summary.json"
+            if summary_path.is_file():
+                with suppress(Exception):
+                    app_outputs["evaluation_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+            payload["outputs"] = app_outputs
         # Only a finished job's manifest is its own: the run directory is reused across runs of one
         # name, so while the job is queued or running the file there is a previous run's.
         outputs = self._recorded_outputs(job) if job.status == "done" else None
@@ -739,7 +748,7 @@ class JobRegistry:
                 )
                 raise RuntimeError(
                     f"Session '{session}' already has active job(s) on conflicting device(s): {active}. "
-                    "Pick disjoint gpu ids, or get_job_status(wait=True) / cancel_job first."
+                    "Pick disjoint gpu ids (gpu=[] for a CPU-only job), or get_job_status(wait=True) / cancel_job first."
                 )
             self.jobs[job.job_id] = job
             self._persist_job(job)

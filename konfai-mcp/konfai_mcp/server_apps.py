@@ -879,12 +879,10 @@ class AppService:
         kwargs: dict[str, Any] = {
             name: self._normalize_input_groups([paths], name)[0] if paths else [] for name, paths in groups.items()
         }
-        if cpu is not None and gpu is None:
-            gpu = []
+        if gpu is None and (cpu is not None or not (fixed_images or moving_images)):
+            gpu = []  # Dice on label maps and TRE on landmarks need no GPU: do not reserve one
         label = self.workspace_layout.sanitize_name("eval_registration")
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppEvaluations", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppEvaluations", label)
         kwargs.update({"output": resolved_output, "gpu": gpu, "cpu": cpu})
         return {
             "kind": "evaluate",

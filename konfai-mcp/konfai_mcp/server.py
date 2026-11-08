@@ -1445,7 +1445,14 @@ def run_app(
         list[list[str]] | None,
         Field(description="evaluate, pipeline: ground-truth volumes as GROUPS, paired with inputs by order."),
     ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description="evaluate, pipeline: " + _APP_MASK_DESC)] = None,
+    mask: Annotated[
+        list[list[str]] | None,
+        Field(
+            description="evaluate, pipeline: "
+            + _APP_MASK_DESC
+            + " Registration infer: two groups, [fixed masks, moving masks], paired with inputs."
+        ),
+    ] = None,
     tta: Annotated[int | None, Field(description="infer, pipeline: " + _APP_TTA_DESC)] = None,
     ensemble: Annotated[int | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_DESC)] = None,
     ensemble_models: Annotated[

@@ -53,6 +53,11 @@ an unknown resource URI lists the resources; `preview_volume` reports the volume
 direction from the header; `inspect_dataset` says when a folder is flat (one file per case) and repeats a
 statistics-failure reason once; `set_parameters` says a dotted config path works; `run_scout_inspection` accepts
 the `claude-code` and `codex` providers (no API key).
+A run registering a Learn2Reg inspiration/expiration pair with impact-reg presets (Dice 0.839 unregistered, 0.842
+rigid, 0.915 B-spline; Scout inspected the field) added: `run_registration_evaluate` writes its output inside the
+session like every app job and reserves no GPU when it scores only label maps or landmarks; the device-conflict
+error says `gpu=[]` is a CPU-only job; a finished app job lists its outputs and carries `Evaluation_summary.json`
+when it wrote one; the `mask` parameter of `run_app` says how a registration takes its masks.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)
