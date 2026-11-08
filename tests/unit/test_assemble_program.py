@@ -122,8 +122,8 @@ def test_models_folded_first_run_the_per_copy_ops_on_each_copys_mean():
         **M,
         "preprocessing": [{"op": "resample", "spacing": [1.0, 1.0], "id": "Resample", "interpolation": "linear"}],
         "postprocessing": [
-            {"op": "unnormalize", "min_value": -1024.0, "max_value": 3071.0},
-            {"op": "cast", "dtype": "int16"},
+            {"op": "softmax", "dim": 0},
+            {"op": "cast", "dtype": "float16"},
             {"op": "inverse", "of": "Resample", "interpolation": "linear"},
         ],
     }
@@ -137,15 +137,17 @@ def test_models_folded_first_run_the_per_copy_ops_on_each_copys_mean():
         ("model", "input", "cv_0__p1"),
         ("model", "input", "cv_1__p1"),
         ("mean", ["cv_0__p0", "cv_1__p0"], "mean__p0"),
-        ("unnormalize", ["mean__p0"], "mean__p0__0"),
+        ("softmax", ["mean__p0"], "mean__p0__0"),
         ("cast", ["mean__p0__0"], "mean__p0__1"),
         ("mean", ["cv_0__p1", "cv_1__p1"], "mean__p1"),
-        ("unnormalize", ["mean__p1"], "mean__p1__0"),
+        ("softmax", ["mean__p1"], "mean__p1__0"),
         ("cast", ["mean__p1__0"], "mean__p1__1"),
         ("mean", ["mean__p0__1", "mean__p1__1"], "r"),
         ("resample_linear", ["r", "input"], "output"),
     ]
-    # Each model keeps only the undoing of its own copy.
+    # The body softmax names no axis (a program op runs on the channel axis); each model keeps only the undoing
+    # of its own copy.
+    assert program["steps"][5] == {"op": "softmax", "in": ["mean__p0"], "out": "mean__p0__0"}
     assert program["steps"][0]["manifest"]["postprocessing"] == []
     assert program["steps"][2]["manifest"]["postprocessing"] == [{"op": "inverse", "of": "__tta_0"}]
 

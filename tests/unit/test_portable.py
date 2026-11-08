@@ -1323,6 +1323,44 @@ def test_models_konfai_averages_before_a_per_copy_chain_fold_first(copies: str) 
     assert not models_fold_first(config, "Predictor", 1)
 
 
+def test_a_per_copy_chain_folded_on_the_models_average_runs_as_body_ops_or_is_refused_by_name() -> None:
+    # konfai runs the before-reduction chain on the models' average; a program runs a cast, a softmax or an argmax
+    # on a buffer and nothing else, so each such step takes its body form (a softmax names no axis there) and any
+    # other stage is refused before export, rather than copied into a program the schema rejects.
+    from konfai.portable_schema import program_schema
+
+    lenient = _without_required(program_schema())
+    manifest = {
+        **_one_model()[0]["manifest"],
+        "postprocessing": [{"op": "softmax", "dim": 0}, {"op": "cast", "dtype": "uint8"}],
+    }
+    models = [{"id": name, "manifest": manifest} for name in ("a", "b")]
+    program = assemble_program(models, reduce="mean", per_copy=2, fold_models=True)
+    _meets(program, "program", lenient)
+    assert [step for step in program["steps"] if "op" in step][:3] == [
+        {"op": "mean", "in": ["a", "b"], "out": "mean__p0"},
+        {"op": "softmax", "in": ["mean__p0"], "out": "mean__p0__0"},
+        {"op": "cast", "dtype": "uint8", "in": ["mean__p0__0"], "out": "output"},
+    ]
+    unnormalize = {**manifest, "postprocessing": [{"op": "unnormalize", "min_value": -1.0, "max_value": 1.0}]}
+    with pytest.raises(ConfigError, match="'unnormalize'"):
+        assemble_program([{**m, "manifest": unnormalize} for m in models], reduce="mean", per_copy=1, fold_models=True)
+
+
+def test_a_cubic_resample_runs_through_a_whole_program_the_schema_admits() -> None:
+    # The compiler emits `cubic` on a resample and its inverse, and `resample_cubic` once that inverse is hoisted
+    # past the reduction: the schema admits each where it admits `linear`.
+    from konfai.portable_schema import program_schema
+
+    lenient = _without_required(program_schema())
+    manifest = _undone_resample({}, {"interpolation": "cubic"})
+    _meets(manifest, "manifest", lenient)
+    assert manifest["postprocessing"] == [{"op": "inverse", "of": "Resample", "interpolation": "cubic"}]
+    program = assemble_program([{"id": name, "manifest": manifest} for name in ("a", "b")], reduce="mean")
+    _meets(program, "program", lenient)
+    assert program["steps"][-1] == {"op": "resample_cubic", "in": ["r", "input"], "out": "output"}
+
+
 def test_one_model_folds_its_test_time_copies_by_their_own_reduction() -> None:
     # konfai's combine hands one model's output back, and the copies fold by the output's `reduction`: that
     # fold is the program's only one, whatever `combine` says.

@@ -1608,14 +1608,14 @@ def assemble_program(
     folded: list[dict[str, Any]] = []
     if fold_models and len(models) > 1:
         post = manifests[0].get("postprocessing", [])
-        folded = post[:per_copy]
-        moves = [step["op"] for step in folded if step["op"] in ("resample", *INDEX_SELECTIONS)]
+        moves = [step["op"] for step in post[:per_copy] if step["op"] in ("resample", *INDEX_SELECTIONS)]
         if moves and split_post(post, manifests[0].get("preprocessing", []), per_copy) > per_copy:
             raise ConfigError(
                 f"assemble_program: the per-copy '{moves[0]}' runs on the models' average, past the inverses each"
                 " model keeps, which konfai runs after it.",
                 _or_konfai("Combine the models by Concat", _PREDICT),
             )
+        folded = [_fold_op(step) for step in post[:per_copy]]
         manifests = [{**mf, "postprocessing": mf.get("postprocessing", [])[per_copy:]} for mf in manifests]
         per_copy = 0
     tail: list[dict[str, Any]] = []
@@ -1667,6 +1667,22 @@ def _model_steps(
             steps.append({"model": model["id"], "in": _model_inputs(copy), "out": out, "manifest": copy})
             copies.append(out)
     return steps, copies
+
+
+def _fold_op(step: dict[str, Any]) -> dict[str, Any]:
+    """A per-copy chain op as the program step running it on the models' average: a cast keeps its dtype, a
+    softmax or an argmax runs on the channel axis the body op implies. No other chain op has a body form, and
+    konfai runs the stage on the average, so the models cannot each run it in their own manifest."""
+    op = step["op"]
+    if op == "cast":
+        return {"op": "cast", "dtype": step["dtype"]}
+    if op in ("softmax", "argmax") and int(step.get("dim", 0)) == 0:
+        return {"op": op}
+    raise ConfigError(
+        f"assemble_program: '{op}' runs on the models' average before the copies fold, and a program runs a cast,"
+        " a softmax or an argmax alone on a buffer.",
+        _or_konfai("Combine the models by Concat", _PREDICT),
+    )
 
 
 def _fold_models(steps: list[dict[str, Any]], copies: list[str], models: int, ops: list[dict[str, Any]]) -> list[str]:
