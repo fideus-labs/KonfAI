@@ -104,6 +104,25 @@ def test_surface_distances_are_the_brute_force_ones() -> None:
     assert hd95[3] == pytest.approx(diagonal) and assd[3] == pytest.approx(diagonal) and nsd[3] == 0.0
 
 
+def test_the_grid_s_border_is_a_surface() -> None:
+    """A label touching the grid's face has its surface there too (MedPy's and DeepMind's convention): it scores as
+    the same label inside the grid does, and two identical maps filling the grid score 0, not an error."""
+    attributes = _attributes()
+    reference = torch.zeros(1, 1, 6, 6, 6, dtype=torch.uint8)
+    reference[..., 0:3, 0:3, 0:3] = 1
+    output = torch.zeros_like(reference)
+    output[..., 0:3, 0:3, 1:4] = 1
+    inside = torch.zeros(1, 1, 8, 8, 8, dtype=torch.uint8)
+    inside[..., 1:4, 1:4, 1:4] = 1
+    inside_output = torch.zeros_like(inside)
+    inside_output[..., 1:4, 1:4, 2:5] = 1
+    for criterion in (HD95(), ASSD(), SurfaceDice(tolerance=1.0)):
+        at_the_face = criterion(output, reference, attributes=attributes)[1][1]
+        assert at_the_face == pytest.approx(criterion(inside_output, inside, attributes=attributes)[1][1])
+    full = torch.ones(1, 1, 5, 6, 7, dtype=torch.uint8)
+    assert HD95()(full, full, attributes=attributes)[1] == pytest.approx({1: 0.0}, abs=1e-5)
+
+
 # ---------------------------------------------------------------- image similarity
 
 
@@ -147,21 +166,24 @@ def test_nmi_is_numpy_s_and_two_for_a_one_to_one_map() -> None:
     assert nmi.combine_metric(halves)[1] == pytest.approx(nmi(a, b)[1])
 
 
-def test_lncc_is_the_mean_of_its_windows_and_streams_with_its_halo() -> None:
-    from konfai.metric.measure import LNCC
-
-    a, b, mask = _images()
-    x, y = a[0, 0].numpy(), b[0, 0].numpy()
-    radius = 1
-    expected = []
+def _lncc_brute(x: np.ndarray, y: np.ndarray, radius: int) -> float:
+    """The mean over the voxels of cov^2 / (var var) in the (2 radius + 1)-wide window around each, cut at the
+    faces."""
+    values = []
     for index in np.ndindex(x.shape):
         window = tuple(slice(max(i - radius, 0), i + radius + 1) for i in index)
         wa, wb = x[window], y[window]
         covariance = (wa * wb).mean() - wa.mean() * wb.mean()
-        variance = (wa.var()) * (wb.var())
-        expected.append(covariance**2 / (variance + 1e-5))
+        values.append(covariance**2 / (wa.var() * wb.var() + 1e-5))
+    return float(np.mean(values))
+
+
+def test_lncc_is_the_mean_of_its_windows_and_streams_with_its_halo() -> None:
+    from konfai.metric.measure import LNCC
+
+    a, b, mask = _images()
     lncc = LNCC(kernel=3)
-    assert lncc(a, b)[1] == pytest.approx(np.mean(expected), rel=1e-4)
+    assert lncc(a, b)[1] == pytest.approx(_lncc_brute(a[0, 0].numpy(), b[0, 0].numpy(), 1), rel=1e-4)
     # two patches read with the halo, each scoring its own slot
     states = [
         lncc.partial_metric(a[..., 0:6, :, :], b[..., 0:6, :, :], core=(slice(0, 5), slice(None), slice(None))),
@@ -169,6 +191,37 @@ def test_lncc_is_the_mean_of_its_windows_and_streams_with_its_halo() -> None:
     ]
     assert lncc.combine_metric(states)[1] == pytest.approx(lncc(a, b)[1], rel=1e-5)
     assert 0 < lncc(a, b, mask)[1] <= 1
+
+
+def test_lncc_reads_a_volume_thinner_than_its_kernel() -> None:
+    """Four planes under the default 9-voxel window (a thin acquisition, a boundary patch): the windows are cut at
+    the faces, as everywhere else, where the pool alone refused the image."""
+    from konfai.metric.measure import LNCC
+
+    rng = np.random.default_rng(1)
+    x, y = rng.normal(size=(4, 10, 10)), rng.normal(size=(4, 10, 10))
+    a, b = (torch.from_numpy(t)[None, None] for t in (x, y))
+    assert LNCC()(a, b)[1] == pytest.approx(_lncc_brute(x, y, 4), rel=1e-4)
+
+
+def test_an_empty_mask_scores_nan_not_an_error() -> None:
+    from konfai.metric.measure import LNCC, NCC, NMI
+
+    a, b, _ = _images()
+    empty = torch.zeros_like(a)
+    for criterion in (NCC(), NMI(), LNCC(kernel=3)):
+        assert np.isnan(criterion(a, b, empty)[1]), criterion.get_name()
+
+
+def test_the_measures_are_metrics_not_losses() -> None:
+    """Each returns a value without a gradient: a training config that leaves ``is_loss`` out takes it as a metric,
+    and ``is_loss: true`` on it is refused."""
+    from konfai.metric.measure import LNCC, NCC, NMI, BendingEnergy, Displacement, JacobianFolding, PointDistance
+
+    for criterion in (NCC, NMI, LNCC, PointDistance, BendingEnergy, Displacement, JacobianFolding):
+        assert not criterion.loss_capable, criterion.__name__
+    for criterion in (Jaccard, VolumeDifference, HD95, ASSD, SurfaceDice):
+        assert not criterion.loss_capable, criterion.__name__
 
 
 @pytest.mark.parametrize("offset", [0.0, 1000.0, 30000.0])

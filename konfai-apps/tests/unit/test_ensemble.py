@@ -55,7 +55,7 @@ def test_outputs_and_a_stack_average_their_members(tmp_path: Path) -> None:
     stack_path = tmp_path / "r2" / "P000" / "InferenceStack.mha"
     _image(np.stack([c, d], -1), stack_path, vector=True)  # a stack written before the count: a member a channel
 
-    shape, counts = ensemble.combine(
+    counts = ensemble.combine(
         [one, two, stack_path],
         "Mean",
         tmp_path / "out" / "P000" / "Output.mha",
@@ -63,7 +63,7 @@ def test_outputs_and_a_stack_average_their_members(tmp_path: Path) -> None:
         tmp_path / "out" / "P000" / "InferenceStack.mha",
     )
 
-    assert shape == [1, 7, 5, 4] and counts == [1, 1, 2]
+    assert counts == [1, 1, 2]
     np.testing.assert_allclose(
         sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out/P000/Output.mha"))), (a + b + c + d) / 4, atol=1e-6
     )
@@ -115,11 +115,15 @@ def test_an_output_of_several_files_moves_into_place_whole(tmp_path: Path) -> No
     np.testing.assert_allclose(written, (a + b) / 2, atol=1e-6)
 
 
-def test_label_maps_vote(tmp_path: Path) -> None:
+@pytest.mark.parametrize("operator", ["Vote", "Mean"])
+def test_label_maps_vote_whatever_the_operator(tmp_path: Path, operator: str) -> None:
+    """Label maps (integer voxels) are voted under the operator an app declares for its probabilities too: a mean of
+    labels 2 and 5 is no label, and the output keeps the labels' type."""
     labels = [np.full((4, 3, 3), value, dtype=np.uint8) for value in (2, 2, 5)]
     paths = [_image(array, tmp_path / f"r{i}" / "P000" / "Seg.nii.gz") for i, array in enumerate(labels)]
-    ensemble.combine(paths, "Vote", tmp_path / "out" / "P000" / "Seg.nii.gz", "nii.gz")
-    assert np.all(sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out/P000/Seg.nii.gz"))) == 2)
+    ensemble.combine(paths, operator, tmp_path / "out" / "P000" / "Seg.nii.gz", "nii.gz")
+    image = sitk.ReadImage(str(tmp_path / "out/P000/Seg.nii.gz"))
+    assert image.GetPixelID() == sitk.sitkUInt8 and np.all(sitk.GetArrayFromImage(image) == 2)
 
 
 def test_members_on_two_grids_are_refused(tmp_path: Path) -> None:

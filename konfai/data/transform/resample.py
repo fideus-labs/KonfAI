@@ -2033,17 +2033,12 @@ class WorldCoordinates(Transform):
         origin = cache_attribute.get_np_array("Origin").astype(np.float64)
         spacing = cache_attribute.get_np_array("Spacing").astype(np.float64)
         direction = cache_attribute.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
-        # world_c = origin_c + sum_a direction[c, a] spacing_a index_a: one broadcast per axis, so nothing larger
-        # than one channel is held beside the result. Index axis a (x, y, z) is array axis rank - 1 - a.
+        # world_c = origin_c + sum_a direction[c, a] spacing_a index_a, a channel at a time in float64 (the index
+        # grids are broadcast views: nothing larger than one channel is held beside the result). Index axis a
+        # (x, y, z) is array axis rank - 1 - a.
         step = direction * spacing
+        indices = torch.meshgrid(*(torch.arange(n, dtype=torch.float64) for n in spatial), indexing="ij")
         world = torch.empty((rank, *spatial), dtype=torch.float32)
         for c in range(rank):
-            channel = torch.full((1,) * rank, float(origin[c]), dtype=torch.float64)
-            for a in range(rank):
-                along = [1] * rank
-                along[rank - 1 - a] = spatial[rank - 1 - a]
-                channel = channel + float(step[c, a]) * torch.arange(spatial[rank - 1 - a], dtype=torch.float64).view(
-                    along
-                )
-            world[c] = channel
+            world[c] = float(origin[c]) + sum(float(step[c, a]) * indices[rank - 1 - a] for a in range(rank))
         return world

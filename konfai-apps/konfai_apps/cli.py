@@ -278,7 +278,7 @@ def _with_run_options(
     read off the app's config ``config_name`` as it ships (a server's app, from the server)."""
     if not output_format and seed is None:
         return overrides
-    config = _shipped_config(app, remote, config_name)
+    _, config = _shipped_config(app, remote, config_name)
     if config is None:
         raise AppRepositoryError(
             f"App '{split_preset(app)[0]}' has no {config_name}: --output-format and --seed have nothing to set."
@@ -286,25 +286,36 @@ def _with_run_options(
     return [*(overrides or []), *run_overrides(config, output_format, seed)]
 
 
-def _shipped_config(app: str, remote: RemoteServer | None, config_name: str) -> Any:
-    """The app's config ``config_name`` as it ships (a server's app, from the server), parsed; None without one."""
+def _shipped_config(app: str, remote: RemoteServer | None, config_name: str) -> tuple[Any, Any]:
+    """The app's repository (a server's app, from the server) and its config ``config_name`` as it ships, parsed; None
+    without one."""
     from ruamel.yaml import YAML
 
     base = split_preset(app)[0]
     info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
     files = {path.name: path for path in info.download_config_file()}
-    return YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8")) if config_name in files else None
+    config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8")) if config_name in files else None
+    return info, config
 
 
-def _combine_of(references: list[str], remote: RemoteServer | None, config_name: str) -> str:
-    """The operator an ensemble of ``references`` reduces its members with: the one their configs declare for their
-    checkpoints (``Predictor.combine``), ``Mean`` where it is unset or a ``Concat`` (a stack's), the same for all."""
+def _combine_of(
+    references: list[str], remote: RemoteServer | None, config_name: str, overrides: list[str] | None
+) -> str:
+    """The operator an ensemble of ``references`` reduces its members with: the one their runs combine their
+    checkpoints with, ``Predictor.combine`` as the config ships, then as the reference's preset and the run's ``--set``
+    leave it; ``Mean`` where it is unset or a ``Concat`` (a stack's), the same for all."""
     from .ensemble import OPERATORS
 
     operators = {}
     for reference in references:
-        config = _shipped_config(reference, remote, config_name)
-        declared = str(((config or {}).get("Predictor") or {}).get("combine") or "Mean")
+        info, config = _shipped_config(reference, remote, config_name)
+        declared = ((config or {}).get("Predictor") or {}).get("combine")
+        preset = info.get_presets().get(split_preset(reference)[1])
+        for override in [*(preset.overrides if preset else ()), *(overrides or [])]:
+            key, sep, value = override.partition("=")
+            if sep and [part for part in key.strip().split(".") if part] == ["Predictor", "combine"]:
+                declared = value.strip()
+        declared = str(declared or "Mean")
         operators[reference] = "Mean" if declared == "Concat" else declared
     if len(set(operators.values())) > 1:
         raise AppRepositoryError(
@@ -1053,7 +1064,7 @@ def main_apps() -> None:
             references,
             make_app,
             Path(kwargs.pop("output")),
-            _combine_of(references, remote, config_name),
+            _combine_of(references, remote, config_name, overrides),
             kwargs.pop("uncertainty"),
             lambda reference: _with_run_options(reference, remote, config_name, overrides, output_format, seed),
             **kwargs,

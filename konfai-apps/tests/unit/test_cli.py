@@ -302,6 +302,32 @@ def test_list_and_show_read_an_app_repository(
         apps_cli_module.describe_app(str(tmp_path), "A_ap")
 
 
+def test_an_ensemble_reduces_with_the_operator_its_members_run_with(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A preset or a --set choosing Predictor.combine runs each member with it: the ensemble reduces with it too, and
+    two references that end up with different operators are refused."""
+    from konfai_apps.presets import Preset
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor:\n  combine: Mean\n", encoding="utf-8")
+
+    class Info:
+        def download_config_file(self) -> list[Path]:
+            return [config]
+
+        def get_presets(self) -> dict[str, Preset]:
+            return {"median": Preset("median", "", ("Predictor.combine=Median",))}
+
+    monkeypatch.setattr(apps_cli_module, "get_app_repository_info", lambda app_id, force_update: Info())
+    combine_of = apps_cli_module._combine_of
+    assert combine_of(["demo/app"], None, "Prediction.yml", None) == "Mean"
+    assert combine_of(["demo/app#median"], None, "Prediction.yml", None) == "Median"
+    assert combine_of(["demo/app#median"], None, "Prediction.yml", ["Predictor.combine=Vote"]) == "Vote"
+    with pytest.raises(AppRepositoryError, match="differently"):
+        combine_of(["demo/app", "demo/app#median"], None, "Prediction.yml", None)
+
+
 def test_check_overrides_refuses_what_the_run_would_and_leaves_the_config_alone() -> None:
     from konfai_apps.app_repository import check_overrides
     from konfai_apps.errors import AppRepositoryError
