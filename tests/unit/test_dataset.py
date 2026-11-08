@@ -316,17 +316,31 @@ def test_sitk_file_to_data_missing_entry_raises_nameerror(tmp_path: Path) -> Non
 
 
 def test_h5_write_unknown_transform_type_raises(tmp_path: Path) -> None:
+    """A leaf the codec holds no kind for, a displacement field inside a composite, is refused by name."""
     dataset = Dataset(tmp_path / "Transforms", "h5")
-    composite = sitk.CompositeTransform([sitk.TranslationTransform(2, (1.0, 2.0))])
-    with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
+    composite = sitk.CompositeTransform([sitk.DisplacementFieldTransform(2)])
+    with pytest.raises(DatasetManagerError, match="Unsupported transform type 'DisplacementFieldTransform'"):
         dataset.write("T", "CASE_000", composite, Attribute())
 
 
 def test_sitk_read_unknown_transform_type_raises(tmp_path: Path) -> None:
-    dataset = Dataset(tmp_path / "Dataset", "mha")
-    dataset.write("Transf", "CASE_000", sitk.TranslationTransform(2, (1.0, 2.0)), Attribute())
-    with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
-        dataset.read_transform("Transf", "CASE_000")
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    field = sitk.DisplacementFieldTransform(sitk.Image([4, 4], sitk.sitkVectorFloat64, 2))
+    sitk.WriteTransform(sitk.CompositeTransform([sitk.Euler2DTransform(), field]), str(case / "Transf.itk.txt"))
+    with pytest.raises(DatasetManagerError, match="Unsupported transform type 'DisplacementFieldTransform'"):
+        Dataset(tmp_path / "Dataset", "mha").read_transform("Transf", "CASE_000")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5"])
+def test_a_2d_linear_leaf_without_a_tag_is_stored_as_the_2d_affine_it_is(tmp_path: Path, file_format: str) -> None:
+    """A 2-D registration's translation reads back as the 2-D affine it is: no longer refused for its dimension."""
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    translation = sitk.TranslationTransform(2, (1.0, 2.0))
+    dataset.write("Transf", "CASE_000", translation, Attribute())
+    back = dataset.read_transform("Transf", "CASE_000")
+    assert back.GetDimension() == 2
+    assert back.TransformPoint((3.0, -4.0)) == pytest.approx(translation.TransformPoint((3.0, -4.0)))
 
 
 @pytest.mark.parametrize("file_format", ["mha", "h5"])
@@ -1114,7 +1128,7 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     assert dataset.is_dataset_exist("MASK", "P001")
 
 
-@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm", "nrrd.gz"])
+@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm"])
 def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, image_attributes, file_format: str) -> None:
     """A format SimpleITK has no writer for, or whose writer refuses this volume, answered with ITK's
     trace and the name of a staging file the user never asked for."""

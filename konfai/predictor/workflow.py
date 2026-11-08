@@ -18,12 +18,10 @@
 """The configured prediction workflow and its Python entrypoints."""
 
 import hashlib
-import itertools
 import json
 import math
 import multiprocessing
 import os
-import shutil
 import warnings
 import zipfile
 from collections.abc import Sequence
@@ -47,7 +45,7 @@ from konfai.predictor.output import OutputDatasetLoader
 from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import _load_tree, apply_config, config, strict_config
+from konfai.utils.config import _load_tree, apply_config, config, snapshot, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
 from konfai.utils.errors import ConfigError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
@@ -257,7 +255,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 "Prediction.yml, model or checkpoints, which this run would no longer describe.",
                 "Run with --overwrite to recompute them with this one, or give this run another train_name.",
             )
-        shutil.copyfile(config_file(), archived)
+        snapshot(config_file(), archived)
         weights.write_text(json.dumps(identity))
 
         self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
@@ -555,7 +553,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             if not headers or any(goal is None for goal in goals.values()):
                 continue  # a case that fits is read whole, at level 0
             chosen = 0
-            for level in itertools.count(1):
+            # A store of one level answers every level with it, and never comes to one too coarse: its count ends this.
+            for level in range(1, max(dataset.level_count(*key) for key in goals)):
                 dataset.level = level
                 dataset._infos_cache.clear()
                 try:
@@ -566,7 +565,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                             dataset.get_infos(group, name)[1].get_np_array("Spacing"), coarse or [], strict=True
                         )
                     )
-                except Exception:  # nosec B112 - past the store's last level
+                except Exception:  # nosec B112 - past the last level of a store shorter than another
                     break
                 if not fine_enough:
                     break

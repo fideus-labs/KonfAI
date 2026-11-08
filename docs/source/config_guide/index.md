@@ -76,7 +76,34 @@ The tables in this documentation give the main arguments. For the complete list:
 
 - run `konfai <COMMAND> --init`: the config is filled with every argument and its default;
 - run `konfai list <kind>` for the exact names;
+- let your editor complete them ({ref}`below <config-editor>`);
 - or read the class's `__init__`.
+
+(config-editor)=
+## Completion in your editor
+
+Each config file has a JSON Schema, published with this documentation:
+`https://konfai.readthedocs.io/en/stable/schema/<File>.schema.json`, for `Config`, `Prediction`,
+`Evaluation` and `Transform`. `stable` matches the latest release; write `latest` if you run KonfAI from
+`main`, or the version you installed (`v1.9.0`). In VS Code, install the YAML extension by Red Hat and add
+to your settings:
+
+```json
+"yaml.schemas": {
+  "https://konfai.readthedocs.io/en/stable/schema/Config.schema.json": "**/Config.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Prediction.schema.json": "**/Prediction.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Evaluation.schema.json": "**/Evaluation.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Transform.schema.json": "**/Transform.yml"
+}
+```
+
+The editor then completes keys and the names of transforms, augmentations, losses and schedulers, shows each
+default, and underlines a misspelled key or a value of the wrong type. A model's own arguments and a class
+named as `module:Class` are not checked. For a file with another name, put
+`# yaml-language-server: $schema=<schema URL>` on its first line.
+
+Without an editor, `konfai TRAIN --check` (or `PREDICTION`, `EVALUATION`, `TRANSFORM`) lists every mistake
+at once, each with the nearest valid name. It needs `pip install 'konfai[check]'`; see {doc}`../reference/cli`.
 
 ## `classpath`
 
@@ -114,6 +141,29 @@ write your own.
 A value written `default|...` in the code is a default the config can override: `train_name` defaults to
 `default|TRAIN_01`, meaning `TRAIN_01` unless you write another name.
 
+## Sharing a block between files
+
+`!include` writes, in place of a block, a block another file holds:
+
+```yaml
+Predictor:
+  Dataset: !include shared.yml#Predictor.Dataset
+```
+
+| Form | Example | Reads |
+| --- | --- | --- |
+| a path | `!include shared.yml`, `!include ../common/Dataset.yml` | the file, relative to the file that names it |
+| a path and a key | `!include shared.yml#Predictor.Dataset` | that block of the file |
+| a Hub file | `!include owner/name@v1.8.7:App/Prediction.yml#Predictor.Dataset` | that file of a Hugging Face model repository, at that revision |
+
+The block binds as if it were written in place. The write-back keeps the `!include` line, never the block's
+content: the included file stays the one place the block is written, and a default resolved inside it is not
+recorded. An include stands for a block, not a single value; one that closes a cycle is refused. A relative
+include inside a Hub file is read from the same repository at the same revision. A config written elsewhere as
+the record of a run (the `Prediction.yml` archived beside the predictions, the `Config.yml` kept with a training's
+statistics, the copy the Python API reads) holds the included block in place, so it stands alone and a relative
+model `classpath` inside it is anchored as one written in the file.
+
 ## The `Dataset` block
 
 Every workflow reads its data through a `Dataset:` block. The keys below are shared; each workflow page lists
@@ -142,7 +192,10 @@ A list of `path`, `path:format` or `path:flag:format`:
 
 - `./Dataset:mha`, `./DicomDataset:dicom`, `./OmeDataset:omezarr`;
 - the flag `a` adds a dataset's cases to the others (union), `i` keeps only the cases present in all
-  (intersection): `./Predictions/TRAIN_01/Dataset:i:mha`.
+  (intersection): `./Predictions/TRAIN_01/Dataset:i:mha`;
+- a manifest of explicit entries, `./cases.yml:omezarr`, when the cases do not sit in the layout above (a
+  store in object storage, files from several folders): see
+  {doc}`../reference/components/storage-backends`.
 
 ### `groups_src` and `groups_dest`
 

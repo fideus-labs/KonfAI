@@ -199,7 +199,12 @@ def _write_workflow_config(
     return {
         "written": filename,
         **result,
-        "next_actions": ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"],
+        # Written either way; a config with schema_errors is fixed and rewritten before anything runs it.
+        "next_actions": (
+            ["write_workflow_config", "describe_config_schema"]
+            if "schema_errors" in result
+            else ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"]
+        ),
     }
 
 

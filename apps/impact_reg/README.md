@@ -126,12 +126,23 @@ impact-reg-konfai register <PRESET> [<PRESET_2> ...] -f fixed.nii.gz -m moving.n
 impact-reg-konfai register Elastix_IMPACT_Static -f ct.nii.gz -m mr.nii.gz --fixed-mask ct_body.nii.gz -o ./Output --gpu 0
 ```
 
-Each case gets its transform, `Output/P000/Transform.h5` (an ITK displacement field on the fixed grid mapping a fixed
-point to its moving partner, in mm), and the moving image resampled through it, `Output/P000/Moved.<ext>`. OME-Zarr
-stores go in and come out the same way:
+Each case gets its transform, `Output/P000/Transform.h5` (an ITK transform mapping a fixed point to its moving partner,
+in mm: a displacement field on the fixed grid, or the affine a linear preset declares with `transform_type: affine`,
+as `Generic_Rigid` does), and the moving image resampled through it, `Output/P000/Moved.<ext>`. OME-Zarr stores go in
+and come out the same way:
 
 ```bash
 impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0
+```
+
+The transform too: the preset's output dataset says where it goes, and `Transform:omezarr` writes
+`Output/P000/Transform.ome.zarr`, an NGFF RFC-5 `displacements` field in the images' unit, in place of the `.h5`. RFC-5
+places a field by a scale and a translation: on an oblique grid, the store has no `displacements` entry, and its rotation
+stays in a sidecar only KonfAI reads.
+
+```bash
+impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0 \
+  --set Predictor.outputs_dataset.DisplacementField.OutputDataset.dataset_filename=Transform:omezarr
 ```
 
 Evaluate a registration on any subset of modalities, always from the original moving data (the transform warps it);

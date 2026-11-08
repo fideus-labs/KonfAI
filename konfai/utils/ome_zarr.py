@@ -33,6 +33,7 @@ import contextlib
 import dataclasses
 import importlib.util
 import itertools
+import json
 import operator
 import tempfile
 import threading
@@ -277,6 +278,7 @@ def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """
     _multiscales.cache_clear()
     _level_array.cache_clear()
+    _affine_document.cache_clear()
     if _CHUNK_CACHE is not None:
         _CHUNK_CACHE.forget(None if store_path is None else store_identity(store_path))
 
@@ -1192,6 +1194,12 @@ def create_ome_zarr_store(
     ngff_zarr = _require_ngff_zarr()
     import dask.array
 
+    if displacement_field and shape[0] == 1:
+        # A scalar computed from a field (its magnitude) inherits the field's header, and is an image.
+        from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE
+
+        displacement_field = False
+        attributes = {key: value for key, value in (attributes or {}).items() if key != DISPLACEMENT_FIELD_ATTRIBUTE}
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )
@@ -1396,3 +1404,164 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
         "n_levels": n_levels,
         "attributes": _read_konfai_attributes(store_path),
     }
+
+
+# --------------------------------------------------------------------------------------------------
+# An affine transformation store: RFC-5 metadata, no image. OME-Zarr 0.6 lets a store hold one
+# ``coordinateTransformations`` entry on its own (ngff-zarr reads it with ``kind="transformation"``);
+# KonfAI writes a linear registration result that way, where a field would be that affine sampled.
+# KonfAI writes the matrix inline; ngff-zarr 0.52 keeps it in an array the entry names by ``path``.
+# --------------------------------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=_MEMOISED_STORES)
+def _affine_document(store_path: str) -> dict[str, Any] | None:
+    """The ``ome`` metadata of ``store_path`` when it holds one ``affine`` transformation and no image. Memoised per
+    path, as the store parses are: the backend asks before every region it reads, and ``clear_ome_zarr_cache`` forgets
+    a store replaced at its path."""
+    # ponytail: a local store alone; the transforms this reads are the ones register wrote beside its outputs
+    try:
+        with open(Path(store_path) / "zarr.json", encoding="utf-8") as file:
+            ome = json.load(file).get("attributes", {}).get("ome", {})
+    except (OSError, ValueError):
+        return None
+    entries = ome.get("coordinateTransformations") if "multiscales" not in ome else None
+    return ome if entries and entries[0].get("type") == "affine" else None
+
+
+def is_affine_store(store_path: str | Path) -> bool:
+    """Whether ``store_path`` holds an RFC-5 ``affine`` transformation on its own, as ``write_ome_zarr_affine``
+    writes it: an entry the backend reads as a linear transform, not as an image. Never raises."""
+    return _affine_document(str(store_path)) is not None
+
+
+def _axis_permutation(axes: Sequence[str]) -> np.ndarray:
+    """The matrix taking a vector over ``axes`` (Zarr order, ``z, y, x``) to SimpleITK's ``(x, y, z)``."""
+    itk_order = [axis for axis in ("x", "y", "z") if axis in axes]
+    permutation = np.zeros((len(axes), len(axes)))
+    for row, axis in enumerate(itk_order):
+        permutation[row, list(axes).index(axis)] = 1.0
+    return permutation
+
+
+def _unit_factors(units: dict[str, str], axes: Sequence[str]) -> np.ndarray:
+    """Millimetres per unit of each axis, 1 where the axis declares none or one that is no length."""
+    return np.array([millimetres_per_unit(units.get(axis)) or 1.0 for axis in axes])
+
+
+def write_ome_zarr_affine(store_path: str | Path, transform: Any, attributes: dict[str, Any] | None = None) -> None:
+    """Write the linear ``transform`` (fixed -> moving points, millimetres, ``(x, y, z)``) as an OME-Zarr 0.6
+    transformation store: an RFC-5 ``affine`` from a spatial ``physical`` coordinate system onto itself, over the
+    axes in Zarr order and in the units ``attributes`` declare (``OMEUnits``, millimetres without)."""
+    from konfai.utils.dataset.attribute import as_affine  # imported here: attribute imports this module
+
+    _require_zarr()
+    import zarr
+
+    affine = as_affine(transform)
+    rank = affine.GetDimension()
+    axes = list(_SPATIAL[-rank:])
+    units = _declared_units(attributes, axes)
+    to_itk = _axis_permutation(axes)
+    # In each axis's unit: y_i = sum_j (A_ij u_j / u_i) x_j + t_i / u_i, with u the millimetres per unit.
+    per_unit = 1.0 / _unit_factors(units, axes)
+    matrix = np.asarray(affine.GetMatrix(), dtype=np.float64).reshape(rank, rank)
+    matrix = np.diag(per_unit) @ to_itk.T @ matrix @ to_itk @ np.diag(1.0 / per_unit)
+    translation = per_unit * (to_itk.T @ np.asarray(affine.GetTranslation(), dtype=np.float64))
+    document: dict[str, Any] = {
+        "version": "0.6",
+        "coordinateSystems": [
+            {
+                "name": _PHYSICAL_CS,
+                "axes": [
+                    {"name": axis, "type": "space", **({"unit": units[axis]} if axis in units else {})} for axis in axes
+                ],
+            }
+        ],
+        "coordinateTransformations": [
+            {
+                "type": "affine",
+                "affine": np.hstack([matrix, translation.reshape(rank, 1)]).tolist(),
+                "input": {"name": _PHYSICAL_CS},
+                "output": {"name": _PHYSICAL_CS},
+            }
+        ],
+    }
+    zarr.create_group(str(store_path), overwrite=True).attrs["ome"] = document
+    clear_ome_zarr_cache(store_path)  # the path may have been probed, or held another store
+
+
+def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """An affine store's matrix, N x (N+1) with the translation last, and the axes of its input coordinate system
+    (Zarr order, with the units they declare). The matrix is inline, or in an array of the store that the entry names
+    by ``path`` (ngff-zarr writes it so from 0.52). A store that is no affine store, a path out of the store, or a
+    matrix of another shape is refused."""
+    ome = _affine_document(str(store_path))
+    if ome is None:
+        raise DatasetManagerError(
+            f"'{store_path}' holds no affine transformation.", "Write it with write_ome_zarr_affine."
+        )
+    entry = ome["coordinateTransformations"][0]
+    systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
+    system = systems.get((entry.get("input") or {}).get("name"))
+    output = systems.get((entry.get("output") or {}).get("name"))
+
+    def frame(declared_system: dict[str, Any]) -> list[tuple[Any, Any]]:
+        return [(axis.get("name"), axis.get("unit")) for axis in declared_system["axes"]]
+
+    # The transform is rebuilt in the input system's units on both sides: an output in other axes or units
+    # (um in, mm out) would come back without its change of scale, so it is refused.
+    if system is not None and output is not None and frame(output) != frame(system):
+        raise DatasetManagerError(
+            f"'{store_path}': the affine maps '{system['name']}' to '{output['name']}', whose axes or units differ.",
+            "KonfAI reads an affine within one coordinate system; express its output in the input's axes and units.",
+        )
+    declared = len(system["axes"]) if system else None
+    values: np.ndarray | None = None
+    if "affine" in entry:
+        with contextlib.suppress(TypeError, ValueError):  # a ragged or non-numeric matrix
+            values = np.asarray(entry["affine"], dtype=np.float64)
+    else:
+        root = Path(store_path).resolve()
+        path = (root / str(entry.get("path") or "")).resolve()
+        if path != root and path.is_relative_to(root):
+            _require_zarr()
+            import zarr
+
+            with contextlib.suppress(OSError, ValueError):  # zarr's not-found errors are both
+                array = zarr.open_array(str(path), mode="r")
+                rank = declared if declared is not None else (array.shape[0] if array.ndim == 2 else 0)
+                if 0 < rank <= len(_SPATIAL) and array.shape == (rank, rank + 1):  # its shape, before reading it
+                    values = np.asarray(array[:], dtype=np.float64)
+    # A store that declares its axes is held to them, an empty list included.
+    rank = declared if declared is not None else (values.shape[0] if values is not None and values.ndim == 2 else 0)
+    if values is None or not 0 < rank <= len(_SPATIAL) or values.shape != (rank, rank + 1):
+        raise DatasetManagerError(
+            f"'{store_path}': the affine is no N x (N+1) matrix over its axes, inline or in an array of the store "
+            f"(path {entry.get('path')!r}).",
+            "RFC-5 stores an affine as N x (N+1), the translation last; an array is named by a path in the store.",
+        )
+    return values, system["axes"] if system else [{"name": axis} for axis in _SPATIAL[-rank:]]
+
+
+def ome_zarr_affine_units(store_path: str | Path) -> dict[str, str]:
+    """The unit of each spatial axis of an affine store, absent where it declares none."""
+    return {axis["name"]: axis["unit"] for axis in _affine_matrix(store_path)[1] if axis.get("unit")}
+
+
+def read_ome_zarr_affine(store_path: str | Path) -> Any:
+    """The transform an affine store holds, as a SimpleITK ``AffineTransform`` taking fixed points to moving
+    points in millimetres and ``(x, y, z)``: ``write_ome_zarr_affine``'s inverse."""
+    import SimpleITK as sitk
+
+    values, axes = _affine_matrix(store_path)
+    names = [axis["name"] for axis in axes]
+    rank = values.shape[0]
+    to_itk = _axis_permutation(names)
+    in_mm = _unit_factors({axis["name"]: axis["unit"] for axis in axes if axis.get("unit")}, names)
+    matrix = to_itk @ np.diag(in_mm) @ values[:, :rank] @ np.diag(1.0 / in_mm) @ to_itk.T
+    translation = to_itk @ (in_mm * values[:, rank])
+    affine = sitk.AffineTransform(rank)
+    affine.SetMatrix(matrix.ravel().tolist())
+    affine.SetTranslation(translation.tolist())
+    return affine
