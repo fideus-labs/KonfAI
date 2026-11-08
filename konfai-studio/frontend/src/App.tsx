@@ -970,10 +970,16 @@ function Studio({ remote }: { remote: boolean }) {
                   <TerminalIcon />
                 </button>
               </nav>
-              {sheetOpen && terminalRequested && (
+              {terminalRequested && (
                 <>
-                  <div className="term-sheet-back" onClick={() => setSheetOpen(false)} />
-                  <div className="term-sheet" role="dialog" aria-label="Terminal">
+                  {sheetOpen && <div className="term-sheet-back" onClick={() => setSheetOpen(false)} />}
+                  {/* hidden, never unmounted: Console's unmount closes its socket and the server kills the shell */}
+                  <div
+                    className="term-sheet"
+                    role="dialog"
+                    aria-label="Terminal"
+                    style={sheetOpen ? undefined : { display: "none" }}
+                  >
                     <Suspense fallback={<div className="console-head" role="status">Opening terminal…</div>}>
                       <Console initialOpen />
                     </Suspense>
