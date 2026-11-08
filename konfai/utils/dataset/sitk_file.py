@@ -75,9 +75,7 @@ from konfai.utils.dataset.stream import (
     _NrrdDataStream,
 )
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning
-from konfai.utils.utils import (
-    SUPPORTED_EXTENSIONS,
-)
+from konfai.utils.utils import COMPRESSED_IN_FILE, SUPPORTED_EXTENSIONS
 
 # Formats already reported by _warn_unstreamed_region_read. Keyed by format, not by file: the remedy
 # is dataset-wide, so every case of a dataset would otherwise repeat the same warning.
@@ -128,7 +126,7 @@ def _unwritable(image: sitk.Image, final: str, file_format: str, reason: str) ->
     )
 
 
-def _write_image(image: sitk.Image, path: str, final: str, file_format: str, compress: bool = False) -> None:
+def _write_image(image: sitk.Image, path: str, final: str, file_format: str, compress: bool) -> None:
     """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
     volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
     permission, a full disk) keeps ITK's error.
@@ -229,9 +227,8 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
 #: The formats whose region writer leaves a file that reads back as the one ITK's writer leaves:
 #: voxels, geometry and every attribute. A NIfTI's spells its header otherwise (no qform).
 _WHOLE_BY_STREAM = ("mha", "nrrd")
-#: Format tokens that ask for compressed pixels in a file carrying another suffix: the formats whose
-#: compression lives inside the file, where NIfTI and GIPL gzip the file itself.
-_COMPRESSED_FORMS = {f"{extension}.gz": extension for extension in ("mha", "mhd", "nrrd", "tif", "tiff")}
+#: The ':mha.gz' tokens, each to the suffix the compressed file carries.
+_COMPRESSED_FORMS = {f"{extension}.gz": extension for extension in COMPRESSED_IN_FILE}
 
 
 class SitkFile(AbstractFile):

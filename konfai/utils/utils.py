@@ -354,8 +354,7 @@ SUPPORTED_EXTENSIONS = [
     "mhd",  # MetaImage
     "nii",
     "nii.gz",  # NIfTI
-    "nrrd",
-    "nrrd.gz",  # NRRD
+    "nrrd",  # NRRD
     "gipl",
     "gipl.gz",  # GIPL
     "hdr",
@@ -380,17 +379,14 @@ SUPPORTED_EXTENSIONS = [
     "npy",
 ]
 
+# The formats whose compression lives inside the file, where NIfTI and GIPL gzip the file itself: a
+# '.gz' on their token (':mha.gz') writes them compressed under their own suffix, `<group>.mha`.
+COMPRESSED_IN_FILE = ("mha", "mhd", "nrrd", "tif", "tiff")
+
 # Backend tokens that are not suffixes: an ':itktransform' entry is one ITK transform file written as
-# `<group>.h5`, and a '.gz' on a format whose compression lives inside the file (':mha.gz', with
-# ':nrrd.gz' above) writes it compressed under its own suffix, `<group>.mha`. Legal wherever a format
-# is declared and never probed on disk.
-SUPPORTED_BACKEND_FORMATS = [
-    "itktransform",
-    "mha.gz",
-    "mhd.gz",
-    "tif.gz",
-    "tiff.gz",
-]
+# `<group>.h5`, a ':mha.gz' entry as `<group>.mha`. Legal wherever a format is declared and never
+# probed on disk.
+SUPPORTED_BACKEND_FORMATS = ["itktransform", *(f"{extension}.gz" for extension in COMPRESSED_IN_FILE)]
 
 # Everything a `path[:flag]:format` spec may name.
 SUPPORTED_FORMATS = [*SUPPORTED_EXTENSIONS, *SUPPORTED_BACKEND_FORMATS]
