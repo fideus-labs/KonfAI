@@ -245,3 +245,39 @@ def test_every_tool_call_leaves_a_line_in_the_usage_log(
     assert [line["tool"] for line in lines[-2:]] == ["describe_konfai_capabilities", "get_job_status"]
     assert lines[-2]["ok"] is True and lines[-1]["ok"] is (not failed)
     assert "arguments" not in lines[-1] and set(lines[-1]) == {"ts", "tool", "session", "ok", "ms"}
+
+
+_RETIRED_TOOLS = (
+    "browse_dataset read_dataset_file read_session_file read_template_file check_external_dependency "
+    "run_component_smoke_test review_config_semantics validate_config_semantics create_session switch_session "
+    "delete_session import_experiment list_jobs wait_for_job request_validation set_live_tunables "
+    "list_app_parameters export_app import_app register_app_source unregister_app_source list_scout_reports "
+    "fidopt_list_datasets fidopt_describe_dataset fidopt_list_methods plan_transform"
+).split()
+
+
+def test_no_string_in_the_package_names_a_retired_tool() -> None:
+    """Descriptions, messages, hints and docstrings name the tools a client can call, not the ones they replaced."""
+    import ast
+
+    pattern = re.compile(r"\b(" + "|".join(_RETIRED_TOOLS) + r")\b")
+    offenders = []
+    for source in sorted((_PACKAGE_ROOT / "konfai_mcp").glob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and pattern.search(node.value):
+                offenders.append(f"{source.name}:{node.lineno}: {pattern.search(node.value).group(0)}")
+    assert offenders == []
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_read_file_reads_a_resource_uri(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            result = await client.call_tool("read_file", {"path": "guide://tool-index", "max_chars": 500})
+            return result.structured_content
+
+    payload = asyncio.run(scenario())
+    assert payload["uri"] == "guide://tool-index" and payload["truncated"] is True
+    assert len(payload["content"]) == 500 and "tools" in payload["content"]

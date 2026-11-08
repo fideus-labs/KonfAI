@@ -279,7 +279,7 @@ def _write_workflow_config(
         "next_actions": (
             ["write_workflow_config", "describe_config_schema"]
             if "schema_errors" in result
-            else ["check_config", "check_config", f"run_{workflow}"]
+            else ["check_config", f"run_{workflow}"]
         ),
     }
 
@@ -1070,7 +1070,8 @@ def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> st
 
 def _tool_inspect_dataset(
     dataset_dir: Annotated[
-        str, Field(description="Host path of the chosen dataset root (browse_dataset first when ambiguous).")
+        str,
+        Field(description="Host path of the chosen dataset root (inspect_dataset(browse=True) first when ambiguous)."),
     ],
     groups: Annotated[
         list[str] | None, Field(description="Restrict statistics to these group names (default: every detected group).")
@@ -1466,7 +1467,7 @@ def _tool_import_app(
 _APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
-_APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."
+_APP_CPU_DESC = "Worker processes on CPU (KonfAI --cpu; 1 is one plain process); set without gpu, the run stays on CPU."
 _APP_FORCE_UPDATE_DESC = "Re-download the app files instead of reusing the local cache."
 _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's maximum_tta)."
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
@@ -1746,7 +1747,7 @@ def run_scout_inspection(
 
 
 def _tool_read_scout_report(
-    name: Annotated[str, Field(description="The inspection's name (list_scout_reports lists them).")],
+    name: Annotated[str, Field(description="The inspection's name (read_scout_report() without a name lists them).")],
 ) -> dict[str, Any]:
     """Read a Scout report: verdict, observations, measurements, views; no image bytes."""
     return SCOUT_SERVICE.read_report(name)
@@ -2112,7 +2113,7 @@ def initialize_session(
             raise ValueError(
                 f"Session workspace already exists for '{WORKSPACE_LAYOUT.current_session}'. "
                 "overwrite=True DELETES its entire contents (Checkpoints/Predictions included); "
-                "use switch_session to start a new session and keep this one."
+                "use session(action='create') to start another session and keep this one."
             )
         SESSION.ensure_no_active_job()
         shutil.rmtree(workspace)
@@ -2155,7 +2156,7 @@ def initialize_session(
             f"The example's configs reference local Python file(s) {skipped_python} that were NOT copied "
             "(include_support_files=False), so those classpaths will not resolve. Re-run with "
             "include_support_files=True (and check their external dependencies with "
-            "check_external_dependency), or replace them with your own components."
+            "check_component), or replace them with your own components."
         ]
     return payload
 
@@ -2201,7 +2202,9 @@ def _tool_create_session(
 def _tool_switch_session(
     name: Annotated[
         str,
-        Field(description="Existing session name to switch onto (see sessions://list; create_session makes new ones)."),
+        Field(
+            description="Existing session name to switch onto (see sessions://list; session(action='create') makes new ones)."
+        ),
     ],
 ) -> dict[str, Any]:
     """Switch the current session workspace (job history reloads from that session's disk state)."""
@@ -2210,7 +2213,7 @@ def _tool_switch_session(
     if safe not in WORKSPACE_LAYOUT.available_sessions():
         raise ValueError(
             f"Unknown session '{safe}'. Available sessions: {WORKSPACE_LAYOUT.available_sessions()}. "
-            "Use create_session to create one."
+            "Use session(action='create') to create one."
         )
     if safe != WORKSPACE_LAYOUT.current_session:
         SESSION.ensure_no_active_job()
@@ -2791,7 +2794,7 @@ def summarize_session(
         "readiness": summary["readiness"],
         "configs": summary["configs"],
         "resources": summary["resources"],
-        # Compact ref only (the full job payload is one get_job_status / list_jobs call away).
+        # Compact ref only (the full job payload is one get_job_status call away).
         "latest_job": (
             {
                 key: summary["latest_job"].get(key)
@@ -2804,8 +2807,13 @@ def summarize_session(
         # Whole metrics only: the per-label rows behind them are what get_run_metrics is for.
         "metrics_summary": top_level_metrics(metrics_payload["summary"] or {}) or None,
         "metrics_path": metrics_payload["path"],
+        "missing_configs": [workflow for workflow, path in summary["configs"].items() if path is None],
         "next_actions": summary["next_actions"],
     }
+    latest = summary["latest_job"]
+    if latest is not None and (job := JOB_REGISTRY.get(latest.get("job_id"))) is not None:
+        # the last parsed metric line of the job's log: a training's final losses without another call
+        payload["latest_job"]["latest_metrics"] = SESSION.read_live_metrics_payload(job, 1)["latest"]
     if include_validation:
         validation = SESSION.validate_session_payload()
         # readiness/active_jobs/next_actions already sit at the top level of this payload.
@@ -2890,7 +2898,9 @@ def run_train(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -2982,7 +2992,9 @@ def run_resume(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -3070,7 +3082,9 @@ def run_batch(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -3275,7 +3289,9 @@ def run_prediction(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing prediction outputs without prompting (KonfAI --overwrite).")
     ] = False,
@@ -3334,7 +3350,9 @@ def run_evaluation(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing evaluation outputs without prompting (KonfAI --overwrite).")
     ] = False,
@@ -3527,7 +3545,7 @@ def _tool_set_live_tunables(
 
 
 def _tool_get_job_status(
-    job_id: Annotated[str, Field(description="Job identifier returned by a run_* launch or list_jobs.")],
+    job_id: Annotated[str, Field(description="Job identifier returned by a run_* launch or get_job_status().")],
 ) -> dict[str, Any]:
     """Return the current job status together with suggested next actions."""
     return _job_payload(JOB_REGISTRY.get(job_id))
@@ -3626,7 +3644,7 @@ def _tool_wait_for_job(
             payload["waited_s"] = round(float(timeout_s or 0.0), 1)
             payload["note"] = (
                 f"Job still {payload['status']} after {timeout_s:.1f}s of waiting: not a failure. "
-                "Call wait_for_job again, or read_live_metrics to watch progress."
+                "Call get_job_status(wait=True) again, or read_live_metrics to watch progress."
             )
             payload["next_actions"] = ["get_job_status", "read_live_metrics", "read_job_log"]
             return payload
@@ -3678,12 +3696,12 @@ def inspect_dataset(
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["read_file"]))
-def read_file(
+async def read_file(
     path: Annotated[
         str,
         Field(
             description="Relative to the session, or absolute for a dataset file; with template, the file name "
-            "inside that template."
+            "inside that template; a resource URI (docs://..., guide://..., template://...) reads that resource."
         ),
     ],
     template: Annotated[str | None, Field(description="An example template name: read one of its files.")] = None,
@@ -3691,6 +3709,19 @@ def read_file(
     offset: Annotated[int, Field(description="Character offset to start from (session and template files).")] = 0,
     max_lines: Annotated[int, Field(description="Lines returned at most from a dataset file.")] = 200,
 ) -> dict[str, Any]:
+    if "://" in path:
+        # the resources, for a client that cannot read them itself
+        parts = (await mcp.read_resource(path)).contents
+        text = "\n".join(
+            part.content if isinstance(part.content, str) else f"<{len(part.content)} bytes, {part.mime_type}>"
+            for part in parts
+        )
+        return {
+            "uri": path,
+            "content": text[offset : offset + max_chars],
+            "total_chars": len(text),
+            "truncated": offset + max_chars < len(text),
+        }
     if template is not None:
         return _tool_read_template_file(template, path, max_chars=max_chars, offset=offset)
     if Path(path).expanduser().is_absolute() and not _inside_workspace(path):
@@ -3762,7 +3793,9 @@ def run_transform(
         Field(description="Plan only: every case's verdict and the budget; nothing of the deliverable is written."),
     ] = False,
     gpu: Annotated[int | list[int] | None, Field(description="GPU index or indices; omitted: CPU.")] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[
+        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+    ] = None,
     overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
     quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
     single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,
@@ -3786,7 +3819,12 @@ def session(
     force: Annotated[bool, Field(description="delete: cancel the active jobs first.")] = False,
 ) -> dict[str, Any]:
     if action == "list":
-        return {"session": WORKSPACE_LAYOUT.current_session, "sessions": WORKSPACE_LAYOUT.available_sessions()}
+        return {
+            "session": WORKSPACE_LAYOUT.current_session,
+            "sessions": WORKSPACE_LAYOUT.available_sessions(),
+            # a host UI (Studio) owns the session binding: create, switch and delete are refused
+            "pinned_by_host": bool(os.environ.get("KONFAI_MCP_SESSION")),
+        }
     if action == "create":
         return _tool_create_session(_required(name, "name", action), switch=switch)
     if action == "switch":

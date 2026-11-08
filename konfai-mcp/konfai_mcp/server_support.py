@@ -336,7 +336,7 @@ def modeling_rules() -> dict[str, Any]:
             "how_to_check_an_authored_model": (
                 "inspect_object_signature reads a model's hyperparameters, loss-attachable outputs, and "
                 "(for YAML) full content WITHOUT building it: use it to understand any of the three forms. "
-                "To confirm the architecture actually BUILDS and wires correctly, validate_config_semantics"
+                "To confirm the architecture actually BUILDS and wires correctly, check_config(level='instantiate')"
                 "(level='instantiate') constructs the model inside its config (catching channel/shape/output "
                 "mismatches), and describe_model_outputs lists the real outputs_criterions paths of the built "
                 "model. Both build the model as part of the workflow, so the config must be complete (dataset "

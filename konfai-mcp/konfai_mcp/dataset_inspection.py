@@ -466,7 +466,7 @@ class DatasetInspectionMixin:
                 payload["warnings"] = [
                     *(payload.get("warnings") or []),
                     "No supported groups were found directly under the requested path. "
-                    "Inspect candidate_dataset_roots or call browse_dataset to locate the actual dataset root.",
+                    "Inspect candidate_dataset_roots or call inspect_dataset(browse=True) to locate the actual dataset root.",
                 ]
             # Once groups are found the real question is what to DO with the dataset: use a published app
             # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next

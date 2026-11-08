@@ -157,7 +157,10 @@ class MetricsServiceMixin:
             "metrics_source": metrics_source,
             "metrics_sources_checked": checked_sources,
             "latest": parsed_entries[-1] if parsed_entries else None,
-            "recent": parsed_entries[-max(max_entries, 1) :] if parsed_entries else [],
+            # consecutive identical entries (a log line repeated) count once
+            "recent": [e for i, e in enumerate(parsed_entries) if i == 0 or e != parsed_entries[i - 1]][
+                -max(max_entries, 1) :
+            ],
             "by_stage": latest_by_stage,
         }
 

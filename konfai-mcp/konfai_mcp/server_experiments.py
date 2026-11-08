@@ -358,7 +358,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                 "how_to_customize": [
                     "Prefer a built-in component (list_components) when one fits.",
                     "Otherwise reference an installed library class directly by classpath, e.g. "
-                    "`monai.losses:DiceLoss` (vet it with check_external_dependency); no wrapper needed when its "
+                    "`monai.losses:DiceLoss` (vet it with check_component); no wrapper needed when its "
                     "forward convention already matches the KonfAI base.",
                     "Write a local wrapper (write_session_file) only when the convention differs or you need "
                     "custom logic; see describe_extension_points for the base class and contract.",
@@ -594,7 +594,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                     if not isinstance(loaders, dict):
                         continue
                     for criterion_name in loaders:
-                        if criterion_name not in generic_names:
+                        if criterion_name.removesuffix("Loss").removesuffix("Metric") not in generic_names:
                             specialized.add(criterion_name)
         return sorted(specialized)
 
@@ -808,7 +808,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                         "extra support files or assumptions that are not obvious from the YAML alone."
                     ),
                     observed={"components": specialized_components},
-                    suggested_next_checks=["docs://examples", "template://Synthesis/summary", "guide://config-design"],
+                    suggested_next_checks=["docs://examples", "guide://config-design"],
                 )
             )
         if normalized_workflow == "train" and not non_input_groups:

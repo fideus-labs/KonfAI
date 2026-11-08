@@ -967,7 +967,7 @@ def validate_workflow_api(
     ``workflow='transform'`` at ``level='setup'`` runs ``Transformer.setup``, whose plan opens and
     removes a real region-write probe on every destination the config's Write/Save stages name: those
     are the author's own stores, not the validate root. A directory store gets a probe case created
-    then removed; a single-file store (h5) is created if it was not already there. ``plan_transform``
+    then removed; a single-file store (h5) is created if it was not already there. ``run_transform(dry_run=True)``
     is the tool for a plan.
     """
     from konfai.evaluator import build_evaluate

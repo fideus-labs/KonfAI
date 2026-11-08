@@ -729,7 +729,7 @@ class JobRegistry:
                 )
                 raise RuntimeError(
                     f"Session '{session}' already has active job(s) on conflicting device(s): {active}. "
-                    "Pick disjoint gpu ids, or wait_for_job / cancel_job first."
+                    "Pick disjoint gpu ids, or get_job_status(wait=True) / cancel_job first."
                 )
             self.jobs[job.job_id] = job
             self._persist_job(job)

@@ -22,7 +22,7 @@ Two gaps this closes:
   external-library classpath syntax (``lib.module:Class``) are not surfaced anywhere in the MCP
   tool surface: the agent is biased toward copying/wrapping when it could often reference an
   installed library class directly. ``describe_extension_points`` makes the contract explicit.
-* There is no way to vet an external dependency before integrating a brick. ``check_external_dependency``
+* There is no way to vet an external dependency before integrating a brick. ``check_component``
   reports importability/version/license without importing the module into the server process
   (``find_spec``/``importlib.metadata`` only), so external import side-effects never run here.
 """
@@ -101,8 +101,8 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "config_location": "Trainer.Dataset.groups_src.<src>.groups_dest.<dest>.transforms.<Name> (or patch_transforms).",
         "direct_external": "An external image op rarely satisfies transform_shape: wrap it.",
         "local_wrapper": "Subclass Transform; implement __call__ AND transform_shape exactly.",
-        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it: run run_component_smoke_test, which asserts transform_shape(shape) == __call__(...).shape for you.",
-        "verify_tool": "run_component_smoke_test(classpath, kind='transform'): executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
+        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it: run check_component, which asserts transform_shape(shape) == __call__(...).shape for you.",
+        "verify_tool": "check_component(classpath, kind='transform'): executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
         "list_tool": "list_components('transform')",
     },
     "scheduler": {

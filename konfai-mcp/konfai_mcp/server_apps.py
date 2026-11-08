@@ -321,7 +321,7 @@ class AppService:
         finetunable = info.is_finetunable()
 
         # Route by what the app can actually do instead of dead-ending on describe/design. run_app runs the
-        # app AS PUBLISHED; import_app is offered beside it for the case where the app has to be modified
+        # app AS PUBLISHED; fetch_app is offered beside it for the case where the app has to be modified
         # first. fine_tune_app is only offered when the app ships a train config to
         # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
         source = _source_of(info)

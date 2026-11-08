@@ -69,7 +69,7 @@ STAGE_FOCUS: dict[str, str] = {
     # known the stage has already moved on, so the shape lives in the system prompt where it applies
     # whenever a dataset is described.
     "dataset_inspection": (
-        "Inspect the dataset: inspect_dataset; browse_dataset only if the root is still unknown, and "
+        "Inspect the dataset: inspect_dataset; inspect_dataset(browse=True) only if the root is still unknown, and "
         "report what it holds."
     ),
     "action_selection": (
@@ -175,7 +175,7 @@ DIAGNOSES: tuple[tuple[Diagnosis, tuple[str, ...]], ...] = (
         Diagnosis(
             "unsupported_format",
             "an input format is not readable",
-            "convert the inputs, or install the matching KonfAI extra (check_external_dependency)",
+            "convert the inputs, or install the matching KonfAI extra (check_component)",
             False,
         ),
         ("unsupported", "unknown extension", "no backend", "supported_extensions"),

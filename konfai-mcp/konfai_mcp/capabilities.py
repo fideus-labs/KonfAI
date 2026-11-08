@@ -70,18 +70,18 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "principle": "Subclass a base, reference it by classpath in YAML: no core edits.",
             "describe": "describe_extension_points(kind)",
             "external_libraries": "Reference an installed library class directly via `package.module:Class` "
-            "(e.g. monai.losses:DiceLoss); vet it first with check_external_dependency.",
+            "(e.g. monai.losses:DiceLoss); vet it first with check_component.",
         },
         "apps": {
             "principle": "When the user wants a RESULT, check published apps FIRST: cheapest fit wins: "
             "use an app as-is, else fine-tune one, else train from scratch.",
-            "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app (action infer or pipeline) "
-            "(runs the app as published); import_app copies it into the session when it must be MODIFIED first",
+            "use_dont_train": "list_apps -> describe_app(parameters=True) -> run_app (action infer or pipeline) "
+            "(runs the app as published); fetch_app copies it into the session when it must be MODIFIED first",
             "fine_tune": "fine_tune_app (one call: weights-only warm start on the user's dataset -> runnable "
-            "bundle), or import_app -> run_resume(weights_only=True) for full control (custom losses, config "
+            "bundle), or fetch_app -> run_resume(weights_only=True) for full control (custom losses, config "
             "surgery)",
             "resume": "run_resume (true RESUME of an interrupted session training: optimizer/epoch restored)",
-            "package": "package_app_from_session / export_app (turn a trained session or tuned app into a bundle)",
+            "package": "package_app_from_session / fetch_app(path=...) (turn a trained session or tuned app into a bundle)",
         },
         "modeling_modes": "2D / 2.5D (extend_slice>0, patch_size[0]==1) / 3D, set via the Patch block.",
         "advanced": [
@@ -93,8 +93,8 @@ def describe_konfai_capabilities() -> dict[str, Any]:
         "safe_actions": [
             "inspect_dataset, list_components, describe_*, inspect_object_signature",
             "write_workflow_config / write_session_file (authoring)",
-            "validate_config_semantics (side-effect-free), check_external_dependency (no import side effects)",
-            "run_component_smoke_test (executes a custom transform/criterion contract in an isolated subprocess)",
+            "check_config (level 'review' is side-effect-free), check_component (no import side effects)",
+            "check_component with a kind (executes a custom transform/criterion contract in an isolated subprocess)",
             "read_live_metrics, leaderboard, summarize_session (read-only)",
         ],
         "risky_actions_prefer_human_confirmation": [

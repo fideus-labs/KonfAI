@@ -41,7 +41,8 @@ SERVER_INSTRUCTIONS = (
     "read_live_metrics, and read_job_log when it fails. A tool that imports an app's code or installs its "
     "requirements needs allow_untrusted_code=True; initialize_session(overwrite=True), delete_run and "
     "session(action='delete') destroy data. Resources: docs://* hold the detailed guides, session://current/* the "
-    "current session, job://{job_id}/* one job, guide://tool-index every tool with its parameters."
+    "current session, job://{job_id}/* one job, guide://tool-index every tool with its parameters; read_file(uri) "
+    "reads any of them when the client cannot."
 )
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -62,7 +63,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "inspect_object_signature": (
         "Signature, defaults, doc and contract hints of any configurable classpath: built-in, local File:Class, "
         "external package.module:Class, or a declarative .yml model (its hyperparameters, loss-attachable leaves "
-        "and how to adapt it). Parsed statically, never built. Next: write_workflow_config, check_config."
+        "and how to adapt it, with the file's content: no read_file needed). Parsed statically, never built. Next: write_workflow_config, check_config."
     ),
     "describe_extension_points": (
         "How to add a component of a kind (loss, metric, model, transform, augmentation, scheduler, pretrained "
@@ -95,10 +96,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Check the session's workflow config. level 'review': schema and semantic checks only (blocking_issues, "
         "warnings; no runtime object built). 'instantiate' builds the KonfAI objects, 'setup' also the dataloader, "
         "'train_step' runs one forward and backward on one batch (train only): each in an isolated subprocess, "
-        "nothing launched. Next: run_train, run_prediction, run_evaluation, or fix the config."
+        "nothing launched; every level includes the review's findings, one call is enough. Next: run_train, run_prediction, run_evaluation, or fix the config."
     ),
     "inspect_dataset": (
-        "Groups, entry hints, ambiguities and sampled statistics of one dataset root (include_stats=False for a "
+        "Groups, entry hints, ambiguities and sampled statistics (shapes channel-first) of one dataset root "
+        "(include_stats=False for a "
         "fast structure scan, groups=[one] for focused statistics). browse=True returns instead a bounded file "
         "tree with candidate roots, for a path with nested cohorts or an unclear layout. Next: "
         "design_config_strategy."
@@ -108,7 +110,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "config snapshots, evaluation JSON). An absolute path reads a dataset's small text file: CSV or TSV (with "
         "columns and rows), JSON or YAML sidecar, case list, .mhd/.nhdr header, or a Transform.h5 summarised "
         "(type, parameters or displacement statistics). template=<example name> reads a file shipped with that "
-        "template. Binary files are refused. Never writes."
+        "template. A resource URI (docs://patching, guide://tool-index, template://Segmentation/summary...) reads "
+        "that resource, for a client that cannot read resources itself. Binary files are refused. Never writes."
     ),
     "prepare_dataset_aliases": (
         "Copy, symlink or move dataset files under new group names when the content is right but the filenames "
@@ -136,7 +139,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "and Predictions/ too; use session(action='create') for a fresh name instead. Next: write_workflow_config."
     ),
     "session": (
-        "Manage session workspaces: action 'list'; 'create' (name; switches to it); 'switch' (name); 'delete' (the "
+        "Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it); 'switch' (name); 'delete' (the "
         "current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its "
         "configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while "
         "a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session."

@@ -23,6 +23,13 @@ it does, when to search its tools), marks six entry tools to load upfront under 
 describes every tool in one short paragraph; listed schemas drop pydantic's `anyOf [T, null]`, `default: null` and
 the free-form output schemas: the tool list a client loads drops from ~26,600 to ~14,800 tokens.
 Every call appends one line (tool, session, ok, ms) to `tool_calls.jsonl` in the workspaces root.
+A Claude Code run driving the server end to end (session, dataset, config, training) reported what a client
+meets: `read_file` now reads a resource URI (`docs://`, `guide://`, `template://`) for clients that cannot read
+resources; no message, hint or description names a retired tool any more (a test scans every string); the
+`specialized_components_require_review` warning no longer fires on `CrossEntropyLoss` or `DiceLoss`; `cpu`
+parameters say what they are (KonfAI `--cpu` worker processes); `session(action='list')` says whether a host
+pinned the session; `summarize_session` names the missing configs and carries the latest job's last metrics;
+`read_live_metrics` drops repeated entries; `check_config` says every level includes the review.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

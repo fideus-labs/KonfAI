@@ -20,7 +20,7 @@ Pre-flight a component before wiring it into a config. Without kind: whether the
 
 ### `check_config`
 
-Check the session's workflow config. level 'review': schema and semantic checks only (blocking_issues, warnings; no runtime object built). 'instantiate' builds the KonfAI objects, 'setup' also the dataloader, 'train_step' runs one forward and backward on one batch (train only): each in an isolated subprocess, nothing launched. Next: run_train, run_prediction, run_evaluation, or fix the config.
+Check the session's workflow config. level 'review': schema and semantic checks only (blocking_issues, warnings; no runtime object built). 'instantiate' builds the KonfAI objects, 'setup' also the dataloader, 'train_step' runs one forward and backward on one batch (train only): each in an isolated subprocess, nothing launched; every level includes the review's findings, one call is enough. Next: run_train, run_prediction, run_evaluation, or fix the config.
 
 ### `compare_runs`
 
@@ -104,11 +104,11 @@ Create or reset the current session workspace, optionally seeded from an example
 
 ### `inspect_dataset`
 
-Groups, entry hints, ambiguities and sampled statistics of one dataset root (include_stats=False for a fast structure scan, groups=[one] for focused statistics). browse=True returns instead a bounded file tree with candidate roots, for a path with nested cohorts or an unclear layout. Next: design_config_strategy.
+Groups, entry hints, ambiguities and sampled statistics (shapes channel-first) of one dataset root (include_stats=False for a fast structure scan, groups=[one] for focused statistics). browse=True returns instead a bounded file tree with candidate roots, for a path with nested cohorts or an unclear layout. Next: design_config_strategy.
 
 ### `inspect_object_signature`
 
-Signature, defaults, doc and contract hints of any configurable classpath: built-in, local File:Class, external package.module:Class, or a declarative .yml model (its hyperparameters, loss-attachable leaves and how to adapt it). Parsed statically, never built. Next: write_workflow_config, check_config.
+Signature, defaults, doc and contract hints of any configurable classpath: built-in, local File:Class, external package.module:Class, or a declarative .yml model (its hyperparameters, loss-attachable leaves and how to adapt it, with the file's content: no read_file needed). Parsed statically, never built. Next: write_workflow_config, check_config.
 
 ### `leaderboard`
 
@@ -136,7 +136,7 @@ One slice of a volume as a PNG (any SimpleITK-readable file), windowed between t
 
 ### `read_file`
 
-Read a bounded text range of one file. A relative path reads the current session (configs, support code, config snapshots, evaluation JSON). An absolute path reads a dataset's small text file: CSV or TSV (with columns and rows), JSON or YAML sidecar, case list, .mhd/.nhdr header, or a Transform.h5 summarised (type, parameters or displacement statistics). template=<example name> reads a file shipped with that template. Binary files are refused. Never writes.
+Read a bounded text range of one file. A relative path reads the current session (configs, support code, config snapshots, evaluation JSON). An absolute path reads a dataset's small text file: CSV or TSV (with columns and rows), JSON or YAML sidecar, case list, .mhd/.nhdr header, or a Transform.h5 summarised (type, parameters or displacement statistics). template=<example name> reads a file shipped with that template. A resource URI (docs://patching, guide://tool-index, template://Segmentation/summary...) reads that resource, for a client that cannot read resources itself. Binary files are refused. Never writes.
 
 ### `read_job_log`
 
@@ -192,7 +192,7 @@ Batch-process a dataset with the session Transform.yml chain: read, transform, w
 
 ### `session`
 
-Manage session workspaces: action 'list'; 'create' (name; switches to it); 'switch' (name); 'delete' (the current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session.
+Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it); 'switch' (name); 'delete' (the current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session.
 
 ### `summarize_session`
 
