@@ -1,6 +1,8 @@
-# The warped moving segmentation is scored against the fixed one, the reference: every label of the fixed
-# segmentation gets a Dice, near 0 when the moving one lost it (scored the other way round, a lost label was
-# dropped from the mean). int32, not uint8: 1002, 2002 and 1026 wrapped to 234, 210 and 2.
+# konfai-apps eval APP --evaluation-file Evaluation_with_seg.yml -i TRANSFORM --gt FIXED_SEG --gt MOVING_SEG
+# The moving segmentation, pulled onto the fixed grid through the registration (Volume_0, a transform file, a field
+# store or a field image), is scored against the fixed one, the reference: every label of the fixed segmentation gets
+# a Dice, near 0 when the moved one lost it (scored the other way round, a lost label was dropped from the mean).
+# int32, not uint8: 1002, 2002 and 1026 wrapped to 234, 210 and 2.
 Evaluator:
   metrics:
     MovingSeg:
@@ -13,16 +15,22 @@ Evaluator:
               group: Dice_map
   Dataset:
     groups_src:
-      Volume_0:
+      Reference_0:
         groups_dest:
           FixedSeg:
             transforms:
               TensorCast:
                 dtype: int32
-      Reference_0:
+      Reference_1:
         groups_dest:
           MovingSeg:
             transforms:
+              Resample:
+                reference: '{case}'
+                reference_group: Reference_0
+                transforms:
+                  Volume_0: false
+                interpolation: nearest
               TensorCast:
                 dtype: int32
     subset: None

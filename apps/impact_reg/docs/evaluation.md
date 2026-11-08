@@ -14,7 +14,7 @@ measures the misalignment before registration).
 
 When the transform is a displacement field, `eval` also reports its **Jacobian determinant**: the fraction of folded
 voxels (determinant ≤ 0), the minimum, and the standard deviation of its logarithm. A good deformable registration has
-no folding.
+no folding. `--transform` given alone measures the Jacobian and nothing else.
 
 ```bash
 impact-reg-konfai eval --transform Output/P000/Transform.h5 \
@@ -22,6 +22,18 @@ impact-reg-konfai eval --transform Output/P000/Transform.h5 \
     --gt-fixed-seg fixed_organs.nii.gz --gt-moving-seg moving_organs.nii.gz \
     --gt-fixed-fid fixed.fcsv --gt-moving-fid moving.fcsv \
     -o Evaluation
+```
+
+**Without impact-reg.** Each modality is `konfai-apps eval` of the transform (`-i`) against the fixed and the moving
+data (`--gt`, in that order), through the configs every engine app ships: `Evaluation_with_images.yml`,
+`Evaluation_with_seg.yml`, `Evaluation_with_fid.yml`, and `Evaluation_with_jacobian.yml`, which takes the field alone.
+`konfai-apps pipeline` registers and scores in one call.
+
+```bash
+konfai-apps eval VBoussot/ImpactReg:ConvexAdam --evaluation-file Evaluation_with_seg.yml \
+    -i Output/P000/Transform.h5 --gt fixed_organs.nii.gz --gt moving_organs.nii.gz -o Evaluation
+konfai-apps pipeline VBoussot/ImpactReg:ConvexAdam -i fixed.nii.gz -i moving.nii.gz \
+    --gt fixed_organs.nii.gz --gt moving_organs.nii.gz --evaluation-file Evaluation_with_seg.yml -o Output
 ```
 
 **Outputs.** One folder per case and modality, `Evaluation/<case>/Evaluation/{Image,Segmentation,Landmarks,Jacobian}/`,

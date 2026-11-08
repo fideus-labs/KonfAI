@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -122,36 +122,52 @@ def field_reach(dataset: Dataset, group: str, name: str) -> float:
     return longest
 
 
-def jacobian_statistics(dataset: Dataset, group: str, name: str) -> dict[str, float]:
-    """How regular the map a stored displacement field stores is, over the field's grid: from the determinant of
-    its Jacobian ``J = I + du/dx``, the fraction of voxels where it folds (``det <= 0``), its minimum, and the
-    standard deviation of its log (the determinant clipped to ``[1e-9, 1e9]`` first, so a fold counts as a
-    vanishing volume rather than being left out).
+#: The sufficient statistics of a field's Jacobian determinant over some voxels: how many, how many folded
+#: (``det <= 0``), the lowest determinant, the sum of the logs and of their squares (the determinant clipped to
+#: ``[1e-9, 1e9]`` first, so a fold counts as a vanishing volume rather than being left out).
+JacobianSums = tuple[int, int, float, float, float]
 
-    ``du/dx`` is in world axes: central differences along the grid's axes (one-sided at its faces, as
-    ``np.gradient`` takes them) mapped through the inverse of the grid's direction times its spacing, so an
-    oblique grid reads the same map as an axis-aligned one. The field is read in slabs of planes with one plane
-    of halo on each side: every derivative is the whole field's.
+
+def field_jacobian_sums(values: np.ndarray, core: tuple[slice, ...], to_index: np.ndarray) -> JacobianSums:
+    """The :data:`JacobianSums` of a displacement field ``values`` (``[c, z, y, x]``, float64) over its ``core``
+    (z, y, x slices), from the determinant of its Jacobian ``J = I + du/dx``.
+
+    ``du/dx`` is in world axes: central differences along the grid's axes (one-sided at the array's faces, as
+    ``np.gradient`` takes them) mapped through ``to_index``, the inverse of the grid's direction times its spacing,
+    so an oblique grid reads the same map as an axis-aligned one. The differences run through the voxels around the
+    core: a patch read with one voxel of halo past its slot, clamped at the field's faces, gets the whole field's.
+    Slabs of planes with one plane of halo on each side bound the working set to ``FIELD_SLAB_VOXELS``.
     """
-    read, shape, _, _, _, to_index = open_field(dataset, group, name)
-    planes = _slab_planes(shape)
+    first, last = core[0].indices(values.shape[1])[:2]
+    planes = _slab_planes(list(values.shape))
     count = folded = 0
     lowest, log_sum, log_squares = float("inf"), 0.0, 0.0
-    for first in range(0, shape[1], planes):
-        last = min(first + planes, shape[1])
-        low, high = max(first - 1, 0), min(last + 1, shape[1])
-        block = read((slice(None), slice(low, high), slice(None), slice(None)))
+    for start in range(first, last, planes):
+        stop = min(start + planes, last)
+        low, high = max(start - 1, 0), min(stop + 1, values.shape[1])
+        block = values[:, low:high]
         # du_c / d(index) along x, y, z (the block is [c, z, y, x]), then to world axes.
         by_index = np.stack(
             [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
             axis=-1,
-        )[:, first - low : last - low]
+        )[:, start - low : stop - low, core[1], core[2]]
         jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
         determinant = np.linalg.det(jacobian).ravel()
         logs = np.log(np.clip(determinant, 1e-9, 1e9))
         count, folded = count + determinant.size, folded + int((determinant <= 0).sum())
         lowest = min(lowest, float(determinant.min()))
         log_sum, log_squares = log_sum + float(logs.sum()), log_squares + float((logs**2).sum())
+    return count, folded, lowest, log_sum, log_squares
+
+
+def jacobian_statistics(sums: Iterable[JacobianSums]) -> dict[str, float]:
+    """How regular the map a displacement field stores is, from the :func:`field_jacobian_sums` of the blocks that
+    cover it once: the fraction of voxels where it folds, the lowest determinant, and the standard deviation of the
+    log of the determinant."""
+    blocks = list(sums)
+    count, folded = sum(block[0] for block in blocks), sum(block[1] for block in blocks)
+    lowest, log_sum = min(block[2] for block in blocks), sum(block[3] for block in blocks)
+    log_squares = sum(block[4] for block in blocks)
     return {
         "folded_fraction": folded / count,
         "min": lowest,
@@ -329,7 +345,7 @@ def read_transform_stages(
     held in: float64 for the bit-exact walk, float32 for a caller whose walk runs in float32.
     """
     from konfai.data.geometry import Grid
-    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, data_to_transform
+    from konfai.utils.dataset import data_to_transform, is_displacement_entry
 
     read_data = getattr(dataset, "read_data", None)
     if read_data is None:
@@ -339,7 +355,7 @@ def read_transform_stages(
         # The PLAN's read: a dense field answers as the identity and its values are never touched.
         # Everything else is coefficients, small and bounded exactly, so it decodes as usual.
         shape, header = dataset.get_infos(group, name)
-        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+        if is_displacement_entry(shape, header):
             return ()
         data, attribute = read_data(group, name)
         return decode_transform_stages(data_to_transform(data, attribute, name))
@@ -347,14 +363,14 @@ def read_transform_stages(
     # A backend that cannot serve a slice reads whole, as it would for any window it was given.
     if box is not None and getattr(dataset, "read_data_slice", None) is not None:
         shape, header = dataset.get_infos(group, name)
-        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+        if is_displacement_entry(shape, header):
             grid = Grid.of([int(extent) for extent in shape[1:]], header, what)
             window = grid.node_window(box())
     if window is not None:
         data, attribute = dataset.read_data_slice(group, name, (slice(None), *window))
         return (_displacement_stage(grid.sub_grid(window), data, 1, what, field_dtype),)
     data, attribute = read_data(group, name)
-    if DISPLACEMENT_FIELD_ATTRIBUTE not in attribute:
+    if not is_displacement_entry(np.shape(data), attribute):
         return decode_transform_stages(data_to_transform(data, attribute, name))
     return (
         _displacement_stage(

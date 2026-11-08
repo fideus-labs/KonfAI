@@ -34,6 +34,7 @@ from konfai.utils.dataset.attribute import displacement_field_to_data as displac
 from konfai.utils.dataset.attribute import get_infos as get_infos
 from konfai.utils.dataset.attribute import image_to_data as image_to_data
 from konfai.utils.dataset.attribute import is_an_image as is_an_image
+from konfai.utils.dataset.attribute import is_displacement_entry as is_displacement_entry
 from konfai.utils.dataset.attribute import ome_zarr_attributes as ome_zarr_attributes
 from konfai.utils.dataset.attribute import region_geometry as region_geometry
 from konfai.utils.dataset.attribute import sitk as sitk
@@ -80,6 +81,7 @@ __all__ = [
     "get_infos",
     "image_to_data",
     "is_an_image",
+    "is_displacement_entry",
     "is_staging_entry",
     "ome_zarr_attributes",
     "read_landmarks",
