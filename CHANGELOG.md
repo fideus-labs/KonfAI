@@ -75,6 +75,10 @@ checkpoints with KonfAI's own loader (konfai-apps); `compare_runs` pairs a metri
 when the runs named them differently; `read_training_curves` keeps one point per step, in order; `run_transform`
 takes `config_file` and reports its real devices; `inspect_dataset` names an inverted layout; a finished app job
 carries its case names; `docs://dataset-mapping` states the layout.
+A run steering a training (live tunables, cancel, resume, compare, delete) added: the check subprocess forces
+single-process loading on what KonfAI now reads (`_num_workers`), so `check_config(train_step)` no longer dies on
+`num_workers > 0`; `check_config(setup)` reports `iterations_per_epoch`; a cancelled or failed training lists its
+outputs and `newest_checkpoint`.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

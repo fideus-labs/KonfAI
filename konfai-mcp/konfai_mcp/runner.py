@@ -792,6 +792,33 @@ def smoke_test_component(
         return payload
 
 
+def _force_single_process_in_config(config_path: Path) -> None:
+    """Set every ``num_workers`` of a (scratch) config to 0 and drop the worker-only loader knobs, in place."""
+    from ruamel.yaml import YAML
+
+    yaml = YAML()
+    try:
+        data = yaml.load(config_path.read_text(encoding="utf-8"))
+    except Exception:  # not our YAML to judge here: the build reports it
+        return
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "num_workers" in node:
+                node["num_workers"] = 0
+            for key in ("prefetch_factor", "persistent_workers"):
+                node.pop(key, None)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.dump(data, handle)
+
+
 def _force_single_process_loading(workflow_object: Any) -> int:
     """Force num_workers=0 on the dataset before setup builds the dataloader; return the requested value.
 
@@ -803,10 +830,20 @@ def _force_single_process_loading(workflow_object: Any) -> int:
     can run the worker-spawn picklability check only when the real run would actually spawn workers.
     """
     dataset = getattr(workflow_object, "dataset", None)
-    args = getattr(dataset, "dataLoader_args", None)
     requested = 0
+    # the source resolves its loader arguments again at setup from _num_workers: force the request itself, not
+    # only the dictionary it was last written to
+    for name in ("resolved_num_workers", "_num_workers"):
+        value = getattr(dataset, name, None)
+        if isinstance(value, int):
+            requested = max(requested, value)
+            setattr(dataset, name, 0)
+    for name, off in (("_prefetch_factor", None), ("_persistent_workers", None)):
+        if hasattr(dataset, name):
+            setattr(dataset, name, off)
+    args = getattr(dataset, "dataLoader_args", None)
     if isinstance(args, dict):
-        requested = int(args.get("num_workers", 0) or 0)
+        requested = max(requested, int(args.get("num_workers", 0) or 0))
         args["num_workers"] = 0
         args.pop("prefetch_factor", None)  # invalid when num_workers == 0
         args.pop("persistent_workers", None)
@@ -1016,6 +1053,9 @@ def validate_workflow_api(
         # Runs in the spawn subprocess (never the server process): purge cached workspace imports so an
         # edited Model.py/Loss.py is re-imported fresh instead of silently validating stale code.
         _purge_workspace_modules(Path(workspace_dir))
+        # This daemonic child cannot spawn loader workers: the scratch copy asks for none, whatever the
+        # config says (the real run keeps its num_workers; worker_spawn_check pre-flights that path).
+        _force_single_process_in_config(scratch)
         try:
             if single_process:
                 _apply_single_process_patches()
@@ -1062,9 +1102,12 @@ def validate_workflow_api(
             if level in ("setup", "train_step"):
                 requested_num_workers = _force_single_process_loading(workflow_object)
                 workflow_object.setup(1)
+                loaders = getattr(workflow_object, "dataloader", []) or []
                 payload["setup"] = {
-                    "dataloaders": len(getattr(workflow_object, "dataloader", [])),
+                    "dataloaders": len(loaders),
                     "world_size": getattr(workflow_object, "size", None),  # processes the run would spawn
+                    # how long a run is, before it is launched: batches per epoch of each loader
+                    "iterations_per_epoch": [len(loader) for loader in loaders if hasattr(loader, "__len__")],
                 }
                 payload["worker_spawn_check"] = _check_worker_spawn_picklability(workflow_object, requested_num_workers)
             if level == "train_step" and workflow == "train":

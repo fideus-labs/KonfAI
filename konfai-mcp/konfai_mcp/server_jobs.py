@@ -609,8 +609,14 @@ class JobRegistry:
             },
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
         }
-        if job.status == "done" and not app_kind and job.run_name and self.workspace_layout is not None:
-            # what the run produced, so the next step needs no guess at a path
+        if (
+            job.status in {"done", "killed", "error"}
+            and not app_kind
+            and job.run_name
+            and self.workspace_layout is not None
+        ):
+            # what the run produced (a cancelled training left its checkpoints too), so the next step needs no
+            # guess at a path
             run_dirs = {
                 "train": self.workspace_layout.checkpoints_dir,
                 "prediction": self.workspace_layout.predictions_dir,
@@ -621,6 +627,11 @@ class JobRegistry:
                 # ponytail: a full walk per status call; cache it if a big run makes this slow
                 files = sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
                 payload["outputs"] = {"dir": str(out_dir), "file_count": len(files), "files": files[:20]}
+                checkpoints = [p for p in out_dir.glob("*.pt") if p.name != "resume_latest.pt"]
+                if checkpoints:
+                    # the one run_resume takes by default; resume_latest.pt is KonfAI's rolling copy
+                    newest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+                    payload["outputs"]["newest_checkpoint"] = str(newest)
         if job.status == "done" and app_kind and job.output_path is not None and job.output_path.is_dir():
             # an app job's output directory, and the aggregates an evaluation wrote there
             files = sorted(str(p.relative_to(job.output_path)) for p in job.output_path.rglob("*") if p.is_file())
