@@ -26,8 +26,8 @@ on Hugging Face `VBoussot/ImpactReg`. Work from a preset; change it only where a
    what one runs, needs (GPU, models, installs), costs per voxel and tunes.
 2. **Give the fixed image a body mask** (`--fixed-mask`) whenever it shows what the other image does not: the table
    or head rest of a CT, a CT that extends past the MRI's field of view. A deformable stage otherwise pulls the moving
-   image onto them. On the tutorial MR/CT pair it took `Elastix_IMPACT_Static` from 4.0 to 2.1 mm TRE (Dice 0.88 to
-   0.91), `FireANTs_SyN` from 5.2 to 3.2 mm and `FireANTs_Anatomix` from 3.2 to 1.8 mm. ConvexAdam ignores masks
+   image onto them. On the tutorial MR/CT pair it took `Elastix#impact_static` from 4.0 to 2.1 mm TRE (Dice 0.88 to
+   0.91), `FireANTs#syn` from 5.2 to 3.2 mm and `FireANTs#anatomix` from 3.2 to 1.8 mm. ConvexAdam ignores masks
    (itk-impact has no mask API).
 3. **Pick the preset from the pair** (below), always with `--gpu` when a GPU exists.
 4. **Register**, then **measure before trusting**: `eval` with whatever ground truth exists (labels: Dice; landmarks:
@@ -41,19 +41,19 @@ on Hugging Face `VBoussot/ImpactReg`. Work from a preset; change it only where a
 
 | Pair | Start with | Then |
 |---|---|---|
-| any pair, far apart | `Generic_Rigid` (seconds, CPU) | a deformable preset; every shipped deformable preset has its own rigid or affine stage |
-| CT/CT, MR/MR (same contrast) | `ConvexAdam_Composite` (lungs: TRE 2.1 mm in 40 s), `FireANTs_SyN` (brains) | `FireANTs_Anatomix` (the best on the lungs, five times slower); `Elastix_IMPACT_Static` between two patients; `Generic_Rigid_BSpline` on the CPU |
-| MR/CT | `Elastix_IMPACT_Static` (deep TotalSegmentator features + MIND) with a body mask on the CT: best on both MR/CT sets | `FireANTs_IMPACT_MRCT` (TS/M730 layer 7 + MIND); `ConvexAdam_IMPACT_MRCT` on the abdomen; not `FireANTs_SyN` or `FireANTs_IMPACT`, both below the unregistered pair on head and neck MR/CT |
-| CT/CBCT | `FireANTs_SyN` | `FireANTs_IMPACT` (early TotalSegmentator CT layers): at most 0.01 more Dice, 2.5 to 6.5 times slower; `ConvexAdam_IMPACT_CBCT` (TS/M730 layer 2) in half a minute |
-| microscopy, non-medical | `FireANTs_SyN` | `ConvexAdam_Composite`, `Generic_Rigid_BSpline`; not the TotalSegmentator-based presets, made for human CT/MR anatomy at millimetre scale |
+| any pair, far apart | `Elastix#rigid` (seconds, CPU) | a deformable preset; every shipped deformable preset has its own rigid or affine stage |
+| CT/CT, MR/MR (same contrast) | `ConvexAdam#composite` (lungs: TRE 2.1 mm in 40 s), `FireANTs#syn` (brains) | `FireANTs#anatomix` (the best on the lungs, five times slower); `Elastix#impact_static` between two patients; `Elastix#rigid_bspline` on the CPU |
+| MR/CT | `Elastix#impact_static` (deep TotalSegmentator features + MIND) with a body mask on the CT: best on both MR/CT sets | `FireANTs#impact_mrct` (TS/M730 layer 7 + MIND); `ConvexAdam#impact_mrct` on the abdomen; not `FireANTs#syn` or `FireANTs#impact`, both below the unregistered pair on head and neck MR/CT |
+| CT/CBCT | `FireANTs#syn` | `FireANTs#impact` (early TotalSegmentator CT layers): at most 0.01 more Dice, 2.5 to 6.5 times slower; `ConvexAdam#impact_cbct` (TS/M730 layer 2) in half a minute |
+| microscopy, non-medical | `FireANTs#syn` | `ConvexAdam#composite`, `Elastix#rigid_bspline`; not the TotalSegmentator-based presets, made for human CT/MR anatomy at millimetre scale |
 
 Intensity metrics (FireANTs' local correlation, mutual information) compare grey values; across modalities they
 compare values that do not correspond. IMPACT compares network features instead. Every mutual-information stage
 clamps each image's extreme voxels first (0.01-99.99 percentiles; FireANTs 0.5-99.5), as does ConvexAdam before MIND:
 on two raw ExaSPIM light-sheet brains, lone voxels at 21,668 beside tissue under 33 had put the whole brain in one
-histogram bin (brain Dice after `Generic_Rigid` 0.742 against 0.879 as they came; 0.916 clamped). The rigid stage
+histogram bin (brain Dice after `Elastix#rigid` 0.742 against 0.879 as they came; 0.916 clamped). The rigid stage
 of an elastix IMPACT preset keeps the raw intensities its models need: clamp such images before an IMPACT preset.
-elastix samples its metric at random: a single `Generic_*` run can land far from another on a hard pair
+elastix samples its metric at random: a single `Elastix#rigid*` run can land far from another on a hard pair
 (AbdomenMRCT case 2: Dice 0.22 or 0.56 with the seed alone); compare presets over several cases, not one run.
 
 ## Feature layers (the IMPACT guideline)
@@ -69,10 +69,10 @@ elastix samples its metric at random: a single `Generic_*` run can land far from
   activations outweighed ConvexAdam's regularisation and folded 16 % of the voxels. They need the whole image around
   them: on native tiles ConvexAdam lost 0.065, which is why the presets built on them register a large pair on a
   coarse copy only. The segmentation head alone has a short capture range: a pair that starts far apart falls into the
-  wrong organ. `Elastix_IMPACT_Static` compares the last decoder layer (`0000001`) at its coarse levels and the head
+  wrong organ. `Elastix#impact_static` compares the last decoder layer (`0000001`) at its coarse levels and the head
   (`00000001`) at its fine ones; the head at every level lost AbdomenMRCT case_0002 (Dice 0.28 against 0.65).
 - `TS/M730` serves both guidelines. The one measured exception: in FireANTs, CT/CBCT layer 2 of TotalSegmentator CT
-  (`TS/M291`) beat `TS/M730` on head and neck (0.800 against 0.736) and matched it elsewhere, so `FireANTs_IMPACT`
+  (`TS/M291`) beat `TS/M730` on head and neck (0.800 against 0.736) and matched it elsewhere, so `FireANTs#impact`
   keeps `TS/M291`.
 - `layers_mask` is positional over the network's outputs, shallow to deep. Its path depends on the engine, and
   `impact-reg-konfai presets NAME` prints every one: `Predictor.Model.RegistrationNet.models.N.layers_mask` for FireANTs

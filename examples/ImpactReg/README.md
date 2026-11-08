@@ -32,7 +32,7 @@ moving patient's labels through the recovered displacement field and measure the
 fixed patient's labels. `impact-reg-konfai eval` does exactly that; run it with no `--transform` for
 the **before**, and with the `Transform.h5` that `register` wrote for the **after**.
 
-On `1PC032 -> 1PC006` with the `FireANTs_SyN` preset, mean Dice over the 23 labels present goes from
+On `1PC032 -> 1PC006` with the `FireANTs#syn` preset, mean Dice over the 23 labels present goes from
 **0.29 to 0.60**, and 20 of the 23 improve. Bone and muscle land around 0.83-0.90; a few small
 structures move the wrong way, which is ordinary for inter-patient registration and is why the
 notebook plots a per-label chart rather than a single number.
@@ -44,7 +44,7 @@ notebook plots a per-label chart rather than a single number.
 # exists on PyPI at a release tag.
 pip install . ./konfai-apps ./apps/impact_reg
 
-impact-reg-konfai register FireANTs_SyN \
+impact-reg-konfai register FireANTs#syn \
   -f fixed.mha -m moving.mha \
   -o Output --gpu 0
 ```
@@ -69,7 +69,7 @@ Add patch overrides and KonfAI registers overlapping patches, then reassembles t
 displacement field with a `Cosinus` partition-of-unity window, which leaves no seam in the field:
 
 ```bash
-impact-reg-konfai register FireANTs_SyN -f fixed.mha -m moving.mha -o Output --gpu 0 --max-voxels 20000000
+impact-reg-konfai register FireANTs#syn -f fixed.mha -m moving.mha -o Output --gpu 0 --max-voxels 20000000
 ```
 
 A pair larger than what the preset registers whole is registered at native resolution in tiles, after one
@@ -77,8 +77,8 @@ global pass on a coarse copy; `--max-voxels` sets that size and `--patch-size` t
 
 ## What to adapt first
 
-1. **preset**: `register ConvexAdam_Composite ...` (itk-impact, GPU) or `register Generic_Rigid ...` (elastix, CPU);
-2. **ensemble**: pass several presets as positionals (`register FireANTs_SyN ConvexAdam_Composite ...`); the fields
+1. **preset**: `register ConvexAdam#composite ...` (itk-impact, GPU) or `register Elastix#rigid ...` (elastix, CPU);
+2. **ensemble**: pass several presets as positionals (`register FireANTs#syn ConvexAdam#composite ...`); the fields
    are averaged, and `--uncertainty` retains the per-preset fields for an `impact-reg-konfai uncertainty` map;
 3. **patch size / overlap**: size the patch to your GPU budget; larger overlap = smoother blend;
 4. **inputs**: the same command reads OME-Zarr or DICOM directly (KonfAI auto-detects the store format).

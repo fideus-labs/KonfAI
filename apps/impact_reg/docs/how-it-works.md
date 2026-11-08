@@ -38,7 +38,7 @@ version (TotalSegmentator), are refused.
 ## The transform and its conventions
 
 `Output/<case>/Transform.h5` is an ITK `DisplacementFieldTransform` stored as HDF5, readable by SimpleITK, ITK, 3D Slicer
-and ANTs. A linear preset that declares `transform_type: affine` (`Generic_Rigid`) writes the one `AffineTransform` its
+and ANTs. A linear preset that declares `transform_type: affine` (`Elastix#rigid`) writes the one `AffineTransform` its
 stages found instead, and as an OME-Zarr output (`Transform:omezarr`) an RFC-5 `affine` transformation on its own,
 twelve numbers where the same registration as a field weighs megabytes. Both forms map fixed points to moving points:
 
@@ -76,7 +76,7 @@ alike. The unit conversion (an OME-Zarr in micrometres read as millimetres) is e
 is in voxels too: `--set final_grid_spacing=8` is a grid of 8 voxels.
 
 The presets were tuned in millimetres on ~2 mm anatomy, so their lengths are half the millimetres they were tuned in:
-the B-spline grid of `Generic_Rigid_BSpline` is 8 voxels, 16 mm on that anatomy. On the tutorial MR/CT pair (2 mm) the
+the B-spline grid of `Elastix#rigid_bspline` is 8 voxels, 16 mm on that anatomy. On the tutorial MR/CT pair (2 mm) the
 presets give what they gave in millimetres. FireANTs moves its translation with its own step, `translation_lr`
 (voxels), apart from `affine_lr`, the step of the rotation and the matrix, which have no unit.
 
@@ -140,7 +140,7 @@ They are downloaded once to the Hugging Face cache (`~/.cache/huggingface`) when
 | Similarity | mutual information or IMPACT | local correlation, mutual information or IMPACT | IMPACT |
 | IMPACT modes | Static or Jacobian | Static or Jacobian | Static or Jacobian (fine stage) |
 | Runs on | CPU, IMPACT metric on a CUDA GPU | GPU (CPU works, slowly) | GPU or CPU |
-| Presets | `Generic_Rigid`, `Generic_Rigid_BSpline`, `Elastix_IMPACT_Static`, `Elastix_IMPACT_Jacobian` | `FireANTs_SyN`, `FireANTs_IMPACT`, `FireANTs_Anatomix`, `FireANTs_IMPACT_MRCT` | `ConvexAdam_Coarse`, `ConvexAdam_Composite`, `ConvexAdam_IMPACT_CBCT`, `ConvexAdam_IMPACT_MRCT` |
+| Presets | `Elastix#rigid`, `Elastix#rigid_bspline`, `Elastix#impact_static`, `Elastix#impact_jacobian` | `FireANTs#syn`, `FireANTs#impact`, `FireANTs#anatomix`, `FireANTs#impact_mrct` | `ConvexAdam#coarse`, `ConvexAdam#composite`, `ConvexAdam#impact_cbct`, `ConvexAdam#impact_mrct` |
 
 The three engines compute one IMPACT loss: the same models, layers, PCA, feature normalisation and distances, each
 layer divided by its value when a level starts (`normalize`). elastix and itk-impact share itk-impact's C++

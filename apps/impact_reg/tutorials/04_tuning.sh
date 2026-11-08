@@ -17,7 +17,7 @@
 
 # Tutorial 4: tuning a preset with --set, and choosing its feature layers.
 #
-# FireANTs_IMPACT drives SyN with the early layers of a TotalSegmentator CT model: the pairing for CT/CBCT, where
+# FireANTs#impact drives SyN with the early layers of a TotalSegmentator CT model: the pairing for CT/CBCT, where
 # texture carries the alignment. On an MR/CT pair, the organ-level layers of the MR model suit better. Both are one
 # --set away, and the registration is scored after each change.
 #
@@ -29,11 +29,11 @@ DEV="--gpu ${GPU-0}"
 MODEL=Predictor.Model.RegistrationNet.models.0
 
 # What can be tuned, with values, ranges and descriptions:
-impact-reg-konfai show FireANTs_IMPACT
+impact-reg-konfai show FireANTs#impact
 
 run() {  # run <name> [--set ...]: register, evaluate, print Dice and TRE
     name=$1; shift
-    impact-reg-konfai register FireANTs_IMPACT -f data/fixed_ct.mha -m data/moving_mr.mha --fixed-mask data/fixed_mask.mha \
+    impact-reg-konfai register FireANTs#impact -f data/fixed_ct.mha -m data/moving_mr.mha --fixed-mask data/fixed_mask.mha \
         -o out/04_$name $DEV -q "$@"
     impact-reg-konfai eval --transform out/04_$name/P000/Transform.h5 \
         --gt-fixed-seg data/fixed_labels.mha --gt-moving-seg data/moving_labels.mha \
@@ -48,4 +48,4 @@ run longer --set deformable_iterations=[400,200,100]                # more defor
 run smoother --set smooth_warp_sigma=1.5                             # a more regular field
 
 # Several presets in one run take PRESET:NAME=VALUE, since engines name their knobs differently:
-#   --set FireANTs_SyN:deformable_iterations=[400,200,100] --set Generic_Rigid_BSpline:max_iterations=500
+#   --set FireANTs#syn:deformable_iterations=[400,200,100] --set Elastix#rigid_bspline:max_iterations=500
