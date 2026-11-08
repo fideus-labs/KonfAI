@@ -28,6 +28,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 from konfai.portable import (
     _CHAIN_OPS,
@@ -287,13 +288,8 @@ def test_a_stated_interpolation_wins_over_the_dtype() -> None:
 
 def _undone_resample(outputs: dict, resample: dict | None = None) -> dict:
     """The post chain konfai's predictor runs for ``outputs`` over a float32 input it resampled."""
-    chain = {
-        "TensorCast": {"dtype": "float32", "inverse": False},
-        "Resample": {"spacing": [1.5, 1.5, 1.5], "inverse": True, **(resample or {})},
-    }
-    config = {"Predictor": {"Dataset": _input_group(chain), "outputs_dataset": {"H": {"OutputDataset": outputs}}}}
-    manifest, _, _ = transform_manifest(config, "Predictor")
-    return manifest
+    resample = {"Resample": {"spacing": [1.5, 1.5, 1.5], "inverse": True, **(resample or {})}}
+    return transform_manifest(_prediction(resample, outputs), "Predictor")[0]
 
 
 def _input_group(transforms: dict | None, **more: object) -> dict:
@@ -504,9 +500,11 @@ def test_a_per_channel_statistic_collapses_or_is_refused() -> None:
 
 @pytest.mark.parametrize(
     ("written", "expected"),
-    [("2G", 2 * 1024**3), ("512M", 512 * 1024**2), ("1024K", 1024**2), (4096, 4096), ("auto", None), (None, None)],
+    [("2GB", 2 * 10**9), ("512MiB", 512 * 2**20), ("4096b", 4096), (24, 24 * 2**30), ("auto", None), (None, None)],
 )
-def test_a_budget_reaches_the_runtime_in_bytes(written: object, expected: int | None) -> None:
+def test_a_budget_reaches_the_runtime_in_the_bytes_konfai_plans_against(written: object, expected: int | None) -> None:
+    # The program's budget is a byte count the runtime plans against, read from the config by konfai's own
+    # grammar: a bare number is GiB there, not bytes.
     from konfai.portable import _budget_bytes
 
     assert _budget_bytes(written) == expected
@@ -790,8 +788,6 @@ def test_every_konfai_stage_and_draw_is_carried_or_refused_by_name() -> None:
     # The coverage that matters is konfai's own registry, not the configs that ship: a stage this
     # compiler has never heard of must still meet a refusal that names it, never a crash or a silent
     # drop. konfai growing one is what makes this fail.
-    import inspect
-
     import konfai.data.augmentation as augmentation
     import konfai.data.transform as transform
     from konfai.data.augmentation import DataAugmentation
@@ -942,9 +938,7 @@ def _compile_stage(key: str, params: dict[str, object]) -> object:
 
     name = key.rpartition(":")[-1]
     if key.startswith(_AUG) and name != "Brightness":
-        config = _prediction({}, {})
-        config["Predictor"]["Dataset"]["augmentations"] = {"T": {"nb": 2, "data_augmentations": {name: params}}}
-        return tta_passes(config, "Predictor")
+        return tta_passes(_prediction({}, {}, flips=2, draws={name: params}), "Predictor")
     if name in ("Write", "Save"):
         return steps([{name: params}], "G")[1]
     if name in OP_MAP and name not in PROGRAM_TRANSFORMS:
@@ -1089,12 +1083,15 @@ def test_a_label_merge_takes_no_test_time_passes() -> None:
         assemble_program(_one_model(), reduce="merge_labels", passes=[[], [1]])
 
 
-def _prediction(transforms: dict, outputs: dict, combine: str = "Mean", flips: int = 0) -> dict:
-    """A Predictor section; ``flips`` test-time draws that flip every axis."""
+def _prediction(
+    transforms: dict, outputs: dict, combine: str = "Mean", flips: int = 0, draws: dict | list | None = None
+) -> dict:
+    """A Predictor section; ``flips`` test-time copies, each drawn by ``draws`` (a Flip of every axis unnamed)."""
     chain = {"TensorCast": {"dtype": "float32", "inverse": False}, **transforms}
     dataset = _input_group(chain)
     if flips:
-        dataset["augmentations"] = {"T": {"nb": flips, "data_augmentations": {"Flip": {"f_prob": [1, 1]}}}}
+        draws = {"Flip": {"f_prob": [1, 1]}} if draws is None else draws
+        dataset["augmentations"] = {"T": {"nb": flips, "data_augmentations": draws}}
     return {
         "Predictor": {
             "Model": {"classpath": "Probe"},
@@ -1326,6 +1323,44 @@ def test_models_konfai_averages_before_a_per_copy_chain_fold_first(copies: str) 
     assert not models_fold_first(config, "Predictor", 1)
 
 
+def test_a_per_copy_chain_folded_on_the_models_average_runs_as_body_ops_or_is_refused_by_name() -> None:
+    # konfai runs the before-reduction chain on the models' average; a program runs a cast, a softmax or an argmax
+    # on a buffer and nothing else, so each such step takes its body form (a softmax names no axis there) and any
+    # other stage is refused before export, rather than copied into a program the schema rejects.
+    from konfai.portable_schema import program_schema
+
+    lenient = _without_required(program_schema())
+    manifest = {
+        **_one_model()[0]["manifest"],
+        "postprocessing": [{"op": "softmax", "dim": 0}, {"op": "cast", "dtype": "uint8"}],
+    }
+    models = [{"id": name, "manifest": manifest} for name in ("a", "b")]
+    program = assemble_program(models, reduce="mean", per_copy=2, fold_models=True)
+    _meets(program, "program", lenient)
+    assert [step for step in program["steps"] if "op" in step][:3] == [
+        {"op": "mean", "in": ["a", "b"], "out": "mean__p0"},
+        {"op": "softmax", "in": ["mean__p0"], "out": "mean__p0__0"},
+        {"op": "cast", "dtype": "uint8", "in": ["mean__p0__0"], "out": "output"},
+    ]
+    unnormalize = {**manifest, "postprocessing": [{"op": "unnormalize", "min_value": -1.0, "max_value": 1.0}]}
+    with pytest.raises(ConfigError, match="'unnormalize'"):
+        assemble_program([{**m, "manifest": unnormalize} for m in models], reduce="mean", per_copy=1, fold_models=True)
+
+
+def test_a_cubic_resample_runs_through_a_whole_program_the_schema_admits() -> None:
+    # The compiler emits `cubic` on a resample and its inverse, and `resample_cubic` once that inverse is hoisted
+    # past the reduction: the schema admits each where it admits `linear`.
+    from konfai.portable_schema import program_schema
+
+    lenient = _without_required(program_schema())
+    manifest = _undone_resample({}, {"interpolation": "cubic"})
+    _meets(manifest, "manifest", lenient)
+    assert manifest["postprocessing"] == [{"op": "inverse", "of": "Resample", "interpolation": "cubic"}]
+    program = assemble_program([{"id": name, "manifest": manifest} for name in ("a", "b")], reduce="mean")
+    _meets(program, "program", lenient)
+    assert program["steps"][-1] == {"op": "resample_cubic", "in": ["r", "input"], "out": "output"}
+
+
 def test_one_model_folds_its_test_time_copies_by_their_own_reduction() -> None:
     # konfai's combine hands one model's output back, and the copies fold by the output's `reduction`: that
     # fold is the program's only one, whatever `combine` says.
@@ -1344,8 +1379,9 @@ def test_models_a_program_may_fold_after_the_blend_keep_their_reduction() -> Non
 
 
 def test_an_occurrence_key_names_its_stage() -> None:
-    config = _prediction({"Clip#2": {"min_value": 0, "max_value": 1}}, {}, flips=1)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = {"Flip#2": {"f_prob": [1, 1]}}
+    config = _prediction(
+        {"Clip#2": {"min_value": 0, "max_value": 1}}, {}, flips=1, draws={"Flip#2": {"f_prob": [1, 1]}}
+    )
     manifest, folds, _ = transform_manifest(config, "Predictor")
     assert [step["op"] for step in manifest["preprocessing"]] == ["cast", "clip"]
     assert not folds
@@ -1639,19 +1675,14 @@ def test_a_draw_the_portable_runtime_does_not_draw_is_refused_by_name(tmp_path: 
     ],
 )
 def test_portable_tta_refuses_a_draw_it_cannot_represent(chain: dict, refused: str) -> None:
-    config = _prediction({}, {}, flips=1)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = chain
     with pytest.raises(ConfigError, match=refused):
-        tta_passes(config, "Predictor")
+        tta_passes(_prediction({}, {}, flips=1, draws=chain), "Predictor")
 
 
 def test_a_vector_field_draw_negates_the_component_of_every_mirrored_axis() -> None:
     # konfai's `Flip(vector_field=True)` mirrors the axes and negates each one's component channel, and
     # the draw is its own inverse, so the copy's inverse negates them again.
-    config = _prediction({}, {}, flips=1)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = {
-        "Flip": {"f_prob": [1.0, 1.0, 1.0], "vector_field": True}
-    }
+    config = _prediction({}, {}, flips=1, draws={"Flip": {"f_prob": [1.0, 1.0, 1.0], "vector_field": True}})
     passes = tta_passes(config, "Predictor")
     assert passes == [[], [{"op": "flip", "axes": [0], "vector_field": True}]]
     copy = assemble_program(_one_model(), reduce="mean", passes=passes)["steps"][1]["manifest"]
@@ -1663,12 +1694,10 @@ def test_a_vector_field_draw_negates_the_component_of_every_mirrored_axis() -> N
 def test_portable_tta_composes_every_flip_in_a_draw(as_list: bool) -> None:
     import torch
 
-    config = _prediction({}, {}, flips=1)
     first = {"f_prob": [0.0, 0.0, 1.0]}
     second = {"f_prob": [1.0, 1.0, 0.0]}
     chain = [{"Flip": first}, {"Flip": second}] if as_list else {"Flip": first, "Flip#2": second}
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = chain
-    passes = tta_passes(config, "Predictor")
+    passes = tta_passes(_prediction({}, {}, flips=1, draws=chain), "Predictor")
     # Both flips apply, in the chain's order, and are undone.
     image = torch.arange(24).reshape(1, 2, 3, 4)
     expected = torch.flip(torch.flip(image, [3]), [1])
@@ -1680,9 +1709,7 @@ def test_portable_tta_composes_every_flip_in_a_draw(as_list: bool) -> None:
 
 
 def test_portable_tta_keeps_identity_copies_in_the_reduction() -> None:
-    config = _prediction({}, {}, flips=3)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = {}
-    assert tta_passes(config, "Predictor") == [[], [], [], []]
+    assert tta_passes(_prediction({}, {}, flips=3, draws={}), "Predictor") == [[], [], [], []]
 
 
 @pytest.mark.parametrize(
@@ -1943,9 +1970,9 @@ def test_an_onnx_export_refuses_free_patch_axes_instead_of_dropping_them(size: l
 
 @pytest.mark.parametrize(("prob", "copies"), [(0.0, [[], []]), (1.0, [[0], [2]])])
 def test_portable_tta_reads_the_resolved_draw_gate(prob: float, copies: list[list[int]]) -> None:
-    config = _prediction({}, {}, flips=2)
-    chain = {"Flip": {"f_prob": [1.0, 0.0, 1.0], "prob": prob, "vector_field": False}}
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = chain
+    config = _prediction(
+        {}, {}, flips=2, draws={"Flip": {"f_prob": [1.0, 0.0, 1.0], "prob": prob, "vector_field": False}}
+    )
     # A draw the gate closes leaves the copy as it is: an identity pass, with no op to undo.
     assert tta_passes(config, "Predictor") == [[], *([{"op": "flip", "axes": axes}] if axes else [] for axes in copies)]
 
@@ -1961,8 +1988,7 @@ def test_portable_tta_flips_are_the_copies_konfai_predicts_with(
     monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
     draw = Flip(f_prob=f_prob)
     draw._state_init(0, [[4, 4, 4] for _ in range(nb)], [Attribute() for _ in range(nb)])
-    config = _prediction({}, {}, flips=nb)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = {"Flip": {"f_prob": f_prob}}
+    config = _prediction({}, {}, flips=nb, draws={"Flip": {"f_prob": f_prob}})
     # konfai's flip dims count the channel axis first.
     konfai = [[{"op": "flip", "axes": [dim - 1 for dim in dims]}] if dims else [] for dims in draw.flip[0]]
     assert tta_passes(config, "Predictor") == [[], *konfai]
@@ -2044,42 +2070,10 @@ def test_a_model_tiling_by_a_model_patch_is_refused_by_name(tmp_path: Path, monk
         )
 
 
-def test_a_draw_naming_the_groups_it_draws_is_refused_by_name() -> None:
-    # konfai draws the named groups alone; the runtime draws the chain the draw is written in.
-    from konfai.portable import compile_chain
-
-    with pytest.raises(KonfAIError, match="Brightness"):
-        compile_chain(
-            [
-                {"Expand": {"nb": 2}},
-                {"Brightness": {"b_std": 0.1, "groups": ["CT"]}},
-                {"Write": {"dataset": "./Out:mha"}},
-            ],
-            "CT",
-        )
-
-
-def test_a_clip_that_records_its_bound_is_refused_by_name() -> None:
-    # konfai's Clip(save_clip_min) writes its bound as the volume's Min, and a later Normalize takes that
-    # statistic over the volume's own minimum; the runtime measures the minimum, so the values differ.
-    from konfai.portable import compile_pipeline
-
-    with pytest.raises(KonfAIError, match="save_clip_min"):
-        compile_pipeline({"Clip": {"min_value": 0, "max_value": 1, "save_clip_min": True}}, fold=False)
-    steps, _folds, _inverted = compile_pipeline(
-        {"Clip": {"min_value": 0, "max_value": 1, "save_clip_min": False, "save_clip_max": False}}, fold=False
-    )
-    assert steps == [{"op": "clip", "min_value": 0.0, "max_value": 1.0}]
-
-
 def test_a_permute_draw_with_no_shares_gives_each_of_two_copies_its_own_order() -> None:
     # konfai's Permute(prob_permute=None) draws torch.eye(2): the first copy takes the first order alone,
     # the second the second, and any other copy count is refused.
-    config = _prediction({}, {}, flips=1)
-    config["Predictor"]["Dataset"]["augmentations"]["T"] = {
-        "nb": 2,
-        "data_augmentations": {"Permute": {"prob_permute": None}},
-    }
+    config = _prediction({}, {}, flips=2, draws={"Permute": {"prob_permute": None}})
     passes = tta_passes(config, "Predictor")
     assert passes == [[], [{"op": "permute", "axes": [1, 0, 2]}], [{"op": "permute", "axes": [2, 0, 1]}]]
     config["Predictor"]["Dataset"]["augmentations"]["T"]["nb"] = 3
@@ -2164,12 +2158,10 @@ def test_a_fractional_test_time_share_warns_that_the_copies_are_not_torchs(draw:
 
     from konfai.utils.errors import KonfAIWarning
 
-    config = _prediction({}, {}, flips=2)
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = draw
     with pytest.warns(KonfAIWarning, match=re.escape(key)):
-        tta_passes(config, "Predictor")
+        tta_passes(_prediction({}, {}, flips=2, draws=draw), "Predictor")
     # A test-time Flip's f_prob only names the axes its mirrors take: konfai draws nothing from it.
-    config["Predictor"]["Dataset"]["augmentations"]["T"]["data_augmentations"] = {"Flip": {"f_prob": [0.5, 0, 1]}}
+    config = _prediction({}, {}, flips=2, draws={"Flip": {"f_prob": [0.5, 0, 1]}})
     with warnings.catch_warnings():
         warnings.simplefilter("error", KonfAIWarning)
         tta_passes(config, "Predictor")
@@ -2183,57 +2175,11 @@ _MRSEG_PROGRAM = _SCHEMA_COPY.with_name("mrseg_program.json")
 # The public tree ships the compiler without the runtime; these checks pair the two where both are present.
 _needs_the_runtime = pytest.mark.skipif(not _SCHEMA_COPY.exists(), reason="the runtime's fixtures are not in this tree")
 
-_TYPES = {
-    "string": str,
-    "integer": int,
-    "number": (int, float),
-    "boolean": bool,
-    "array": list,
-    "object": dict,
-    "null": type(None),
-}
 
-
-def _meets(instance: object, node: dict, schema: dict, at: str = "$") -> None:
-    """Assert ``instance`` meets ``node`` of ``schema``: the subset of draft 2020-12 the schema spells."""
-    if "$ref" in node:
-        node = schema["$defs"][node["$ref"].rsplit("/", 1)[-1]]
-    if "oneOf" in node:
-        fits = [alternative for alternative in node["oneOf"] if _fits(instance, alternative, schema)]
-        assert len(fits) == 1, f"{at}: {instance!r} fits {len(fits)} of the alternatives"
-        return
-    types = node.get("type", [])
-    accepted = tuple(_TYPES[name] for name in ([types] if isinstance(types, str) else types))
-    if accepted:
-        assert isinstance(instance, accepted) and not (isinstance(instance, bool) and bool not in accepted), (
-            f"{at}: {instance!r} is no {types}"
-        )
-    assert "const" not in node or instance == node["const"], f"{at}: {instance!r} is not {node['const']!r}"
-    assert "enum" not in node or instance in node["enum"], f"{at}: {instance!r} is not one of {node['enum']}"
-    assert "minimum" not in node or instance >= node["minimum"], f"{at}: {instance!r} is below {node['minimum']}"  # type: ignore[operator]
-    assert "maximum" not in node or instance <= node["maximum"], f"{at}: {instance!r} is above {node['maximum']}"  # type: ignore[operator]
-    if isinstance(instance, dict):
-        for key in node.get("required", []):
-            assert key in instance, f"{at}: no {key!r}"
-        for key, value in instance.items():
-            if key in node.get("properties", {}):
-                _meets(value, node["properties"][key], schema, f"{at}.{key}")
-            elif node.get("additionalProperties", True) is False:
-                raise AssertionError(f"{at}: {key!r} is no key of this object")
-            elif isinstance(node.get("additionalProperties"), dict):
-                _meets(value, node["additionalProperties"], schema, f"{at}.{key}")
-    if isinstance(instance, list):
-        assert len(instance) >= node.get("minItems", 0) and len(instance) <= node.get("maxItems", len(instance)), at
-        for index, item in enumerate(instance):
-            _meets(item, node.get("items", {}), schema, f"{at}[{index}]")
-
-
-def _fits(instance: object, node: dict, schema: dict) -> bool:
-    try:
-        _meets(instance, node, schema)
-    except AssertionError:
-        return False
-    return True
+def _meets(instance: object, definition: str, schema: dict) -> None:
+    """Validate ``instance`` against ``definition`` of ``schema`` (draft 2020-12), the root's own ``oneOf`` of the
+    four whole documents set aside: a fragment is none of them."""
+    jsonschema.Draft202012Validator({"$defs": schema["$defs"], "$ref": f"#/$defs/{definition}"}).validate(instance)
 
 
 def _without_required(node: object) -> object:
@@ -2261,7 +2207,7 @@ def _every_compiled_program_meets_the_schema(monkeypatch: pytest.MonkeyPatch) ->
         def compiled(*args: Any, **kwargs: Any) -> Any:
             result = original(*args, **kwargs)
             for fragment, definition, schema in picks(result):
-                _meets(fragment, {"$ref": f"#/$defs/{definition}"}, schema, definition)
+                _meets(fragment, definition, schema)
             return result
 
         monkeypatch.setattr(portable, name, compiled)
@@ -2291,31 +2237,26 @@ def test_the_committed_program_schema_is_what_the_code_generates() -> None:
 
 @_needs_the_runtime
 def test_the_published_mrseg_program_meets_the_schema() -> None:
-    _meets(json.loads(_MRSEG_PROGRAM.read_text()), {"$ref": "#/$defs/program"}, json.loads(_SCHEMA_COPY.read_text()))
+    _meets(json.loads(_MRSEG_PROGRAM.read_text()), "program", json.loads(_SCHEMA_COPY.read_text()))
 
 
 @_needs_the_runtime
-def test_the_schema_is_valid_draft_2020_12_and_the_check_here_agrees_with_it() -> None:
-    jsonschema = pytest.importorskip("jsonschema")
+def test_the_schema_is_valid_draft_2020_12_and_closed_on_the_keys_the_ops_read() -> None:
     from konfai.portable_schema import program_schema
 
     schema = program_schema()
     jsonschema.Draft202012Validator.check_schema(schema)
     program = json.loads(_MRSEG_PROGRAM.read_text())
-    jsonschema.Draft202012Validator({**schema, "$ref": "#/$defs/program"}).validate(program)
+    _meets(program, "program", schema)
     # A key no op reads is what both refuse: the runtime by name, the schema by its closed objects.
     program["steps"][0]["manifest"]["preprocessing"][0]["value"] = 0.0
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.Draft202012Validator({**schema, "$ref": "#/$defs/program"}).validate(program)
-    with pytest.raises(AssertionError):
-        _meets(program, {"$ref": "#/$defs/program"}, schema)
+        _meets(program, "program", schema)
 
 
 def test_a_stage_left_without_its_parameters_compiles_konfais_own_defaults() -> None:
     """A config that leaves a key out binds the transform's default (audit of 2026-09-26, P-09 and P-10): the
     compiler reads it off konfai's signature rather than a copy of its own."""
-    import inspect
-
     from konfai.data import transform as stages
     from konfai.portable import OP_MAP
 

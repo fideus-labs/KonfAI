@@ -75,7 +75,9 @@ def test_explicit_classes_override_the_per_model_ones():
 
 
 def test_mean_reduction_carries_no_classes():
+    # A plain same-class ensemble (logits already final, no resample) reduces straight to output.
     program = assemble_program([{"id": "a", "manifest": M}, {"id": "b", "manifest": M}], reduce="mean")
+    assert [s.get("op") for s in program["steps"] if "op" in s] == ["mean"]
     assert program["steps"][-1] == {"op": "mean", "in": ["a", "b"], "out": "output"}
 
 
@@ -120,8 +122,8 @@ def test_models_folded_first_run_the_per_copy_ops_on_each_copys_mean():
         **M,
         "preprocessing": [{"op": "resample", "spacing": [1.0, 1.0], "id": "Resample", "interpolation": "linear"}],
         "postprocessing": [
-            {"op": "unnormalize", "min_value": -1024.0, "max_value": 3071.0},
-            {"op": "cast", "dtype": "int16"},
+            {"op": "softmax", "dim": 0},
+            {"op": "cast", "dtype": "float16"},
             {"op": "inverse", "of": "Resample", "interpolation": "linear"},
         ],
     }
@@ -135,15 +137,17 @@ def test_models_folded_first_run_the_per_copy_ops_on_each_copys_mean():
         ("model", "input", "cv_0__p1"),
         ("model", "input", "cv_1__p1"),
         ("mean", ["cv_0__p0", "cv_1__p0"], "mean__p0"),
-        ("unnormalize", ["mean__p0"], "mean__p0__0"),
+        ("softmax", ["mean__p0"], "mean__p0__0"),
         ("cast", ["mean__p0__0"], "mean__p0__1"),
         ("mean", ["cv_0__p1", "cv_1__p1"], "mean__p1"),
-        ("unnormalize", ["mean__p1"], "mean__p1__0"),
+        ("softmax", ["mean__p1"], "mean__p1__0"),
         ("cast", ["mean__p1__0"], "mean__p1__1"),
         ("mean", ["mean__p0__1", "mean__p1__1"], "r"),
         ("resample_linear", ["r", "input"], "output"),
     ]
-    # Each model keeps only the undoing of its own copy.
+    # The body softmax names no axis (a program op runs on the channel axis); each model keeps only the undoing
+    # of its own copy.
+    assert program["steps"][5] == {"op": "softmax", "in": ["mean__p0"], "out": "mean__p0__0"}
     assert program["steps"][0]["manifest"]["postprocessing"] == []
     assert program["steps"][2]["manifest"]["postprocessing"] == [{"op": "inverse", "of": "__tta_0"}]
 
@@ -265,13 +269,6 @@ def test_hoisting_does_not_mutate_the_input_manifest():
     before = json.dumps(MR, sort_keys=True)
     assemble_program([{"id": f"f{i}", "manifest": MR} for i in range(3)], reduce="mean")
     assert json.dumps(MR, sort_keys=True) == before, "assemble_program must not mutate the caller's manifest"
-
-
-def test_mean_ensemble_without_post_or_resample_has_no_tail():
-    # A plain same-class ensemble (logits already final, no resample) reduces straight to output.
-    program = assemble_program([{"id": "a", "manifest": M}, {"id": "b", "manifest": M}], reduce="mean")
-    assert [s.get("op") for s in program["steps"] if "op" in s] == ["mean"]
-    assert program["steps"][-1] == {"op": "mean", "in": ["a", "b"], "out": "output"}
 
 
 def test_non_channel_axis_post_op_cannot_be_hoisted():

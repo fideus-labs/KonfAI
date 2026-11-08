@@ -40,7 +40,7 @@ _NUMBER: dict[str, Any] = {"type": "number"}
 _BOOLEAN: dict[str, Any] = {"type": "boolean"}
 #: A clip bound: a number, or "min", "max" or "percentile:<q>", resolved against the volume in hand.
 _BOUND: dict[str, Any] = {"type": ["number", "string"]}
-_INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear"]}
+_INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear", "cubic"]}
 _ALIGN: dict[str, Any] = {"enum": ["extent", "origin"]}
 _AXES: dict[str, Any] = {"type": "array", "items": {"type": "integer", "minimum": 0}}
 #: The name a post chain undoes the step by; written on the ops konfai's predictor can undo.
@@ -122,6 +122,7 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     # Aligned on the origin, the align, the spacing and the fill of the resample undone onto the reference buffer.
     "resample_linear": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _NUMBER}, []),
     "resample_nearest": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _NUMBER}, []),
+    "resample_cubic": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _NUMBER}, []),
     "softmax": ({}, []),
     "argmax": ({}, []),
     "cast": ({"dtype": _STRING}, ["dtype"]),
