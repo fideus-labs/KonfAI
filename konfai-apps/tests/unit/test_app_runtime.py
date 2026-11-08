@@ -503,6 +503,24 @@ def test_write_mask_or_default_reads_header_only(
     assert np.array_equal(arr, np.ones_like(arr))
 
 
+def test_default_mask_of_a_three_channel_volume_takes_its_grid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A three-channel 3-D prediction against a three-channel reference is an image pair, not a field: the default
+    mask is one channel of ones on its grid (a registration's field, beside a fixed image, defers to the image)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    for name in ("pred.mha", "ref.mha"):
+        sitk.WriteImage(sitk.GetImageFromArray(np.zeros((4, 5, 6, 3), np.float32), isVector=True), str(data / name))
+    monkeypatch.chdir(tmp_path)
+
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[data / "pred.mha"]])
+    app._write_gt_to_dataset([[data / "ref.mha"]])
+    app._write_mask_or_default(None)
+
+    mask = sitk.ReadImage(str(tmp_path / "Dataset" / "P000" / "Mask_0.mha"))
+    assert mask.GetSize() == (6, 5, 4) and mask.GetNumberOfComponentsPerPixel() == 1
+
+
 class _FakeSseResponse:
     def __init__(self, lines: list[str], status_code: int = 200) -> None:
         self._lines = lines
