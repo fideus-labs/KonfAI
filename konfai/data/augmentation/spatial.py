@@ -494,6 +494,11 @@ class Flip(DataAugmentation):
                 f"Give one probability per axis: f_prob: {[0.33] * rank}.",
             )
         dims = [1, 2, 3][: len(self.f_prob)]
+        # The grids' directions, which a vector field's components are reflected through: a test-time copy's
+        # inverse reads them as a training draw's does.
+        self.directions[index] = [
+            Flip._direction(attribute, len(shape)) for attribute, shape in zip(caches_attribute, shapes, strict=True)
+        ]
         if os.environ.get("KONFAI_STATE") == str(State.PREDICTION):
             # Test-time copies take the distinct mirrors in turn, from the axes f_prob allows: none is drawn
             # twice before all have come, and none is the identity.
@@ -503,9 +508,6 @@ class Flip(DataAugmentation):
             return shapes
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
         self.flip[index] = [torch.tensor(dims)[mask].tolist() for mask in prob]
-        self.directions[index] = [
-            Flip._direction(attribute, len(shape)) for attribute, shape in zip(caches_attribute, shapes, strict=True)
-        ]
         return shapes
 
     @staticmethod
