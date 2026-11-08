@@ -24,5 +24,6 @@ To switch it on:
 1. In the repository settings, Pages, set the source to "GitHub Actions".
 2. Run the "site" workflow from the Actions tab (or `gh workflow run site.yml`).
 
-The pages use relative links only, so they also serve from any sub-path or from another static host. The KonfAI
-Edge demo (fideye PR 847) is meant to land under `edge/` here; `docs/edge.html` says so and will link to it.
+The pages use relative links only, so they also serve from any sub-path or from another static host.
+`docs/edge.html` carries KonfAI Edge's one-line notice until it ships. The visual identity (fonts, tokens,
+components, the hero) is `design/` at the repository root, copied here by `design/sync.sh`.

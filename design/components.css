@@ -1,0 +1,56 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* The family's primitives, on the tokens: the hue a block owns, a kicker, two buttons, a card with its rail,
+   chips, a rule above a title, a reveal. Namespaced k- so they drop onto any page. Needs tokens.css. */
+
+/* ---- the hue a page, a section or a card owns: set it on the element, everything below reads it ---- */
+:root { --k-hue: var(--k-sage); --k-hue-ink: var(--k-sage-ink); }
+.hue-engine { --k-hue: var(--k-sage); --k-hue-ink: var(--k-sage-ink); }
+.hue-apps { --k-hue: var(--k-teal); --k-hue-ink: var(--k-teal-ink); }
+.hue-edge { --k-hue: var(--k-violet); --k-hue-ink: var(--k-violet-ink); }
+.hue-studio { --k-hue: var(--k-amber); --k-hue-ink: var(--k-amber-ink); }
+.hue-mcp { --k-hue: var(--k-steel); --k-hue-ink: var(--k-steel-ink); }
+.hue-scout { --k-hue: var(--k-coral); --k-hue-ink: var(--k-coral-ink); }
+
+/* ---- kicker: a mono, uppercase label in the hue's ink ---- */
+.k-kicker { font: 500 var(--k-fs-0) / 1 var(--k-mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--k-hue-ink); }
+
+/* ---- buttons: a filled one in the ink and a ghost one; 42 px tall, a hairline, a soft lift ---- */
+.k-btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 18px; border-radius: 11px;
+  font: 500 14.5px var(--k-sans); color: var(--k-ink); border: 1px solid transparent; text-decoration: none; cursor: pointer;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: background var(--k-dur) var(--k-ease), border-color var(--k-dur) var(--k-ease), transform var(--k-dur) var(--k-ease);
+}
+.k-btn.fill { color: #0b0d12; background: var(--k-ink); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 8px 24px -8px rgba(0, 0, 0, 0.6); }
+.k-btn.fill:hover { background: #fff; }
+.k-btn.ghost { background: rgba(176, 198, 232, 0.06); border-color: rgba(176, 198, 232, 0.16); }
+.k-btn.ghost:hover { background: rgba(176, 198, 232, 0.11); border-color: var(--k-hue); }
+.k-btn:active { transform: translateY(1px); }
+
+/* ---- card: a raised surface, the hue as a two-pixel rail along its top edge; a link card lifts and glows ---- */
+.k-card {
+  position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 22px 22px 24px;
+  border-radius: var(--k-r-3); background: var(--k-night-2); border: 1px solid var(--k-line);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.035) inset; color: var(--k-ink); overflow: hidden; text-decoration: none;
+  transition: border-color var(--k-dur) var(--k-ease), transform var(--k-dur) var(--k-ease), box-shadow var(--k-dur) var(--k-ease);
+}
+.k-card::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, var(--k-hue), transparent 85%); opacity: 0.9; }
+a.k-card:hover { border-color: color-mix(in srgb, var(--k-hue) 55%, var(--k-line)); transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.035) inset, 0 18px 50px -30px var(--k-hue); }
+.k-card h3 { margin: 4px 0 0; font: 600 var(--k-fs-4) / 1.2 var(--k-display); letter-spacing: -0.015em; }
+.k-card p { margin: 0; color: var(--k-muted); font-size: 14.5px; }
+.k-card .go { margin-top: auto; padding-top: 8px; font-size: 13.5px; color: var(--k-hue-ink); }
+.k-card .tag { position: absolute; top: 18px; right: 18px; font: 500 11px var(--k-mono); letter-spacing: 0.06em; color: var(--k-hue-ink); border: 1px solid color-mix(in srgb, var(--k-hue) 55%, transparent); border-radius: var(--k-r-pill); padding: 3px 8px; }
+
+/* ---- chips: small mono links in a row ---- */
+.k-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.k-chips > a, .k-chip { font: 500 13px var(--k-mono); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--k-line); background: var(--k-night); color: var(--k-ink-2); text-decoration: none; transition: border-color var(--k-dur), color var(--k-dur); }
+.k-chips > a:hover, .k-chip:hover { border-color: var(--k-hue); color: var(--k-ink); }
+
+/* ---- rule: the hue as a short bar above a title ---- */
+.k-rule::before { content: ""; display: block; width: 44px; height: 3px; border-radius: 2px; margin: 0 0 18px; background: var(--k-hue); }
+
+/* ---- reveal: a block rises into place as it scrolls into view. A script puts .js on <html> and .in on the
+   block when it intersects (the site's landing.js does); without a script every block shows. ---- */
+.js .k-reveal { opacity: 0; transform: translateY(12px); transition: opacity var(--k-dur-2) var(--k-ease), transform var(--k-dur-2) var(--k-ease); }
+.js .k-reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .js .k-reveal { opacity: 1; transform: none; } }

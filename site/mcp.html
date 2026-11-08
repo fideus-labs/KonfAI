@@ -6,9 +6,9 @@
 <meta name="theme-color" content="#080b12">
 <title>KonfAI MCP</title>
 <meta name="description" content="The MCP server that lets an agent drive KonfAI: fifty tools, one per object.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;680;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="design/fonts.css">
+<link rel="stylesheet" href="design/tokens.css">
+<link rel="stylesheet" href="design/components.css">
 <link rel="stylesheet" href="landing.css">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="assets/konfai-logo.png">
@@ -146,15 +146,8 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
   </table>
 </section>
 <section>
-  <h2 id="fidopt">FidOpt</h2>
-  <p>The benchmark through its own code.</p>
-  <table class="tools">
-    <tbody>
-      <tr><td><code>fidopt_catalog</code></td><td>FidOpt&#x27;s benchmark catalogue through its own code: one line per dataset (task, anatomy, modalities, cases; task= and anatomy= narrow it) and the methods of the task; with dataset=&lt;name&gt;, that dataset&#x27;s descriptor (cases, truth, labels, licence) and the methods of its task.</td></tr>
-      <tr><td><code>fidopt_table</code></td><td>A FidOpt dataset&#x27;s board (fidopt table --json): one line per method and machine, published scores and local rows.</td></tr>
-      <tr><td><code>fidopt_run</code></td><td>Launch one FidOpt operation as a tracked job: check, run or tune a method on a dataset&#x27;s cases (only the operations KONFAI_MCP_FIDOPT_ALLOWED permits); scout=&#x27;PROVIDER[:MODEL]&#x27; adds Scout&#x27;s inspection of the scored outputs.</td></tr>
-    </tbody>
-  </table>
+  <h2 id="benchmarks">Benchmark integrations</h2>
+  <p>Three tools read an external benchmark's catalogue and boards and launch its runs as tracked jobs. A host enables them; they are documented with the benchmark.</p>
 </section>
 <section>
   <h2 id="session-lifecycle">Session lifecycle</h2>
@@ -176,7 +169,7 @@ konfai-mcp                    # the stdio server an MCP client launches</code></
     <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
     <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
     <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
-    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a></div>
   </div>
 </footer>
 <script src="landing.js" data-root="" defer></script>

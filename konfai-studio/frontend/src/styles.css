@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+@import "./design/fonts.css";
+@import "./design/tokens.css";
 
 /* KonfAI Studio. IDE shell in the VS Code / Claude Code desktop idiom:
    warm-neutral dark chrome, flat panels, one restrained accent = KonfAI sage. */
@@ -22,20 +24,23 @@
   --accent-ink: #eef1f4;
   --accent-t: rgba(223, 227, 231, 0.08);
   --accent-solid: #2f3741; /* filled buttons */
-  --sage: #52b89b; /* KonfAI sage: what is current, what is ready */
-  --working: #d9a441; /* amber: a tool is running, a job is writing */
-  --current: #52b89b; /* the open tab, the selected split, the focused experiment */
+  --sage: var(--k-sage); /* KonfAI sage (design/tokens.css): what is current, what is ready */
+  --working: var(--k-amber); /* amber: a tool is running, a job is writing */
+  --current: var(--k-sage); /* the open tab, the selected split, the focused experiment */
   --good: #6cc39a;
-  --err: #e2735b;
+  --err: var(--k-coral);
   /* Scout's three statements and three verdicts, named for what they mean, not for a colour. */
-  --kind-confirmed: #e2735b;
-  --kind-suspected: #d9a441;
-  --kind-measured: #7fb4d6;
-  --verdict-defective: #e2735b;
-  --verdict-acceptable: #52b89b;
-  --verdict-insufficient: #d9a441;
-  --fsans: system-ui, -apple-system, "Segoe UI", "Roboto", "Helvetica Neue", "Arial", sans-serif;
-  --fmono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+  --kind-confirmed: var(--k-coral);
+  --kind-suspected: var(--k-amber);
+  --kind-measured: var(--k-steel);
+  --verdict-defective: var(--k-coral);
+  --verdict-acceptable: var(--k-sage);
+  --verdict-insufficient: var(--k-amber);
+  /* The family's faces, served by Studio itself (design/fonts.css): Plex Sans for the interface, Plex Mono for
+     data, Archivo for the verdict word and the welcome title. */
+  --fsans: var(--k-sans);
+  --fmono: var(--k-mono);
+  --fdisplay: var(--k-display);
   /* One type scale, one spacing scale, three radii: every new rule reads from here. */
   --fs-0: 10.5px; /* eyebrows, tab labels (mono, uppercase) */
   --fs-1: 12px; /* captions, data */
@@ -48,13 +53,13 @@
   --s-3: 12px;
   --s-4: 16px;
   --s-5: 24px;
-  --r-1: 6px;
-  --r-2: 10px;
-  --r-3: 14px;
+  --r-1: var(--k-r-1);
+  --r-2: var(--k-r-2);
+  --r-3: var(--k-r-3);
   --ctl: 32px; /* the height of every bar control; 40px where a finger does the pointing */
   /* One clock for the whole interface: state changes settle in 150ms with a hard ease-out. */
-  --dur: 0.15s;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: var(--k-dur);
+  --ease: var(--k-ease);
   color-scheme: dark;
 }
 /* The light theme is cool paper, not cream: the same roles, the same hierarchy, the ink turned around. A page
@@ -76,17 +81,17 @@
     --accent-ink: #121820;
     --accent-t: rgba(23, 28, 34, 0.06);
     --accent-solid: #e3e8ed;
-    --sage: #2f9a7e;
-    --working: #b07d1c;
-    --current: #2f9a7e;
+    --sage: var(--k-sage-deep);
+    --working: var(--k-amber-deep);
+    --current: var(--k-sage-deep);
     --good: #2f9a62;
-    --err: #c7523b;
-    --kind-confirmed: #c7523b;
-    --kind-suspected: #b07d1c;
-    --kind-measured: #3a7ca8;
-    --verdict-defective: #c7523b;
-    --verdict-acceptable: #2f9a7e;
-    --verdict-insufficient: #b07d1c;
+    --err: var(--k-coral-deep);
+    --kind-confirmed: var(--k-coral-deep);
+    --kind-suspected: var(--k-amber-deep);
+    --kind-measured: var(--k-steel-deep);
+    --verdict-defective: var(--k-coral-deep);
+    --verdict-acceptable: var(--k-sage-deep);
+    --verdict-insufficient: var(--k-amber-deep);
     color-scheme: light;
   }
 }
@@ -106,17 +111,17 @@
   --accent-ink: #121820;
   --accent-t: rgba(23, 28, 34, 0.06);
   --accent-solid: #e3e8ed;
-  --sage: #2f9a7e;
-  --working: #b07d1c;
-  --current: #2f9a7e;
+  --sage: var(--k-sage-deep);
+  --working: var(--k-amber-deep);
+  --current: var(--k-sage-deep);
   --good: #2f9a62;
-  --err: #c7523b;
-  --kind-confirmed: #c7523b;
-  --kind-suspected: #b07d1c;
-  --kind-measured: #3a7ca8;
-  --verdict-defective: #c7523b;
-  --verdict-acceptable: #2f9a7e;
-  --verdict-insufficient: #b07d1c;
+  --err: var(--k-coral-deep);
+  --kind-confirmed: var(--k-coral-deep);
+  --kind-suspected: var(--k-amber-deep);
+  --kind-measured: var(--k-steel-deep);
+  --verdict-defective: var(--k-coral-deep);
+  --verdict-acceptable: var(--k-sage-deep);
+  --verdict-insufficient: var(--k-amber-deep);
   color-scheme: light;
 }
 
@@ -599,6 +604,7 @@ dialog.modal-back::backdrop {
   display: block;
 }
 .titlebar .studio {
+  font-family: var(--fdisplay);
   font-size: 13px;
   font-weight: 600;
   color: var(--muted);
@@ -2740,9 +2746,10 @@ dialog.modal-back::backdrop {
   margin-bottom: 6px;
 }
 .welcome-title {
+  font-family: var(--fdisplay);
   font-size: 23px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 680;
+  letter-spacing: -0.02em;
   color: var(--ink);
   text-wrap: balance;
 }
@@ -4241,9 +4248,10 @@ dialog.modal-back::backdrop {
   --verdict: var(--err);
 }
 .verdict-word {
+  font-family: var(--fdisplay);
   font-size: var(--fs-5);
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  font-weight: 680;
+  letter-spacing: -0.02em;
   line-height: 1.1;
   color: var(--verdict);
 }
