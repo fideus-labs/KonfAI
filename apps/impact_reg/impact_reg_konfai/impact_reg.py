@@ -58,7 +58,7 @@ from konfai.utils.dataset import (
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
-from konfai.utils.utils import format_token, path_format_token, storage_form
+from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
@@ -967,8 +967,10 @@ class ImpactRegKonfAIApp:
         # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
         self._ran: dict[str, list[dict]] = {}
-        # The run's own choices every preset pass takes as they are: --output-format, --seed.
+        # The run's own choices every preset pass takes as they are: --output-format, --seed. The moved image is
+        # derived here, so its format (--output-format [Moved=]FORMAT) is this orchestrator's; None: the moving's.
         self._run_args: list[str] = []
+        self._moved_format: str | None = None
 
     # ------------------------------------------------------------------ register
 
@@ -1152,8 +1154,21 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
-        self._run_args = [arg for spec in output_format or [] for arg in ("--output-format", spec)]
-        self._run_args += ["--seed", str(seed)] if seed is not None else []
+        self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._moved_format = None
+        for spec in output_format or []:
+            name, assigned, file_format = spec.rpartition("=")
+            if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
+                if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"--output-format {spec}: '{file_format}' is not a format KonfAI writes."
+                        f"{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                        f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+                    )
+                self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
+            if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
+                self._run_args += ["--output-format", spec]
         # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
         affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
         if affine_presets and (len(presets) > 1 or tta):
@@ -1308,8 +1323,9 @@ class ImpactRegKonfAIApp:
                 for case, moving in zip(cases, moving_units, strict=True):
                     for field in (_the_output(output / case, group), *(output / case / _ENSEMBLE_DIR).glob("*")):
                         project_field(field)
-                    if not fields_only:
-                        project_image(_the_output(output / case, "Moved"), output / case / f"Moved{_form(moving)}")
+                    if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
+                        moved = _the_output(output / case, "Moved")
+                        project_image(moved, moved if self._moved_format else output / case / f"Moved{_form(moving)}")
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1655,10 +1671,10 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the MOVING's own form: the fields' form may be an ITK
-        # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
+        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
-        backend = _backend(next(iter(cases.values())))
+        backend = self._moved_format or _backend(next(iter(cases.values())))
         roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
         if _is_field(next(iter(fields.values()))):
             resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
