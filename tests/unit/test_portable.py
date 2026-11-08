@@ -1498,19 +1498,18 @@ def _tiny_prediction(
     return config
 
 
-@pytest.mark.parametrize("placement", [None, "pad", "monai", "spread"])
 def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A real Prediction.yml over the tests' tiny segmentation model and two of its checkpoints: the predictor
     # builds, each checkpoint exports beside the program, and the autouse check holds the program to the schema.
-    # Each model's manifest carries the Patch.placement konfai places its windows with, pad when unstated.
+    # Each model's manifest carries the Patch.placement konfai places its windows with, and its unrounded step.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
     import torch
     from konfai.portable import compile_prediction
 
-    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", placement)
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", "monai")
     from TinySeg import TinySegNet
 
     checkpoints = [tmp_path / f"fold_{index}.pt" for index in range(2)]
@@ -1530,7 +1529,8 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     steps = output["program"]["steps"]
     assert [step.get("model") for step in steps[:2]] == ["model_0", "model_1"]
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
-    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == [placement or "pad"] * 2
+    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == ["monai"] * 2
+    assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
 
 
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2061,7 +2061,7 @@ def test_an_explicitly_disabled_patch_combine_keeps_the_last_patch(value) -> Non
     assert derive_blend(config, "Predictor") == "Overwrite"
 
 
-@pytest.mark.parametrize(("pad_value", "expected"), [(-1.0, -1.0), ("edge", "edge"), (None, "min")])
+@pytest.mark.parametrize(("pad_value", "expected"), [(-1.0, -1.0), ("edge", "edge"), (None, "min"), ("None", "min")])
 def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float | str | None, expected) -> None:
     # A pad_value left null pads with the minimum of the window konfai reads, not with 0.
     from konfai.portable import derive_onnx_params
@@ -2070,13 +2070,48 @@ def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float |
     assert derive_onnx_params(config, "Predictor")[3] == expected
 
 
+@pytest.mark.parametrize(
+    ("patch", "expected"),
+    [
+        ({}, "pad"),
+        ({"placement": "None"}, "pad"),
+        ({"placement": "monai"}, "monai"),
+        ({"placement": "spread"}, "spread"),
+    ],
+)
+def test_the_placement_a_patch_states_reaches_the_manifest(patch: dict[str, str], expected: str) -> None:
+    from konfai.portable import derive_placement
+
+    assert derive_placement(patch) == expected
+
+
 def test_a_placement_konfai_does_not_know_is_refused() -> None:
     # The runtime would place the windows otherwise than the config says.
     from konfai.portable import derive_placement
 
-    config = {"Predictor": {"Dataset": {"Patch": {"patch_size": [16, 16], "placement": "centre"}}}}
     with pytest.raises(ConfigError, match="placement 'centre'"):
-        derive_placement(config, "Predictor")
+        derive_placement({"patch_size": [16, 16], "placement": "centre"})
+
+
+@pytest.mark.parametrize(
+    ("patch", "exported", "expected"),
+    [
+        # Patch 5, overlap 0.25: konfai steps by 3.75 (MONAI truncates it to 3); the integer overlap, 1, would step by 4.
+        ({"overlap": 0.25}, [5], [3.75]),
+        ({"overlap": "25%"}, [8, 16], [6.0, 12.0]),
+        ({"overlap": 2}, [5], [3]),
+        # Left unset, konfai's monai and spread step on the default fraction of the patch: nothing is case-dependent.
+        ({}, [5], [4.0]),
+        # A 2.5-D axis drops out of the step as it does of the overlap.
+        ({"patch_size": [1, 8, 12], "overlap": [0, 0.25, "50%"]}, [8, 12], [6.0, 6.0]),
+    ],
+)
+def test_a_monai_or_spread_placement_exports_the_step_konfai_walks(
+    patch: dict[str, object], exported: list[int], expected: list[float]
+) -> None:
+    from konfai.portable import derive_stride
+
+    assert derive_stride(patch, exported) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("size", [[0, 16, 16], [16, 0, 16], [16, 16, -1]])

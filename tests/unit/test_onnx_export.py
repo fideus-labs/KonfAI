@@ -194,6 +194,16 @@ def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_state
     assert not (tmp_path / "refused").exists()
 
 
+@pytest.mark.parametrize("stated", [{"pad_value": "unknown"}, {"placement": "centre"}])
+def test_export_refuses_a_pad_or_a_placement_the_manifest_schema_rejects(tmp_path, stated):
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    with pytest.raises(PredictorError, match=r"unknown|centre"):
+        export_to_onnx(None, tmp_path, torch.zeros(1, 1, 8, 8), **stated)
+    assert not list(tmp_path.iterdir())
+
+
 def test_export_unknown_head_raises(tmp_path):
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
