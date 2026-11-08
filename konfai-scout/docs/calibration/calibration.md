@@ -6,7 +6,7 @@ hippocampus labels given as references), each registered by ImpactReg's `ConvexA
 1.8.9.dev30, a displacement field on the fixed grid). `examples/calibrate_real.py` with `--repeats 2
 --defects-per-case 1 --max-tool-calls 25 --max-seconds 900`: per case the clean copy and one planted copy (the
 defect types rotate over the cases), each inspected twice, 20 inspections. Provider `claude-code`, model
-`claude-opus-5-5`, active mode, blind, Claude Agent SDK 0.2.179. Every inspection concluded by itself in 8 to 12
+`claude-opus-5-5`, active mode, blind, prompt 1.3, Claude Agent SDK 0.2.179. Every inspection concluded by itself in 8 to 12
 tool calls (no budget exhausted), 36 s on average; $3.25 in all at API prices. `calibration.json` holds every
 inspection, the planted boxes and the minimum Jacobian determinant of each local defect.
 

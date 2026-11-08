@@ -33,7 +33,7 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
         assert "view" in tools
     explored = [c for c in report.tool_calls if c.tool not in ("note", "conclude")]  # notes are outside the budget
     assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(explored)
-    assert report.case["truth_available"] and report.versions["prompt"] == "1.3"
+    assert report.case["truth_available"] and report.versions["prompt"] == "1.4"
     assert report.prompts["system"].startswith("You are KonfAI Scout")
     summary = report.summary()
     assert summary["verdict"] == report.conclusion.verdict and summary["observations"][0]["defect"]

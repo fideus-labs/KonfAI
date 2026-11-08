@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, DESCRIPTION_MAX, KINDS, SEVERITIES, SUMMARY_MAX, VERDICTS, value_text
 
-PROMPT_VERSION = "1.3"
+PROMPT_VERSION = "1.4"
 
 SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
 write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
