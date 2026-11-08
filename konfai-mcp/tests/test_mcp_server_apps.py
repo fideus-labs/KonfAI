@@ -487,20 +487,22 @@ def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, mon
     workspace = layout.workspace_dir()
     (workspace / "Checkpoints" / "run").mkdir(parents=True)
     _run_checkpoint(workspace / "Checkpoints" / "run" / "model.pt")
+    _run_checkpoint(workspace / "Checkpoints" / "run" / "fold_1.pt")
     (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
     import konfai_apps.bundle as bundle_module
 
     def _fail_in_process(*args: object, **kwargs: object) -> object:
-        raise AssertionError("export_onnx_into_bundle must not run in the server process")
+        raise AssertionError("export_portable_into_bundle must not run in the server process")
 
-    monkeypatch.setattr(bundle_module, "export_onnx_into_bundle", _fail_in_process)
+    monkeypatch.setattr(bundle_module, "export_portable_into_bundle", _fail_in_process)
 
     calls: list[tuple[str, dict[str, object]]] = []
 
     def _fake_subprocess(target: str, kwargs: dict[str, object], *rest: object) -> str:
         calls.append((target, kwargs))
-        return kwargs["bundle"] + "/model.onnx"  # type: ignore[operator]
+        # Two checkpoints export as a program: one <stem>.onnx each plus the bundle's program.json.
+        return kwargs["bundle"] + "/program.json"  # type: ignore[operator]
 
     # Patch by dotted path so it lands on the live konfai_mcp.runner module (some suites reload it),
     # which is the exact object package_from_session's `from . import runner` resolves at call time.
@@ -512,10 +514,13 @@ def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, mon
 
     assert len(calls) == 1
     target, kwargs = calls[0]
-    assert target == "konfai_apps.bundle:export_onnx_into_bundle"
+    assert target == "konfai_apps.bundle:export_portable_into_bundle"
     assert kwargs["bundle"] == str(Path(result["bundle_path"]))
-    assert kwargs["checkpoint"].endswith("model.pt")  # type: ignore[union-attr]
-    assert result["onnx"].endswith("model.onnx")
+    # Every packaged checkpoint is exported, from the weights the bundle ships (a run's .pt published as
+    # .safetensors): the program runs them as the ensemble konfai runs.
+    assert sorted(kwargs["checkpoints"]) == ["fold_1.safetensors", "model.safetensors"]  # type: ignore[arg-type]
+    assert sorted(result["checkpoints"]) == ["fold_1.safetensors", "model.safetensors"]
+    assert result["onnx"].endswith("program.json")
 
 
 def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1389,6 +1394,25 @@ def _registration_app(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return app_dir
+
+
+def test_describe_app_lists_the_presets_and_a_registration_preset_reaches_impact_reg(tmp_path: Path) -> None:
+    """An app's presets are named lists of --set: describe_app lists them and marks the one a ref#preset chose,
+    and a registration app run with one hands impact-reg-konfai the app and its preset as APP#PRESET."""
+    app_dir = _registration_app(tmp_path)
+    manifest = json.loads((app_dir / "app.json").read_text())
+    manifest["presets"] = {"rigid": {"description": "Rigid only", "set": []}}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    service = _service(tmp_path)
+
+    payload = service.describe_app(f"{app_dir}#rigid")
+    assert payload["presets"] == {"rigid": {"description": "Rigid only", "set": []}}
+    assert payload["preset"] == "rigid"
+    assert "presets" not in service.describe_app(str(_write_local_app(tmp_path)))
+
+    fixed, moving = (_touch(tmp_path / "data" / f"{name}.mha") for name in ("fixed", "moving"))
+    spec = service.prepare_infer(ref=f"{app_dir}#rigid", inputs=[[fixed], [moving]], allow_untrusted_code=True)
+    assert (spec["kwargs"]["repo"], spec["kwargs"]["preset"]) == (str(app_dir.parent), "TinyRigid#rigid")
 
 
 def test_a_registration_app_runs_through_impact_reg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

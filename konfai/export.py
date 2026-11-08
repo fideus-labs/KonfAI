@@ -38,6 +38,7 @@ from konfai.utils.errors import PredictorError
 
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
+    from konfai.utils.utils import Placement
 
 MANIFEST_VERSION = 4
 
@@ -191,6 +192,32 @@ def select_inference_head(model: torch.nn.Module, *example_input: torch.Tensor) 
     return head
 
 
+def _write_onnx(
+    module: torch.nn.Module,
+    examples: tuple[torch.Tensor, ...],
+    onnx_path: Path,
+    input_names: list[str],
+    output_names: list[str],
+    opset: int = 18,
+) -> None:
+    """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
+    inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
+    which a model handed to others does not carry."""
+    _require("onnx")
+    _require("onnxscript")  # required by the torch dynamo ONNX exporter
+    from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
+
+    with torch.no_grad():
+        program = cast(
+            "torch.onnx.ONNXProgram",
+            torch.onnx.export(
+                module, examples, opset_version=opset, input_names=input_names, output_names=output_names, dynamo=True
+            ),
+        )
+    ClearMetadataAndDocStringPass()(program.model)
+    program.save(onnx_path, external_data=False)
+
+
 def export_to_onnx(
     model: torch.nn.Module,
     output_dir: str | Path,
@@ -204,7 +231,8 @@ def export_to_onnx(
     output_group: str = "output",
     patch_overlap: list[int] | None = None,
     extend_slice: int = 0,
-    pad_value: float | None = None,
+    pad_value: float | str | None = None,
+    placement: Placement = "pad",
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
@@ -232,6 +260,8 @@ def export_to_onnx(
     patch_overlap:
         Per-axis voxel overlap. None retains KonfAI's case-dependent fixed-patch
         overlap and last-patch assignment. An explicit zero list means disjoint patches.
+    placement:
+        The ``Patch.placement`` the config states, written into the manifest's patch.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
     model_filename:
@@ -245,10 +275,6 @@ def export_to_onnx(
     ``(onnx_path, manifest)``: the written ONNX path and the manifest dict (also written
     to ``manifest.json`` when ``write_manifest``).
     """
-    _require("onnx")
-    _require("onnxscript")  # required by the torch dynamo ONNX exporter
-    from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
-
     out_dir = Path(output_dir)
     onnx_path = out_dir / model_filename
 
@@ -273,19 +299,8 @@ def export_to_onnx(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
-    with torch.no_grad():
-        names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
-        program = cast(
-            "torch.onnx.ONNXProgram",
-            torch.onnx.export(
-                wrapper, examples, opset_version=opset, input_names=names, output_names=[output_name], dynamo=True
-            ),
-        )
-
-    # The exporter records every node's Python stack, and with it the paths of the machine that exported,
-    # which a model handed to others does not carry. The weights go inline: one self-contained .onnx file.
-    ClearMetadataAndDocStringPass()(program.model)
-    program.save(onnx_path, external_data=False)
+    names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
+    _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset)
 
     input_shape = tuple(int(s) for s in examples[0].shape)
     spatial = list(input_shape[2:])
@@ -302,8 +317,13 @@ def export_to_onnx(
             "overlap": patch_overlap,
             "dim": dim,
             "extend_slice": extend_slice,
-            # The border-pad value for the last (ragged) patch of an axis; 0 unless the config pins one.
-            "pad_value": float(pad_value) if pad_value is not None else 0.0,
+            # What pads a patch past the volume (after it under placement pad, on both sides otherwise): 0 unless
+            # the config pins a value, "edge" for the volume's edge voxel, or "min" for the minimum of the window read.
+            "pad_value": pad_value if isinstance(pad_value, str) else float(pad_value or 0.0),
+            # Where the windows of an axis sit, konfai's Patch.placement: pad, monai or spread
+            # (konfai.utils.utils.get_patch_slices_from_shape). Under monai a Gaussian blend's weight is floored at
+            # its min_weight, 1e-3.
+            "placement": placement,
         },
         "geometry": {"mode": "preserve_from_input"},
     }

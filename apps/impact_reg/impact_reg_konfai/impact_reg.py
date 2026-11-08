@@ -35,6 +35,7 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,7 @@ import numpy as np
 import SimpleITK as sitk
 from konfai import RemoteServer
 from konfai.utils.dataset import (
+    DENSE_TRANSFORMS_ENV,
     Attribute,
     Dataset,
     entry_files,
@@ -53,14 +55,16 @@ from konfai.utils.dataset import (
     read_landmarks,
     staged_entry,
     transfer_entry,
-    write_landmarks,
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
-from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
-from konfai.utils.utils import format_token, path_format_token, storage_form
+from konfai.utils.ITK import field_reach
+from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
+from konfai_apps.ensemble import STACK, combine, stack_file
+from konfai_apps.ensemble import _token as member_token
+from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
@@ -69,7 +73,6 @@ from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_fie
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
 IMPACT_REG_KONFAI_REPO = PRESETS_REPO
 
-_ENSEMBLE_DIR = "Ensemble"
 
 #: The app ``evaluate`` runs: the image, segmentation and landmark evaluation configs, as package data.
 _EVALUATION_APP = Path(__file__).resolve().with_name("evaluation")
@@ -144,12 +147,17 @@ def _is_flat_field(path: Path) -> bool:
 
 def _is_field(path: Path) -> bool:
     """Whether a stored registration is a displacement field: an image, a field store or a field transform file. A
-    linear transform file or an RFC-5 affine store (a preset's ``transform_type: affine``) is not one."""
+    linear transform file, an RFC-5 affine store or a B-spline (a preset's native form) is not one."""
     if _is_transform_file(path):
         return _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
     from konfai.utils.ome_zarr import is_affine_store
 
     return not (_backend(path) == "omezarr" and is_affine_store(path))
+
+
+def _is_bspline(path: Path) -> bool:
+    """Whether a stored registration is a transform file holding a B-spline (elastix's native form)."""
+    return _is_transform_file(path) and any("BSpline" in kind for kind in _transform_kinds(path))
 
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
@@ -175,20 +183,13 @@ def _compose_padding(headers: "list[dict[str, _Header]]", budget: int, reach: fl
     return [extent for extent in widest for _ in range(2)]
 
 
-def _jacobian_statistics(path: Path, work: Path) -> dict[str, float]:
-    """KonfAI's Jacobian statistics of a stored field, under the names the evaluation summary reports."""
-    return {f"Transform:Jacobian:{key}": value for key, value in jacobian_statistics(*_field(path, work)).items()}
-
-
-def _displace(points: np.ndarray, path: Path, work: Path) -> np.ndarray:
-    """``points`` (``[N, 3]``, LPS) moved by the stored registration, fixed -> moving, whatever its form: a field
-    read around the points alone (KonfAI's ``displace_points``), any other transform read and applied whole."""
-    if not _is_field(path):
-        from konfai.utils.ome_zarr import read_ome_zarr_affine
-
-        transform = read_ome_zarr_affine(path) if _backend(path) == "omezarr" else sitk.ReadTransform(str(path))
-        return np.array([transform.TransformPoint(point) for point in points.astype(np.float64).tolist()])
-    return displace_points(points, *_field(path, work))
+def _identity(work: Path, fixed: list[Path]) -> Path:
+    """The identity map as a transform file, for an evaluation given no transform: 2-D for a 2-D fixed image."""
+    flat = bool(fixed) and is_flat(_read_header(work / "identity", "Fixed", fixed[0])[0])
+    path = work / "Identity.itk.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteTransform(sitk.AffineTransform(2 if flat else 3), str(path))
+    return path
 
 
 def _case_key(name: str) -> tuple[int, str]:
@@ -198,22 +199,50 @@ def _case_key(name: str) -> tuple[int, str]:
 
 
 def _manifest(preset: str) -> dict:
-    """The preset's ``app.json``, from the local preset directory or the Hugging Face repo; empty if unreadable.
+    """The preset's ``app.json`` (its app's, for ``APP#PRESET``), from the local preset directory or the Hugging Face
+    repo, with the user's own presets of a Hugging Face app (konfai-apps runs them alike); empty if unreadable.
 
     Read cache first, as the preset run resolves its own files: an online read moved the cache to the newest
     preset, which only the runs that read a manifest then picked up.
     """
+    app, name = split_preset(preset)
     try:
-        return json.loads(app_file(IMPACT_REG_KONFAI_REPO, preset, "app.json").read_text(encoding="utf-8"))
+        manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    presets = read_presets(manifest.get("presets"), f"the app.json of '{app}'")
+    if not Path(IMPACT_REG_KONFAI_REPO).expanduser().is_dir():  # a Hugging Face app: the user's own presets too
+        own_file = user_presets_file(IMPACT_REG_KONFAI_REPO.partition("@")[0], app)
+        presets = merge_presets(presets, own_file, app)  # a clash is refused as konfai-apps refuses it
+        manifest["presets"] = {key: entry.to_json() for key, entry in presets.items()}
+    chosen = presets.get(name) if name else None
+    if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
+        manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
+    return manifest
 
 
 def _preset_config(preset: str, filename: str) -> dict:
     """One of the preset's prediction configs, as data."""
     from ruamel.yaml import YAML
 
-    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, preset, filename).read_text(encoding="utf-8")) or {}
+    app = split_preset(preset)[0]
+    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, app, filename).read_text(encoding="utf-8")) or {}
+
+
+def _app_preset_sets(preset: str) -> list[str]:
+    """The ``--set`` of the app preset ``APP#PRESET`` names (none for a bare app): they go first in its share, split
+    between its passes as any ``--set`` is, so the app is then run bare and nothing applies them twice."""
+    app, name = split_preset(preset)
+    if name is None:
+        return []
+    presets = read_presets(_manifest(app).get("presets"), f"the app.json of '{app}'")
+    if name not in presets:
+        raise KonfAIError(
+            "ImpactReg",
+            f"the app '{app}' has no preset '{name}'.{did_you_mean(name, presets)}",
+            f"Its presets: {', '.join(presets)}." if presets else "It declares none.",
+        )
+    return list(presets[name].overrides)
 
 
 #: A key a prediction config leaves out, at its model's default (see ``_agree``).
@@ -224,9 +253,11 @@ _PASSES = ("global", "tile")
 
 
 def _config_value(config: dict, key: str) -> object:
-    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a bare name in the
-    model's parameter block, a dotted one from the config root. ``_UNSET`` when the config has no such key."""
-    node = config if "." in key else LocalAppRepository._model_param_block(config)[1]
+    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a name in the model's
+    parameter block (a nested one dotted from there), one that starts at the config root from there. ``_UNSET`` when
+    the config has no such key."""
+    from_root = "." in key and key.split(".", 1)[0] in config  # Predictor.Dataset...: from the config root
+    node = config if from_root else LocalAppRepository._model_param_block(config)[1]
     for part in filter(None, key.split(".")):
         if not isinstance(node, dict) or part not in node:
             return _UNSET
@@ -290,7 +321,9 @@ def _preset_overrides(
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
     nothing cached) leaves its share to that resolver, in the preset's own process.
     """
-    shares: dict[str, list[tuple[str | None, str]]] = {preset: [] for preset in presets}
+    shares: dict[str, list[tuple[str | None, str]]] = {
+        preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
+    }
     for override in overrides or []:
         preset, stage, rest = _scopes(override, presets)
         for member in [preset] if preset else presets:
@@ -354,27 +387,11 @@ def _preset_overrides(
                 raise KonfAIError(
                     "ImpactReg",
                     f"{preset} ({files[stage]}): {error.args[0]}",
-                    f"'impact-reg-konfai show {preset}' lists its parameters. A dotted NAME is a path from its"
-                    f" config root, and --set {preset}:NAME=VALUE sets it for this preset alone.",
+                    f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
+                    f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
+                    " for this preset alone.",
                 ) from None
     return passes
-
-
-def _declares_affine(preset: str, overrides: list[str]) -> bool:
-    """Whether the preset's global pass writes its transform as an affine: ``transform_type`` in its config, or the
-    ``--set`` of it. A config that cannot be read (offline, nothing cached) declares nothing here: the preset's own
-    process reads it."""
-    # Bare or dotted from the config root (Predictor.Model.RegistrationNet.transform_type), as konfai-apps resolves it.
-    declared = {
-        name.strip().rpartition(".")[2]: value.strip() for name, _, value in (o.partition("=") for o in overrides)
-    }.get("transform_type")
-    if declared is None:
-        try:
-            tiling = _manifest(preset).get("tiling") or {}
-            declared = _config_value(_preset_config(preset, tiling.get("global") or "Prediction.yml"), "transform_type")
-        except Exception:
-            return False
-    return declared == "affine"
 
 
 def _plan(
@@ -435,11 +452,23 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
     return {match.parent.name: match for match in matches}
 
 
+def _stack_beside(output: Path) -> Path | None:
+    """The stack a run wrote beside ``output`` (its TTA copies, under -uncertainty), or None."""
+    return next((path for path in sorted(output.parent.iterdir()) if _is_entry(path, STACK)), None)
+
+
 def _is_entry(path: Path, stem: str) -> bool:
     """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name; never a writer's
     staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
     """
     return (path.name == stem or path.name.startswith(f"{stem}.")) and not is_staging_entry(path.name)
+
+
+def _workspace(name: str) -> str:
+    """A folder name for a preset's workspace: ``ConvexAdam#composite`` as ``ConvexAdam_composite``. A ``#`` in a path
+    is a URL fragment to zarr, which then wrote an OME-Zarr output into the folder before it; ``/`` and ``:`` of an
+    app reference would nest folders and split a dataset spec."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
 def _drop_other_forms(dest_dir: Path, stem: str, suffixes: str) -> None:
@@ -466,18 +495,21 @@ _Header = tuple[list[int], list[float], list[float], list[float]]
 
 
 def _cases(groups: dict[str, list[Path]]) -> list[list[Path]]:
-    """``eval``'s groups, keyed by their option, each as long as the case count: the longest group.
-
-    A group holds one entry per case or one used for every case (one atlas against several movings, one
-    mask), or is empty; each modality comes as a pair (a fixed side without its moving one scores
-    nothing). Anything else is refused.
-    """
+    """``eval``'s groups, keyed by their option, each as long as the case count (:func:`_broadcast`); each modality
+    comes as a pair (a fixed side without its moving one scores nothing)."""
     for fixed, moving in (("-f", "-m"), ("--gt-fixed-seg", "--gt-moving-seg"), ("--gt-fixed-fid", "--gt-moving-fid")):
         if bool(groups[fixed]) != bool(groups[moving]):
             given, missing = (fixed, moving) if groups[fixed] else (moving, fixed)
             raise EvaluatorError(
                 f"{given} is given without {missing}.", "A modality is scored from both sides: give both, or neither."
             )
+    return _broadcast(groups)
+
+
+def _broadcast(groups: dict[str, list[Path]]) -> list[list[Path]]:
+    """``groups``, keyed by their option, each as long as the case count: the longest group. A group holds one entry
+    per case or one used for every case (one atlas against several movings, one mask), or is empty; anything else is
+    refused."""
     count = max(len(entries) for entries in groups.values())
     wrong = [f"{option} has {len(entries)}" for option, entries in groups.items() if len(entries) not in (0, 1, count)]
     if wrong:
@@ -515,16 +547,17 @@ def _check_presets(presets: list[str]) -> None:
     for preset in presets:
         if presets.count(preset) > 1:
             raise KonfAIError("ImpactReg", f"the preset '{preset}' is listed twice.", "Name each preset once.")
-        if _manifest(preset):
+        app = split_preset(preset)[0]
+        if _manifest(app):
             continue
         try:
             available = app_names(IMPACT_REG_KONFAI_REPO, force_update=True)
         except Exception:
             return
-        if preset not in available:
+        if app not in available:
             raise KonfAIError(
                 "ImpactReg",
-                f"there is no preset '{preset}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(preset, available, 3)}",
+                f"there is no preset '{app}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(app, available, 3)}",
                 "'impact-reg-konfai list' lists them.",
             )
 
@@ -924,6 +957,12 @@ class ImpactRegKonfAIApp:
         # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
         self._ran: dict[str, list[dict]] = {}
+        # The run's own choices every preset pass takes as they are: --output-format, --seed. The moved image is
+        # derived here, so its format (--output-format [Moved=]FORMAT) is this orchestrator's; None: the moving's.
+        self._run_args: list[str] = []
+        # Whether every preset pass writes its field, never a native form: an ensemble or a TTA averages them.
+        self._dense = False
+        self._moved_format: str | None = None
 
     # ------------------------------------------------------------------ register
 
@@ -943,6 +982,7 @@ class ImpactRegKonfAIApp:
         prediction_file: str | None = None,
         label: str | None = None,
         max_voxels: int | None = None,
+        uncertainty: bool = False,
     ) -> tuple[str, dict[str, Path]]:
         """Run one preset app on every case at once; return its output group and its transform per case.
 
@@ -965,14 +1005,16 @@ class ImpactRegKonfAIApp:
         mapping is positional, a lone moving mask still needs the fixed-mask slot present: filled with an all-ones
         mask on each case's fixed grid (``_neutral_fixed_masks``).
         """
-        out = work / (label or preset)
+        out = work / _workspace(label or preset)
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
-        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, preset)]
+        # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
+        app = split_preset(preset)[0]
+        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, app)]
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:
-            fixed_masks = _neutral_fixed_masks(work / f"{label or preset}_fixed_mask", fixed_images)
+            fixed_masks = _neutral_fixed_masks(work / _workspace(f"{label or preset}_fixed_mask"), fixed_images)
         if fixed_masks:
             command += ["-i", *(str(path) for path in fixed_masks)]
         if moving_masks:
@@ -988,12 +1030,15 @@ class ImpactRegKonfAIApp:
         command += ["--tmp-dir", str(out / "workspace")]
         if tta:
             command += ["--tta", str(tta)]
+        if uncertainty:  # its copies' stack beside the field: each TTA copy is a member of the ensemble
+            command += ["-uncertainty"]
         if prediction_file:
             command += ["--prediction-file", prediction_file]
         # Preset-parameter tuning: this pass's share of --set (see _preset_overrides), for `konfai-apps infer`.
         for override in config_overrides or []:
             command += ["--set", override]
         self._applied[label or preset] = list(config_overrides or [])
+        command += self._run_args
         if max_voxels:
             command += ["--max-voxels", str(max_voxels)]
         if gpu:
@@ -1007,6 +1052,8 @@ class ImpactRegKonfAIApp:
         if self._force_update:
             command.append("--force_update")
         env = {**os.environ, "TMPDIR": str(work)}
+        if self._dense or label is not None:
+            env[DENSE_TRANSFORMS_ENV] = "1"
         if self._remote is not None:
             command += ["--host", self._remote.host, "--port", str(self._remote.port)]
             # Through the environment konfai-apps reads it from, not the argv any process listing shows; a
@@ -1052,11 +1099,13 @@ class ImpactRegKonfAIApp:
         cpu: int | None = None,
         quiet: bool = False,
         tta: int = 0,
-        keep_dvf: bool = False,
+        uncertainty: bool = False,
         config_overrides: list[str] | None = None,
         tmp_dir: Path | None = None,
         fields_only: bool = False,
         max_voxels: int | None = None,
+        output_format: list[str] | None = None,
+        seed: int | None = None,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -1102,15 +1151,24 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
-        # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
-        affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
-        if affine_presets and (len(presets) > 1 or tta):
-            raise KonfAIError(
-                "ImpactReg",
-                f"the preset '{affine_presets[0]}' writes its transform as an affine, which "
-                f"{'an ensemble' if len(presets) > 1 else '--tta'} cannot average.",
-                "Run it alone and without --tta, or --set transform_type=field.",
-            )
+        self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._moved_format = None
+        for spec in output_format or []:
+            name, assigned, file_format = spec.rpartition("=")
+            if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
+                if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"--output-format {spec}: '{file_format}' is not a format KonfAI writes."
+                        f"{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                        f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+                    )
+                self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
+            if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
+                self._run_args += ["--output-format", spec]
+        # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
+        # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
+        self._dense = len(presets) > 1 or bool(tta)
         self._applied, self._plans, self._ran = {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
@@ -1143,12 +1201,6 @@ class ImpactRegKonfAIApp:
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
                 largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
-                if tiled and preset in affine_presets:
-                    raise KonfAIError(
-                        "ImpactReg",
-                        f"the pair outgrows the device, and the tile pass of '{preset}' refines a field, not an affine.",
-                        "--set transform_type=field, or --max-voxels to register the pair whole.",
-                    )
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
@@ -1183,6 +1235,7 @@ class ImpactRegKonfAIApp:
                     tta,
                     overrides[preset]["global"],
                     max_voxels=budget,
+                    uncertainty=uncertainty and bool(tta) and not flat,
                 )
             groups = {group for group, _ in fields_by_preset.values()}
             if len(groups) != 1:
@@ -1216,27 +1269,21 @@ class ImpactRegKonfAIApp:
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
-                # The per-preset displacement fields are large; only persist them (under Ensemble/) when the
-                # caller asks, so `uncertainty` can measure the ensemble spread afterwards.
-                if keep_dvf:
-                    (case_out / _ENSEMBLE_DIR).mkdir(parents=True, exist_ok=True)
-
-                dvf_paths = []
-                for preset in presets:
-                    dvf = fields_by_preset[preset][case]
-                    if keep_dvf:
-                        dvf = _copy_output(dvf, case_out / _ENSEMBLE_DIR, preset, move=True)
-                    dvf_paths.append(dvf)
-
-                if len(presets) == 1:
-                    # Kept under Ensemble/ as well when asked; otherwise it is the workspace's, deleted next.
-                    _copy_output(dvf_paths[0], case_out, group, move=not keep_dvf)
+                members = [fields_by_preset[preset][case] for preset in presets]
+                # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
+                sources = [_stack_beside(member) or member for member in members] if uncertainty else members
+                if sources == members and len(presets) == 1:
+                    _copy_output(members[0], case_out, group, move=True)
                 else:
-                    # Ensemble: fold the presets' fields (all on the fixed grid, and Reduce VERIFIES
-                    # the claim) into the averaged DVF, the one output no single preset produced.
-                    # Streamed: the fold is incremental, so the peak is one accumulator plus the
-                    # member being read, whatever the size of the ensemble.
-                    self._ensemble_mean(case, group, presets, dvf_paths, output, work, gpu, cpu, quiet)
+                    # An ensemble is konfai-apps' (docs/design/ensembles.md): every member reduced into the field,
+                    # slab by slab, the members on one grid. With --uncertainty their stack is kept beside it, built
+                    # here, or for a 2-D pair once its members are planes again (below).
+                    form = _form(members[0])
+                    stack = case_out / stack_file(form) if uncertainty and not flat else None
+                    combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
+                    _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
+                    if stack is not None:
+                        _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK))
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1254,10 +1301,19 @@ class ImpactRegKonfAIApp:
                 )
             if flat:
                 for case, moving in zip(cases, moving_units, strict=True):
-                    for field in (_the_output(output / case, group), *(output / case / _ENSEMBLE_DIR).glob("*")):
-                        project_field(field)
-                    if not fields_only:
-                        project_image(_the_output(output / case, "Moved"), output / case / f"Moved{_form(moving)}")
+                    project_field(_the_output(output / case, group))
+                    if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
+                        moved = _the_output(output / case, "Moved")
+                        project_image(moved, moved if self._moved_format else output / case / f"Moved{_form(moving)}")
+                    if uncertainty and len(presets) > 1:
+                        # The members as planes, then their stack: a 2-D ensemble's stack holds 2-D fields.
+                        members = [fields_by_preset[preset][case] for preset in presets]
+                        for member in members:
+                            project_field(member)
+                        target = _the_output(output / case, group)
+                        stack = output / case / stack_file(_form(members[0]))
+                        combine(members, "Mean", target, member_token(members[0]), stack)
+                        _drop_other_forms(output / case, STACK, stack.name.removeprefix(STACK))
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1492,7 +1548,7 @@ class ImpactRegKonfAIApp:
                         dict(zip(cases, inputs[side], strict=True)),
                         fixed,
                         global_fields,
-                        work / f"{preset}_prewarp",
+                        work / _workspace(f"{preset}_prewarp"),
                         gpu,
                         cpu,
                         quiet,
@@ -1506,7 +1562,7 @@ class ImpactRegKonfAIApp:
                 dict(zip(cases, inputs["FixedMask"], strict=True)),
                 fixed,
                 None,
-                work / f"{preset}_prewarp",
+                work / _workspace(f"{preset}_prewarp"),
                 gpu,
                 cpu,
                 quiet,
@@ -1529,50 +1585,14 @@ class ImpactRegKonfAIApp:
             return group, tile_fields
         # Volume-sized intermediates go as soon as nothing reads them: the pre-warped images before the composition,
         # the tiles' field after it.
-        shutil.rmtree(work / f"{preset}_prewarp", ignore_errors=True)
-        reach = max(field_reach(*_field(field, work / f"{preset}_reach")) for field in tile_fields.values())
+        shutil.rmtree(work / _workspace(f"{preset}_prewarp"), ignore_errors=True)
+        reach = max(field_reach(*_field(field, work / _workspace(f"{preset}_reach"))) for field in tile_fields.values())
         padding = _compose_padding(headers, budget, reach)
         composed = self._compose(
-            tile_fields, global_fields, fixed, group, padding, work / f"{preset}_compose", gpu, cpu, quiet
+            tile_fields, global_fields, fixed, group, padding, work / _workspace(f"{preset}_compose"), gpu, cpu, quiet
         )
-        shutil.rmtree(work / f"{preset}_tiles", ignore_errors=True)
+        shutil.rmtree(work / _workspace(f"{preset}_tiles"), ignore_errors=True)
         return group, composed
-
-    def _ensemble_mean(
-        self,
-        case: str,
-        group: str,
-        presets: list[str],
-        dvf_paths: list[Path],
-        output: Path,
-        work: Path,
-        gpu: list[int],
-        cpu: int | None,
-        quiet: bool,
-    ) -> None:
-        """Average one case's preset fields into ``<output>/<case>/<group>``: Reduce(Mean), streamed."""
-        from konfai.data.transform import Reduce, Write
-
-        members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        # Written apart, as the moved image is: see _derive_moved.
-        root = work / f"ensemble_{case}_mean"
-        _run_transform(
-            f"impact_reg_ensemble_{case}",
-            [members],
-            {
-                "DVF": {
-                    group: [
-                        Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{root}:{_backend(dvf_paths[0])}"),
-                    ]
-                }
-            },
-            work,
-            gpu,
-            cpu,
-            quiet,
-        )
-        _copy_output(_the_output(root / case, group), output / case, group, move=True)
 
     def _derive_moved(
         self,
@@ -1590,7 +1610,7 @@ class ImpactRegKonfAIApp:
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
-        slab's source window sized from the field values it reads. An affine (``transform_type: affine``) has no
+        slab's source window sized from the field values it reads. An affine (a linear preset's native form) has no
         grid of its own: the fixed image lends it, and the affine is the map KonfAI decodes (``transforms``).
 
         NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK
@@ -1603,10 +1623,10 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the MOVING's own form: the fields' form may be an ITK
-        # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
+        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
-        backend = _backend(next(iter(cases.values())))
+        backend = self._moved_format or _backend(next(iter(cases.values())))
         roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
         if _is_field(next(iter(fields.values()))):
             resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
@@ -1664,8 +1684,10 @@ class ImpactRegKonfAIApp:
         is given it warps the moving data onto the fixed grid first; otherwise the moving data is assumed
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
-        Jacobian statistics. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
-        Segmentation, Landmarks, Jacobian), and the whole call to ``<output>/Evaluation_summary.json``.
+        measures without reference (Jacobian, bending energy, displacement lengths), and is evaluated alone when no
+        modality is given; a B-spline (elastix's native form) gets them on the fixed grid, the fixed image's or
+        segmentation's. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        Segmentation, Landmarks, NoReference), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
         three, and resolving one only to read them pip-installed its requirements (itk-impact for the
@@ -1677,17 +1699,12 @@ class ImpactRegKonfAIApp:
         # landmark files expand too: .h5, .fcsv and .itk.txt are all supported extensions. A transform
         # FILE is taken as it is: ITK's text .tfm is not an extension konfai's listing knows. register's
         # output folder is not a list of transforms: beside each case's transform it holds the moved image
-        # and, with --keep-fields, every preset's field under Ensemble/, each of which would be scored as
-        # a case of its own. An ensemble member named itself, or through its Ensemble folder, is a transform.
+        # and, with --uncertainty, the ensemble's stack, each of which would be scored as a case of its own.
         expanded = [(path, unit) for path in transforms for unit in ([path] if path.is_file() else _units([path]))]
-        strays = [
-            unit
-            for path, unit in expanded
-            if _is_entry(unit, "Moved") or (unit.parent.name == _ENSEMBLE_DIR and path not in (unit, unit.parent))
-        ]
+        strays = [unit for _, unit in expanded if _is_entry(unit, "Moved") or _is_entry(unit, STACK)]
         if strays:
             raise EvaluatorError(
-                f"--transform takes in '{strays[0]}', register's moved image or ensemble member, not a case's transform.",
+                f"--transform takes in '{strays[0]}', register's moved image or ensemble stack, not a case's transform.",
                 "Name the transforms themselves, e.g. <output>/P*/Transform.h5, not register's output folder.",
             )
         transforms = [unit for _, unit in expanded]
@@ -1705,98 +1722,93 @@ class ImpactRegKonfAIApp:
                 }
             )
         )
-        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
+        # A transform given alone is a case of its own: its measures without reference, when it is a field, are the
+        # evaluation.
+        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
-        jacobians: dict[Path, dict[str, float]] = {}  # one transform given for every case is measured once
+        # One transform given for every case is measured once: it reads the whole field (on one grid, for a B-spline).
+        jacobians: dict[tuple[Path, Path | None], Path] = {}
         for index in range(n_cases):
-            transform_path = transforms[index] if transforms else None
-            # One output folder AND one workspace per modality (Image, Segmentation, Landmarks): the three
-            # configs share one train_name and konfai-apps evaluates with overwrite.
+            # One output folder AND one workspace per modality: the configs share one train_name and konfai-apps
+            # evaluates with overwrite.
             eval_out = output / f"P{index:03d}" / "Evaluation"
             work = _work_dir(tmp_dir, output, "impact_reg_eval_")
             try:
-                # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
+                # Each modality is konfai-apps' evaluation of the transform (-i) against the fixed and the moving data
+                # (--gt): its config pulls the moving side through the transform onto the fixed grid, or pushes the
+                # fixed landmarks into the moving image. With no transform the moving data is taken as registered
+                # already, and an identity only resamples it onto the fixed grid.
+                transform = (
+                    transforms[index]
+                    if transforms
+                    else _identity(work, (fixed_images or gt_fixed_seg)[index : index + 1])
+                )
+                runs: list[tuple[str, str, Path, Path, list[list[Path]] | None]] = []
                 if fixed_images:
-                    moved = self._warp_onto_fixed(
-                        work, "img", fixed_images[index], moving_images[index], transform_path, gpu, cpu, quiet
+                    case_mask = [[mask[index]]] if mask else None
+                    runs.append(
+                        ("Image", "Evaluation_with_images.yml", fixed_images[index], moving_images[index], case_mask)
                     )
-                    app.evaluate(
-                        inputs=[[fixed_images[index]]],
-                        gt=[[moved]],
-                        output=eval_out / "Image",
-                        mask=[[mask[index]]] if mask else None,
-                        evaluation_file="Evaluation_with_images.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Image",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Image"))
-
-                # Segmentation: moving seg warped onto fixed vs fixed seg (Dice), nearest-neighbour.
                 if gt_fixed_seg:
-                    moved_seg = self._warp_onto_fixed(
-                        work, "seg", gt_fixed_seg[index], gt_moving_seg[index], transform_path, gpu, cpu, quiet
+                    runs.append(
+                        ("Segmentation", "Evaluation_with_seg.yml", gt_fixed_seg[index], gt_moving_seg[index], None)
                     )
-                    app.evaluate(
-                        inputs=[[gt_fixed_seg[index]]],
-                        gt=[[moved_seg]],
-                        output=eval_out / "Segmentation",
-                        evaluation_file="Evaluation_with_seg.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Segmentation",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Segmentation"))
-
-                # Landmarks (TRE): the transform is defined on the fixed grid and maps fixed->moving, so the
-                # fixed fiducials are displaced by it into moving space and compared against the moving fiducials
-                # there (the standard warped-keypoints convention; no field inversion needed). With no transform
-                # the raw fiducials are compared, measuring the initial misalignment. Landmarks are a few
-                # points: a field is read around them alone (``_displace``). Points pair by row,
-                # so both files must hold as many; the warped fixed points are the config's FixedFid group.
                 if gt_fixed_fid:
-                    fixed_points = read_landmarks(gt_fixed_fid[index])
-                    moving_count = len(read_landmarks(gt_moving_fid[index]))
-                    if len(fixed_points) != moving_count:
+                    fixed_count, moving_count = (
+                        len(read_landmarks(path)) for path in (gt_fixed_fid[index], gt_moving_fid[index])
+                    )
+                    if fixed_count != moving_count:
                         raise EvaluatorError(
-                            f"{len(fixed_points)} fixed vs {moving_count} moving landmarks"
+                            f"{fixed_count} fixed vs {moving_count} moving landmarks"
                             f" ('{gt_fixed_fid[index]}', '{gt_moving_fid[index]}').",
                             "Landmarks pair by row order: give both files the same points, in the same order.",
                         )
-                    if transform_path is not None:
-                        fixed_points = _displace(fixed_points, transform_path, work)
-                    moved_fid = work / "moved_fid.fcsv"
-                    write_landmarks(fixed_points, moved_fid)
+                    runs.append(
+                        ("Landmarks", "Evaluation_with_fid.yml", gt_fixed_fid[index], gt_moving_fid[index], None)
+                    )
+                for modality, evaluation_file, fixed, moving, case_mask in runs:
                     app.evaluate(
-                        inputs=[[moved_fid]],
-                        gt=[[gt_moving_fid[index]]],
-                        output=eval_out / "Landmarks",
-                        evaluation_file="Evaluation_with_fid.yml",
+                        inputs=[[transform]],
+                        gt=[[fixed], [moving]],
+                        output=eval_out / modality,
+                        mask=case_mask,
+                        evaluation_file=evaluation_file,
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
-                        tmp_dir=work / "Landmarks",
+                        tmp_dir=work / modality,
                     )
-                    scored.append((f"P{index:03d}", eval_out / "Landmarks"))
-
-                # Deformation quality, a property of the transform alone. Only a displacement field is
-                # measured: a linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is
-                # not converted to a field.
-                if transform_path is not None and _is_field(transform_path):
-                    from konfai.evaluator import Statistics
-
-                    if transform_path not in jacobians:
-                        jacobians[transform_path] = _jacobian_statistics(transform_path, work)
-                    jacobian = Statistics(eval_out / "Jacobian" / "ImpactReg" / "Metric_TRAIN.json")
-                    jacobian.filename.parent.mkdir(parents=True, exist_ok=True)
-                    jacobian.add(jacobians[transform_path], "P000")
-                    jacobian.directions = {
-                        key: "max" if key.endswith(":min") else "min" for key in jacobian.measures["P000"]
-                    }
-                    jacobian.write([jacobian.measures])
-                    scored.append((f"P{index:03d}", eval_out / "Jacobian"))
+                    scored.append((f"P{index:03d}", eval_out / modality))
+                # The transform alone, no reference: its Jacobian, bending energy and displacement lengths. A field is
+                # measured on its own grid; a B-spline (elastix's native form) has none and is sampled on the fixed
+                # one, the fixed image's or segmentation's; a linear transform's Jacobian is its matrix everywhere.
+                if transforms:
+                    field, grid = _is_field(transform), None
+                    if not field and _is_bspline(transform):
+                        grid = next((group[index] for group in (fixed_images, gt_fixed_seg) if group), None)
+                        if grid is None:
+                            print(
+                                f"[ImpactReg] P{index:03d}: a B-spline transform is measured without reference on"
+                                " the fixed grid; give the fixed image (-f/-m) or segmentation"
+                                " (--gt-fixed-seg/--gt-moving-seg).",
+                                flush=True,
+                            )
+                    if field or grid is not None:
+                        if (transform, grid) in jacobians:
+                            shutil.copytree(jacobians[(transform, grid)], eval_out / "NoReference", dirs_exist_ok=True)
+                        else:
+                            app.evaluate(
+                                inputs=[[transform]],
+                                gt=[[grid]] if grid is not None else None,
+                                output=eval_out / "NoReference",
+                                evaluation_file="Evaluation_no_reference.yml",
+                                gpu=gpu,
+                                cpu=cpu,
+                                quiet=quiet,
+                                tmp_dir=work / "NoReference",
+                            )
+                            jacobians[(transform, grid)] = eval_out / "NoReference"
+                        scored.append((f"P{index:03d}", eval_out / "NoReference"))
             except BaseException as error:
                 _leave(work, error)
                 raise
@@ -1892,61 +1904,68 @@ class ImpactRegKonfAIApp:
 
     def uncertainty(
         self,
-        dvfs: list[Path],
+        stacks: list[Path],
+        gt_fixed_fid: list[Path] = [],
+        gt_moving_fid: list[Path] = [],
+        gt_moving_seg: list[Path] = [],
         output: Path = Path("./Output").resolve(),
         gpu: list[int] = [],
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
     ) -> None:
-        """Estimate registration uncertainty as the voxel-wise spread of an ensemble of displacement fields.
+        """How much an ensemble's registrations disagree, from the stack ``register --uncertainty`` keeps
+        (``<case>/InferenceStack.mha``, or ``.ome.zarr`` beside a store): konfai-apps' uncertainty of the stack through the configs this package ships.
 
-        The spread of the displacement VECTORS, in mm: the standard deviation of each component across
-        the members, then the norm of those three, ``sqrt(s_x^2 + s_y^2 + s_z^2)``. That is the root mean
-        square distance of the members to their mean vector (with the N-1 sample correction; two members
-        give ``|u1 - u2| / sqrt(2)``), and it does not depend on the axes the field is expressed in.
-
-        The order is the point: the standard deviation of the magnitudes would read two members that agree in
-        length but not in direction as certain. ``Reduce(Std)`` folds with running moments and ``Magnitude`` is pointwise on its result, so no member is ever
-        whole in RAM whatever the size of the ensemble. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
+        Always the spread of the displacement vectors, a map with its mean and 95th percentile (``Uncertainty.yml``);
+        with the fixed landmarks, their spread through every member (``Uncertainty_with_fid.yml``), and with the
+        moving ones too, whether that spread predicts the error (``Uncertainty_calibration.yml``); with the moving
+        segmentation, how its propagations disagree (``Uncertainty_with_seg.yml``). Each option holds one entry per case
+        or one for every case. Case ``P###`` is written to ``<output>/P###/Uncertainty/<measure>/`` (Map, Landmarks,
+        Segmentation), and the whole call to ``<output>/Uncertainty_summary.json``.
         """
-        if len(dvfs) < 2:
-            raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
-        work = _work_dir(tmp_dir, output, "impact_reg_unc_")
-        try:
-            from konfai.data.transform import Magnitude, Reduce, Write
-
-            members = _units(list(dvfs))
-            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
-            flat = _is_flat_field(members[0])
-            if flat:  # See plane.py.
-                members = [lift_field(dvf, work / "planes" / f"M{index:03d}") for index, dvf in enumerate(members)]
-            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            _run_transform(
-                "impact_reg_uncertainty",
-                [spec],
-                {
-                    "DVF": {
-                        "Uncertainty": [
-                            Reduce(operator="Std", output="uncertainty", grid="strict"),
-                            Magnitude(),
-                            Write(dataset=f"{output}:{_format_token(suffixes)}"),
-                        ]
-                    }
-                },
-                work,
-                gpu,
-                cpu,
-                quiet,
+        app = KonfAIApp(str(_EVALUATION_APP), False, False)
+        stacks, gt_fixed_fid, gt_moving_fid, gt_moving_seg = _broadcast(
+            {
+                "-i": _units(stacks),
+                "--gt-fixed-fid": _units(gt_fixed_fid),
+                "--gt-moving-fid": _units(gt_moving_fid),
+                "--gt-moving-seg": _units(gt_moving_seg),
+            }
+        )
+        if gt_moving_fid and not gt_fixed_fid:
+            raise EvaluatorError(
+                "--gt-moving-fid is given without --gt-fixed-fid.", "The spread is the fixed landmarks'."
             )
-            _drop_other_forms(output / "uncertainty", "Uncertainty", suffixes)
-            if flat:
-                written = _the_output(output / "uncertainty", "Uncertainty")
-                project_image(written, written)
-        except BaseException as error:
-            _leave(work, error)
-            raise
-        _leave(work, None)
+        scored: list[tuple[str, Path]] = []
+        for index, stack in enumerate(stacks):
+            out = output / f"P{index:03d}" / "Uncertainty"
+            work = _work_dir(tmp_dir, output, "impact_reg_unc_")
+            try:
+                runs: list[tuple[str, str, list[list[Path]] | None]] = [("Map", "Uncertainty.yml", None)]
+                if gt_fixed_fid:
+                    landmarks = [[gt_fixed_fid[index]], *([[gt_moving_fid[index]]] if gt_moving_fid else [])]
+                    config = "Uncertainty_calibration.yml" if gt_moving_fid else "Uncertainty_with_fid.yml"
+                    runs.append(("Landmarks", config, landmarks))
+                if gt_moving_seg:
+                    runs.append(("Segmentation", "Uncertainty_with_seg.yml", [[gt_moving_seg[index]]]))
+                for measure, uncertainty_file, gt in runs:
+                    app.uncertainty(
+                        inputs=[[stack]],
+                        gt=gt,
+                        output=out / measure,
+                        uncertainty_file=uncertainty_file,
+                        gpu=gpu,
+                        cpu=cpu,
+                        quiet=quiet,
+                        tmp_dir=work / measure,
+                    )
+                    scored.append((f"P{index:03d}", out / measure))
+            except BaseException as error:
+                _leave(work, error)
+                raise
+            _leave(work, None)
+        _write_evaluation_summary(output / "Uncertainty_summary.json", scored)
 
     # --------------------------------------------------------------- apply
 

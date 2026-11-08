@@ -1,0 +1,35 @@
+# konfai-apps eval APP --evaluation-file Evaluation_no_reference.yml -i TRANSFORM [--gt FIXED]
+# How plausible a displacement field is, read alone (no reference): from the determinant of its Jacobian, the
+# fraction of voxels where it folds, its minimum and the spread of its log; its bending energy (how far from smooth);
+# and the length of its displacements (mean, 95th percentile, maximum, in mm). A field is read on its own grid; a
+# transform with none (an affine, elastix's rigid then B-spline) is sampled on the fixed image's (--gt FIXED).
+Evaluator:
+  metrics:
+    Transform:
+      targets_criterions:
+        None:
+          criterions_loader:
+            JacobianFolding: {}
+            JacobianMin: {}
+            JacobianLogStd: {}
+            BendingEnergy: {}
+            Displacement:
+              statistic: mean
+            Displacement#2:
+              statistic: p95
+            Displacement#3:
+              statistic: max
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          Transform:
+            transforms:
+              TransformToField:
+                group: Volume_0
+                reference_group: Reference_0
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

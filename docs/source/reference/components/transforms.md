@@ -41,7 +41,13 @@ loaded whole.
 | Name | Purpose | Key arguments (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
 | `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0` (or `edge`), `inverse=True` | yes | yes (the grid change) | yes |
+| `TransformPoints` | Push landmarks (`[N, 3]`, LPS) through stored transforms: the map a `Resample` with the same `transforms` pulls an image back through, so fixed landmarks land in the moving image (a registration's TRE). | `transforms` | no | no | no |
 | `Displace` | Move a point set (`.fcsv` landmarks) by the case's displacement field, read at each point as SimpleITK's `DisplacementFieldTransform` reads it, from the voxels around the point alone. | `field_group="DVF"` | no | no | no |
+
+A transform group holding a stack (an ensemble's members, `InferenceStack`) is applied one member at a time: `Resample` returns one result per member, stacked with their count, over the whole volume; `TransformPoints` returns `[M, N, 3]`. `StandardDeviation`, `Variance` and `SegmentationDisagreement` read a stack's member count from its header, so a stack of fields spreads per component.
+
+| `TransformToField` | A case's transform as a displacement field: a stored field as it is; a transform with no grid of its own (an affine, a B-spline, their composite) sampled on the grid of `reference_group` (the fixed image), so the measures of a field read it. | `group="Volume_0", reference_group="Reference_0"` | grid, channels | no | a stored field |
+| `WorldCoordinates` | Replace the case by its voxels' world coordinates (one channel per axis): resampled through a map and its inverse, `PointDistance` reads the round trip's error. | | channels | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |
 | `Canonical` | Reorient to RAS (3-D). An oblique volume is resampled onto the nearest axis-aligned grid. | `inverse=True, fill=0.0` | yes | yes | yes, if not oblique |
@@ -58,6 +64,7 @@ loaded whole.
 
 | Name | Purpose | Key arguments (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
+| `Fill` | Set every voxel to `value`, the grid and geometry kept: an image of ones or zeros to resample into a field-of-view mask. | `value=1.0` | no | no | yes |
 | `TensorCast` | Change the dtype. | `dtype="float32", inverse=True` | no | yes | yes |
 | `OneHot` | One-hot encode a one-channel label map. | `num_classes, inverse=True` | no † | yes | yes |
 | `Argmax` | `argmax(dim)`, keeping the axis. | `dim=0` | no † | no | yes over channels |

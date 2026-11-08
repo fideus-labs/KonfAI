@@ -89,4 +89,8 @@ setup(
         # Checks a written config against KonfAI's schema (konfai.config_schema.config_errors).
         "jsonschema",
     ],
+    extras_require={
+        # run_scout_inspection runs the sibling package; pinned like every other member of the family.
+        "scout": [_sibling("konfai-scout", _version)],
+    },
 )

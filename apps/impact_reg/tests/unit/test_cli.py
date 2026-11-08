@@ -64,9 +64,9 @@ def test_subcommands_are_wired(monkeypatch: pytest.MonkeyPatch, subcommand: str)
 @pytest.mark.parametrize(
     "argv",
     [
-        ["register", "FireANTs_SyN", "Generic_Rigid", "-f", "a.mha", "-m", "b.mha"],
-        ["register", "-f", "a.mha", "-m", "b.mha", "-p", "FireANTs_SyN", "Generic_Rigid"],
-        ["register", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha", "--preset", "Generic_Rigid"],
+        ["register", "FireANTs", "Elastix", "-f", "a.mha", "-m", "b.mha"],
+        ["register", "-f", "a.mha", "-m", "b.mha", "-p", "FireANTs", "Elastix"],
+        ["register", "FireANTs", "-f", "a.mha", "-m", "b.mha", "--preset", "Elastix"],
     ],
 )
 def test_register_takes_presets_first_or_with_the_flag(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
@@ -76,12 +76,12 @@ def test_register_takes_presets_first_or_with_the_flag(monkeypatch: pytest.Monke
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
     monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv])
     cli.main()
-    assert calls["register"]["presets"] == ["FireANTs_SyN", "Generic_Rigid"]
+    assert calls["register"]["presets"] == ["FireANTs", "Elastix"]
 
 
 def test_register_says_where_a_trailing_preset_went(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     # A name after -m is one more moving image; the error must say so, not that 'presets' is missing.
-    assert _run(monkeypatch, ["register", "-f", "a.mha", "-m", "b.mha", "FireANTs_SyN"]) == 2
+    assert _run(monkeypatch, ["register", "-f", "a.mha", "-m", "b.mha", "FireANTs"]) == 2
     assert "first or with -p/--preset" in capsys.readouterr().err
 
 
@@ -96,8 +96,8 @@ def test_list_shows_each_preset_with_its_display_name(
     import json
 
     for name, display, task in (
-        ("FireANTs_SyN", "FireANTs (SyN)", "registration"),
-        ("ConvexAdam_Composite", "ConvexAdam (MIND)", "registration"),
+        ("FireANTs", "FireANTs (SyN)", "registration"),
+        ("ConvexAdam", "ConvexAdam (MIND)", "registration"),
         ("Evaluation_only", "Not a preset", "evaluation"),
     ):
         (tmp_path / name).mkdir()
@@ -109,10 +109,10 @@ def test_list_shows_each_preset_with_its_display_name(
     cli.main()
 
     assert capsys.readouterr().out.splitlines()[:4] == [
-        "ConvexAdam_Composite  ConvexAdam (MIND)",
-        "                      What ConvexAdam (MIND) does.",
-        "FireANTs_SyN          FireANTs (SyN)",
-        "                      What FireANTs (SyN) does.",
+        "ConvexAdam  ConvexAdam (MIND)",
+        "            What ConvexAdam (MIND) does.",
+        "FireANTs    FireANTs (SyN)",
+        "            What FireANTs (SyN) does.",
     ]
 
 
@@ -126,7 +126,7 @@ def test_show_says_what_a_preset_will_do(
     import re
 
     model = tmp_path / "Feature.pt"
-    preset = tmp_path / "presets" / "FireANTs_SyN"
+    preset = tmp_path / "presets" / "FireANTs"
     preset.mkdir(parents=True)
     manifest = {
         "display_name": "FireANTs (SyN)",
@@ -146,7 +146,7 @@ def test_show_says_what_a_preset_will_do(
         f"    RegistrationNet:\n      cc_kernel: 5\n      models:\n        '0':\n          ref: {model}\n"
     )
     monkeypatch.setattr(impact_reg, "IMPACT_REG_KONFAI_REPO", str(preset.parent))
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "show", "FireANTs_SyN"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "show", "FireANTs"])
     monkeypatch.setenv("COLUMNS", "200")
 
     cli.main()
@@ -158,12 +158,12 @@ def test_show_says_what_a_preset_will_do(
     assert "nibabel, on first use" in out
     # The shape, not FireANTs' own wording: the preset's value, its range or choices, a description under it.
     assert re.search(r"\n  cc_kernel = 5  \([^)]+\)\n      \w", out)
-    assert f"  Predictor.Model.RegistrationNet.models.0.ref = {model}" in out
+    assert f"  models.0.ref = {model}" in out  # a nested parameter by the name --set takes: dotted from the model
 
     # Not a case slip: a local folder is a path, which macOS and Windows resolve whatever the case.
-    assert _run(monkeypatch, ["show", "FireANTs_SyM"]) == 1
+    assert _run(monkeypatch, ["show", "FireANT"]) == 1
     err = capsys.readouterr().err
-    assert "No app 'FireANTs_SyM'" in err and "Did you mean 'FireANTs_SyN'" in err
+    assert "No app 'FireANT'" in err and "Did you mean 'FireANTs'" in err
 
 
 @pytest.mark.parametrize(
@@ -228,7 +228,7 @@ def test_a_failure_is_one_line_on_stderr(
     # line that might be a bug's (anything but a designed KonfAIError) says so.
     monkeypatch.delenv("IMPACT_REG_DEBUG", raising=False)
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _failing_app(error))
-    assert _run(monkeypatch, ["register", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha"]) == code
+    assert _run(monkeypatch, ["register", "FireANTs", "-f", "a.mha", "-m", "b.mha"]) == code
     assert capsys.readouterr().err.strip() == message
 
     monkeypatch.setenv("IMPACT_REG_DEBUG", "1")
@@ -285,12 +285,12 @@ def test_uncertainty_needs_no_preset(monkeypatch: pytest.MonkeyPatch, capsys: py
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "app_names", no_listing)
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "uncertainty", "--dvf", "a.h5", "b.h5"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "uncertainty", "-i", "a.mha", "--gt-fixed-fid", "f.fcsv"])
     cli.main()
-    assert [path.name for path in calls["uncertainty"]["dvfs"]] == ["a.h5", "b.h5"]
+    assert [path.name for path in calls["uncertainty"]["stacks"]] == ["a.mha"]
+    assert [path.name for path in calls["uncertainty"]["gt_fixed_fid"]] == ["f.fcsv"]
 
-    assert _run(monkeypatch, ["uncertainty", "--dvf", "a.h5"]) == 2
-    assert "two or more displacement fields" in capsys.readouterr().err
+    assert _run(monkeypatch, ["uncertainty", "--gt-fixed-fid", "f.fcsv"]) == 2  # the stack is required
     assert _run(monkeypatch, ["uncertainty", "--help"]) == 0
     assert "--download" not in capsys.readouterr().out
 
@@ -302,34 +302,24 @@ def test_uncertainty_needs_no_preset(monkeypatch: pytest.MonkeyPatch, capsys: py
 def test_a_bad_count_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, option: list[str]) -> None:
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    assert _run(monkeypatch, ["register", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha", *option]) == 2
+    assert _run(monkeypatch, ["register", "FireANTs", "-f", "a.mha", "-m", "b.mha", *option]) == 2
     assert not calls
 
 
 def test_a_remote_uri_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     # konfai-apps stages inputs from the local filesystem only; a URI used to become '<cwd>/s3:/bucket/...'.
-    assert _run(monkeypatch, ["register", "FireANTs_SyN", "-f", "s3://bucket/f.ome.zarr", "-m", "b.mha"]) == 2
+    assert _run(monkeypatch, ["register", "FireANTs", "-f", "s3://bucket/f.ome.zarr", "-m", "b.mha"]) == 2
     assert "is a URI" in capsys.readouterr().err
 
 
-def test_keep_fields_names_what_the_ensemble_holds(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    # Members accumulate across runs into one --output; the stale one must be named, since `uncertainty --dvf
-    # Ensemble/*` takes it too.
-    ensemble = tmp_path / "P000" / "Ensemble"
-    ensemble.mkdir(parents=True)
-    for member in ("FireANTs_SyN.h5", "Generic_Rigid.h5", "ConvexAdam_Coarse.h5"):
-        (ensemble / member).touch()
+def test_uncertainty_keeps_the_ensemble_s_stack(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    argv = ["register", "FireANTs_SyN", "Generic_Rigid", "-f", "a.mha", "-m", "b.mha", "-o", str(tmp_path)]
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--keep-fields", "--cpu", "1"])
+    argv = ["register", "FireANTs", "Elastix", "-f", "a.mha", "-m", "b.mha", "-o", str(tmp_path)]
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--uncertainty", "--cpu", "1"])
     cli.main()
 
-    assert calls["register"]["keep_dvf"] is True
-    assert capsys.readouterr().out.strip() == (
-        f"[ImpactReg] {ensemble}: ConvexAdam_Coarse, FireANTs_SyN, Generic_Rigid "
-        "(ConvexAdam_Coarse from an earlier run)."
-    )
+    assert calls["register"]["uncertainty"] is True
 
 
 @pytest.mark.parametrize(("device", "noted"), [([], True), (["--cpu", "1"], False), (["--gpu", "0"], False)])
@@ -339,7 +329,7 @@ def test_register_notes_an_unused_gpu(monkeypatch: pytest.MonkeyPatch, capsys, d
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app({}))
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "register", "FireANTs_SyN", "-f", "a", "-m", "b", *device])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "register", "FireANTs", "-f", "a", "-m", "b", *device])
     cli.main()
     assert ("No --gpu" in capsys.readouterr().out) is noted
 

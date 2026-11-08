@@ -30,13 +30,21 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
 from konfai.utils import uri
-from konfai.utils.dataset import Attribute, Dataset, entry_links
+from konfai.utils.dataset import (
+    DENSE_TRANSFORMS_ENV,
+    Attribute,
+    Dataset,
+    entry_links,
+    is_an_image,
+    is_displacement_entry,
+)
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -54,6 +62,9 @@ from ruamel.yaml import YAML
 from .app_repository import LocalAppRepository, get_app_repository_info
 from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
+
+#: The file an inference writes in its output folder: what ran (``LocalAppRepository.record``).
+RUN_RECORD = "konfai-run.json"
 
 # Marks the ``./Dataset`` directories konfai-apps staged: the only ones it may delete from a caller's workspace.
 _STAGED_MARKER = ".konfai-apps-staged"
@@ -685,14 +696,19 @@ class KonfAIAppClient(AbstractKonfAIApp):
                             del data["models"]
                     if "gpu" in data:
                         data["gpu"] = ",".join(str(x) for x in data["gpu"])
+                    if func.__name__ == "infer" and os.environ.get(DENSE_TRANSFORMS_ENV):
+                        # The server runs the job in its own environment: the caller's need for a field goes along.
+                        data["dense_transforms"] = "true"
                     if options:
                         data["options"] = json.dumps(options)
                     connect_timeout = 60
                     read_timeout: int = 600
 
                     body = _multipart_body(files, data)
+                    # The app is a path segment: a preset's '#' goes as %23, or the URL would end at it.
+                    url = f"{self.remote_server.get_url()}/apps/{quote(self.app, safe='/:@')}/{func.__name__}"
                     with requests.post(
-                        f"{self.remote_server.get_url()}/apps/{self.app}/{func.__name__}",
+                        url,
                         data=body,
                         headers={**self.remote_server.get_headers(), "Content-Type": body.content_type},
                         timeout=(connect_timeout, read_timeout),
@@ -776,7 +792,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
     def evaluate(
         self,
         inputs: list[list[Path | str]],
-        gt: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
         mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -797,6 +813,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         pass
 
@@ -913,7 +930,8 @@ class KonfAIApp(AbstractKonfAIApp):
             True if the file matches one of `SUPPORTED_EXTENSIONS`.
         """
         lower = file.name.lower()
-        return any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
+        # ITK's text .tfm is a transform file konfai's own listing does not know: staged for itktransform.
+        return lower.endswith(".tfm") or any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
 
     @staticmethod
     def _supported_suffix(file: Path) -> str:
@@ -1090,21 +1108,31 @@ class KonfAIApp(AbstractKonfAIApp):
                 if not matches:
                     continue
                 suffix = KonfAIApp._directory_volume_suffix(matches[0])
-                return "mha" if suffix is None else KonfAIApp._unit_backend(suffix)
+                return KonfAIApp._unit_backend(matches[0], storage_form(matches[0]) if suffix is None else suffix)
         return "mha"
 
     @staticmethod
-    def _unit_backend(suffix: str) -> str:
-        """The backend token a staged unit is read through, from its staging suffix: an OME-Zarr store,
-        a DICOM series (a bare directory, no suffix) or a single file."""
+    def _unit_backend(source: Path, suffix: str) -> str:
+        """The backend token a staged unit is read through: an OME-Zarr store, a DICOM series (a bare
+        directory, no suffix), an ITK transform file (a ``.h5`` no ITK image reader takes: a field, an
+        affine or a composite, which a Resample or a TransformPoints reads as a transform) or an image file."""
         if suffix in (".ome.zarr", ".zarr"):
             return "omezarr"
-        return "dicom" if suffix == "" else "mha"
+        if suffix == "":
+            return "dicom"
+        if suffix.lower() == ".tfm" or (
+            suffix.lower() == ".h5" and not sitk.ImageFileReader.GetImageIOFromFileName(str(source))
+        ):
+            return "itktransform"
+        return "mha"
 
     @staticmethod
     def _dataset_roots() -> list[Path]:
         """The staging roots on disk: ``./Dataset``, then one ``./Dataset_<backend>`` per other backend."""
-        roots = [Path("Dataset"), *(Path(f"Dataset_{backend}") for backend in ("mha", "dicom", "omezarr"))]
+        roots = [
+            Path("Dataset"),
+            *(Path(f"Dataset_{backend}") for backend in ("mha", "dicom", "omezarr", "itktransform")),
+        ]
         return [root for root in roots if root.exists() or root.is_symlink()]
 
     #: Where the inputs read in place are named: KonfAI's manifest form (``CASE: {GROUP: uri}``), inside
@@ -1139,9 +1167,10 @@ class KonfAIApp(AbstractKonfAIApp):
         if isinstance(source, str):
             KonfAIApp._name_remote_entry(source, case, entry)
             return
-        backend = KonfAIApp._unit_backend(suffix)
+        backend = KonfAIApp._unit_backend(source, suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
-        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix}")
+        # In lower case: the transform backend looks an entry up as <entry>.h5 or .tfm, an image by its stem.
+        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix.lower()}")
         (root / _STAGED_MARKER).touch()  # konfai-apps' own root: _clear_dataset may delete it
 
     @staticmethod
@@ -1271,10 +1300,12 @@ class KonfAIApp(AbstractKonfAIApp):
         if prefix == "Volume":
             # ./Dataset, the root every config reads, takes the backend of the first input staged on disk: a
             # store read in place lands in no root.
-            local = next((suffix for source, suffix in listed[0] if isinstance(source, Path)), None) if listed else None
-            primary = KonfAIApp._unit_backend(local) if local is not None else "mha"
+            local = next(((s, suffix) for s, suffix in listed[0] if isinstance(s, Path)), None) if listed else None
+            primary = KonfAIApp._unit_backend(*local) if local is not None else "mha"
         else:
             primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
+        # A transform never takes ./Dataset, the root every config reads as images: its own root is declared beside it.
+        primary = "mha" if primary == "itktransform" else primary
         for i, units in enumerate(listed):
             if len(units) != cases:
                 raise AppRepositoryError(
@@ -1383,9 +1414,9 @@ class KonfAIApp(AbstractKonfAIApp):
                 KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
 
     @staticmethod
-    def _staged_cases(config_file: str) -> list[tuple[Dataset, str, list[int], Attribute]]:
-        """Every staged case as ``(writer, name, shape, attributes)``: its ``Volume_0`` header (no pixel read)
-        and the dataset a default input for it is written to.
+    def _staged_cases(config_file: str, group: str = "Volume_0") -> list[tuple[Dataset, str, list[int], Attribute]]:
+        """Every staged case holding ``group`` as ``(writer, name, shape, attributes)``: the entry's header (no pixel
+        read) and the dataset a default input for it is written to.
 
         A case staged on disk is read from, and written beside, the root its backend staged it in (see
         :meth:`_stage`), at the level ``config_file`` declares for that root. A case read in place (the remote
@@ -1400,8 +1431,8 @@ class KonfAIApp(AbstractKonfAIApp):
             file_format = KonfAIApp._detect_group_format(root, "Volume_0")
             level = KonfAIApp._dataset_entry(config_file, root)[1]
             dataset = Dataset(str(root), f"{file_format}@{level}" if level else file_format)
-            for name in dataset.get_names("Volume_0"):
-                found.append((dataset, name, *dataset.get_infos("Volume_0", name)))
+            for name in dataset.get_names(group):
+                found.append((dataset, name, *dataset.get_infos(group, name)))
         manifest = KonfAIApp._REMOTE_MANIFEST
         if manifest.is_file():
             file_format, level = KonfAIApp._dataset_entry(config_file, Path("Dataset"))
@@ -1411,37 +1442,25 @@ class KonfAIApp(AbstractKonfAIApp):
             if any(Path("Dataset").glob("*/Volume_0*")):
                 file_format = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
             local = Dataset("Dataset", f"{file_format}@{level}" if level else file_format)
-            for name in remote.get_names("Volume_0"):
-                found.append((local, name, *remote.get_infos("Volume_0", name)))
+            for name in remote.get_names(group):
+                found.append((local, name, *remote.get_infos(group, name)))
         return found
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path | str]]) -> None:
-        """
-        Build the Dataset/ structure for uncertainty estimation.
-
-        This method enforces that each input file is a multi-component volume
-        (e.g., an inference stack) by reading metadata with SimpleITK.
-
-        Raises
-        ------
-        AppRepositoryError
-            If a provided input is not multi-channel (single-component).
-        """
-        dataset_path = KonfAIApp._stage_dataset()
-        for i, input_path in enumerate(inputs):
-            for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                reader = sitk.ImageFileReader()
-                reader.SetFileName(str(file))
-                reader.ReadImageInformation()
-                n_channels = reader.GetNumberOfComponents()
-                if n_channels > 1:
-                    suffix = KonfAIApp._supported_suffix(file)
-                    KonfAIApp.link_entry(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
-                else:
-                    raise AppRepositoryError(
-                        f"'{file}' has one channel: uncertainty reads an inference stack, one channel per inference.",
-                        "Give the InferenceStack.mha an inference with -uncertainty wrote.",
-                    )
+        """Stage the stacks as inputs are staged (``P{idx}/Volume_{i}``, an OME-Zarr store whole), each read back by its
+        header and refused when it holds one channel: uncertainty reads an inference stack, its members' channels."""
+        self._write_inputs_to_dataset(inputs)
+        for dataset_dir in KonfAIApp._dataset_roots():
+            for i in range(len(inputs)):
+                group = f"Volume_{i}"
+                dataset = Dataset(str(dataset_dir), KonfAIApp._detect_group_format(dataset_dir, group))
+                for name in dataset.get_names(group):
+                    if dataset.get_infos(group, name)[0][0] < 2:
+                        raise AppRepositoryError(
+                            f"Case {name}'s {group} has one channel: uncertainty reads an inference stack, one channel"
+                            " per inference.",
+                            "Give the InferenceStack an inference with -uncertainty wrote.",
+                        )
 
     def _write_gt_to_dataset(self, gt: list[list[Path | str]]) -> None:
         """
@@ -1475,8 +1494,22 @@ class KonfAIApp(AbstractKonfAIApp):
             Optional mask paths.
         """
         if mask is None:
+            # One channel of ones, which a masked metric broadcasts over the image's, on the grid of Volume_0 when it
+            # is an image and no field, else of the Reference_0 beside it (a registration's transform masks nothing),
+            # else of the first image: a three-channel volume with no fixed image beside it is an image. A transform
+            # store holds no mask.
+            references = {
+                name: (dataset, shape, attr)
+                for dataset, name, shape, attr in KonfAIApp._staged_cases(config_file, "Reference_0")
+            }
             for dataset, name, shape, attr in KonfAIApp._staged_cases(config_file):
-                KonfAIApp.write_constant(dataset, "Mask_0", name, shape, attr, 1)
+                candidates = [(dataset, shape, attr), *([references[name]] if name in references else [])]
+                images = [
+                    c for c in candidates if is_an_image(c[2]) and not c[0].file_format.startswith("itktransform")
+                ]
+                if images:
+                    holder, shape, attr = next((i for i in images if not is_displacement_entry(i[1], i[2])), images[0])
+                    KonfAIApp.write_constant(holder, "Mask_0", name, [1, *shape[1:]], attr, 1)
         else:
             KonfAIApp._stage_groups(mask, "Mask")
 
@@ -1633,12 +1666,16 @@ class KonfAIApp(AbstractKonfAIApp):
         self._collect_result(output, tmp_dir, "Predictions")
         for case, volumes in KonfAIApp._case_volumes(output, self._predicted or []).items():
             print(f"[KonfAI-Apps] {case}: {', '.join(str(volume) for volume in volumes)}")
+        # What ran, beside what it wrote: the app, its revision, its preset and every --set, in order.
+        output.mkdir(parents=True, exist_ok=True)
+        record = self.app_repository.record(config_overrides)
+        (output / RUN_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     @run_distributed_app
     def evaluate(
         self,
         inputs: list[list[Path | str]],
-        gt: list[list[Path | str]],
+        gt: list[list[Path | str]] | None,
         output: Path = Path("./Output/"),
         mask: list[list[Path | str]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -1664,7 +1701,8 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
-        self._write_gt_to_dataset(gt)
+        if gt:  # an evaluation of the prediction alone (a field's Jacobian) has no reference
+            self._write_gt_to_dataset(gt)
         # The config first: a default mask is sized at the level it declares for the inputs.
         self.app_repository.install_evaluation(evaluation_file)
         self._write_mask_or_default(mask, evaluation_file)
@@ -1694,9 +1732,12 @@ class KonfAIApp(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         """
-        Run uncertainty estimation locally.
+        Run uncertainty estimation locally: an evaluation of the stack (``Volume_0``), against the references ``gt``
+        (``Reference_i``) an uncertainty config reads beside it (an ensemble's landmarks, a segmentation it
+        propagates).
 
         Steps:
         1. Validate that inputs are multi-component inference stacks
@@ -1711,7 +1752,10 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inference_stack_to_dataset(inputs)
+        if gt:
+            self._write_gt_to_dataset(gt)
         self.app_repository.install_uncertainty(uncertainty_file)
+        self._declare_dataset_roots(uncertainty_file)
         from konfai.evaluator import evaluate
 
         result_dir = self._stage_result_dir(output, tmp_dir, "Uncertainties")
@@ -1781,8 +1825,10 @@ class KonfAIApp(AbstractKonfAIApp):
         # every later prediction on the next case's reference, or score what an earlier run left in its place.
         staged = [f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))]
         volumes = [volume for files in KonfAIApp._case_volumes(predictions_dir, staged).values() for volume in files]
-        outputs = [volume for volume in volumes if volume.name != "InferenceStack.mha"]
-        inference_stacks = [volume for volume in volumes if volume.name == "InferenceStack.mha"]
+        from .ensemble import is_stack
+
+        outputs = [volume for volume in volumes if not is_stack(volume)]
+        inference_stacks = [volume for volume in volumes if is_stack(volume)]
         missing = [case for case in staged if self._predicted is not None and case not in self._predicted]
         if (gt is not None or uncertainty) and missing:
             raise AppRepositoryError(

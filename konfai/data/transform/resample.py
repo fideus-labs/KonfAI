@@ -21,6 +21,8 @@ import functools
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -65,7 +67,14 @@ from konfai.data.transform.base import (
     TransformInverse,
     sitk,
 )
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, as_member, stacked_groups
+from konfai.utils.dataset import (
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    Attribute,
+    Dataset,
+    image_to_data,
+    is_displacement_entry,
+)
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.utils import split_path_spec
@@ -1107,8 +1116,6 @@ class Resample(TransformInverse):
 
     def _stored_field_headers(self, name: str) -> list[tuple[list[int], Attribute]]:
         """The shape and header of every dense-field member of this case's stored map."""
-        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
-
         fields = []
         for group in cast("dict[str, bool]", self.transforms or {}):
             for dataset in self.datasets:
@@ -1117,7 +1124,7 @@ class Resample(TransformInverse):
                 if getattr(dataset, "read_data", None) is None:
                     break  # a transform-only store serves no field
                 shape, header = dataset.get_infos(group, name)
-                if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+                if is_displacement_entry(shape, header):
                     fields.append((shape, header))
                 break
         return fields
@@ -1249,7 +1256,10 @@ class Resample(TransformInverse):
         if self.transforms is None:
             return
         try:
-            self._stored_map(name)
+            # Every member of a stack is a map of its own, read as the call reads it; the first stands for them.
+            stacked, members = stacked_groups(self, self.transforms, name)
+            with self._as_member(name, stacked, 0) if members else nullcontext():
+                self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
@@ -1306,6 +1316,11 @@ class Resample(TransformInverse):
                 )
         for name in self._grids:
             try:
+                if stacked_groups(self, self.transforms or {}, name)[1]:
+                    return (
+                        f"case '{name}' is resampled through a stacked transform (an ensemble's members), one member"
+                        " at a time over the whole volume"
+                    )
                 self._pricing_bound(name)
             except TransformError as error:
                 # Both halves of the refusal: the first says what is wrong, the second what to
@@ -1423,6 +1438,43 @@ class Resample(TransformInverse):
         return self._sample(name, tensor, tuple(context.target), [part.start for part in context.source])
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """The case resampled; through a stacked transform (an ensemble's members), once per member, the results
+        stacked in the members' order with their count in the header."""
+        stacked, members = stacked_groups(self, self.transforms or {}, name)
+        if not members:
+            return self._resample_whole(name, tensor, cache_attribute)
+        # Every member reads the case on its own grid: the header the first leaves is the target's.
+        source, results = Attribute(cache_attribute), []
+        for member in range(members):
+            header = Attribute(source)
+            with self._as_member(name, stacked, member):
+                results.append(self._resample_whole(name, tensor, header))
+        dict.clear(cache_attribute)
+        dict.update(cache_attribute, header)
+        cache_attribute[MEMBERS_ATTRIBUTE] = members
+        return torch.cat(results)
+
+    @contextmanager
+    def _as_member(self, name: str, stacked: set[str], member: int) -> Iterator[None]:
+        """The stage reading member ``member`` of the stacks under ``stacked`` alone, its maps read afresh and
+        forgotten after: the next member's is another map."""
+        self._forget_maps(name)
+        with as_member(self, stacked, member):
+            try:
+                yield
+            finally:
+                self._forget_maps(name)
+
+    def _forget_maps(self, name: str) -> None:
+        """Drop what this case's stored map was read and decoded into: the next member's is another map."""
+        self._maps.pop(name, None)
+        self._bounds.pop(name, None)
+        self._covering.pop(name, None)
+        for key in [key for key in self._stored if key[0] == name]:
+            self._stored.pop(key, None)
+        self._field_window = None
+
+    def _resample_whole(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         shape = [int(extent) for extent in tensor.shape[1:]]
         # Re-recorded on every call: the whole-volume path is handed the case's own evolved header,
         # and a grid recorded by an earlier walk may describe the stored volume rather than this
@@ -1853,3 +1905,181 @@ class Resample(TransformInverse):
     @property
     def _target_is_own(self) -> bool:
         return isinstance(self._target, _OwnGrid)
+
+
+class TransformPoints(Transform):
+    """Push a case's points (``[N, 3]`` in LPS, as a ``.fcsv`` reads) through transforms stored beside the cases.
+
+    The map is the one a ``Resample`` with the same ``transforms`` pulls an image back through: a registration that
+    moves the moving image onto the fixed grid maps each fixed point to where it lands in the moving image, so the
+    TRE of a registration compares the fixed landmarks pushed through it with the moving ones, and no field is
+    inverted. ``transforms`` maps each GROUP to whether to invert it (a rigid or affine map only), the LAST declared
+    applied first, as in ``Resample``.
+
+    A 3-D displacement field is read around each point alone (:func:`~konfai.utils.ITK.displace_points`), so a few
+    points never hold the field in memory. Any other transform is read whole and applied to the axes it has: a 2-D
+    one moves x and y and leaves z, where a 2-D image's landmarks sit.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME  # a set of points, read whole: there is no region of it to stream
+
+    def __init__(self, transforms: dict[str, bool]) -> None:
+        super().__init__()
+        if not transforms:
+            raise TransformError(
+                "'TransformPoints' was given no transform.",
+                "Name a group and whether to invert it: transforms: {Volume_0: false}.",
+            )
+        self.transforms = transforms
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """The points pushed through the transforms; through a stacked transform (an ensemble's members), once per
+        member: ``[M, N, 3]``, the members in their order."""
+        stacked, members = stacked_groups(self, self.transforms, name)
+        if not members:
+            return self._push(name, tensor)
+        moved = []
+        for member in range(members):
+            with as_member(self, stacked, member):
+                moved.append(self._push(name, tensor))
+        return torch.stack(moved)
+
+    def _push(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        from konfai.utils.ITK import displace_points
+
+        points = tensor.detach().cpu().numpy().astype(np.float64).reshape(-1, 3)
+        for group, invert in reversed(list(self.transforms.items())):
+            dataset = self.dataset_holding(group, name)
+            if dataset is None:
+                raise TransformError(
+                    f"'TransformPoints' found no transform for case '{name}' in group '{group}'.",
+                    "Every case needs an entry in every group named under 'transforms:'.",
+                )
+            shape, header = dataset.get_infos(group, name)
+            if not invert and len(shape) == 4 and is_displacement_entry(shape, header):
+                points = displace_points(points, dataset, group, name)
+                continue
+            transform = dataset.read_transform(group, name)
+            if invert:
+                try:
+                    transform = transform.GetInverse()
+                except RuntimeError as error:
+                    raise TransformError(
+                        f"'TransformPoints' cannot invert group '{group}' for case '{name}': it is not a rigid or"
+                        " affine map.",
+                        f"Store the inverse instead, or set '{group}: false'.",
+                    ) from error
+            rank = transform.GetDimension()
+            points[:, :rank] = [transform.TransformPoint(point[:rank].tolist()) for point in points]
+        return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
+
+
+class TransformToField(Transform):
+    """A case's transform as a displacement field: a stored field as it is; any other transform (an affine, a
+    B-spline, their composite), which has no grid of its own, sampled on the grid of ``reference_group`` (the fixed
+    image), ``T(x) - x`` at each voxel centre, in world units, marked a field. The measures of a field (its Jacobian,
+    its bending energy, its displacement lengths) then read a native transform as they read a field.
+
+    Applied to the transform's own group, named ``group`` (``Volume_0``): what it reads there is the transform's
+    entry, which only a field holds as an image.
+    """
+
+    def __init__(self, group: str = "Volume_0", reference_group: str = "Reference_0") -> None:
+        super().__init__()
+        self.group = group
+        self.reference_group = reference_group
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """A stored field its header marks one passes as it is, voxel by voxel. Anything else is sampled whole: a
+        transform with no grid of its own, and an image the header alone cannot tell from a field."""
+        if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute:
+            return PatchLocality(LocalityKind.POINTWISE)
+        # ponytail: sampled whole; by slab if a case outgrows memory
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="a transform with no grid of its own is sampled whole")
+
+    def _entry(self, name: str) -> Any:
+        """The dataset holding the case's transform, None when it is a field (measured as it is)."""
+        dataset = self.dataset_holding(self.group, name)
+        if dataset is None:
+            raise TransformError(
+                f"'TransformToField' found no transform for case '{name}' in group '{self.group}'.",
+                "Name the group the transform is read as: TransformToField: {group: Volume_0}.",
+            )
+        return None if is_displacement_entry(*dataset.get_infos(self.group, name)) else dataset
+
+    def _grid(self, name: str) -> tuple[list[int], Attribute]:
+        reference = self.dataset_holding(self.reference_group, name)
+        if reference is None:
+            raise TransformError(
+                f"The transform of case '{name}' has no grid of its own (an affine, a B-spline): it is measured where"
+                f" it applies, and '{self.reference_group}' holds no image for it.",
+                "Give the fixed image beside the transform (--gt FIXED).",
+            )
+        return reference.get_infos(self.reference_group, name)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        del group_src, cache_attribute
+        if not name or self._entry(name) is None:
+            return shape
+        return [int(extent) for extent in self._grid(name)[0][1:]]
+
+    def output_channels(self, channels: int) -> int:
+        del channels
+        return 3
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        dataset = self._entry(name)
+        if dataset is None:
+            return tensor  # a field already
+        transform = dataset.read_transform(self.group, name)
+        shape, header = self._grid(name)
+        grid = Grid.of([int(extent) for extent in shape[1:]], header, f"the fixed image of case '{name}'")
+        field = sitk.TransformToDisplacementField(
+            transform,
+            sitk.sitkVectorFloat32,
+            list(grid.size_zyx[::-1]),
+            grid.origin_xyz.tolist(),
+            grid.spacing_xyz.tolist(),
+            grid.direction_xyz.ravel().tolist(),
+        )
+        data, geometry = image_to_data(field)
+        for key in ("Origin", "Spacing", "Direction"):
+            cache_attribute[key] = geometry.get_np_array(key)
+        cache_attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        return torch.from_numpy(np.ascontiguousarray(data))
+
+
+class WorldCoordinates(Transform):
+    """Replace a case by the world coordinates of its voxel centres: one channel per axis (x, y, z), in the unit of
+    its spacing, from its ``Origin``, ``Spacing`` and ``Direction``. A ``Resample`` through a map then reads, at each
+    voxel, where the map sends it: through a registration and the one registered back, the distance to the case's
+    own coordinates (``PointDistance``) is the round trip's error, its inverse consistency.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME
+
+    def output_channels(self, channels: int) -> int:
+        del channels
+        return 3  # a 2-D case holds two: three bounds every case
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        del name
+        spatial = list(tensor.shape[1:])
+        rank = len(spatial)
+        if not all(key in cache_attribute for key in _GEOMETRY_KEYS):
+            raise TransformError(
+                "'WorldCoordinates' needs the case's Origin, Spacing and Direction.",
+                "Read the case from a store that keeps its geometry (an image file, an OME-Zarr store).",
+            )
+        origin = cache_attribute.get_np_array("Origin").astype(np.float64)
+        spacing = cache_attribute.get_np_array("Spacing").astype(np.float64)
+        direction = cache_attribute.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
+        # world_c = origin_c + sum_a direction[c, a] spacing_a index_a, a channel at a time in float64 (the index
+        # grids are broadcast views: nothing larger than one channel is held beside the result). Index axis a
+        # (x, y, z) is array axis rank - 1 - a.
+        step = direction * spacing
+        indices = torch.meshgrid(*(torch.arange(n, dtype=torch.float64) for n in spatial), indexing="ij")
+        world = torch.empty((rank, *spatial), dtype=torch.float32)
+        for c in range(rank):
+            world[c] = float(origin[c]) + sum(float(step[c, a]) * indices[rank - 1 - a] for a in range(rank))
+        return world

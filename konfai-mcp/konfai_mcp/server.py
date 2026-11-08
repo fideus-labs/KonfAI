@@ -66,6 +66,7 @@ from .runner import run_api_in_subprocess as _run_api_in_subprocess
 from .server_apps import AppService
 from .server_experiments import SessionService
 from .server_jobs import Job, JobRegistry
+from .server_scout import FidoptAdapter, ScoutService
 from .server_support import (
     WORKFLOW_CONFIG_FILES,
     DatasetGroupUnreadableError,
@@ -132,6 +133,8 @@ SESSION = SessionService(
 )
 
 APP_SERVICE = AppService(workspace_layout=WORKSPACE_LAYOUT)
+SCOUT_SERVICE = ScoutService(WORKSPACE_LAYOUT)
+FIDOPT = FidoptAdapter(WORKSPACE_LAYOUT)
 
 
 _SESSION_SWITCH_LOCK = threading.Lock()
@@ -1395,7 +1398,10 @@ def import_app(
 
 
 # Parameter descriptions shared by the app-execution tools below (one wording, two tools).
-_APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
+_APP_REF_DESC = (
+    "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only), '#preset' after it to run "
+    "one of the app's presets (describe_app lists them)."
+)
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
 _APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."
@@ -1610,6 +1616,161 @@ def run_registration_evaluate(
     )
 
 
+_SCOUT_TASK_DESC = "segmentation, registration or synthesis."
+_SCOUT_INPUTS_DESC = (
+    "Host paths by role. segmentation: image, prediction, truth, mask. registration: fixed, moving, field (a "
+    "displacement image in mm on the fixed grid) or transform (an ITK transform file), fixed_labels, moving_labels, "
+    "warped_labels, fixed_landmarks, moving_landmarks, fixed_mask. synthesis: source, synthetic, target, mask."
+)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_scout_inspection"]))
+def run_scout_inspection(
+    task: Annotated[Literal["segmentation", "registration", "synthesis"], Field(description=_SCOUT_TASK_DESC)],
+    inputs: Annotated[dict[str, str], Field(description=_SCOUT_INPUTS_DESC)],
+    name: Annotated[
+        str | None, Field(description="The inspection's name (default: task and first input's stem).")
+    ] = None,
+    labels: Annotated[dict[str, str] | None, Field(description="Label value -> name, e.g. {'1': 'liver'}.")] = None,
+    evaluation: Annotated[
+        list[str] | None,
+        Field(description="KonfAI Eval Metric_*.json files whose values for this case Scout starts from."),
+    ] = None,
+    notes: Annotated[
+        str, Field(description="What the model should know: modality, dataset, the method inspected.")
+    ] = "",
+    provider: Annotated[
+        Literal["anthropic", "openai", "mock"],
+        Field(description="anthropic (Claude), openai (GPT or an OpenAI-compatible local server), mock (no API)."),
+    ] = "anthropic",
+    model: Annotated[str | None, Field(description="The model id; the provider's default when omitted.")] = None,
+    base_url: Annotated[
+        str | None, Field(description="An OpenAI-compatible server (a local VLM) for the openai provider.")
+    ] = None,
+    effort: Annotated[
+        Literal["low", "medium", "high", "xhigh", "max"] | None, Field(description="Claude's effort.")
+    ] = None,
+    mode: Annotated[
+        Literal["active", "fixed"], Field(description="active exploration, or a fixed set of views.")
+    ] = "active",
+    max_tool_calls: Annotated[int, Field(description="Tool calls the model may make.", ge=1, le=400)] = 40,
+    max_images: Annotated[int, Field(description="Images the model may receive.", ge=1, le=400)] = 60,
+    max_seconds: Annotated[float | None, Field(description="Wall-clock limit of the inspection.")] = 900.0,
+    max_usd: Annotated[float | None, Field(description="Cost limit, when the model's price is known.")] = None,
+    allow_cloud_images: Annotated[
+        bool, Field(description="Authorise sending images of the case to a cloud API.")
+    ] = False,
+    local_provider: Annotated[bool, Field(description="The base_url is a server on this machine or network.")] = False,
+) -> dict[str, Any]:
+    """Inspect one result with KonfAI Scout, as a tracked job."""
+    spec = SCOUT_SERVICE.prepare_inspection(
+        task=task,
+        inputs=inputs,
+        name=name,
+        labels=labels,
+        evaluation=evaluation,
+        notes=notes,
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        effort=effort,
+        mode=mode,
+        max_tool_calls=max_tool_calls,
+        max_images=max_images,
+        max_seconds=max_seconds,
+        max_usd=max_usd,
+        allow_cloud_images=allow_cloud_images,
+        local_provider=local_provider,
+    )
+    payload = _launch_app_job(spec)
+    payload["next_actions"] = ["wait_for_job", "read_scout_report"]
+    return payload
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["read_scout_report"]))
+def read_scout_report(
+    name: Annotated[str, Field(description="The inspection's name (list_scout_reports lists them).")],
+) -> dict[str, Any]:
+    """Read a Scout report: verdict, observations, measurements, views; no image bytes."""
+    return SCOUT_SERVICE.read_report(name)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["list_scout_reports"]))
+def list_scout_reports() -> dict[str, Any]:
+    """List the session's Scout inspections."""
+    return {"reports": SCOUT_SERVICE.list_reports(), "next_actions": ["read_scout_report", "run_scout_inspection"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_datasets"]))
+def fidopt_list_datasets(
+    task: Annotated[
+        Literal["registration", "segmentation", "synthesis"] | None, Field(description="One task only.")
+    ] = None,
+) -> dict[str, Any]:
+    """List FidOpt's datasets through FidOpt's own code."""
+    return {"datasets": FIDOPT.list_datasets(task), "next_actions": ["fidopt_describe_dataset", "fidopt_table"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_describe_dataset"]))
+def fidopt_describe_dataset(
+    dataset: Annotated[str, Field(description="A FidOpt dataset name.")],
+) -> dict[str, Any]:
+    """One FidOpt dataset's descriptor."""
+    return {"dataset": FIDOPT.describe_dataset(dataset), "next_actions": ["fidopt_table", "fidopt_run"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_methods"]))
+def fidopt_list_methods() -> dict[str, Any]:
+    """List the methods FidOpt runs."""
+    return {"methods": FIDOPT.list_methods(), "next_actions": ["fidopt_table", "fidopt_run"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_table"]))
+def fidopt_table(
+    dataset: Annotated[str, Field(description="A FidOpt dataset name.")],
+    research: Annotated[
+        bool, Field(description="The research board (every licence) instead of the official one.")
+    ] = False,
+) -> dict[str, Any]:
+    """A dataset's board as FidOpt prints it."""
+    return {"table": FIDOPT.table(dataset, research), "next_actions": ["fidopt_run", "run_scout_inspection"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_run"]))
+def fidopt_run(
+    operation: Annotated[Literal["check", "run", "tune"], Field(description="The FidOpt operation.")],
+    method: Annotated[str, Field(description="methods/<name>, <name>@<variant>, or identity.")],
+    dataset: Annotated[
+        str | None, Field(description="The dataset (optional for check: the synthetic convention check).")
+    ] = None,
+    cases: Annotated[
+        list[str] | None, Field(description="Case names (run: --case each; check: the case after --on).")
+    ] = None,
+    scout: Annotated[
+        str | None, Field(description="PROVIDER or PROVIDER:MODEL: inspect the scored outputs with Scout.")
+    ] = None,
+    scout_allow_cloud: Annotated[bool, Field(description="Authorise Scout to send images to a cloud API.")] = False,
+    extra: Annotated[
+        list[str] | None, Field(description="Further fidopt flags (e.g. --family NAME, --try LABEL=SETTINGS).")
+    ] = None,
+) -> dict[str, Any]:
+    """Launch one allowed FidOpt operation as a tracked job."""
+    if operation != "check" and not dataset:
+        raise ValueError(f"fidopt {operation} needs a dataset.")
+    spec = FIDOPT.prepare_run(
+        operation,
+        method,
+        dataset or "",
+        cases,
+        scout,
+        scout_allow_cloud,
+        extra,
+    )
+    payload = _launch_app_job(spec)
+    payload["next_actions"] = ["wait_for_job", "read_job_log", "fidopt_table"]
+    return payload
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
 def fine_tune_app(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],
@@ -1729,7 +1890,12 @@ def package_app_from_session(
     onnx: Annotated[
         bool,
         Field(
-            description="Also export the newest packaged checkpoint as model.onnx inside the bundle (default False)."
+            description=(
+                "Also export every packaged checkpoint for the portable runtime inside the bundle (default False). "
+                "One checkpoint writes model.onnx + manifest.json; several (or test-time copies, or a Mask reading "
+                "a nested app) write one <stem>.onnx per checkpoint + program.json. The result's 'onnx' names "
+                "model.onnx or program.json."
+            )
         ),
     ] = False,
     onnx_patch_size: Annotated[

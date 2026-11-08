@@ -39,8 +39,10 @@ from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
     AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     _encode_transform_leaves,
+    _is_field_shape,
     affine_from_attributes,
     image_to_data,
     is_an_image,
@@ -50,11 +52,6 @@ from konfai.utils.dataset.h5 import _get_h5_file_lock, _h5_read_pool, _open_h5
 from konfai.utils.dataset.staging import is_staging_entry
 from konfai.utils.dataset.stream import DataStream
 from konfai.utils.errors import DatasetManagerError
-
-
-def _is_field_shape(shape: tuple[int, ...] | list[int]) -> bool:
-    """Whether ``shape`` is a displacement field's: channel-first, one component per spatial axis, in 2-D or 3-D."""
-    return len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
 
 
 def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attribute) -> tuple[Any, Any]:
@@ -313,7 +310,11 @@ class ItkTransformFile(AbstractFile):
         # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
-        if attributes is not None and AFFINE_ATTRIBUTE in attributes:
+        native = None
+        if attributes is not None and TRANSFORM_FILE_ATTRIBUTE in attributes:
+            native = Path(str(attributes[TRANSFORM_FILE_ATTRIBUTE]))
+            data = sitk.ReadTransform(str(native))  # the transform a field's header names, in place of the field
+        elif attributes is not None and AFFINE_ATTRIBUTE in attributes:
             data = affine_from_attributes(attributes)  # the map a field's header declares, in place of the field
         if sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, staging)
@@ -333,6 +334,8 @@ class ItkTransformFile(AbstractFile):
                 # One buffer, as in _ItkTransformDataStream.write_slice.
                 parameters[:] = np.ascontiguousarray(np.moveaxis(array, 0, -1), dtype=np.float64).ravel()
         os.replace(staging, final)
+        if native is not None:
+            native.unlink(missing_ok=True)
         try:  # one entry per name
             os.remove(os.path.join(self.filename, f"{name}.tfm"))
         except FileNotFoundError:

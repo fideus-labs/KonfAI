@@ -72,3 +72,20 @@ def add_device(parser: argparse.ArgumentParser, download: bool = True) -> None:
             action="store_true",
             help="Refresh required app files before running.",
         )
+
+
+def add_run_options(parser: argparse.ArgumentParser, output_format: bool = True) -> None:
+    """Add the run's own choices every app shares, each sugar over the ``--set`` it writes (``run_overrides``):
+    ``--output-format [OUTPUT=]FORMAT`` (repeatable, one output each) and ``--seed N``."""
+    if output_format:
+        parser.add_argument(
+            "--output-format",
+            "--output_format",
+            dest="output_format",
+            action="append",
+            default=None,
+            metavar="[OUTPUT=]FORMAT",
+            help="Write every output in FORMAT (mha, nii.gz, omezarr, ...), or OUTPUT=FORMAT for one output "
+            "(repeatable). Default: the app's own.",
+        )
+    parser.add_argument("--seed", type=int, default=None, help="The run's random seed. Default: the app's own.")

@@ -17,6 +17,7 @@
 
 """Overlap criteria over label maps."""
 
+import weakref
 from functools import partial, reduce
 from typing import Any
 
@@ -24,7 +25,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from konfai.metric.measure.base import Criterion, CriterionOutput, LabelledValues, MaskedLoss
+from konfai.metric.measure.base import (
+    Criterion,
+    CriterionOutput,
+    CriterionWithAttribute,
+    LabelledValues,
+    MaskedLoss,
+    _require_optional,
+)
 from konfai.utils.errors import MeasureError
 
 #: Per-label sums of one (output, reference) pair, what every Dice is computed from and the state a
@@ -334,7 +342,7 @@ class Dice(Criterion):
                     total[3] or present,
                 )
         labels = self._labels if self._labels is not None else sorted(label for label in sums if sums[label][3])
-        value, result = Dice._score(sums, labels)
+        value, result = self._score(sums, labels)
         return torch.tensor(value), result
 
 
@@ -387,3 +395,175 @@ class DiceSaveMap(Dice):
 
     def get_name(self) -> str:
         return "Dice"
+
+
+class _LabelRatio(Dice):
+    """A per-label score of a label map against the reference's from the sums Dice counts (intersection, predicted
+    and reference voxels), every label the reference holds but the background, NaN for one it lacks; the reported
+    value is their mean. The sums of disjoint patches add up, so it streams as Dice does."""
+
+    loss_capable = False  # a ratio of counts, no gradient
+
+    @staticmethod
+    def _ratio(intersection: float, predicted: float, reference: float) -> float:
+        raise NotImplementedError
+
+    @classmethod
+    def _score(cls, sums: LabelSums, labels: list[int]) -> tuple[float, dict[int, float]]:
+        result = {
+            label: (cls._ratio(*sums[label][:3]) if label in sums and sums[label][3] else np.nan) for label in labels
+        }
+        scored = [value for value in result.values() if not np.isnan(value)]
+        mean = float(np.mean(scored)) if scored else 0.0
+        return (1 - mean if cls.maximize else mean), result
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        return self.combine_metric([self.partial_metric(output, *targets)])
+
+
+class Jaccard(_LabelRatio):
+    """The Jaccard index (intersection over union) of each label: the overlap Dice measures, without its weight on
+    the intersection."""
+
+    @staticmethod
+    def _ratio(intersection: float, predicted: float, reference: float) -> float:
+        return (intersection + 1e-6) / (predicted + reference - intersection + 1e-6)
+
+
+class VolumeDifference(_LabelRatio):
+    """The relative volume difference of each label, ``|V_output - V_reference| / V_reference``: 0 when the two hold
+    as many voxels, whatever their place."""
+
+    maximize = False
+
+    @staticmethod
+    def _ratio(intersection: float, predicted: float, reference: float) -> float:
+        del intersection
+        return abs(predicted - reference) / reference
+
+
+#: The last pair's surface distances, so HD95, ASSD and SurfaceDice of one case share one computation.
+_LAST_SURFACES: tuple[Any, Any, tuple, Any] | None = None
+
+
+def _surface_distances(
+    output: torch.Tensor, target: torch.Tensor, spacing: list[float], labels: list[int] | None
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray] | None], float]:
+    """Per label the reference holds: the distances (in the spacing's unit) from each surface voxel of the output's
+    label to the reference's surface, and back; ``None`` for a label the output lacks. And the diagonal of the
+    grid, the distance a lacking label is scored at.
+
+    A surface is the label's contour voxels (face-connected), and a distance the one from a voxel centre to the
+    nearest contour voxel's (SimpleITK's Maurer map, in physical spacing). Each label is cropped to the bounding
+    box of the two maps' label and padded with one voxel of background: the grid's border is a surface too (as
+    MedPy and DeepMind's surface-distance count it), and every contour lies inside the crop, so the distances are
+    exact.
+    """
+    global _LAST_SURFACES
+    key = (tuple(labels) if labels is not None else None, tuple(spacing))
+    last = _LAST_SURFACES
+    if last is not None and last[0]() is output and last[1]() is target and last[2] == key:
+        return last[3]
+    sitk = _require_optional("SimpleITK", criterion="HD95, ASSD and SurfaceDice", extra="itk")
+    predicted = output[0, 0].detach().cpu().numpy()
+    reference = target[0, 0].detach().cpu().numpy()
+    if labels is None:
+        labels = [int(label) for label in np.unique(reference) if label != 0]
+    xyz_spacing = [float(value) for value in spacing][: predicted.ndim]
+
+    def contour(mask: np.ndarray) -> tuple[Any, np.ndarray]:
+        image = sitk.GetImageFromArray(mask.astype(np.uint8))
+        image.SetSpacing(xyz_spacing)
+        edge = sitk.BinaryContour(image, fullyConnected=False, backgroundValue=0, foregroundValue=1)
+        return edge, sitk.GetArrayFromImage(edge).astype(bool)
+
+    def distance_to(edge: Any) -> np.ndarray:
+        distances = sitk.SignedMaurerDistanceMap(
+            edge, insideIsPositive=False, squaredDistance=False, useImageSpacing=True
+        )
+        return np.abs(sitk.GetArrayFromImage(distances))
+
+    distances: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
+    for label in labels:
+        a, b = predicted == label, reference == label
+        if not b.any():
+            continue
+        if not a.any():
+            distances[label] = None
+            continue
+        union = np.argwhere(a | b)
+        box = tuple(slice(int(low), int(high) + 1) for low, high in zip(union.min(0), union.max(0), strict=True))
+        (edge_a, voxels_a), (edge_b, voxels_b) = contour(np.pad(a[box], 1)), contour(np.pad(b[box], 1))
+        distances[label] = (distance_to(edge_b)[voxels_a], distance_to(edge_a)[voxels_b])
+    diagonal = float(np.linalg.norm(np.array(predicted.shape[::-1]) * np.array(xyz_spacing)))
+    _LAST_SURFACES = (weakref.ref(output), weakref.ref(target), key, (distances, diagonal))
+    return distances, diagonal
+
+
+class _SurfaceDistance(CriterionWithAttribute):
+    """A per-label score of a label map against the reference's from their surfaces, in the reference's physical
+    spacing (both maps on one grid): every label the reference holds but the background, NaN for one it lacks;
+    the reported value is their mean. Read whole: a surface distance has no partial state."""
+
+    loss_capable = False  # distances read off SimpleITK's maps, no gradient
+
+    def __init__(self, labels: list[int] | None = None) -> None:
+        super().__init__()
+        self.labels = labels
+
+    def _of(self, distances: tuple[np.ndarray, np.ndarray] | None, diagonal: float) -> float:
+        raise NotImplementedError
+
+    def forward(  # type: ignore[override]
+        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Any]]
+    ) -> CriterionOutput:
+        if output.shape[0] != 1 or output.shape[1] != 1:
+            raise MeasureError(
+                f"{self.get_name()} reads one label map per case; got {list(output.shape[:2])} (batch, channels).",
+                "Evaluate one case at a time, on a label map (Argmax a probability map first).",
+            )
+        spacing = attributes[0][0].get_np_array("Spacing").tolist()
+        per_label, diagonal = _surface_distances(output, Dice.on_grid(output, targets[0]), spacing, self.labels)
+        result = {label: self._of(distances, diagonal) for label, distances in per_label.items()}
+        scored = list(result.values())
+        mean = float(np.mean(scored)) if scored else 0.0
+        return torch.tensor((1 - mean) if self.maximize else mean), result
+
+
+class HD95(_SurfaceDistance):
+    """The 95th percentile Hausdorff distance of each label, in mm: the larger of the two directed 95th percentiles
+    (output surface to reference surface, and back). A label the output lacks scores the grid's diagonal."""
+
+    def _of(self, distances: tuple[np.ndarray, np.ndarray] | None, diagonal: float) -> float:
+        if distances is None:
+            return diagonal
+        return float(max(np.percentile(distances[0], 95), np.percentile(distances[1], 95)))
+
+
+class ASSD(_SurfaceDistance):
+    """The average symmetric surface distance of each label, in mm: the mean of every distance from one surface to
+    the other, both ways. A label the output lacks scores the grid's diagonal."""
+
+    def _of(self, distances: tuple[np.ndarray, np.ndarray] | None, diagonal: float) -> float:
+        if distances is None:
+            return diagonal
+        return float((distances[0].sum() + distances[1].sum()) / (distances[0].size + distances[1].size))
+
+
+class SurfaceDice(_SurfaceDistance):
+    """The surface Dice (normalised surface distance) of each label at ``tolerance`` mm: the share of both surfaces
+    within ``tolerance`` of the other, which leaves an annotation's own uncertainty unscored. A label the output
+    lacks scores 0."""
+
+    maximize = True
+
+    def __init__(self, tolerance: float = 1.0, labels: list[int] | None = None) -> None:
+        super().__init__(labels)
+        self.tolerance = float(tolerance)
+
+    def _of(self, distances: tuple[np.ndarray, np.ndarray] | None, diagonal: float) -> float:
+        del diagonal
+        if distances is None:
+            return 0.0
+        within = (distances[0] <= self.tolerance).sum() + (distances[1] <= self.tolerance).sum()
+        return float(within / (distances[0].size + distances[1].size))

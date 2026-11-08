@@ -820,6 +820,9 @@ def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> No
         def get_mc_dropout(self) -> int:
             return 0
 
+        def get_uncertainties_inputs(self) -> dict:
+            return {}
+
         def get_patch_size(self) -> None:
             return None
 
@@ -828,6 +831,9 @@ def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> No
 
         def is_finetunable(self) -> bool:
             return True
+
+        def get_presets(self) -> dict:
+            return {}
 
         def get_terminology(self) -> None:
             return None

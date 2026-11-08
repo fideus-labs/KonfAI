@@ -72,6 +72,7 @@ from konfai.data.transform import (
     StandardDeviation,
     Sum,
     Transform,
+    TransformPoints,
     Variance,
     Write,
 )
@@ -602,6 +603,8 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Standardize": [StageCase(transform_module.Standardize(), atol=STAT_ATOL)],
         "StandardDeviation": [StageCase(StandardDeviation(), group="Ensemble")],
         "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
+        # Landmarks pushed through a stored transform, not a volume: test_registration_evaluation.py proves it.
+        "TransformPoints": [StageCase(TransformPoints({"transform": False}), sweep=False)],
         "Variance": [StageCase(Variance(), group="Ensemble")],
     }
 

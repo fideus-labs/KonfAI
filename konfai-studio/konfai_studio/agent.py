@@ -19,7 +19,7 @@ import shutil
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import Client
 
@@ -378,12 +378,14 @@ class AnthropicBackend:
             tool_uses: list[Any] = []
             blocks: list[dict[str, Any]] = []
             try:
+                # The history and the tools are kept as plain dicts (they are logged and replayed as JSON); the SDK
+                # types them as its own TypedDicts, which the dicts satisfy at runtime.
                 async with self._llm.messages.stream(
                     model=self._model,
                     max_tokens=MAX_TOKENS,
                     system=SYSTEM_PROMPT,
-                    tools=self._tools,
-                    messages=self._history,
+                    tools=cast(Any, self._tools),
+                    messages=cast(Any, self._history),
                 ) as stream:
                     async for text in stream.text_stream:
                         yield {"type": "text", "text": text}
@@ -432,11 +434,16 @@ class OpenAIBackend:
             content = ""
             calls: dict[int, dict[str, str]] = {}
             try:
-                stream = await self._llm.chat.completions.create(
-                    model=self._model,
-                    messages=self._history,
-                    tools=self._tools or None,
-                    stream=True,
+                # stream=True answers an async stream of chunks; the SDK's return type is the union with the
+                # non-streamed completion, which this call never gets.
+                stream = cast(
+                    AsyncIterator[Any],
+                    await self._llm.chat.completions.create(
+                        model=self._model,
+                        messages=cast(Any, self._history),
+                        tools=cast(Any, self._tools or None),
+                        stream=True,
+                    ),
                 )
                 async for chunk in stream:
                     if not chunk.choices:

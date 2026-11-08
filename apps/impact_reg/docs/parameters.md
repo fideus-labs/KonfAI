@@ -5,8 +5,8 @@ one parameter of it for one run, and `show NAME` lists every parameter the prese
 choices, and what it does:
 
 ```bash
-impact-reg-konfai show FireANTs_SyN
-impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz --gpu 0 \
+impact-reg-konfai show FireANTs#syn
+impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz --gpu 0 \
     --set deformable_iterations=[400,200,100] --set smooth_warp_sigma=1.0
 ```
 
@@ -29,7 +29,7 @@ is refused with the closest matches. A nested parameter takes its full path from
 
 The names below are those of the shipped presets; `show NAME` gives each preset's full list.
 
-| Concept | elastix (`Generic_*`, `Elastix_IMPACT_*`) | FireANTs (`FireANTs_*`) | ConvexAdam (`ConvexAdam_*`) |
+| Concept | elastix (`Elastix#*`) | FireANTs (`FireANTs#*`) | ConvexAdam (`ConvexAdam#*`) |
 |---|---|---|---|
 | Transform model | `parameter_maps` (rigid, B-spline) | `linear_method` (rigid_affine, rigid, none), `deformable_method` (syn, greedy, none) | `stages` (coarse, fine), `linear` |
 | Optimisation | `max_iterations` | `affine_iterations`, `deformable_iterations`, `affine_lr`, `deformable_lr` | `iterations`, `learning_rate` |
@@ -38,7 +38,7 @@ The names below are those of the shipped presets; `show NAME` gives each preset'
 | Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk`, `feature_overlap` (Static extraction) | the IMPACT loss (below) |
 | Regularisation | `final_grid_spacing` | `smooth_warp_sigma`, `smooth_grad_sigma` | `regularization_weight`, `control_grid_smoothing` |
 | Initialisation | the rigid map, `moments_init` (cof, com) | `moments_init` (cof, com, none) | `linear`, `linear_iterations`, `linear_sampling` |
-| Transform written | `transform_type` (field; affine, for linear maps alone) | `transform_type` (field; affine, with `deformable_method: none`) | a field |
+| Transform written | `transform_type` (native: the affine or rigid then B-spline the maps found; field) | `transform_type` (native: an affine with `deformable_method: none`, else a field; field) | a field |
 | Sampling | `spatial_samples` | | |
 | Random draws | `seed` | `seed` | `seed` |
 | Escape hatch | `parameter_overrides` (any elastix parameter) | | |

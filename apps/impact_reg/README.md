@@ -58,18 +58,18 @@ impact-reg-konfai list
 
 | Preset | Pair | Engine | What it does |
 |---|---|---|---|
-| `Generic_Rigid` | any | elastix | Rigid alignment, mutual information, multi-resolution |
-| `Generic_Rigid_BSpline` | any | elastix | Rigid, then B-spline deformable refinement |
-| `Elastix_IMPACT_Static` | MRI / CT | elastix + IMPACT | Rigid, then a B-spline driven by TotalSegmentator (decoder, then segmentation head) and MIND, features extracted once |
-| `Elastix_IMPACT_Jacobian` | CT / CBCT | elastix + IMPACT | Rigid, then a B-spline driven by early TotalSegmentator layers, differentiated through the network |
-| `ConvexAdam_Coarse` | any | itk-impact | Linear pre-alignment, then the global coarse coupled-convex initialisation on MIND features |
-| `ConvexAdam_Composite` | any | itk-impact | The same coarse pass followed by the Adam instance-optimisation refinement |
-| `ConvexAdam_IMPACT_CBCT` | CT / CBCT | itk-impact | The same pipeline on the second layer of TotalSegmentator MR |
-| `ConvexAdam_IMPACT_MRCT` | MRI / CT | itk-impact | The same pipeline on the last decoder layer of TotalSegmentator MR and MIND |
-| `FireANTs_SyN` | any | FireANTs | Rigid, affine, then SyN diffeomorphic registration on the GPU |
-| `FireANTs_IMPACT` | CT / CBCT | FireANTs + IMPACT | Rigid, affine, then SyN driven by IMPACT on early TotalSegmentator layers |
-| `FireANTs_Anatomix` | any | FireANTs + IMPACT | anatomix and MIND features extracted once and registered as feature volumes |
-| `FireANTs_IMPACT_MRCT` | MRI / CT | FireANTs + IMPACT | Rigid, affine, then SyN on the last decoder layer of TotalSegmentator MR and MIND, extracted once |
+| `Elastix#rigid` | any | elastix | Rigid alignment, mutual information, multi-resolution |
+| `Elastix#rigid_bspline` | any | elastix | Rigid, then B-spline deformable refinement |
+| `Elastix#impact_static` | MRI / CT | elastix + IMPACT | Rigid, then a B-spline driven by TotalSegmentator (decoder, then segmentation head) and MIND, features extracted once |
+| `Elastix#impact_jacobian` | CT / CBCT | elastix + IMPACT | Rigid, then a B-spline driven by early TotalSegmentator layers, differentiated through the network |
+| `ConvexAdam#coarse` | any | itk-impact | Linear pre-alignment, then the global coarse coupled-convex initialisation on MIND features |
+| `ConvexAdam#composite` | any | itk-impact | The same coarse pass followed by the Adam instance-optimisation refinement |
+| `ConvexAdam#impact_cbct` | CT / CBCT | itk-impact | The same pipeline on the second layer of TotalSegmentator MR |
+| `ConvexAdam#impact_mrct` | MRI / CT | itk-impact | The same pipeline on the last decoder layer of TotalSegmentator MR and MIND |
+| `FireANTs#syn` | any | FireANTs | Rigid, affine, then SyN diffeomorphic registration on the GPU |
+| `FireANTs#impact` | CT / CBCT | FireANTs + IMPACT | Rigid, affine, then SyN driven by IMPACT on early TotalSegmentator layers |
+| `FireANTs#anatomix` | any | FireANTs + IMPACT | anatomix and MIND features extracted once and registered as feature volumes |
+| `FireANTs#impact_mrct` | MRI / CT | FireANTs + IMPACT | Rigid, affine, then SyN on the last decoder layer of TotalSegmentator MR and MIND, extracted once |
 
 Every deformable preset aligns the pair rigidly or affinely first, so a pair that starts centimetres apart needs no
 separate rigid run. `impact-reg-konfai show NAME` says what a preset runs, needs and tunes, and
@@ -113,26 +113,28 @@ The CLI is organised into sub-commands, matching the registration workflow:
 | Sub-command | Purpose |
 |---|---|
 | `list`, `show` | List the presets; say what one runs, needs, costs and tunes (`show NAME`). |
-| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform, the moved image derived from it, a record of the run (`register.json`) and, with `--keep-fields`, each preset's own field under `Ensemble/`. |
+| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform, the moved image derived from it, a record of the run (`register.json`) and, with `--uncertainty`, the ensemble's stack (every preset's field, `InferenceStack.mha`). |
 | `eval` | Evaluate a registration on any subset of modalities: image (MAE), segmentation (Dice), landmarks (TRE), and for a displacement field its Jacobian (the fraction of folded voxels). |
 | `apply` | Warp more moving-side images through a transform: another sequence, or a label map (`--labels`, nearest neighbour). |
-| `uncertainty` | Voxel-wise spread map from an ensemble of displacement fields. |
+| `uncertainty` | How an ensemble's registrations disagree, from its stack: the spread of the displacement vectors (a map, its mean and 95th percentile); with landmarks, their spread through every member and its calibration against the TRE; with a moving segmentation, how its propagations disagree. |
 
 Register a moving image onto a fixed image (ensemble several presets by listing them):
 
 ```bash
 impact-reg-konfai register <PRESET> [<PRESET_2> ...] -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0
 # an MRI onto a CT, with the CT's body mask:
-impact-reg-konfai register Elastix_IMPACT_Static -f ct.nii.gz -m mr.nii.gz --fixed-mask ct_body.nii.gz -o ./Output --gpu 0
+impact-reg-konfai register Elastix#impact_static -f ct.nii.gz -m mr.nii.gz --fixed-mask ct_body.nii.gz -o ./Output --gpu 0
 ```
 
 Each case gets its transform, `Output/P000/Transform.h5` (an ITK transform mapping a fixed point to its moving partner,
-in mm: a displacement field on the fixed grid, or the affine a linear preset declares with `transform_type: affine`,
-as `Generic_Rigid` does), and the moving image resampled through it, `Output/P000/Moved.<ext>`. OME-Zarr stores go in
+in mm) in the form the preset found: an affine for linear maps (`Elastix#rigid`), elastix's rigid then B-spline as
+such (kilobytes), a displacement field on the fixed grid for what is dense (ConvexAdam, FireANTs SyN). An ensemble, a
+TTA or a tiled run writes the field whatever the form, and `--set transform_type=field` forces it. The moving image
+resampled through it is `Output/P000/Moved.<ext>`. OME-Zarr stores go in
 and come out the same way:
 
 ```bash
-impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0
+impact-reg-konfai register FireANTs#syn -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0
 ```
 
 The transform too: the preset's output dataset says where it goes, and `Transform:omezarr` writes
@@ -141,7 +143,7 @@ places a field by a scale and a translation: on an oblique grid, the store has n
 stays in a sidecar only KonfAI reads.
 
 ```bash
-impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0 \
+impact-reg-konfai register FireANTs#syn -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0 \
   --set Predictor.outputs_dataset.DisplacementField.OutputDataset.dataset_filename=Transform:omezarr
 ```
 
@@ -163,11 +165,11 @@ Warp a label map of the moving image onto the fixed one:
 impact-reg-konfai apply --transform ./Output/P000/Transform.h5 -f fixed.nii.gz -i moving_labels.nii.gz --labels -o ./Output/P000
 ```
 
-Estimate uncertainty from the per-preset displacement fields written by `register`:
+Measure how an ensemble's registrations disagree, from the stack `register --uncertainty` keeps:
 
 ```bash
-impact-reg-konfai register <PRESET_1> <PRESET_2> -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0 --keep-fields
-impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
+impact-reg-konfai register <PRESET_1> <PRESET_2> -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0 --uncertainty
+impact-reg-konfai uncertainty -i ./Output/P000/InferenceStack.mha --gt-fixed-fid fixed.fcsv -o ./Uncertainty
 ```
 
 ### `register` arguments
@@ -180,7 +182,7 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
 | `--fixed-mask`, `--moving-mask` | Optional masks restricting the metric region | *unset* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--tta` | Test-time-augmentation draws per preset | `0` |
-| `--keep-fields` | Keep each preset's field under `Ensemble/` for a later `uncertainty` run | `False` |
+| `--uncertainty` | Keep the ensemble's stack, every preset's field, as `<case>/InferenceStack.mha` (`.ome.zarr` beside a store) for `uncertainty` | `False` |
 | `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
 | `--max-voxels` | Register whole a pair of at most this many voxels; a larger one runs in two passes (see *Large images*) | what the device holds at the preset's declared cost |
 | `--set [PRESET:]NAME=VALUE` | Tune a preset parameter (repeatable); `PRESET:` limits it to one preset of an ensemble; checked before anything runs | *unset* |
@@ -203,8 +205,11 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--dvf` | Two or more ensemble displacement fields (e.g. the per-preset fields from `register`) | *required* |
-| `-o`, `--output` | Output directory | `./Output/` |
+| `-i`, `--stack` | The ensemble's stack of each case, from `register --uncertainty` | *required* |
+| `--gt-fixed-fid` | Fixed landmarks: their spread through every member (mm per landmark) | *unset* |
+| `--gt-moving-fid` | Moving landmarks, with `--gt-fixed-fid`: whether the spread predicts the TRE (Spearman) | *unset* |
+| `--gt-moving-seg` | Moving segmentation: how its propagations disagree, voxel by voxel | *unset* |
+| `-o`, `--output` | Output directory: `Uncertainty_summary.json` holds every measure, per case and over the cohort | `./Output/` |
 
 See the full help of any sub-command with:
 
@@ -240,7 +245,7 @@ voxels. A pair that fits is registered in one piece, at native resolution. A lar
    Presets without a deformable stage worth refining locally stop after the global pass.
 
 ```text
-[ImpactReg] FireANTs_SyN: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
+[ImpactReg] FireANTs#syn: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
 on the whole pair resampled to fit, then its deformable stage on native tiles of at most 17,705,407 voxels.
 ```
 
@@ -261,18 +266,18 @@ registers whole.
 
 | Preset | **S** · 160 µm<br>128 × 332 × 443 | **M** · 80 µm<br>257 × 665 × 887 | **L** · 40 µm<br>514 × 1331 × 1775 |
 |---|---|---|---|
-| `Generic_Rigid` | 6 s | 24 s | 2 min 18 s |
-| `Generic_Rigid_BSpline` | 8 s | 33 s | 7 min 15 s · 10 tiles |
-| `ConvexAdam_Coarse` | 38 s | 1 min 18 s | 2 min 37 s |
-| `ConvexAdam_Composite` | 42 s | 2 min 30 s · 3 tiles | 9 min 40 s · 30 tiles |
-| `FireANTs_SyN` | 1 min 6 s | 5 min 47 s · 5 tiles | 48 min 7 s · 49 tiles |
-| `FireANTs_IMPACT` | 3 min 10 s | 27 min 51 s · 12 tiles | |
-| `FireANTs_Anatomix` | 1 min 54 s · 2 tiles | 12 min 40 s · 18 tiles | |
+| `Elastix#rigid` | 6 s | 24 s | 2 min 18 s |
+| `Elastix#rigid_bspline` | 8 s | 33 s | 7 min 15 s · 10 tiles |
+| `ConvexAdam#coarse` | 38 s | 1 min 18 s | 2 min 37 s |
+| `ConvexAdam#composite` | 42 s | 2 min 30 s · 3 tiles | 9 min 40 s · 30 tiles |
+| `FireANTs#syn` | 1 min 6 s | 5 min 47 s · 5 tiles | 48 min 7 s · 49 tiles |
+| `FireANTs#impact` | 3 min 10 s | 27 min 51 s · 12 tiles | |
+| `FireANTs#anatomix` | 1 min 54 s · 2 tiles | 12 min 40 s · 18 tiles | |
 
 Registration takes the correlation between the two brains, inside the fixed brain, from 0.27 to 0.65–0.70 with
-`ConvexAdam_Composite` and the FireANTs presets, and the Dice of the two brains from 0.71 to 0.94–0.95, at every size;
-`Generic_Rigid` alone reaches 0.52–0.54 (Dice 0.89), `Generic_Rigid_BSpline` 0.56–0.58 (0.91–0.92). At 40 µm,
-`FireANTs_IMPACT` and `FireANTs_Anatomix` would take about a hundred and a hundred and fifty tiles: at the time a tile
+`ConvexAdam#composite` and the FireANTs presets, and the Dice of the two brains from 0.71 to 0.94–0.95, at every size;
+`Elastix#rigid` alone reaches 0.52–0.54 (Dice 0.89), `Elastix#rigid_bspline` 0.56–0.58 (0.91–0.92). At 40 µm,
+`FireANTs#impact` and `FireANTs#anatomix` would take about a hundred and a hundred and fifty tiles: at the time a tile
 takes them at 80 µm, some four and two hours, not run here. The process tree peaks under 17 GB of RAM at 80 µm and
 between 25 and 39 GB at 40 µm, where KonfAI streams what it resamples and composes within the memory it finds;
 the intermediates of a tiled run at 40 µm take up to 78 GB of disk, which `register` checks before it starts.

@@ -1404,6 +1404,21 @@ def test_set_adds_a_field_the_model_declares_where_the_config_leaves_it_out(tmp_
         repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.nrom=l2"])
 
 
+def test_a_nested_model_parameter_is_dotted_from_the_model(tmp_path: Path) -> None:
+    # Predictor.Model.RegistrationNet.models.0.norm=l2 was the only spelling: a dotted name now starts at the model,
+    # checked as the full path is, and a path from the config root keeps working.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(str(prediction), ["models.0.norm=l2", "optimizer.lr=0.01"])
+    net = _net(prediction)
+    assert net["models"]["0"]["norm"] == "l2" and net["optimizer"]["lr"] == 0.01
+    with pytest.raises(AppRepositoryError, match="Did you mean 'norm'"):
+        repo._apply_config_overrides(str(prediction), ["models.0.nrom=l2"])
+    with pytest.raises(AppRepositoryError, match="outside its range"):
+        repo._apply_config_overrides(str(prediction), ["models.0.pca=-5"])
+    repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.norm=none"])
+    assert _net(prediction)["models"]["0"]["norm"] == "none"
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -1578,6 +1593,26 @@ def _remote_repo_from_payload(monkeypatch: pytest.MonkeyPatch, payload: dict):
             return {}
 
     return app_repository_module.AppRepositoryInfoFromRemoteServer(_Server(), "demo/app")
+
+
+def test_remote_repository_reads_the_uncertainty_tabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uncertainty tabs come as the evaluation tabs do: by tab and config, the references each takes beside the
+    stack. A server that predates them sends none, which reads as no tab."""
+    tabs = {
+        "Map": {"Uncertainty.yml": {}},
+        "Landmarks": {
+            "Uncertainty_with_fid.yml": {
+                "FixedFid": {"display_name": "Fixed landmarks", "volume_type": "FIDUCIALS", "required": True}
+            }
+        },
+    }
+    repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload(inputs_uncertainties=tabs))
+    got = {(key.display_name, key.evaluation_file): entries for key, entries in repo.get_uncertainties_inputs().items()}
+    assert got[("Map", "Uncertainty.yml")] == {}
+    fid = got[("Landmarks", "Uncertainty_with_fid.yml")]["FixedFid"]
+    assert fid.volume_type == app_repository_module.VolumeType.FIDUCIALS and fid.required
+
+    assert _remote_repo_from_payload(monkeypatch, _remote_info_payload()).get_uncertainties_inputs() == {}
 
 
 def test_remote_repository_relays_the_server_reported_finetunable(monkeypatch: pytest.MonkeyPatch) -> None:

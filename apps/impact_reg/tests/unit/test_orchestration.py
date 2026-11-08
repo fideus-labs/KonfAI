@@ -32,6 +32,8 @@ import SimpleITK as sitk
 from impact_reg_konfai import impact_reg as reg
 from konfai.utils.errors import KonfAIError
 from konfai.utils.ITK import field_reach, read_displacement_field
+from konfai_apps.ensemble import combine
+from konfai_apps.errors import AppRepositoryError
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +41,7 @@ def _local_presets(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
     """A local preset repository holding the names these tests register with: register checks the names it is
     given before it runs anything, and nothing here may reach Hugging Face."""
     repo = tmp_path_factory.mktemp("presets")
-    for name in ("FireANTs_SyN", "A", "B", "P"):
+    for name in ("FireANTs", "A", "B", "P"):
         (repo / name).mkdir()
         (repo / name / "app.json").write_text(json.dumps({"task": "registration"}), encoding="utf-8")
     monkeypatch.setattr(reg, "IMPACT_REG_KONFAI_REPO", str(repo))
@@ -127,19 +129,20 @@ def _write_dvf(path: Path, vector, reference: sitk.Image) -> Path:
 
 
 def test_ensemble_mean_is_the_voxelwise_mean_with_reference_geometry(tmp_path: Path) -> None:
-    """Reduce(Mean) over members-as-cases: the averaged DVF lands at <output>/<case>/DVF, on the
-    members' shared grid, which ``grid: strict`` verified rather than assumed."""
+    """konfai-apps' combine, as register calls it: the averaged DVF lands at <output>/<case>/DVF, on the members'
+    shared grid."""
     reference = sitk.GetImageFromArray(np.zeros((6, 6, 6), dtype=np.float32))
     reference.SetSpacing((1.5, 1.5, 1.5))
     reference.SetOrigin((3.0, -2.0, 1.0))
+    for member in ("a", "b"):  # as a run leaves them: <run>/<case>/<group>
+        (tmp_path / member / "P000").mkdir(parents=True)
     paths = [
-        _write_dvf(tmp_path / "a.mha", (1.0, 0.0, 0.0), reference),
-        _write_dvf(tmp_path / "b.mha", (3.0, 2.0, -4.0), reference),
+        _write_dvf(tmp_path / "a" / "P000" / "DVF.mha", (1.0, 0.0, 0.0), reference),
+        _write_dvf(tmp_path / "b" / "P000" / "DVF.mha", (3.0, 2.0, -4.0), reference),
     ]
-    output, work = tmp_path / "out", tmp_path / "work"
-    work.mkdir()
+    output = tmp_path / "out"
 
-    reg.ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], paths, output, work, [], 1, True)
+    combine(paths, "Mean", output / "P000" / "DVF.mha", "mha")
 
     avg = sitk.ReadImage(str(output / "P000" / "DVF.mha"))
     field = sitk.GetArrayFromImage(avg)
@@ -165,6 +168,45 @@ def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: 
     app._infer_preset = fake  # type: ignore[method-assign]
 
 
+def test_a_tta_run_hands_its_copies_to_the_stack(tmp_path: Path) -> None:
+    """Under --uncertainty a preset run with TTA is asked for its copies' stack (-uncertainty), and every copy is a
+    member: one preset's stack holds its two copies, an ensemble's its copies and the other preset's field."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.ReadImage(str(moving))
+    asked = {}
+
+    def fake(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
+        asked[preset] = kwargs.get("uncertainty")
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        if preset == "A":  # two TTA copies, (0, 0, 0) and (2, 0, 0), and their mean
+            _write_dvf(out / "DVF.mha", (1.0, 0.0, 0.0), reference)
+            copies = np.zeros((*reference.GetSize()[::-1], 6), dtype=np.float32)
+            copies[..., 3] = 2.0
+            stack = sitk.GetImageFromArray(copies, isVector=True)
+            stack.CopyInformation(reference)
+            stack.SetMetaData("konfai_members", "2")
+            stack.SetMetaData("konfai_displacement_field", "true")
+            sitk.WriteImage(stack, str(out / "InferenceStack.mha"))
+        else:
+            _write_dvf(out / "DVF.mha", (4.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = fake  # type: ignore[method-assign]
+    for presets, members, mean in ((["A"], 2, 1.0), (["A", "B"], 3, 2.0)):
+        out = tmp_path / f"Output{len(presets)}"
+        app.register(presets, [fixed], [moving], output=out, quiet=True, tta=1, uncertainty=True, fields_only=True)
+        assert asked["A"] is True
+        stack = sitk.ReadImage(str(out / "P000" / "InferenceStack.mha"))
+        assert stack.GetMetaData("konfai_members") == str(members)
+        field = sitk.GetArrayFromImage(sitk.ReadImage(str(out / "P000" / "DVF.mha")))
+        np.testing.assert_allclose(field[0, 0, 0], (mean, 0.0, 0.0), atol=1e-6)
+
+
 def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path: Path) -> None:
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
@@ -172,9 +214,9 @@ def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path:
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
 
     app = reg.ImpactRegKonfAIApp()
-    _stub_infer(app, moving, {"FireANTs_SyN": (2.0, 0.0, 0.0)})
+    _stub_infer(app, moving, {"FireANTs": (2.0, 0.0, 0.0)})
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     case = out / "P000"
     assert (case / "Moved.mha").is_file() and (case / "DVF.mha").is_file()
@@ -183,6 +225,25 @@ def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path:
     # single preset: the DVF is the model's own field, reused verbatim (no re-averaging)
     field = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "DVF.mha")))
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 0.0, 0.0), atol=1e-6)
+
+
+def test_output_format_sets_the_moved_image_s_form_and_leaves_the_engine_its_own(tmp_path: Path) -> None:
+    """The moved image is derived here, so --output-format [Moved=]FORMAT is this orchestrator's to honour: the engine
+    never sees Moved= (it has no such output) and keeps the specs naming its own outputs."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"FireANTs": (2.0, 0.0, 0.0)})
+    out = tmp_path / "Output"
+    app.register(["FireANTs"], [fixed], [moving], output=out, output_format=["DVF=nii.gz", "Moved=nii.gz"])
+
+    assert (out / "P000" / "Moved.nii.gz").is_file() and not (out / "P000" / "Moved.mha").exists()
+    assert app._run_args == ["--output-format", "DVF=nii.gz"]
+    with pytest.raises(KonfAIError, match="not a format KonfAI writes"):
+        app.register(["FireANTs"], [fixed], [moving], output=tmp_path / "Other", output_format=["Moved=bogus"])
 
 
 def test_register_multi_preset_averages_and_warps_once(tmp_path: Path) -> None:
@@ -194,15 +255,20 @@ def test_register_multi_preset_averages_and_warps_once(tmp_path: Path) -> None:
     app = reg.ImpactRegKonfAIApp()
     _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
     out = tmp_path / "Output"
-    app.register(["A", "B"], [fixed], [moving], output=out, keep_dvf=True)
+    app.register(["A", "B"], [fixed], [moving], output=out, uncertainty=True)
 
     case = out / "P000"
     # ensemble DVF is the mean of the two constant fields
     field = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "DVF.mha")))
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 0.0, 0.0), atol=1e-6)
-    # keep_dvf persists each preset's field for a later uncertainty pass
-    assert (case / "Ensemble" / "A.mha").is_file() and (case / "Ensemble" / "B.mha").is_file()
-    assert (case / "Moved.mha").is_file()
+    # with uncertainty the members stand in the ensemble's stack, two of three components, for a later uncertainty pass
+    from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE
+    from konfai.utils.dataset import Dataset
+
+    stack, header = Dataset(str(out), "mha").read_data("InferenceStack", "P000")
+    assert stack.shape[0] == 6 and int(float(header[MEMBERS_ATTRIBUTE])) == 2
+    np.testing.assert_allclose(stack[[0, 3], 0, 0, 0], (1.0, 3.0), atol=1e-6)
+    assert (case / "Moved.mha").is_file() and not (case / "Ensemble").exists()
 
 
 def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Path) -> None:
@@ -228,7 +294,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     case = out / "P000"
     assert (case / "Moved.mha").is_file(), "the orchestrator did not derive the moved image"
@@ -251,9 +317,9 @@ def test_register_fields_only_writes_nothing_derived(tmp_path: Path) -> None:
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
 
     app = reg.ImpactRegKonfAIApp()
-    _stub_infer(app, moving, {"FireANTs_SyN": (2.0, 0.0, 0.0)})
+    _stub_infer(app, moving, {"FireANTs": (2.0, 0.0, 0.0)})
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out, fields_only=True)
+    app.register(["FireANTs"], [fixed], [moving], output=out, fields_only=True)
 
     case = out / "P000"
     assert (case / "DVF.mha").is_file()
@@ -283,7 +349,7 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     # The moved image takes the MOVING's form (a store in, a store out), while the field the
     # preset wrote keeps its own. moved(p) = moving(p + d), d = +2 along x on a unit grid:
@@ -327,7 +393,7 @@ def test_a_store_moving_named_without_a_suffix_keeps_its_moved_image(tmp_path: P
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
     assert (out / "P000" / "Moved.ome.zarr").is_dir()
 
 
@@ -350,7 +416,7 @@ def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
 
     app._infer_preset = named_transform  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     case = out / "P000"
     assert (case / "Transform.mha").is_file() and (case / "Moved.mha").is_file()
@@ -408,7 +474,7 @@ def test_register_reads_a_dicom_series_as_the_moving(tmp_path: Path) -> None:
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [series], output=out)
+    app.register(["FireANTs"], [fixed], [series], output=out)
 
     case = out / "P000"
     assert (case / "DVF.mha").is_file()
@@ -434,7 +500,7 @@ def test_register_reads_a_moving_whose_stem_carries_a_dot(tmp_path: Path) -> Non
 
     app._infer_preset = field_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     case = out / "P000"
     assert (case / "DVF.mha").is_file()
@@ -480,7 +546,7 @@ def test_register_refuses_an_input_in_a_case_directory_it_writes(tmp_path: Path)
     app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
 
     with pytest.raises(KonfAIError, match="another -o"):
-        app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+        app.register(["FireANTs"], [fixed], [moving], output=out)
     assert moving.is_file()
 
 
@@ -497,7 +563,7 @@ def test_register_checks_its_presets_and_inputs_before_any_preset_runs(tmp_path:
     app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
     fixed, moving = [images["fixed"]], [images["moving"]]
 
-    for presets, pattern in ((["FireANTs_SyM"], "Did you mean 'FireANTs_SyN'"), (["A", "B", "A"], "listed twice")):
+    for presets, pattern in ((["FireANT"], "Did you mean 'FireANTs'"), (["A", "B", "A"], "listed twice")):
         with pytest.raises(KonfAIError, match=pattern):
             app.register(presets, fixed, moving, output=tmp_path / "Output")
     with pytest.raises(KonfAIError, match="Moving input expands to 1 volume"):
@@ -609,7 +675,7 @@ def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:
 
     app._infer_preset = named_moved  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="Moved"):
-        app.register(["FireANTs_SyN"], [fixed], [moving], output=tmp_path / "Output")
+        app.register(["FireANTs"], [fixed], [moving], output=tmp_path / "Output")
 
 
 def test_find_output_group_discovers_the_one_group(tmp_path: Path) -> None:
@@ -850,6 +916,78 @@ def test_set_takes_a_model_argument_the_preset_leaves_at_its_default() -> None:
     }
     with pytest.raises(KonfAIError, match="Did you mean 'moments_init'"):
         reg._preset_overrides(["A"], ["moment_init=com"])
+
+
+def test_an_app_preset_s_set_goes_first_and_splits_between_the_passes_as_any_set_does() -> None:
+    """APP#PRESET: the preset's --set lead its share, kept from the tiles where the tile config differs, so the
+    app runs bare and nothing applies them twice; two presets of one engine ensemble, each scoped by its reference."""
+    config = _CONFIG.format(own="deformable_iterations: [200, 100, 50]")
+    _tiled_preset("A", config, _deformable_alone(config))
+    manifest_file = Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "app.json"
+    manifest = json.loads(manifest_file.read_text())
+    manifest["presets"] = {
+        "fast": {"description": "", "set": ["deformable_iterations=[10, 10, 10]"]},
+        "affine": {"description": "", "set": ["linear_method=rigid_affine"]},
+    }
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+
+    shares = reg._preset_overrides(["A#fast", "A#affine"], ["A#fast:seed=3"])
+    assert shares["A#fast"] == {
+        "global": ["deformable_iterations=[10, 10, 10]", "seed=3"],
+        "tile": ["deformable_iterations=[10, 10, 10]", "seed=3"],
+    }
+    assert shares["A#affine"] == {"global": ["linear_method=rigid_affine"], "tile": []}  # the tiles stay deformable
+    with pytest.raises(KonfAIError, match="Did you mean 'fast'"):
+        reg._preset_overrides(["A#fats"], [])
+
+    # a preset that never runs in tiles: its app's tile pass is not its, so a pair too large is resampled instead
+    manifest["presets"]["whole"] = {"description": "", "set": [], "tiles": False}
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    assert reg._manifest("A#whole")["tiling"] == {"global": "Prediction.yml"}
+    assert reg._manifest("A#fast")["tiling"] == _TILING
+    assert reg._preset_overrides(["A#whole"], ["seed=3"]) == {"A#whole": {"global": ["seed=3"], "tile": []}}
+
+
+def test_a_hugging_face_app_s_preset_may_be_the_user_s_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preset saved with ``konfai-apps preset save`` lives in the user's presets file, not the app's ``app.json``:
+    konfai-apps runs it, so impact-reg splits its --set and keeps its tiling choice alike."""
+    local = Path(reg.IMPACT_REG_KONFAI_REPO)
+    _tiled_preset("A", _CONFIG.format(own=""), _CONFIG.format(own=""))
+    monkeypatch.setattr(reg, "IMPACT_REG_KONFAI_REPO", "org/engines@main")
+    monkeypatch.setattr(reg, "app_file", lambda repo, app, filename: local / app / filename)
+    monkeypatch.setenv("KONFAI_PRESETS_DIR", str(tmp_path))
+    (tmp_path / "org" / "engines").mkdir(parents=True)
+    (tmp_path / "org" / "engines" / "A.json").write_text(
+        json.dumps({"mine": {"description": "", "set": ["seed=7"], "tiles": False}}), encoding="utf-8"
+    )
+
+    assert reg._app_preset_sets("A#mine") == ["seed=7"]
+    assert reg._manifest("A#mine")["tiling"] == {"global": "Prediction.yml"}
+
+    # one the app publishes too is refused, as konfai-apps refuses it: the app runs bare, its --set from here
+    manifest = json.loads((local / "A" / "app.json").read_text())
+    manifest["presets"] = {"mine": {"description": "", "set": ["seed=1"]}}
+    (local / "A" / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(AppRepositoryError, match="publishes too"):
+        reg._app_preset_sets("A#mine")
+
+
+def test_an_app_preset_runs_its_app_bare_with_the_run_s_own_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_preset_output
+) -> None:
+    captured: dict = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(command=list(command))
+        write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
+
+    monkeypatch.setattr(reg.subprocess, "run", fake_run)
+    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
+    app._run_args = ["--output-format", "omezarr", "--seed", "7"]
+    app._infer_preset("A#fast", *arguments, tmp_path, [], None, True, config_overrides=["seed=1"])
+    command = captured["command"]
+    assert command[4] == reg.app_id(reg.IMPACT_REG_KONFAI_REPO, "A")
+    assert command[command.index("--output-format") + 1] == "omezarr" and command[command.index("--seed") + 1] == "7"
 
 
 def test_the_tiles_keep_the_stages_their_config_sets_unless_a_scope_names_them() -> None:
@@ -1384,7 +1522,7 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
 
 
 def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
-    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    """A linear transform as a linear preset writes it (its native form): an ITK AffineTransform file, or an
     RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
     affine = sitk.AffineTransform(3)
     affine.SetTranslation(translation)
@@ -1416,7 +1554,7 @@ def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name
 
     app._infer_preset = affine_only  # type: ignore[method-assign]
     out = tmp_path / "Output"
-    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    app.register(["FireANTs"], [fixed], [moving], output=out)
 
     case = out / "P000"
     assert (case / name).exists() and not reg._is_field(case / name)
@@ -1427,12 +1565,12 @@ def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name
     assert record["cases"]["P000"]["transform"].replace("\\", "/") == f"P000/{name}"  # Windows writes backslashes
 
 
-def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
-    """An ensemble and a test-time augmentation average fields: a preset declaring an affine runs alone, or is set back
-    to a field for the run."""
+def test_an_averaged_affine_preset_writes_its_field(tmp_path: Path) -> None:
+    """An ensemble and a test-time augmentation average fields: a preset declaring an affine (or elastix's native
+    B-spline) runs there and writes its field, its runs told so; alone, it keeps its native form."""
     (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
         "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
-        "    RegistrationNet:\n      transform_type: affine\n",
+        "    RegistrationNet:\n      transform_type: native\n",
         encoding="utf-8",
     )
     moving = tmp_path / "moving.mha"
@@ -1443,13 +1581,7 @@ def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
     _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
     out = tmp_path / "Output"
 
-    with pytest.raises(KonfAIError, match="an ensemble cannot average"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
-    with pytest.raises(KonfAIError, match="--tta cannot average"):
-        app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
-    # --set speaks for the run, bare or dotted from the config root: B declared an affine is refused in its turn.
-    overrides = ["A:transform_type=field", "B:Predictor.Model.RegistrationNet.transform_type=affine"]
-    with pytest.raises(KonfAIError, match="'B' writes its transform as an affine"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides)
-    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides[:1])
-    assert (out / "P000" / "Moved.mha").is_file()
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
+    assert app._dense and (out / "P000" / "Moved.mha").is_file()
+    app.register(["A"], [fixed], [moving], output=out, quiet=True)
+    assert not app._dense

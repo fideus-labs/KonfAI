@@ -91,12 +91,20 @@ def _assert_shift(field: np.ndarray, inside: np.ndarray) -> None:
     np.testing.assert_allclose([field[axis][inside].mean() for axis in range(3)], _SHIFT, atol=0.75)
 
 
+def _field(result: "np.ndarray | sitk.Transform", fixed: sitk.Image) -> np.ndarray:
+    """An engine's result as its field on the fixed grid: a linear run keeps the transform it found (an affine) where
+    no mean is taken, which is sampled here; a field is handed back as it is."""
+    from impact_reg_konfai.models.intensity import displacement_on
+
+    return displacement_on(fixed, result) if isinstance(result, sitk.Transform) else result
+
+
 def test_fireants_recovers_a_translation(pair: tuple) -> None:
     from impact_reg_konfai.models.fireants import RegistrationNet
 
     fixed, moving, inside = pair
     net = RegistrationNet(scales=[2, 1], affine_iterations=[200, 100], deformable_iterations=[30, 15])
-    _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 def test_convexadam_recovers_a_translation(pair: tuple) -> None:
@@ -106,7 +114,7 @@ def test_convexadam_recovers_a_translation(pair: tuple) -> None:
     mind = ModelSpec(ref="VBoussot/impact-torchscript-models:MIND/R1D2_3D.pt", voxel_size=[1.5, 1.5, 1.5])
     # The presets' 80 fine steps: the 2-voxel step of the reference's refinement settles over them, not over 20.
     net = RegistrationNet(models={"0": mind}, iterations=80, linear_iterations=50, displacement_half_width=3)
-    _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 @pytest.mark.parametrize("moments_init", ["cof", "com"])
@@ -119,7 +127,7 @@ def test_elastix_recovers_a_translation(
     monkeypatch.chdir(tmp_path)  # a preset's parameter maps are staged in the working directory
     (tmp_path / "Translation.txt").write_text(_TRANSLATION_MAP)
     net = RegistrationNet(engine="elastix", parameter_maps=["Translation.txt"], moments_init=moments_init)
-    _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 #: The moving disk sits here relative to the fixed one, in mm (x, y): the field must be this inside it.
@@ -150,7 +158,7 @@ def test_fireants_recovers_a_translation_in_2d(flat_pair: tuple) -> None:
 
     fixed, moving, inside = flat_pair
     net = RegistrationNet(scales=[2, 1], affine_iterations=[200, 100], deformable_iterations=[30, 15])
-    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift_2d(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 def test_convexadam_recovers_a_translation_in_2d_on_the_2d_version_of_its_model(flat_pair: tuple) -> None:
@@ -159,7 +167,7 @@ def test_convexadam_recovers_a_translation_in_2d_on_the_2d_version_of_its_model(
     fixed, moving, inside = flat_pair
     mind = ModelSpec(ref="VBoussot/impact-torchscript-models:MIND/R1D2_3D.pt", voxel_size=[1.0, 1.0, 1.0])
     net = RegistrationNet(models={"0": mind}, iterations=80, linear_iterations=50, displacement_half_width=3)
-    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift_2d(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 def test_elastix_recovers_a_translation_in_2d(
@@ -171,7 +179,7 @@ def test_elastix_recovers_a_translation_in_2d(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "Translation.txt").write_text(_TRANSLATION_MAP)
     net = RegistrationNet(engine="elastix", parameter_maps=["Translation.txt"])
-    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+    _assert_shift_2d(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
 def test_register_end_to_end_on_a_2d_pair(flat_pair: tuple, tmp_path: Path) -> None:
@@ -179,7 +187,7 @@ def test_register_end_to_end_on_a_2d_pair(flat_pair: tuple, tmp_path: Path) -> N
     fixed, moving, _ = flat_pair
     sitk.WriteImage(fixed, str(tmp_path / "fixed.mha"))
     sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
-    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Generic_Rigid"]
+    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Elastix#rigid"]
     command += ["-f", str(tmp_path / "fixed.mha"), "-m", str(tmp_path / "moving.mha"), "-o", str(tmp_path / "out")]
     subprocess.run([*command, "--cpu", "1", "--tmp-dir", str(tmp_path / "tmp")], check=True)
     transform = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
@@ -195,7 +203,7 @@ def test_register_end_to_end_on_the_cpu(pair: tuple, tmp_path: Path) -> None:
     fixed, moving, inside = pair
     sitk.WriteImage(fixed, str(tmp_path / "fixed.mha"))
     sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
-    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Generic_Rigid_BSpline"]
+    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Elastix#rigid_bspline"]
     command += ["-f", str(tmp_path / "fixed.mha"), "-m", str(tmp_path / "moving.mha"), "-o", str(tmp_path / "out")]
     subprocess.run([*command, "--cpu", "1", "--tmp-dir", str(tmp_path / "tmp")], check=True)
 

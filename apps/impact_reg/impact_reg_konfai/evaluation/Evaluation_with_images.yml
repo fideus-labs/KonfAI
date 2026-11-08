@@ -1,3 +1,8 @@
+# konfai-apps eval APP --evaluation-file Evaluation_with_images.yml -i TRANSFORM --gt FIXED --gt MOVING [--mask MASK]
+# The moving image, pulled onto the fixed grid through the registration (Volume_0), against the fixed one, inside the
+# mask (all of the fixed grid when none is given); no annotation. MAE for one modality and one intensity scale; NMI
+# whatever the modalities; NCC and LNCC (9-voxel windows) for one modality. OutsideMovingFOV is the share of the
+# fixed grid the registration sends outside the moving image: there the moving reads nothing.
 Evaluator:
   metrics:
     FixedImage:
@@ -8,20 +13,48 @@ Evaluator:
               reduction: mean
               dataset: ./Evaluations/ImpactReg/Output:mha
               group: MAE_map
+            NMI:
+              bins: 64
+            NCC: {}
+            LNCC:
+              kernel: 9
+    MovingFOV:
+      targets_criterions:
+        None:
+          criterions_loader:
+            Mean:
+              name: OutsideMovingFOV
   Dataset:
     groups_src:
-      Volume_0:
+      Reference_0:
         groups_dest:
           FixedImage:
             transforms:
               TensorCast:
                 dtype: float32
-      Reference_0:
+      Reference_1:
         groups_dest:
           MovingImage:
             transforms:
+              Resample:
+                reference: '{case}'
+                reference_group: Reference_0
+                transforms:
+                  Volume_0: false
+                interpolation: linear
               TensorCast:
                 dtype: float32
+          MovingFOV:
+            transforms:
+              Fill:
+                value: 0
+              Resample:
+                reference: '{case}'
+                reference_group: Reference_0
+                transforms:
+                  Volume_0: false
+                interpolation: nearest
+                fill: 1
       Mask_0:
         groups_dest:
           Mask:

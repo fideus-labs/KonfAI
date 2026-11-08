@@ -45,6 +45,7 @@ from starlette.types import Receive, Scope, Send
 from .app_repository import get_app_repository_info
 from .cli import REFUSAL_FILE_ENV
 from .errors import AppMetadataError, AppRepositoryError
+from .presets import split_preset
 from .remote_options import parse_remote_options, remote_options_to_cli_args
 
 MAX_ACTIVE_JOBS = 32
@@ -711,7 +712,11 @@ def _require_configured_app(app_id: str) -> None:
     local directories, or reach out to arbitrary remote servers (SSRF / exfiltration) for any token
     holder. The job endpoints already enforce the same allowlist (see the job wrapper).
     """
-    if app_id not in _APPS:
+    try:
+        base = split_preset(app_id)[0]  # an allowed app, with any of its presets
+    except AppRepositoryError:
+        base = None  # a malformed preset name names no app of ours
+    if base not in _APPS:
         raise HTTPException(404, f"Unknown app '{app_id}'")
 
 
@@ -754,6 +759,7 @@ def get_app_info(app_id: str):
         "patch_size": app.get_patch_size(),
         "has_capabilities": app.has_capabilities(),
         "finetunable": app.is_finetunable(),
+        "presets": {name: preset.to_json() for name, preset in app.get_presets().items()},
     }
     terminology = app.get_terminology()
     if terminology is not None:
@@ -762,11 +768,16 @@ def get_app_info(app_id: str):
     result["inputs"] = {k: asdict(v) for k, v in app.get_inputs().items()}
     result["outputs"] = {k: asdict(v) for k, v in app.get_outputs().items()}
 
-    result_tmp: dict[str, dict[str, dict]] = {}
-    for key, entries in app.get_evaluations_inputs().items():
-        by_file = result_tmp.setdefault(key.display_name, {})
-        by_file[key.evaluation_file] = {name: asdict(entry) for name, entry in entries.items()}
-    result["inputs_evaluations"] = result_tmp
+    for key_name, tabs in (
+        ("inputs_evaluations", app.get_evaluations_inputs()),
+        ("inputs_uncertainties", app.get_uncertainties_inputs()),
+    ):
+        by_tab: dict[str, dict[str, dict]] = {}
+        for key, entries in tabs.items():
+            by_tab.setdefault(key.display_name, {})[key.evaluation_file] = {
+                name: asdict(entry) for name, entry in entries.items()
+            }
+        result[key_name] = by_tab
     return result
 
 
@@ -1015,8 +1026,7 @@ def submit_job():
                 raise HTTPException(429, "Server busy: too many active jobs")
 
             app_name = kwargs.get("app_name")
-            if app_name not in _APPS:
-                raise HTTPException(404, f"Unknown app '{app_name}'")
+            _require_configured_app(str(app_name))
 
             # Validate before any workspace exists; an unknown or malformed tunable must be refused
             # loudly (422 naming it), never accepted and then ignored.
@@ -1137,6 +1147,7 @@ async def infer(
     tta: Annotated[int, Form()] = 0,
     mc: Annotated[int, Form()] = 0,
     uncertainty: Annotated[bool, Form()] = False,
+    dense_transforms: Annotated[bool, Form()] = False,
     prediction_file: Annotated[str, Form()] = "Prediction.yml",
     options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",  # CSV "0,1"
@@ -1198,6 +1209,8 @@ async def infer(
     ]
     if uncertainty:
         cmd += ["-uncertainty"]
+    if dense_transforms:  # the client's caller averages or composes it (DENSE_TRANSFORMS_ENV)
+        cmd += ["--dense-transforms"]
     if len(ensemble_models_list) > 0:
         cmd += ["--ensemble_models", *ensemble_models_list]
     else:
@@ -1210,7 +1223,7 @@ async def infer(
 async def evaluate(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
-    gt: Annotated[list[UploadFile], File(...)],
+    gt: Annotated[list[UploadFile], File(...)] = [],
     mask: Annotated[list[UploadFile], File(...)] = [],
     inputs_groups: Annotated[str | None, Form()] = None,
     gt_groups: Annotated[str | None, Form()] = None,
@@ -1266,7 +1279,9 @@ async def evaluate(
 async def uncertainty(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
+    gt: Annotated[list[UploadFile], File(...)] = [],
     inputs_groups: Annotated[str | None, Form()] = None,
+    gt_groups: Annotated[str | None, Form()] = None,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
     options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",

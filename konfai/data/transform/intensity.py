@@ -474,6 +474,23 @@ class Standardize(TransformInverse):
             return scaled.add_(mean) if _writes_into(scaled, mean) else scaled + mean
 
 
+class Fill(Transform):
+    """Set every voxel to ``value``, the case's grid and geometry kept, in float32: an image of ones (or zeros) of
+    the case, for instance to resample into the share of another grid it covers (``Resample``'s ``fill`` marks the
+    rest)."""
+
+    working_multiple = 0.0
+    locality = LocalityKind.POINTWISE
+
+    def __init__(self, value: float = 1.0) -> None:
+        super().__init__()
+        self.value = float(value)
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        del name, cache_attribute
+        return torch.full_like(tensor, self.value, dtype=torch.float32)
+
+
 class TensorCast(TransformInverse):
     working_multiple = 1.0
 
@@ -550,6 +567,8 @@ class Statistics(Transform):
     working_multiple = 2.0
 
     _KEYS = (("Min", "ImageMin"), ("Max", "ImageMax"), ("Mean", "ImageMean"), ("Std", "ImageStd"))
+
+    alters_values = False
 
     def __init__(self) -> None:
         super().__init__()

@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -202,6 +203,55 @@ def test_a_refusal_prints_its_message_and_exits_1(
     assert "not found" not in message.lower()
 
 
+def test_an_app_cli_hands_uncertainty_its_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app's own CLI takes --gt for uncertainty, as konfai-apps does, and hands it on."""
+    seen: dict[str, Any] = {}
+
+    class _App:
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def uncertainty(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+
+    monkeypatch.setattr("konfai_apps.app.KonfAIApp", _App)
+    monkeypatch.setattr(sys, "argv", ["app-cli", "uncertainty", "-i", "stack.mha", "--gt", "fixed.fcsv", "--cpu", "1"])
+    _app_cli_mains()["app-cli"]()
+    assert [[Path(path).name for path in group] for group in seen["gt"]] == [["fixed.fcsv"]]
+
+
+def test_dense_transforms_asks_the_run_for_a_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--dense-transforms, what a server's job gets for a caller that averages: the run writes no native form."""
+    from konfai.utils.dataset import DENSE_TRANSFORMS_ENV
+
+    seen: dict[str, Any] = {}
+
+    class _App:
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def infer(self, **kwargs: Any) -> None:
+            seen["dense"] = os.environ.get(DENSE_TRANSFORMS_ENV)
+
+    monkeypatch.setenv(DENSE_TRANSFORMS_ENV, "")  # recorded, so the run's own setting goes with the test
+    monkeypatch.setattr("konfai_apps.app.KonfAIApp", _App)
+    monkeypatch.setattr(
+        sys, "argv", ["konfai-apps", "infer", "demo", "-i", "in.mha", "--dense-transforms", "--cpu", "1"]
+    )
+    apps_cli_module.main_apps()
+    assert seen["dense"] == "1"
+
+
+def test_the_server_hands_the_job_the_need_for_a_field() -> None:
+    import asyncio
+
+    from konfai_apps import app_server
+
+    command = asyncio.run(app_server.infer.__wrapped__(app_name="demo", inputs=[], dense_transforms=True))
+    assert "--dense-transforms" in command
+    assert "--dense-transforms" not in asyncio.run(app_server.infer.__wrapped__(app_name="demo", inputs=[]))
+
+
 def test_konfai_debug_keeps_the_refusal_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KONFAI_DEBUG", "1")
@@ -250,6 +300,32 @@ def test_list_and_show_read_an_app_repository(
     assert "org/models:net.pt (not cached yet" in out and "model_files" not in out
     with pytest.raises(AppRepositoryError, match="Did you mean 'A_app'"):
         apps_cli_module.describe_app(str(tmp_path), "A_ap")
+
+
+def test_an_ensemble_reduces_with_the_operator_its_members_run_with(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A preset or a --set choosing Predictor.combine runs each member with it: the ensemble reduces with it too, and
+    two references that end up with different operators are refused."""
+    from konfai_apps.presets import Preset
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor:\n  combine: Mean\n", encoding="utf-8")
+
+    class Info:
+        def download_config_file(self) -> list[Path]:
+            return [config]
+
+        def get_presets(self) -> dict[str, Preset]:
+            return {"median": Preset("median", "", ("Predictor.combine=Median",))}
+
+    monkeypatch.setattr(apps_cli_module, "get_app_repository_info", lambda app_id, force_update: Info())
+    combine_of = apps_cli_module._combine_of
+    assert combine_of(["demo/app"], None, "Prediction.yml", None) == "Mean"
+    assert combine_of(["demo/app#median"], None, "Prediction.yml", None) == "Median"
+    assert combine_of(["demo/app#median"], None, "Prediction.yml", ["Predictor.combine=Vote"]) == "Vote"
+    with pytest.raises(AppRepositoryError, match="differently"):
+        combine_of(["demo/app", "demo/app#median"], None, "Prediction.yml", None)
 
 
 def test_check_overrides_refuses_what_the_run_would_and_leaves_the_config_alone() -> None:

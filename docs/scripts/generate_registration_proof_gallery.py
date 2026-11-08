@@ -328,7 +328,7 @@ def compose(cards: list[Image.Image], columns: int, output: Path, summary: Regis
         draw.text((side + 12, 28), "Registration you can inspect.", fill=INK, font=title_font)
         draw.text(
             (side + 14, 76),
-            "Known geometry offset → ConvexAdam_Composite → moved MR + physical displacement field",
+            "Known geometry offset → ConvexAdam#composite → moved MR + physical displacement field",
             fill=MUTED,
             font=body_font,
         )
@@ -443,7 +443,7 @@ def main() -> None:
         card(
             moved_image,
             "3. Moved MR: after",
-            "ConvexAdam_Composite output on fixed grid",
+            "ConvexAdam#composite output on fixed grid",
             f"NCC {summary.after_ncc:.3f} · MAE {summary.after_mae:.2f}",
         ),
         card(
