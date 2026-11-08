@@ -134,7 +134,7 @@ Per command:
 | Command | Options |
 | --- | --- |
 | `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `-uncertainty`, `--prediction-file` |
-| `eval` | `--gt`, `--mask`, `--evaluation-file` |
+| `eval` | `--gt` (left out for a measure of the prediction alone), `--mask`, `--evaluation-file` |
 | `uncertainty` | `--uncertainty-file` |
 | `pipeline` | those of `infer`, `eval` and `uncertainty` |
 | `fine-tune` | `name`, `-d/--dataset`, `--models` (which checkpoints), `--epochs`, `--it-validation`, `--lr`, `--batch-size`, `--config` |

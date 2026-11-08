@@ -1215,7 +1215,7 @@ async def infer(
 async def evaluate(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
-    gt: Annotated[list[UploadFile], File(...)],
+    gt: Annotated[list[UploadFile], File(...)] = [],
     mask: Annotated[list[UploadFile], File(...)] = [],
     inputs_groups: Annotated[str | None, Form()] = None,
     gt_groups: Annotated[str | None, Form()] = None,

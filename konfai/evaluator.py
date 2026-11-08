@@ -637,13 +637,12 @@ class Evaluator(DistributedObject):
                 cored = tensors if core is None else [t[(slice(None), slice(None), *core)] for t in tensors]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
+                    # Criterion declares neither the halo's core= nor output_attributes=: the reducible hooks.
+                    keywords: dict[str, Any] = {"core": core} if reads_halo else {}
+                    if getattr(metric, "accepts_output_attributes", False):  # the case's header, as call_criterion
+                        keywords["output_attributes"] = batch_sample[output_group].attribute
                     with self._clock.phase(metric.get_name()), torch.no_grad():
-                        # Criterion declares neither the halo's core= nor partial_map: the reducible hooks.
-                        state = (
-                            cast(Any, metric).partial_metric(*tensors, core=core)
-                            if reads_halo
-                            else metric.partial_metric(*cored)
-                        )
+                        state = cast(Any, metric).partial_metric(*(tensors if reads_halo else cored), **keywords)
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
                     if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):

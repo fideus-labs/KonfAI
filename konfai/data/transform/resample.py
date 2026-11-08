@@ -1107,7 +1107,7 @@ class Resample(TransformInverse):
 
     def _stored_field_headers(self, name: str) -> list[tuple[list[int], Attribute]]:
         """The shape and header of every dense-field member of this case's stored map."""
-        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
+        from konfai.utils.dataset import is_displacement_entry
 
         fields = []
         for group in cast("dict[str, bool]", self.transforms or {}):
@@ -1117,7 +1117,7 @@ class Resample(TransformInverse):
                 if getattr(dataset, "read_data", None) is None:
                     break  # a transform-only store serves no field
                 shape, header = dataset.get_infos(group, name)
-                if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+                if is_displacement_entry(shape, header):
                     fields.append((shape, header))
                 break
         return fields
@@ -1853,3 +1853,59 @@ class Resample(TransformInverse):
     @property
     def _target_is_own(self) -> bool:
         return isinstance(self._target, _OwnGrid)
+
+
+class TransformPoints(Transform):
+    """Push a case's points (``[N, 3]`` in LPS, as a ``.fcsv`` reads) through transforms stored beside the cases.
+
+    The map is the one a ``Resample`` with the same ``transforms`` pulls an image back through: a registration that
+    moves the moving image onto the fixed grid maps each fixed point to where it lands in the moving image, so the
+    TRE of a registration compares the fixed landmarks pushed through it with the moving ones, and no field is
+    inverted. ``transforms`` maps each GROUP to whether to invert it (a rigid or affine map only), the LAST declared
+    applied first, as in ``Resample``.
+
+    A 3-D displacement field is read around each point alone (:func:`~konfai.utils.ITK.displace_points`), so a few
+    points never hold the field in memory. Any other transform is read whole and applied to the axes it has: a 2-D
+    one moves x and y and leaves z, where a 2-D image's landmarks sit.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME  # a set of points, read whole: there is no region of it to stream
+
+    def __init__(self, transforms: dict[str, bool]) -> None:
+        super().__init__()
+        if not transforms:
+            raise TransformError(
+                "'TransformPoints' was given no transform.",
+                "Name a group and whether to invert it: transforms: {Volume_0: false}.",
+            )
+        self.transforms = transforms
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        from konfai.utils.dataset import is_displacement_entry
+        from konfai.utils.ITK import displace_points
+
+        points = tensor.detach().cpu().numpy().astype(np.float64).reshape(-1, 3)
+        for group, invert in reversed(list(self.transforms.items())):
+            dataset = self.dataset_holding(group, name)
+            if dataset is None:
+                raise TransformError(
+                    f"'TransformPoints' found no transform for case '{name}' in group '{group}'.",
+                    "Every case needs an entry in every group named under 'transforms:'.",
+                )
+            shape, header = dataset.get_infos(group, name)
+            if not invert and len(shape) == 4 and is_displacement_entry(shape, header):
+                points = displace_points(points, dataset, group, name)
+                continue
+            transform = dataset.read_transform(group, name)
+            if invert:
+                try:
+                    transform = transform.GetInverse()
+                except RuntimeError as error:
+                    raise TransformError(
+                        f"'TransformPoints' cannot invert group '{group}' for case '{name}': it is not a rigid or"
+                        " affine map.",
+                        f"Store the inverse instead, or set '{group}: false'.",
+                    ) from error
+            rank = transform.GetDimension()
+            points[:, :rank] = [transform.TransformPoint(point[:rank].tolist()) for point in points]
+        return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
