@@ -1406,6 +1406,10 @@ class KonfAIApp(AbstractKonfAIApp):
         manifest) is read at ``./Dataset``'s level and its defaults land in ``./Dataset``, which every config
         reads: a manifest names where entries are read from, never written, and the roots meet on the case name.
         """
+        if config_file:
+            # The extra roots are declared first: their level is read off the config, and a default sized at
+            # level 0 is the wrong shape for a store the run then reads at @1.
+            KonfAIApp._declare_dataset_roots(config_file)
         found: list[tuple[Dataset, str, list[int], Attribute]] = []
         for root in KonfAIApp._dataset_roots():
             file_format = KonfAIApp._detect_group_format(root, "Volume_0")

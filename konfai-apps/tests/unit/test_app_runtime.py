@@ -606,6 +606,42 @@ def test_a_default_mask_is_sized_at_the_level_the_evaluation_reads(
     assert Dataset("Dataset", "omezarr@1").get_infos("Mask_0", "P000")[0] == [1, 4, 4, 4]
 
 
+def test_a_default_in_an_extra_root_is_sized_at_the_level_that_root_is_then_read_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pyramid staged beside a flat case lands in ./Dataset_omezarr, declared at ./Dataset's level once the
+    defaults are sized: sized before that, its mask was the level-0 shape, and unreadable at @1."""
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.ome_zarr import write_ome_zarr
+    from ruamel.yaml import YAML
+
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    _write_volume(cases / "a.mha")
+    write_ome_zarr(
+        str(cases / "b.ome.zarr"),
+        np.zeros((1, 8, 8, 8), np.float32),
+        spacing=[1.0, 1.0, 1.0],
+        origin=[0.0, 0.0, 0.0],
+        scale_factors=[2],
+    )
+    monkeypatch.chdir(tmp_path)
+    Path("Evaluation.yml").write_text(
+        "Evaluator:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:omezarr@1\n", encoding="utf-8"
+    )
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[cases]])
+
+    app._write_mask_or_default(None, "Evaluation.yml")
+
+    assert (
+        "./Dataset_omezarr/:omezarr@1"
+        in YAML().load(Path("Evaluation.yml"))["Evaluator"]["Dataset"]["dataset_filenames"]
+    )
+    assert Dataset("Dataset_omezarr", "omezarr@1").get_infos("Mask_0", "P001")[0] == [1, 4, 4, 4]
+
+
 def test_a_default_of_a_case_read_in_place_is_written_as_the_store_the_config_reads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
