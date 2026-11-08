@@ -191,7 +191,6 @@ def test_write_inputs_names_a_store_uri_in_the_remote_manifest(tmp_path: Path, m
     assert YAML(typ="safe").load(manifest) == {"P000": {"Volume_0": "s3://bucket/x/fused.ome.zarr"}}
     assert not (tmp_path / "Dataset" / "P000").exists()
     assert (tmp_path / "Dataset_omezarr" / "P000" / "Volume_1.ome.zarr").is_symlink()
-    assert KonfAIApp._remote_cases() == ["P000"]
 
     KonfAIApp._clear_dataset()
 

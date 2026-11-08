@@ -32,6 +32,13 @@ pytestmark = pytest.mark.slow
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
+#: The apps CLI as a subprocess, importing this checkout's own code ahead of any installed copy.
+_APPS = [
+    sys.executable,
+    "-c",
+    f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
+    "from konfai_apps.cli import main_apps; main_apps()",
+]
 WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
 SimpleITK = pytest.importorskip("SimpleITK")
 
@@ -268,13 +275,7 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     _write_image(mask_path, mask_array, SimpleITK.sitkUInt8)
 
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "pipeline",
         str(app_dir),
         "-i",
@@ -343,13 +344,7 @@ def test_konfai_apps_infer_reads_an_ome_zarr_store_by_uri_in_place(tmp_path: Pat
     output = tmp_path / "out"
 
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "infer",
         str(app_dir),
         "-i",
@@ -390,9 +385,7 @@ def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None)
         inputs[spoiled].write_bytes(b"not an image\n")
     return run(
         [
-            sys.executable,
-            "-c",
-            "from konfai_apps.cli import main_apps; main_apps()",
+            *_APPS,
             "pipeline",
             str(app_dir),
             "-i",
@@ -500,13 +493,7 @@ def _run_finetune(
     epochs: int = 2,
 ) -> subprocess.CompletedProcess[str]:
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "fine-tune",
         str(app_dir),
         "FT",

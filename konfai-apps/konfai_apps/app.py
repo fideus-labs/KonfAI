@@ -1004,33 +1004,14 @@ class KonfAIApp(AbstractKonfAIApp):
         return is_dicom_file(path)
 
     @staticmethod
-    def _remote_unit(source: str) -> tuple[str, str]:
-        """A URI input as one unit: an OME-Zarr store, which the core reads in place, chunk by chunk.
-
-        Only a store is addressed by chunk, so only a store reads through a URI; a file there is a whole
-        download, which is the caller's to make. The store is probed once, so a typo in the URI or a
-        missing credential is refused here, in the filesystem's own words, not at the first read.
-        """
-        if not is_store_name(source.rstrip("/")):
-            raise AppRepositoryError(
-                f"'{source}' is a URI, and only an OME-Zarr store is read in place.",
-                "Copy the file locally first, or convert it to an OME-Zarr store.",
-            )
-        if not uri.is_dir(source):
-            raise AppRepositoryError(
-                f"Input path does not exist: '{source}'.", "Check the path given to -i, --gt or --mask."
-            )
-        return source, ".ome.zarr"
-
-    @staticmethod
     def _list_input_units(paths: list[Path | str]) -> list[tuple[Path | str, str]]:
         """Expand input paths into ordered ``(source, staged_suffix)`` units for the ``Dataset/`` layout.
 
         A unit is either a single supported file, or a directory that is itself one volume (an
-        OME-Zarr store or a DICOM series directory: see :meth:`_directory_volume_suffix`), or a store
-        named by a URI (:meth:`_remote_unit`). A plain directory is walked so each contained file /
-        store / series becomes its own case, in sorted order so cases pair consistently across input
-        groups.
+        OME-Zarr store or a DICOM series directory: see :meth:`_directory_volume_suffix`), or an
+        OME-Zarr store named by a URI, read in place. A plain directory is walked so each contained
+        file / store / series becomes its own case, in sorted order so cases pair consistently across
+        input groups.
 
         Raises
         ------
@@ -1064,8 +1045,21 @@ class KonfAIApp(AbstractKonfAIApp):
                     walk(child)
 
         for path in paths:
-            if isinstance(path, str):  # a URI: the only input kept as text
-                units.append(KonfAIApp._remote_unit(path))
+            if isinstance(path, str):
+                # A URI, the only input kept as text, is read in place, chunk by chunk: only an OME-Zarr store
+                # is addressed by chunk, so only a store reads through it; a file there is a whole download,
+                # the caller's to make. The store is probed once, so a typo in the URI or a missing credential
+                # is refused here, in the filesystem's own words, not at the first read.
+                if not is_store_name(path.rstrip("/")):
+                    raise AppRepositoryError(
+                        f"'{path}' is a URI, and only an OME-Zarr store is read in place.",
+                        "Copy the file locally first, or convert it to an OME-Zarr store.",
+                    )
+                if not uri.is_dir(path):
+                    raise AppRepositoryError(
+                        f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                    )
+                units.append((path, ".ome.zarr"))
                 continue
             if not path.exists():
                 raise AppRepositoryError(
@@ -1126,18 +1120,10 @@ class KonfAIApp(AbstractKonfAIApp):
     @staticmethod
     def _name_remote_entry(source: str, case: str, entry: str) -> None:
         """Name a store read in place under its case and group in the remote manifest."""
-        manifest = KonfAIApp._REMOTE_MANIFEST
-        manifest.parent.mkdir(exist_ok=True)
-        (manifest.parent / _STAGED_MARKER).touch()
         cases = KonfAIApp._remote_manifest()
         cases.setdefault(case, {})[entry] = source
-        with open(manifest, "w", encoding="utf-8") as file:
+        with open(KonfAIApp._REMOTE_MANIFEST, "w", encoding="utf-8") as file:
             YAML(typ="safe").dump(cases, file)
-
-    @staticmethod
-    def _remote_cases() -> list[str]:
-        """The cases the remote manifest names, sorted; none without a manifest."""
-        return sorted(KonfAIApp._remote_manifest())
 
     @staticmethod
     def _stage(source: Path | str, suffix: str, case: str, entry: str, primary: str) -> None:
@@ -1280,7 +1266,7 @@ class KonfAIApp(AbstractKonfAIApp):
         sets them)."""
         listed = [KonfAIApp._list_input_units(group) for group in groups]
         staged = {case.name for root in KonfAIApp._dataset_roots() for case in root.iterdir() if case.is_dir()}
-        staged.update(KonfAIApp._remote_cases())
+        staged.update(KonfAIApp._remote_manifest())  # the cases read in place
         cases = len(staged) or (len(listed[0]) if listed else 0)
         if prefix == "Volume":
             # ./Dataset, the root every config reads, takes the backend of the first input staged on disk: a
@@ -1397,7 +1383,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
 
     @staticmethod
-    def _staged_cases(config_file: str | None) -> list[tuple[Dataset, str, list[int], Attribute]]:
+    def _staged_cases(config_file: str) -> list[tuple[Dataset, str, list[int], Attribute]]:
         """Every staged case as ``(writer, name, shape, attributes)``: its ``Volume_0`` header (no pixel read)
         and the dataset a default input for it is written to.
 
@@ -1406,20 +1392,19 @@ class KonfAIApp(AbstractKonfAIApp):
         manifest) is read at ``./Dataset``'s level and its defaults land in ``./Dataset``, which every config
         reads: a manifest names where entries are read from, never written, and the roots meet on the case name.
         """
-        if config_file:
-            # The extra roots are declared first: their level is read off the config, and a default sized at
-            # level 0 is the wrong shape for a store the run then reads at @1.
-            KonfAIApp._declare_dataset_roots(config_file)
+        # The extra roots are declared first: their level is read off the config, and a default sized at
+        # level 0 is the wrong shape for a store the run then reads at @1.
+        KonfAIApp._declare_dataset_roots(config_file)
         found: list[tuple[Dataset, str, list[int], Attribute]] = []
         for root in KonfAIApp._dataset_roots():
             file_format = KonfAIApp._detect_group_format(root, "Volume_0")
-            level = KonfAIApp._dataset_entry(config_file, root)[1] if config_file else 0
+            level = KonfAIApp._dataset_entry(config_file, root)[1]
             dataset = Dataset(str(root), f"{file_format}@{level}" if level else file_format)
             for name in dataset.get_names("Volume_0"):
                 found.append((dataset, name, *dataset.get_infos("Volume_0", name)))
         manifest = KonfAIApp._REMOTE_MANIFEST
         if manifest.is_file():
-            file_format, level = KonfAIApp._dataset_entry(config_file, Path("Dataset")) if config_file else ("mha", 0)
+            file_format, level = KonfAIApp._dataset_entry(config_file, Path("Dataset"))
             remote = Dataset(manifest.as_posix(), f"omezarr@{level}" if level else "omezarr")
             # ./Dataset is read with the backend of a case staged in it (detected from disk), else with the
             # token the config names: a default written in any other form is not found under that token.
@@ -1472,7 +1457,7 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         KonfAIApp._stage_groups(gt, "Reference")
 
-    def _write_mask_or_default(self, mask: list[list[Path | str]] | None, config_file: str | None = None) -> None:
+    def _write_mask_or_default(self, mask: list[list[Path | str]] | None, config_file: str) -> None:
         """
         Write mask volumes into the Dataset/ structure or generate default masks.
 

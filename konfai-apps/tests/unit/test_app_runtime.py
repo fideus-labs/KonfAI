@@ -689,7 +689,7 @@ def test_write_mask_or_default_reads_header_only(
         raise AssertionError("default mask must not read the whole volume")
 
     monkeypatch.setattr(app_module.Dataset, "read_data", _forbid_read_data)
-    app._write_mask_or_default(None)
+    app._write_mask_or_default(None, "Evaluation.yml")
 
     mask = tmp_path / "Dataset" / "P000" / "Mask_0.mha"
     assert mask.exists()
@@ -807,7 +807,7 @@ def test_dataset_writers_pair_cases_by_sorted_name_across_directories(
     app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
     app._write_inputs_to_dataset([[preds]])
     app._write_gt_to_dataset([[refs]])
-    app._write_mask_or_default([[masks]])
+    app._write_mask_or_default([[masks]], "Evaluation.yml")
 
     cases = sorted(path for path in (tmp_path / "Dataset").iterdir() if path.is_dir())
     assert [c.name for c in cases] == ["P000", "P001", "P002"]
