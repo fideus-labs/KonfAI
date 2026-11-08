@@ -615,7 +615,8 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
         async with client_cls(mcp_server.mcp) as client:
             browsed = await client.call_tool(
                 "inspect_dataset",
-                {"browse": True,
+                {
+                    "browse": True,
                     "dataset_dir": str(dataset_root),
                     "depth": 3,
                     "max_entries": 50,
@@ -715,6 +716,7 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
 
 
 @pytest.mark.usefixtures("workspace_root")
+@pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
     tmp_path: Path,
     load_mcp_server: Callable[[], ModuleType],
@@ -723,7 +725,7 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
     Seen live: an agent asked to verify a known 5-voxel shift had the number in Transform.h5 and no
     tool that could open it. Linear transforms expose their parameters; dense fields a displacement
-    summary."""
+    summary. The same summary inside the session, where run_app writes it: never a text dump."""
     h5py = pytest.importorskip("h5py")
     np = pytest.importorskip("numpy")
 
@@ -758,6 +760,15 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
             # An HDF5 that is NOT an ITK transform keeps the binary refusal.
             with pytest.raises(Exception, match="binary"):
                 await client.call_tool("read_file", {"path": str(plain)})
+
+            await client.call_tool("initialize_session", {"overwrite": True})
+            in_session = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir()) / "Predictions" / "case" / "Transform.h5"
+            in_session.parent.mkdir(parents=True)
+            in_session.write_bytes(transform.read_bytes())
+            for path in ("Predictions/case/Transform.h5", str(in_session)):
+                read = await client.call_tool("read_file", {"path": path})
+                assert read.structured_content["kind"] == "itk_transform", path
+                assert read.structured_content["transforms"][1]["parameters"] == [0.0, 0.0, 0.0, 0.0, 5.0, 0.0]
 
     asyncio.run(scenario())
 

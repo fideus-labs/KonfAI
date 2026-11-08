@@ -59,6 +59,7 @@ from .catalog import COMPONENT_KINDS
 from .catalog import list_components as _catalog_list_components
 from .extensions import check_external_dependency as _check_external_dependency
 from .extensions import describe_extension_points as _describe_extension_points
+from .file_io import HDF5_SUFFIXES
 from .guide import (
     CLARIFY_TASK_AND_GROUPS_PROMPT,
     DEBUG_CONFIG_WARNING_PROMPT,
@@ -3695,14 +3696,6 @@ def _required(value: str | None, field: str, action: str) -> str:
     return value
 
 
-def _inside_workspace(path: str) -> bool:
-    try:
-        Path(path).expanduser().resolve().relative_to(WORKSPACE_LAYOUT.workspace_dir().resolve())
-    except (ValueError, OSError):
-        return False
-    return True
-
-
 @mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_dataset"]))
 def inspect_dataset(
     dataset_dir: Annotated[str, Field(description="The dataset root; with browse=True, any folder to explore.")],
@@ -3759,8 +3752,16 @@ async def read_file(
         }
     if template is not None:
         return _tool_read_template_file(template, path, max_chars=max_chars, offset=offset)
-    if Path(path).expanduser().is_absolute() and not _inside_workspace(path):
-        return _tool_read_dataset_file(path, max_lines=max_lines, max_chars=max_chars)
+    candidate = Path(path).expanduser()
+    try:
+        resolved = WORKSPACE_LAYOUT.resolve_workspace_relative_path(path)
+    except ValueError:
+        if not candidate.is_absolute():
+            raise
+        return read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=max_chars)
+    if resolved.suffix.lower() in HDF5_SUFFIXES:
+        # run_app writes a registration's Transform.h5 into the session: its summary, not a text dump.
+        return read_dataset_sidecar(resolved, max_lines=max_lines, max_chars=max_chars)
     return _tool_read_session_file(path, max_chars=max_chars, offset=offset)
 
 
