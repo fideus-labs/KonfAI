@@ -105,7 +105,11 @@
 .glance .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
 .glance .legend b { font-weight: 600; margin: 0 4px 0 2px; }
 .glance .legend span { color: var(--dim); }
-.stack { display: flex; height: 10px; border-radius: 6px; overflow: hidden; gap: 2px; }
+.stack { display: flex; height: 10px; gap: 2px; }
+/* rounded ends without clipping: the tooltip sits above the bar and a focus ring around a segment */
+.stack a:first-child { border-radius: 6px 0 0 6px; }
+.stack a:last-child { border-radius: 0 6px 6px 0; }
+.stack a:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .stack a { display: block; height: 100%; position: relative; transition: filter var(--k-dur); }
 .stack a:hover { filter: brightness(1.25); }
 .stack a::after { content: attr(data-tip); position: absolute; left: 50%; top: -34px; transform: translateX(-50%); white-space: nowrap; font: 12px var(--mono); color: var(--ink); background: var(--card-2); border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; opacity: 0; pointer-events: none; transition: opacity var(--k-dur); }
