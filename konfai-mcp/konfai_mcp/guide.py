@@ -124,7 +124,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "preview_volume": (
         "One slice of a volume as a PNG (any SimpleITK-readable file), windowed between the 1st and 99th "
-        "percentile and downsampled, for a visual check of a case or a prediction. Reads only."
+        "percentile and downsampled, for a visual check of a case or a prediction; the plane's min, max, mean and "
+        "unique values come with it (a black image is a constant plane). Reads only."
     ),
     "run_transform": (
         "Batch-process a dataset with the session Transform.yml chain: read, transform, write. dry_run=True plans "
@@ -135,11 +136,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "initialize_session": (
         "Create or reset the current session workspace, optionally seeded from an example template "
-        "(include_support_files=True copies its local .py). DESTRUCTIVE with overwrite=True: deletes Checkpoints/ "
+        "(read_file('templates://list') lists them; include_support_files=True copies its local .py). DESTRUCTIVE with overwrite=True: deletes Checkpoints/ "
         "and Predictions/ too; use session(action='create') for a fresh name instead. Next: write_workflow_config."
     ),
     "session": (
-        "Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it); 'switch' (name); 'delete' (the "
+        "Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it; the workspace is empty until initialize_session); 'switch' (name); 'delete' (the "
         "current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its "
         "configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while "
         "a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session."

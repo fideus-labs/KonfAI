@@ -29,7 +29,11 @@ resources; no message, hint or description names a retired tool any more (a test
 `specialized_components_require_review` warning no longer fires on `CrossEntropyLoss` or `DiceLoss`; `cpu`
 parameters say what they are (KonfAI `--cpu` worker processes); `session(action='list')` says whether a host
 pinned the session; `summarize_session` names the missing configs and carries the latest job's last metrics;
-`read_live_metrics` drops repeated entries; `check_config` says every level includes the review.
+`read_live_metrics` drops repeated entries; `check_config` says every level includes the review. A second run
+(training, prediction, evaluation) added: `preview_volume` returns the plane's min, max, mean and unique values
+beside the image; a clean `check_config` review suggests the matching `run_*`; launch payloads no longer repeat
+`get_job_status`; `check_config` reports `setup.world_size` (was `size`); readiness says `prediction_config_present`
+(was `prediction_requires_models`).
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

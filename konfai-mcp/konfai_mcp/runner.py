@@ -1062,7 +1062,7 @@ def validate_workflow_api(
                 workflow_object.setup(1)
                 payload["setup"] = {
                     "dataloaders": len(getattr(workflow_object, "dataloader", [])),
-                    "size": getattr(workflow_object, "size", None),
+                    "world_size": getattr(workflow_object, "size", None),  # processes the run would spawn
                 }
                 payload["worker_spawn_check"] = _check_worker_spawn_picklability(workflow_object, requested_num_workers)
             if level == "train_step" and workflow == "train":

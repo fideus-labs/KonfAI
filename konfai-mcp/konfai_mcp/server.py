@@ -43,6 +43,7 @@ try:
     from fastmcp.server.auth import StaticTokenVerifier
     from fastmcp.server.middleware import Middleware as McpMiddleware
     from fastmcp.tools import Tool
+    from fastmcp.tools.base import ToolResult
     from fastmcp.utilities.types import Image as FastMCPImage
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
@@ -3218,8 +3219,8 @@ def preview_volume(
     max_size: Annotated[
         int, Field(description="Maximum output edge in pixels; larger planes are strided down (default 512).")
     ] = 512,
-) -> FastMCPImage:
-    """Render one slice of a volume as a PNG for visual QC."""
+) -> ToolResult:
+    """Render one slice of a volume as a PNG for visual QC, with the plane's own figures beside it."""
     try:
         import SimpleITK as sitk
     except ImportError as exc:
@@ -3261,6 +3262,16 @@ def preview_volume(
         else:
             plane = array
     plane = plane.astype(np.float32)
+    # the plane's figures beside the picture: a black image is a constant plane or a squashed window
+    unique = np.unique(plane)
+    figures = {
+        "shape": list(plane.shape),
+        "min": float(plane.min()),
+        "max": float(plane.max()),
+        "mean": float(plane.mean()),
+        "unique_count": int(unique.size),
+        "unique_values": unique.tolist() if unique.size <= 16 else None,
+    }
     low, high = np.percentile(plane, (1.0, 99.0))
     if high <= low:
         high = low + 1.0
@@ -3274,7 +3285,10 @@ def preview_volume(
         data = png_path.read_bytes()
     finally:
         png_path.unlink(missing_ok=True)
-    return FastMCPImage(data=data, format="png")
+    return ToolResult(
+        content=[FastMCPImage(data=data, format="png").to_image_content(), json.dumps(figures)],
+        structured_content=figures,
+    )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_prediction"]))

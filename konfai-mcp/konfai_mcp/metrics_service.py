@@ -85,6 +85,11 @@ def metric_run_name(metrics_path: Path, workspace: Path) -> str:
     return metrics_path.parent.name
 
 
+def _metrics_only(entry: dict[str, Any]) -> dict[str, Any]:
+    """A parsed metrics entry without its raw log line."""
+    return {key: value for key, value in entry.items() if key != "raw"}
+
+
 class MetricsServiceMixin:
     """Metrics/leaderboard methods mixed into ``SessionService``."""
 
@@ -157,10 +162,12 @@ class MetricsServiceMixin:
             "metrics_source": metrics_source,
             "metrics_sources_checked": checked_sources,
             "latest": parsed_entries[-1] if parsed_entries else None,
-            # consecutive identical entries (a log line repeated) count once
-            "recent": [e for i, e in enumerate(parsed_entries) if i == 0 or e != parsed_entries[i - 1]][
-                -max(max_entries, 1) :
-            ],
+            # consecutive entries with the same metrics (progress lines) count once
+            "recent": [
+                e
+                for i, e in enumerate(parsed_entries)
+                if i == 0 or _metrics_only(e) != _metrics_only(parsed_entries[i - 1])
+            ][-max(max_entries, 1) :],
             "by_stage": latest_by_stage,
         }
 

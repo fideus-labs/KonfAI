@@ -543,9 +543,7 @@ class JobRegistry:
         next_resources = [f"job://{job.job_id}/log"]
         if job.status in self.active_states:
             # App jobs have no parsed runtime metrics (runtime_log_path is None), so skip read_live_metrics.
-            next_actions.extend(
-                ["get_job_status", "cancel_job"] if app_kind else ["get_job_status", "read_live_metrics", "cancel_job"]
-            )
+            next_actions.extend(["cancel_job"] if app_kind else ["read_live_metrics", "cancel_job"])
         elif job.status == "done":
             # An app job writes its outputs to a directory recorded in the manifest, so point at it.
             if app_kind:

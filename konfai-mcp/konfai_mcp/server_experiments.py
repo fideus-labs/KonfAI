@@ -112,7 +112,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         return {
             "train": statuses.get("train", {}).get("ready", False),
             "prediction": statuses.get("prediction", {}).get("ready", False),
-            "prediction_requires_models": statuses.get("prediction", {}).get("config_present", False)
+            "prediction_config_present": statuses.get("prediction", {}).get("config_present", False)
             and bool(statuses.get("prediction", {}).get("missing_models")),
             "evaluation": statuses.get("evaluation", {}).get("ready", False),
             "transform": statuses.get("transform", {}).get("ready", False),
@@ -877,7 +877,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         payload["next_actions"] = (
             ["write_session_file", "write_workflow_config", "inspect_object_signature", "summarize_session"]
             if payload["blocking_issues"]
-            else ["check_config", "summarize_session"]
+            else ["check_config", f"run_{workflow}", "summarize_session"]
         )
         return payload
 
