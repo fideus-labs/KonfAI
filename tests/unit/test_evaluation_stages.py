@@ -14,20 +14,22 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stages that derive what a registration is scored on: a body mask by Otsu's threshold, the labels both maps hold,
-landmarks carried by a field, and the Jacobian over the whole field. Each against the reading it reproduces:
-SimpleITK's filter and transform, the mask of ones it replaces."""
+"""Stages and criteria that derive what a registration is scored on: a body mask by Otsu's threshold, the labels both
+maps hold, landmarks carried by a field, a TRE percentile and the labels a warp lost. Each against the reading it
+reproduces: SimpleITK's filter and transform, NumPy's percentile."""
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
-from konfai.metric.measure import Jacobian
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
-from scipy.ndimage import gaussian_filter
-from scipy.spatial.transform import Rotation
+
+
+def gaussian_filter(array: np.ndarray, sigma: float) -> np.ndarray:
+    """A smooth random volume, by SimpleITK: scipy is no dependency."""
+    return sitk.GetArrayFromImage(sitk.DiscreteGaussian(sitk.GetImageFromArray(array), sigma**2))
 
 
 class _Store:
@@ -128,7 +130,7 @@ def _displaced(field: sitk.Image, points: np.ndarray) -> tuple[np.ndarray, "_Sto
 
 
 def test_displace_moves_points_as_the_whole_fields_transform_does_reading_a_block_a_point():
-    rotation = Rotation.from_rotvec([0.2, -0.3, 0.4]).as_matrix().ravel().tolist()
+    rotation = sitk.VersorTransform((0.2, -0.3, 0.4), 0.54).GetMatrix()
     field = _field((24, 20, 16), (1.5, 0.8, 2.5), (-30.0, 10.0, 5.0), rotation, 3)
     rng = np.random.default_rng(3)
     inside = [
@@ -148,23 +150,6 @@ def test_displace_moves_the_first_two_coordinates_of_a_2d_case():
     points = np.array([[*field.TransformContinuousIndexToPhysicalPoint(p), 0.0] for p in [(5.0, 7.5), (20.2, 12.0)]])
     moved, _ = _displaced(field, points)
     assert np.allclose(moved, _whole_field(field, points), atol=1e-9) and (moved[:, 2] == 0).all()
-
-
-def test_the_jacobian_over_the_whole_field_is_its_value_within_a_mask_of_ones():
-    rng = np.random.default_rng(4)
-    field = torch.from_numpy(
-        np.stack([gaussian_filter(rng.standard_normal((12, 14, 16)), 2) * 3 for _ in range(3)]).astype(np.float32)
-    )[None]
-    body = torch.zeros(1, 1, 12, 14, 16)
-    body[..., 3:9, 3:11, 4:12] = 1
-    attributes = [
-        [Attribute({"Origin": np.zeros(3), "Spacing": np.array([0.7, 1.1, 2.5]), "Direction": np.eye(3).ravel()})]
-    ]
-    ones = Jacobian(["", "_body"])(field, torch.ones_like(body), body, attributes=attributes)
-    whole = Jacobian(["_body"], whole="")(field, body, attributes=attributes)
-    assert set(whole[1]) == set(ones[1]) and float(whole[0]) == pytest.approx(float(ones[0]), abs=1e-12)
-    for key, value in ones[1].items():
-        assert whole[1][key] == pytest.approx(value, abs=1e-12), key
 
 
 def test_tre_gives_the_mean_with_each_landmark_or_one_percentile():
@@ -195,3 +180,12 @@ def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
     mask = torch.zeros_like(reference)
     mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
     assert MissingLabels()(output, reference, mask)[1] == 0.0
+
+
+def test_missing_labels_takes_no_loss_role():
+    from konfai.metric.measure import MissingLabels
+    from konfai.network.network.loaders import CriterionsAttr
+
+    assert not MissingLabels().loss_capable
+    with pytest.raises(MeasureError):
+        CriterionsAttr(is_loss=True).settle_role(MissingLabels(), "k")

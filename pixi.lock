@@ -2288,7 +2288,6 @@ packages:
   - torch>=2.3
   - tqdm
   - numpy
-  - scipy
   - ruamel-yaml
   - psutil
   - safetensors
