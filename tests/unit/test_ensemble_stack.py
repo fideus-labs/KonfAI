@@ -27,7 +27,13 @@ pytest.importorskip("SimpleITK")
 
 from konfai.data.transform import InferenceStack, Magnitude, SegmentationDisagreement, StandardDeviation
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, stack_members
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
+from konfai.utils.dataset import (
+    AFFINE_ATTRIBUTE,
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
+    Attribute,
+    Dataset,
+)
 
 
 def _attributes(field: bool = False) -> Attribute:
@@ -78,6 +84,21 @@ def test_a_stack_without_a_count_is_one_member_a_channel() -> None:
     torch.testing.assert_close(StandardDeviation()("P000", stack, Attribute()), stack.std(0)[None])
     labels = torch.tensor([1, 1, 2])[:, None, None, None]
     assert float(SegmentationDisagreement()("P000", labels, Attribute()).flatten()[0]) == pytest.approx(1 / 3)
+
+
+def test_a_stack_does_not_take_its_output_s_native_form(tmp_path: Path) -> None:
+    """The output's header may name its native form (its affine, its transform file): the members are fields, so
+    their stack names neither, and the output keeps both, its transform file on disk."""
+    transform_file = tmp_path / "Transform.h5"
+    transform_file.write_bytes(b"")
+    attributes = _attributes(field=True)
+    attributes[AFFINE_ATTRIBUTE] = "1 0 0 0 1 0 0 0 1 0 0 0"
+    attributes[TRANSFORM_FILE_ATTRIBUTE] = str(transform_file)
+    InferenceStack(dataset=f"{tmp_path}:mha")("P000", torch.randn(2, 3, 4, 5, 6), attributes)
+
+    header = Dataset(str(tmp_path), "mha").read_data("InferenceStack", "P000")[1]
+    assert AFFINE_ATTRIBUTE not in header and TRANSFORM_FILE_ATTRIBUTE not in header
+    assert AFFINE_ATTRIBUTE in attributes and transform_file.is_file()
 
 
 def test_copies_folded_one_at_a_time_average_their_members(tmp_path: Path) -> None:

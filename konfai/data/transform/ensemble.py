@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from konfai.data.transform.base import _RANK_CHANGE, LocalityKind, PatchLocality, Transform
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import AFFINE_ATTRIBUTE, TRANSFORM_FILE_ATTRIBUTE, Attribute, Dataset, DataStream
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
 
@@ -156,6 +156,9 @@ def _stack_attributes(cache_attribute: Attribute, members: int, dataset: Dataset
             "Write the stack where a header holds it: InferenceStack(dataset='<path>:mha'), or nrrd, or omezarr.",
         )
     attributes = Attribute(cache_attribute)
+    for key in (AFFINE_ATTRIBUTE, TRANSFORM_FILE_ATTRIBUTE):  # the output's native form: the members are fields
+        if key in attributes:
+            attributes.pop(key)
     attributes[MEMBERS_ATTRIBUTE] = members
     return attributes
 
