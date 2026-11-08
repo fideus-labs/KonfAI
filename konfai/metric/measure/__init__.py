@@ -56,6 +56,9 @@ from konfai.metric.measure.regression import KLDivergence as KLDivergence
 from konfai.metric.measure.regression import MAESaveMap as MAESaveMap
 from konfai.metric.measure.regression import Mean as Mean
 from konfai.metric.measure.regression import PointDistance as PointDistance
+from konfai.metric.measure.regression import PointSpread as PointSpread
+from konfai.metric.measure.regression import Quantile as Quantile
+from konfai.metric.measure.regression import SpreadCalibration as SpreadCalibration
 from konfai.metric.measure.regression import Variance as Variance
 from konfai.metric.measure.segmentation import ASSD as ASSD
 from konfai.metric.measure.segmentation import HD95 as HD95
@@ -111,7 +114,10 @@ __all__ = [
     "PatchGanLoss",
     "PerceptualLoss",
     "PointDistance",
+    "PointSpread",
+    "Quantile",
     "SAM_Perceptual",
+    "SpreadCalibration",
     "SurfaceDice",
     "Variance",
     "VolumeDifference",

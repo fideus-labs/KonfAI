@@ -768,11 +768,16 @@ def get_app_info(app_id: str):
     result["inputs"] = {k: asdict(v) for k, v in app.get_inputs().items()}
     result["outputs"] = {k: asdict(v) for k, v in app.get_outputs().items()}
 
-    result_tmp: dict[str, dict[str, dict]] = {}
-    for key, entries in app.get_evaluations_inputs().items():
-        by_file = result_tmp.setdefault(key.display_name, {})
-        by_file[key.evaluation_file] = {name: asdict(entry) for name, entry in entries.items()}
-    result["inputs_evaluations"] = result_tmp
+    for key_name, tabs in (
+        ("inputs_evaluations", app.get_evaluations_inputs()),
+        ("inputs_uncertainties", app.get_uncertainties_inputs()),
+    ):
+        by_tab: dict[str, dict[str, dict]] = {}
+        for key, entries in tabs.items():
+            by_tab.setdefault(key.display_name, {})[key.evaluation_file] = {
+                name: asdict(entry) for name, entry in entries.items()
+            }
+        result[key_name] = by_tab
     return result
 
 
@@ -1271,7 +1276,9 @@ async def evaluate(
 async def uncertainty(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
+    gt: Annotated[list[UploadFile], File(...)] = [],
     inputs_groups: Annotated[str | None, Form()] = None,
+    gt_groups: Annotated[str | None, Form()] = None,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
     options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",
