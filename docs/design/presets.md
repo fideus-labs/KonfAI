@@ -69,7 +69,7 @@ is what one run changes.
 ### What ran
 
 Every inference writes `konfai-run.json` beside its outputs: the app, its revision (the Hugging Face snapshot), its
-preset, every `--set` it applied in order, and an `identity` that every run of the same configuration shares.
+preset, and every `--set` it applied, in order.
 
 ## Implemented on this branch
 
