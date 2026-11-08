@@ -191,7 +191,8 @@ matches; the server's `instructions` say what KonfAI does and when to search its
 tools, and six entry tools (`describe_konfai_capabilities`, `list_apps`, `run_app`,
 `initialize_session`, `write_workflow_config`, `summarize_session`) carry
 `_meta["anthropic/alwaysLoad"]` so Claude Code keeps them loaded while it defers the
-rest. The whole tool list weighs about 18k tokens for a client that loads it upfront.
+rest. Listed schemas are lean (an optional parameter is its type, no output schema for a free-form
+result); the whole tool list weighs about 15k tokens for a client that loads it upfront.
 
 Tools are grouped by stage below. To avoid drift and wasted tokens, each tool's
 **contract (inputs, outputs, `next_actions`) is not duplicated here**; it lives

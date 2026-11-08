@@ -172,7 +172,7 @@ Launch a prediction job from the session Prediction.yml with a checkpoint of the
 
 ### `run_registration_evaluate`
 
-Score a registration against what the pair has: labels (Dice), landmarks (TRE in mm, fixed points pushed through the transform), same-modality images (MAE), and a field's folded-voxel fraction. Pass the ORIGINAL moving data: the transform warps it. Run with and without transforms to report the gain. A tracked impact-reg-konfai job, no trust gate; Evaluation_summary.json holds the aggregates.
+Score a registration against what the pair has: labels (Dice), landmarks (TRE in mm, fixed points pushed through the transform), same-modality images (MAE), and a field's folded-voxel fraction. Pass the ORIGINAL moving data: the transform warps it. Every list holds one path per case, paired by order (or a single path reused for every case). Run with and without transforms to report the gain. A tracked impact-reg-konfai job, no trust gate; Evaluation_summary.json holds the aggregates.
 
 ### `run_resume`
 

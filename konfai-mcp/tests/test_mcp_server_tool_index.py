@@ -208,3 +208,22 @@ def test_the_resources_the_skill_names_are_listed_by_the_client(
     listed = asyncio.run(scenario())
     assert named, skill
     assert named <= listed, sorted(named - listed)
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_the_listed_schemas_are_lean(load_mcp_server: Callable[[], ModuleType]) -> None:
+    """An optional parameter lists as its type (no anyOf-null, no default null), a free-form output schema is not
+    listed, and a call still accepts an explicit null."""
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            for tool in await client.list_tools():
+                assert tool.output_schema is None or tool.output_schema.get("properties"), tool.name
+                for name, prop in tool.input_schema.get("properties", {}).items():
+                    assert {"type": "null"} not in prop.get("anyOf", []), (tool.name, name)
+                    assert not ("default" in prop and prop["default"] is None), (tool.name, name)
+            result = await client.call_tool("check_component", {"classpath": "json", "kind": None})
+            assert result.structured_content is not None
+
+    asyncio.run(scenario())

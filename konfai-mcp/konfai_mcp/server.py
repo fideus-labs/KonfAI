@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import os
@@ -27,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
@@ -38,6 +40,8 @@ try:
     from fastmcp import FastMCP
     from fastmcp import settings as fastmcp_settings
     from fastmcp.server.auth import StaticTokenVerifier
+    from fastmcp.server.middleware import Middleware as McpMiddleware
+    from fastmcp.tools import Tool
     from fastmcp.utilities.types import Image as FastMCPImage
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
@@ -101,6 +105,45 @@ from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind, workflow_choice_de
 mcp = FastMCP("KonfAI", instructions=SERVER_INSTRUCTIONS)
 #: Claude Code loads a tool carrying this upfront even when it defers the rest to its tool search.
 ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
+
+
+def _lean(schema: dict[str, Any]) -> dict[str, Any]:
+    """An optional parameter listed as its type: pydantic's ``anyOf [T, null]`` and ``default: null`` say nothing a
+    client needs, and cost a fifth of the schema."""
+    schema = copy.deepcopy(schema)
+    required = set(schema.get("required", ()))
+    for name, prop in schema.get("properties", {}).items():
+        if name in required:
+            continue
+        if "default" in prop and prop["default"] is None:
+            del prop["default"]
+        alternatives = [a for a in prop.get("anyOf", ()) if a != {"type": "null"}]
+        if len(alternatives) == 1:
+            del prop["anyOf"]
+            prop.update(alternatives[0])
+        elif len(alternatives) < len(prop.get("anyOf", ())):
+            prop["anyOf"] = alternatives
+    return schema
+
+
+class _LeanSchemas(McpMiddleware):
+    """What a client lists: lean input schemas, and no output schema when it is a free-form object (every tool
+    returns a dict). Calls are untouched: an explicit null is still accepted."""
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Sequence[Tool]:
+        tools = await call_next(context)
+        return [
+            tool.model_copy(
+                update={
+                    "parameters": _lean(tool.parameters),
+                    "output_schema": tool.output_schema if (tool.output_schema or {}).get("properties") else None,
+                }
+            )
+            for tool in tools
+        ]
+
+
+mcp.add_middleware(_LeanSchemas())
 
 KONFAI_VERSION = konfai_pkg.__version__
 konfai_get_available_devices = konfai_pkg.get_available_devices
@@ -1557,34 +1600,28 @@ def run_app(
     return _launch_app_job(spec)
 
 
-_REG_CASES = " One path per case, paired by order with the other lists (or one used for every case)."
-
-
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_registration_evaluate"]))
 def run_registration_evaluate(
     transforms: Annotated[
         list[str] | None,
         Field(
             description="The registration's Transform.h5 (from run_app's infer output, <case>/Transform.h5)."
-            + _REG_CASES
-            + " Omit it to score the pair as it is: the misalignment before registration."
+            " Omit it to score the pair as it is: the misalignment before registration."
         ),
     ] = None,
-    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE." + _REG_CASES)] = None,
+    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE.")] = None,
     moving_images: Annotated[
-        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only)." + _REG_CASES)
+        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only).")
     ] = None,
-    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice." + _REG_CASES)] = None,
-    moving_seg: Annotated[
-        list[str] | None, Field(description="ORIGINAL moving label maps, for Dice." + _REG_CASES)
-    ] = None,
+    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice.")] = None,
+    moving_seg: Annotated[list[str] | None, Field(description="ORIGINAL moving label maps, for Dice.")] = None,
     fixed_landmarks: Annotated[
-        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE." + _REG_CASES)
+        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE.")
     ] = None,
     moving_landmarks: Annotated[
-        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE." + _REG_CASES)
+        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE.")
     ] = None,
-    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE." + _REG_CASES)] = None,
+    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE.")] = None,
     output: Annotated[
         str | None,
         Field(description="Output directory (default: a unique dir under the session workspace AppEvaluations/)."),

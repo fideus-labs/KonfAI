@@ -20,7 +20,8 @@ list_app_parameters; `fetch_app` replaces import_app and export_app (`path`); `a
 register_app_source and unregister_app_source; `read_scout_report()` lists the reports; `fidopt_catalog` replaces
 fidopt_list_datasets, fidopt_describe_dataset and fidopt_list_methods. The server now declares instructions (what
 it does, when to search its tools), marks six entry tools to load upfront under Claude Code's tool search, and
-describes every tool in one short paragraph: the tool list a client loads drops from ~26,600 to ~17,800 tokens.
+describes every tool in one short paragraph; listed schemas drop pydantic's `anyOf [T, null]`, `default: null` and
+the free-form output schemas: the tool list a client loads drops from ~26,600 to ~14,800 tokens.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)
