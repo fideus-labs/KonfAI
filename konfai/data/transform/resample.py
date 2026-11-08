@@ -21,6 +21,8 @@ import functools
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -65,6 +67,7 @@ from konfai.data.transform.base import (
     TransformInverse,
     sitk,
 )
+from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, as_member, stacked_groups
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
@@ -1249,7 +1252,10 @@ class Resample(TransformInverse):
         if self.transforms is None:
             return
         try:
-            self._stored_map(name)
+            # Every member of a stack is a map of its own, read as the call reads it; the first stands for them.
+            stacked, members = stacked_groups(self, self.transforms, name)
+            with self._as_member(name, stacked, 0) if members else nullcontext():
+                self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
@@ -1306,6 +1312,11 @@ class Resample(TransformInverse):
                 )
         for name in self._grids:
             try:
+                if stacked_groups(self, self.transforms or {}, name)[1]:
+                    return (
+                        f"case '{name}' is resampled through a stacked transform (an ensemble's members), one member"
+                        " at a time over the whole volume"
+                    )
                 self._pricing_bound(name)
             except TransformError as error:
                 # Both halves of the refusal: the first says what is wrong, the second what to
@@ -1423,6 +1434,43 @@ class Resample(TransformInverse):
         return self._sample(name, tensor, tuple(context.target), [part.start for part in context.source])
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """The case resampled; through a stacked transform (an ensemble's members), once per member, the results
+        stacked in the members' order with their count in the header."""
+        stacked, members = stacked_groups(self, self.transforms or {}, name)
+        if not members:
+            return self._resample_whole(name, tensor, cache_attribute)
+        # Every member reads the case on its own grid: the header the first leaves is the target's.
+        source, results = Attribute(cache_attribute), []
+        for member in range(members):
+            header = Attribute(source)
+            with self._as_member(name, stacked, member):
+                results.append(self._resample_whole(name, tensor, header))
+        dict.clear(cache_attribute)
+        dict.update(cache_attribute, header)
+        cache_attribute[MEMBERS_ATTRIBUTE] = members
+        return torch.cat(results)
+
+    @contextmanager
+    def _as_member(self, name: str, stacked: set[str], member: int) -> Iterator[None]:
+        """The stage reading member ``member`` of the stacks under ``stacked`` alone, its maps read afresh and
+        forgotten after: the next member's is another map."""
+        self._forget_maps(name)
+        with as_member(self, stacked, member):
+            try:
+                yield
+            finally:
+                self._forget_maps(name)
+
+    def _forget_maps(self, name: str) -> None:
+        """Drop what this case's stored map was read and decoded into: the next member's is another map."""
+        self._maps.pop(name, None)
+        self._bounds.pop(name, None)
+        self._covering.pop(name, None)
+        for key in [key for key in self._stored if key[0] == name]:
+            self._stored.pop(key, None)
+        self._field_window = None
+
+    def _resample_whole(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         shape = [int(extent) for extent in tensor.shape[1:]]
         # Re-recorded on every call: the whole-volume path is handed the case's own evolved header,
         # and a grid recorded by an earlier walk may describe the stored volume rather than this
@@ -1881,6 +1929,18 @@ class TransformPoints(Transform):
         self.transforms = transforms
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """The points pushed through the transforms; through a stacked transform (an ensemble's members), once per
+        member: ``[M, N, 3]``, the members in their order."""
+        stacked, members = stacked_groups(self, self.transforms, name)
+        if not members:
+            return self._push(name, tensor)
+        moved = []
+        for member in range(members):
+            with as_member(self, stacked, member):
+                moved.append(self._push(name, tensor))
+        return torch.stack(moved)
+
+    def _push(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
         from konfai.utils.dataset import is_displacement_entry
         from konfai.utils.ITK import displace_points
 

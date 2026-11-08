@@ -1,0 +1,25 @@
+# konfai-apps uncertainty APP --uncertainty-file Uncertainty_with_fid.yml -i STACK --gt FIXED_FID
+# The ensemble's uncertainty where landmarks are, with no reference: each fixed landmark pushed through every member of
+# the stack, and how far the members put it from each other (PointSpread, mm per landmark, and their mean).
+# Uncertainty_calibration.yml adds, against the moving landmarks, whether that spread predicts the error.
+Evaluator:
+  metrics:
+    MemberFid:
+      targets_criterions:
+        None:
+          criterions_loader:
+            PointSpread: {}
+  Dataset:
+    groups_src:
+      Reference_0:
+        groups_dest:
+          MemberFid:
+            transforms:
+              TransformPoints:
+                transforms:
+                  Volume_0: false
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

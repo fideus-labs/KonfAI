@@ -19,7 +19,7 @@ bash 01_first_registration.sh
 | 4 | `04_tuning.sh` | `show NAME`, `--set`, feature layers for MR/CT versus CT/CBCT, iterations, regularisation | ~9 min |
 | 5 | `05_large_images.sh` | two mouse brains of 190 million voxels from public ExaSPIM data through each engine: native tiling, memory, disk | ~17 min (plus the download), 20 GB of disk |
 | 6 | `06_evaluation.sh` | MAE, Dice, TRE and Jacobian before and after, the landmark direction, `apply --labels` | ~2 min |
-| 7 | `07_ensemble_uncertainty.sh` | three presets ensembled, each member scored, the spread map | ~3 min |
+| 7 | `07_ensemble_uncertainty.sh` | three presets ensembled, the ensemble scored, how its members disagree | ~3 min |
 
 ## The data
 

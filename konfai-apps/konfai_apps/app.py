@@ -803,6 +803,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         pass
 
@@ -1436,32 +1437,20 @@ class KonfAIApp(AbstractKonfAIApp):
         return found
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path | str]]) -> None:
-        """
-        Build the Dataset/ structure for uncertainty estimation.
-
-        This method enforces that each input file is a multi-component volume
-        (e.g., an inference stack) by reading metadata with SimpleITK.
-
-        Raises
-        ------
-        AppRepositoryError
-            If a provided input is not multi-channel (single-component).
-        """
-        dataset_path = KonfAIApp._stage_dataset()
-        for i, input_path in enumerate(inputs):
-            for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                reader = sitk.ImageFileReader()
-                reader.SetFileName(str(file))
-                reader.ReadImageInformation()
-                n_channels = reader.GetNumberOfComponents()
-                if n_channels > 1:
-                    suffix = KonfAIApp._supported_suffix(file)
-                    KonfAIApp.link_entry(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
-                else:
-                    raise AppRepositoryError(
-                        f"'{file}' has one channel: uncertainty reads an inference stack, one channel per inference.",
-                        "Give the InferenceStack.mha an inference with -uncertainty wrote.",
-                    )
+        """Stage the stacks as inputs are staged (``P{idx}/Volume_{i}``, an OME-Zarr store whole), each read back by its
+        header and refused when it holds one channel: uncertainty reads an inference stack, its members' channels."""
+        self._write_inputs_to_dataset(inputs)
+        for dataset_dir in KonfAIApp._dataset_roots():
+            for i in range(len(inputs)):
+                group = f"Volume_{i}"
+                dataset = Dataset(str(dataset_dir), KonfAIApp._detect_group_format(dataset_dir, group))
+                for name in dataset.get_names(group):
+                    if dataset.get_infos(group, name)[0][0] < 2:
+                        raise AppRepositoryError(
+                            f"Case {name}'s {group} has one channel: uncertainty reads an inference stack, one channel"
+                            " per inference.",
+                            "Give the InferenceStack an inference with -uncertainty wrote.",
+                        )
 
     def _write_gt_to_dataset(self, gt: list[list[Path | str]]) -> None:
         """
@@ -1733,9 +1722,12 @@ class KonfAIApp(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path | str]] | None = None,
     ) -> None:
         """
-        Run uncertainty estimation locally.
+        Run uncertainty estimation locally: an evaluation of the stack (``Volume_0``), against the references ``gt``
+        (``Reference_i``) an uncertainty config reads beside it (an ensemble's landmarks, a segmentation it
+        propagates).
 
         Steps:
         1. Validate that inputs are multi-component inference stacks
@@ -1750,7 +1742,10 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inference_stack_to_dataset(inputs)
+        if gt:
+            self._write_gt_to_dataset(gt)
         self.app_repository.install_uncertainty(uncertainty_file)
+        self._declare_dataset_roots(uncertainty_file)
         from konfai.evaluator import evaluate
 
         result_dir = self._stage_result_dir(output, tmp_dir, "Uncertainties")
@@ -1820,8 +1815,10 @@ class KonfAIApp(AbstractKonfAIApp):
         # every later prediction on the next case's reference, or score what an earlier run left in its place.
         staged = [f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))]
         volumes = [volume for files in KonfAIApp._case_volumes(predictions_dir, staged).values() for volume in files]
-        outputs = [volume for volume in volumes if volume.name != "InferenceStack.mha"]
-        inference_stacks = [volume for volume in volumes if volume.name == "InferenceStack.mha"]
+        from .ensemble import is_stack
+
+        outputs = [volume for volume in volumes if not is_stack(volume)]
+        inference_stacks = [volume for volume in volumes if is_stack(volume)]
         missing = [case for case in staged if self._predicted is not None and case not in self._predicted]
         if (gt is not None or uncertainty) and missing:
             raise AppRepositoryError(

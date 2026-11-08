@@ -1595,6 +1595,26 @@ def _remote_repo_from_payload(monkeypatch: pytest.MonkeyPatch, payload: dict):
     return app_repository_module.AppRepositoryInfoFromRemoteServer(_Server(), "demo/app")
 
 
+def test_remote_repository_reads_the_uncertainty_tabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uncertainty tabs come as the evaluation tabs do: by tab and config, the references each takes beside the
+    stack. A server that predates them sends none, which reads as no tab."""
+    tabs = {
+        "Map": {"Uncertainty.yml": {}},
+        "Landmarks": {
+            "Uncertainty_with_fid.yml": {
+                "FixedFid": {"display_name": "Fixed landmarks", "volume_type": "FIDUCIALS", "required": True}
+            }
+        },
+    }
+    repo = _remote_repo_from_payload(monkeypatch, _remote_info_payload(inputs_uncertainties=tabs))
+    got = {(key.display_name, key.evaluation_file): entries for key, entries in repo.get_uncertainties_inputs().items()}
+    assert got[("Map", "Uncertainty.yml")] == {}
+    fid = got[("Landmarks", "Uncertainty_with_fid.yml")]["FixedFid"]
+    assert fid.volume_type == app_repository_module.VolumeType.FIDUCIALS and fid.required
+
+    assert _remote_repo_from_payload(monkeypatch, _remote_info_payload()).get_uncertainties_inputs() == {}
+
+
 def test_remote_repository_relays_the_server_reported_finetunable(monkeypatch: pytest.MonkeyPatch) -> None:
     # Remote fine-tune runs on the user's server, so the server (which resolves the actual bundle)
     # is the source of truth; the adapter must relay its answer, not hardcode False.

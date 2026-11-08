@@ -480,6 +480,89 @@ class TRE(Criterion):
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 
 
+def _point_spread(members: torch.Tensor) -> torch.Tensor:
+    """Per landmark, how far an ensemble's members put it from each other: the norm of the per-axis standard
+    deviation across the members (``[M, N, 3]`` in, ``[N]`` out), the root mean square distance to their mean point
+    (N - 1); 0 for one member."""
+    if members.shape[0] < 2:
+        return members.new_zeros(members.shape[1])
+    return torch.linalg.norm(members.double().std(0), dim=-1)
+
+
+class PointSpread(Criterion):
+    """The spread of landmarks pushed through every member of an ensemble (``TransformPoints`` through a stack,
+    ``[B, M, N, 3]``), in mm: per landmark, the root mean square distance of the members' points to their mean; the
+    reported value is their mean. The target is not read: name it ``None`` under ``targets_criterions``."""
+
+    any_target_grid = True
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, LabelledValues]:
+        del targets
+        if output.dim() != 4 or output.shape[-1] != 3:
+            raise MeasureError(
+                f"PointSpread reads the points of an ensemble's members, [batch, members, points, 3]; got {list(output.shape)}.",
+                "Push the landmarks through a stack of transforms (TransformPoints) first.",
+            )
+        spread = torch.stack([_point_spread(case) for case in output]).mean(0)
+        return spread.mean().float(), LabelledValues(spread.float(), [f"Landmarks_{i}" for i in range(spread.shape[0])])
+
+
+def _ranks(values: torch.Tensor) -> torch.Tensor:
+    """The ranks Spearman's correlation takes: tied values share the mean of the ranks they span."""
+    _, inverse, counts = torch.unique(values, return_inverse=True, return_counts=True)
+    first = torch.cumsum(counts, 0) - counts  # each distinct value's first rank, from 0
+    return (first + (counts - 1) / 2).to(values.dtype)[inverse]
+
+
+class SpreadCalibration(Criterion):
+    """Whether an ensemble's spread predicts its error, from landmarks: the Spearman rank correlation, across the
+    landmarks, between their spread (``PointSpread``) and the error of the ensemble's mean point against the target's
+    landmark (its TRE). 1 when the most uncertain landmarks are the worst registered; about 0 when the spread says
+    nothing. The output is the members' points (``[B, M, N, 3]``), the target the landmarks they should land on."""
+
+    maximize = True
+    any_target_grid = True
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        if not targets:
+            raise MeasureError("SpreadCalibration compares the members' points with the target's and was handed none.")
+        correlations = []
+        for members, reference in zip(output, targets[0], strict=True):
+            spread = _point_spread(members)
+            error = torch.linalg.norm(members.double().mean(0) - reference.double(), dim=-1)
+            if spread.numel() < 3 or float(spread.std()) == 0 or float(error.std()) == 0:
+                correlations.append(float("nan"))
+                continue
+            a, b = _ranks(spread), _ranks(error)
+            correlations.append(float(torch.corrcoef(torch.stack([a, b]))[0, 1]))
+        value = float(np.nanmean(correlations)) if not all(np.isnan(correlations)) else float("nan")
+        return torch.tensor(1 - value), value
+
+
+class Quantile(Criterion):
+    """The ``q`` quantile of the output's finite values (0.95: its 95th percentile), a map read whole: with ``Mean``,
+    how large an uncertainty map runs, and how far its tail goes. The target is not read."""
+
+    any_target_grid = True
+
+    def __init__(self, q: float = 0.95, name: str | None = None) -> None:
+        super().__init__()
+        if not 0 <= q <= 1:
+            raise MeasureError(f"Quantile takes q in [0, 1], got {q}.")
+        self.q = float(q)
+        self.name = name or f"Quantile{round(self.q * 100)}"
+
+    def get_name(self) -> str:
+        return self.name
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
+        del targets
+        values = output.detach().float().cpu().numpy().ravel()
+        values = values[np.isfinite(values)]
+        value = float(np.quantile(values, self.q)) if values.size else float("nan")
+        return torch.tensor(value), value
+
+
 def _selected(
     criterion: Criterion, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
 ) -> tuple[torch.Tensor, torch.Tensor]:

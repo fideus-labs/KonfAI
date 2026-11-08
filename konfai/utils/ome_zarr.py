@@ -1195,12 +1195,17 @@ def create_ome_zarr_store(
     ngff_zarr = _require_ngff_zarr()
     import dask.array
 
-    if displacement_field and shape[0] == 1:
-        # A scalar computed from a field (its magnitude) inherits the field's header, and is an image.
-        from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE
-
+    if displacement_field and shape[0] != len(shape) - 1:
+        # A field holds one component per spatial axis. A scalar computed from one (its magnitude) inherits its header
+        # and is an image; a stack of fields (InferenceStack's, member-major) keeps the mark for the members its header
+        # counts, as plain channels in ITK's order and millimetres: no RFC-5 axis types several fields as one.
         displacement_field = False
-        attributes = {key: value for key, value in (attributes or {}).items() if key != DISPLACEMENT_FIELD_ATTRIBUTE}
+        if shape[0] == 1:
+            from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE
+
+            attributes = {
+                key: value for key, value in (attributes or {}).items() if key != DISPLACEMENT_FIELD_ATTRIBUTE
+            }
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )

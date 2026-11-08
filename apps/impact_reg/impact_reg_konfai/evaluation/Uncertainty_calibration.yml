@@ -1,0 +1,33 @@
+# konfai-apps uncertainty APP --uncertainty-file Uncertainty_calibration.yml -i STACK --gt FIXED_FID --gt MOVING_FID
+# The ensemble's uncertainty where landmarks are: each fixed landmark pushed through every member of the stack, and
+# how far the members put it from each other (PointSpread, mm per landmark). Against the moving landmarks, whether
+# that spread predicts the error (SpreadCalibration: the Spearman correlation, across the landmarks, between the spread
+# and the TRE of the ensemble's mean point; 1 when the most uncertain are the worst registered).
+Evaluator:
+  metrics:
+    MemberFid:
+      targets_criterions:
+        None:
+          criterions_loader:
+            PointSpread: {}
+        MovingFid:
+          criterions_loader:
+            SpreadCalibration: {}
+  Dataset:
+    groups_src:
+      Reference_0:
+        groups_dest:
+          MemberFid:
+            transforms:
+              TransformPoints:
+                transforms:
+                  Volume_0: false
+      Reference_1:
+        groups_dest:
+          MovingFid:
+            transforms: None
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

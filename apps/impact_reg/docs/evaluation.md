@@ -61,18 +61,28 @@ converted); rows are paired by order, so both files must list the same points in
 ## `uncertainty`
 
 Several presets registering one pair give several fields. Where they agree, the registration is reliable; where they
-disagree, it is not. `uncertainty` measures that disagreement voxel by voxel: the root mean square distance of the
-members' displacement vectors to their mean (sample, N−1), in mm.
+disagree, it is not. `register --uncertainty` keeps every preset's field beside their mean, as the ensemble's stack
+(`InferenceStack.mha`, or `.ome.zarr` beside a store: one volume whose channels are the members' components, the
+member count in its header). `uncertainty` measures the disagreement from it, through konfai-apps' `uncertainty` and
+the configs shipped in `evaluation/`:
+
+| Given | Measured |
+|---|---|
+| the stack alone | the spread of the displacement vectors, voxel by voxel: the root mean square distance of the members' vectors to their mean (sample, N−1), in mm; its mean and 95th percentile |
+| `--gt-fixed-fid` | the spread of the fixed landmarks pushed through every member, mm per landmark |
+| `--gt-fixed-fid --gt-moving-fid` | whether that spread predicts the error: its Spearman correlation with the TRE |
+| `--gt-moving-seg` | how the moving segmentation, pulled through every member onto the fixed grid, disagrees |
 
 ```bash
-impact-reg-konfai register ConvexAdam#composite FireANTs#anatomix Elastix#impact_static \
-    -f fixed.nii.gz -m moving.nii.gz -o Output --keep-fields --gpu 0
-impact-reg-konfai uncertainty --dvf Output/P000/Ensemble/*.h5 -o Output/P000
+impact-reg-konfai register ConvexAdam#composite FireANTs#anatomix \
+    -f fixed.nii.gz -m moving.nii.gz -o Output --uncertainty --gpu 0
+impact-reg-konfai uncertainty -i Output/P000/InferenceStack.mha \
+    --gt-fixed-fid fixed.fcsv --gt-moving-fid moving.fcsv -o Uncertainty
 ```
 
-The map is written as `Output/P000/uncertainty/Uncertainty.mha`, on the fixed grid. Ensemble members that register
-different things (a rigid preset beside deformable ones) make the spread mean little: ensemble presets of the same
-nature.
+Case `P000` is written to `Uncertainty/P000/Uncertainty/<Map|Landmarks|Segmentation>/`, on the fixed grid, and every
+measure to `Uncertainty_summary.json`. Ensemble members that register different things (a rigid preset beside
+deformable ones) make the spread mean little: ensemble presets of the same nature.
 
 ## `apply`
 

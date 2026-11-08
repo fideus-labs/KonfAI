@@ -645,6 +645,8 @@ def test_inference_stack_super_init_enables_dataset_fallback():
     written: dict[str, object] = {}
 
     class _FakeDataset:
+        file_format = "mha"  # the stack goes with the output where its form holds it
+
         def write(self, group, name, data, cache_attribute):
             written["group"] = group
             written["name"] = name

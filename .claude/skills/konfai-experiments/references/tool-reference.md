@@ -2,7 +2,7 @@
 
 > GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.
 
-60 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
+68 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
 ## Tools
 
@@ -70,6 +70,26 @@ Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters)
 
 Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. resolved_config is the snapshot the job took when it completed, not the live session config, which may have been rewritten since; config_snapshots are the launch-time ones. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
 
+### `fidopt_describe_dataset`
+
+Use to read one FidOpt dataset's descriptor: what a case is, its truth, its labels, its cases and development cases, its licence and notes. Next: fidopt_table, fidopt_run.
+
+### `fidopt_list_datasets`
+
+Use to list the FidOpt benchmark datasets (optionally one task: registration, segmentation, synthesis) through FidOpt's own code (KONFAI_MCP_FIDOPT names its executable): name, task, modalities, anatomy, test and development case counts, licence. Nothing is downloaded. Next: fidopt_describe_dataset, fidopt_table.
+
+### `fidopt_list_methods`
+
+Use to list the methods FidOpt runs (methods/<name>/method.json): title, task, summary, app, licence, version, variants. Next: fidopt_table to see their scores, fidopt_run to run one.
+
+### `fidopt_run`
+
+Use to launch one FidOpt operation as a tracked job, through FidOpt's CLI: check (a method's licence and convention, or its result on one case with dataset + cases), run (a method on a dataset's cases, scored into the local rows), tune (settings on development pairs). Only the operations the server allows (KONFAI_MCP_FIDOPT_ALLOWED, default check) are accepted. scout='PROVIDER[:MODEL]' adds Scout's inspection of the scored outputs (fidopt --scout), with scout_allow_cloud for a cloud model. Outputs: job payload. Next: wait_for_job, read_job_log, fidopt_table.
+
+### `fidopt_table`
+
+Use to read a dataset's board as FidOpt prints it (fidopt table --json): one line per method and machine, with the published scores and the local rows. Next: fidopt_run, run_scout_inspection.
+
 ### `fine_tune_app`
 
 Use to TRAIN by starting from a published app instead of a blank slate: fine-tune an existing app's checkpoint(s) on the user's dataset, WITHOUT authoring or editing a config. This is the middle option between run_app (use as-is, no training) and design_config_strategy (author a config and train from scratch). The produced training runs like any app fine-tune; for full control (custom losses, config surgery) use import_app + run_resume(weights_only=True) instead. It launches a tracked training job and writes a resolvable app bundle (config + code + fine-tuned checkpoint) to the output directory, which you can then run with run_app. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. It does not author a config or adapt the dataset layout for you. Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for the app's MODEL tunables (bare names) or any config key by its full dotted path. Outputs: a job payload (status, resources, next_actions) plus the bundle output path. Next: wait_for_job, then run_app on the produced bundle (action infer, then evaluate to score and rank this fine-tune against other training trials via leaderboard / compare_runs).
@@ -126,6 +146,10 @@ Use to DISCOVER which KonfAI components exist before authoring a config from scr
 
 Use when you need the current job registry state. This lists jobs for the current session workspace. It does not wait for jobs or parse live metrics. Outputs: job payloads sorted by creation time. Next: get_job_status, wait_for_job, or read_live_metrics.
 
+### `list_scout_reports`
+
+Use to list the Scout inspections of the current session: name, task, case, verdict, observation count, when and with which model. Outputs: reports. Next: read_scout_report.
+
 ### `package_app_from_session`
 
 Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app / import_app can consume. Declare local helper packages and assets with support_files (bundle-relative destination -> workspace-relative source); folders copy recursively, with no recursive import discovery. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app on the produced bundle.
@@ -153,6 +177,10 @@ Use to READ a job's log as a tool: the crash-triage primitive: tail more than th
 ### `read_live_metrics`
 
 Use while a job is running and you want parsed runtime metrics instead of raw logs. This reads the runtime log and returns recent metric snapshots. It does not block until the job completes. Outputs: latest metric snapshot, recent entries, by_stage summaries, and job metadata. Next: wait_for_job or summarize_session.
+
+### `read_scout_report`
+
+Use to read a finished Scout inspection by name: verdict, observations (kind, defect, severity, confidence, box in mm, cited views and measurements), measurements, views (ids, positions, modes), usage and budget; no image bytes (the PNGs are under the report's evidence/). Outputs: report fields and the report.md path. Next: preview_volume on a cited position, run_scout_inspection.
 
 ### `read_session_file`
 
@@ -205,6 +233,10 @@ Use to SCORE a registration (a registration app's run_app infer output) against 
 ### `run_resume`
 
 Use to RESUME an interrupted or crashed training run from a checkpoint: model, optimizer, scheduler, and epoch/iteration counters are restored (KonfAI's RESUME command). Set weights_only=True instead to WARM-START a fine-tune from an imported app: load only the checkpoint's model weights and restart epoch/optimizer from scratch; prefer fine_tune_app when the app is used as published, since it needs no config editing. This launches a resumed training job from the current session Config.yml. It does not pick between runs: by default it resumes from the newest checkpoint of the configured run (falling back to the newest in the session), avoiding cross-run contamination. It trains up to the LIVE config's epochs: if the run already completed them, raise epochs in Config.yml first or the resume finishes immediately without adding checkpoints. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job or read_live_metrics.
+
+### `run_scout_inspection`
+
+Use to have KonfAI Scout inspect ONE result visually: a segmentation (image, prediction, optional truth), a registration (fixed, moving, field or transform, optional labels/landmarks) or a synthesis (source, synthetic, optional target). A vision model looks at slices, zooms, overlays and measures regions with KonfAI Eval, then reports localised defects with evidence. This launches a tracked job; the report lands under the session's Scout/<name>/. Images reach a cloud model ONLY with allow_cloud_images=True; a local OpenAI-compatible server (openai provider, loopback base_url) needs no flag. Outputs: job payload with output. Next: wait_for_job, then read_scout_report.
 
 ### `run_train`
 

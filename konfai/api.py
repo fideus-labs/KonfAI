@@ -463,10 +463,18 @@ def evaluate(
     one-entry mappings. ``transforms`` optionally names a pre-metric chain per group; the groups
     themselves are derived from ``metrics``.
     """
-    # A composite target ("Seg;Mask") names several dataset groups: split it so each is loaded.
+    # A composite target ("Seg;Mask") names several dataset groups: split it so each is loaded. The target "None"
+    # names no group: a criterion that reads the output alone (a field's Jacobian) is declared under it, as in a
+    # config file.
     groups = sorted(
         {str(group) for group in metrics}
-        | {part for targets in metrics.values() for target in targets for part in str(target).split(";")}
+        | {
+            part
+            for targets in metrics.values()
+            for target in targets
+            for part in str(target).split(";")
+            if part != "None"
+        }
     )
     groups_src: dict[str, object] = {}
     for group in groups:

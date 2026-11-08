@@ -589,6 +589,50 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Outputs: latest metric snapshot, recent entries, by_stage summaries, and job metadata. "
         "Next: wait_for_job or summarize_session."
     ),
+    "run_scout_inspection": (
+        "Use to have KonfAI Scout inspect ONE result visually: a segmentation (image, prediction, optional truth), "
+        "a registration (fixed, moving, field or transform, optional labels/landmarks) or a synthesis (source, "
+        "synthetic, optional target). A vision model looks at slices, zooms, overlays and measures regions with "
+        "KonfAI Eval, then reports localised defects with evidence. This launches a tracked job; the report lands "
+        "under the session's Scout/<name>/. Images reach a cloud model ONLY with allow_cloud_images=True; a local "
+        "OpenAI-compatible server (openai provider, loopback base_url) needs no flag. "
+        "Outputs: job payload with output. Next: wait_for_job, then read_scout_report."
+    ),
+    "read_scout_report": (
+        "Use to read a finished Scout inspection by name: verdict, observations (kind, defect, severity, "
+        "confidence, box in mm, cited views and measurements), measurements, views (ids, positions, modes), usage "
+        "and budget; no image bytes (the PNGs are under the report's evidence/). "
+        "Outputs: report fields and the report.md path. Next: preview_volume on a cited position, run_scout_inspection."
+    ),
+    "list_scout_reports": (
+        "Use to list the Scout inspections of the current session: name, task, case, verdict, observation count, "
+        "when and with which model. Outputs: reports. Next: read_scout_report."
+    ),
+    "fidopt_list_datasets": (
+        "Use to list the FidOpt benchmark datasets (optionally one task: registration, segmentation, synthesis) "
+        "through FidOpt's own code (KONFAI_MCP_FIDOPT names its executable): name, task, modalities, anatomy, test "
+        "and development case counts, licence. Nothing is downloaded. Next: fidopt_describe_dataset, fidopt_table."
+    ),
+    "fidopt_describe_dataset": (
+        "Use to read one FidOpt dataset's descriptor: what a case is, its truth, its labels, its cases and "
+        "development cases, its licence and notes. Next: fidopt_table, fidopt_run."
+    ),
+    "fidopt_list_methods": (
+        "Use to list the methods FidOpt runs (methods/<name>/method.json): title, task, summary, app, licence, "
+        "version, variants. Next: fidopt_table to see their scores, fidopt_run to run one."
+    ),
+    "fidopt_table": (
+        "Use to read a dataset's board as FidOpt prints it (fidopt table --json): one line per method and machine, "
+        "with the published scores and the local rows. Next: fidopt_run, run_scout_inspection."
+    ),
+    "fidopt_run": (
+        "Use to launch one FidOpt operation as a tracked job, through FidOpt's CLI: check (a method's licence and "
+        "convention, or its result on one case with dataset + cases), run (a method on a dataset's cases, scored into "
+        "the local rows), tune (settings on development pairs). Only the operations the server allows "
+        "(KONFAI_MCP_FIDOPT_ALLOWED, default check) are accepted. scout='PROVIDER[:MODEL]' adds Scout's inspection of "
+        "the scored outputs (fidopt --scout), with scout_allow_cloud for a cloud model. "
+        "Outputs: job payload. Next: wait_for_job, read_job_log, fidopt_table."
+    ),
     "wait_for_job": (
         "Use after launching a job when you want to block until it finishes. "
         "This polls job state until the job reaches a terminal status. "
