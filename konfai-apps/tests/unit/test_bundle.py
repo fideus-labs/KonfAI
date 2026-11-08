@@ -729,6 +729,24 @@ def test_colliding_bundle_filenames_are_refused_before_anything_is_written(tmp_p
     assert not list((tmp_path / "out").glob(".MR.staging-*")) if (tmp_path / "out").exists() else True
 
 
+def test_ensemble_checkpoints_whose_stems_collide_are_refused_before_any_export(tmp_path):
+    # Each model's id is its checkpoint's stem: /a/best.pt and /b/best.pt would both write best.onnx.
+    from konfai_apps.bundle import export_portable_into_bundle
+
+    (tmp_path / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: Model:Net\n")
+    with pytest.raises(AppMetadataError, match="share a file stem"):
+        export_portable_into_bundle(tmp_path, checkpoints=["/a/best.pt", "/b/best.pt"])
+
+
+def test_a_pt_name_resolves_to_the_safetensors_the_bundle_publishes(tmp_path):
+    from konfai_apps.bundle import _bundle_checkpoint
+
+    (tmp_path / "CV_0.safetensors").write_bytes(b"")
+    (tmp_path / "older.pt").write_bytes(b"")
+    assert _bundle_checkpoint(tmp_path, "CV_0.pt") == tmp_path / "CV_0.safetensors"
+    assert _bundle_checkpoint(tmp_path, "older.pt") == tmp_path / "older.pt"
+
+
 def test_a_repackaged_bundle_drops_the_previous_checkpoint_and_keeps_user_files(tmp_path):
     """The second export into an existing bundle left the first checkpoint beside the new one, and
     the default inference enumerated the old one. The previous manifest's checkpoints go; a file the
