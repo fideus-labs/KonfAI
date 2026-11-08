@@ -41,6 +41,7 @@ from konfai.data.transform.ensemble import SegmentationDisagreement as Segmentat
 from konfai.data.transform.ensemble import StandardDeviation as StandardDeviation
 from konfai.data.transform.ensemble import Variance as Variance
 from konfai.data.transform.intensity import Clip as Clip
+from konfai.data.transform.intensity import Fill as Fill
 from konfai.data.transform.intensity import HistogramMatching as HistogramMatching
 from konfai.data.transform.intensity import Normalize as Normalize
 from konfai.data.transform.intensity import Standardize as Standardize
@@ -60,6 +61,7 @@ from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
+from konfai.data.transform.resample import WorldCoordinates as WorldCoordinates
 from konfai.data.transform.shape import Canonical as Canonical
 from konfai.data.transform.shape import Crop as Crop
 from konfai.data.transform.shape import Flatten as Flatten
@@ -76,6 +78,7 @@ __all__ = [
     "Crop",
     "Dilate",
     "Expand",
+    "Fill",
     "FlatLabel",
     "Flatten",
     "Flip",
@@ -113,6 +116,7 @@ __all__ = [
     "TransformPoints",
     "UnNormalize",
     "Variance",
+    "WorldCoordinates",
     "Write",
     "resolve_operator",
     "split_expand",

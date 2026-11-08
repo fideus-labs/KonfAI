@@ -65,6 +65,9 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `ME` | Mean signed error (bias). | |
 | `PSNR` | Peak signal-to-noise ratio. Metric only. | `dynamic_range=4095.0` |
 | `SSIM` | Structural similarity. A metric unless `is_loss: true`. | `dynamic_range=4095.0` |
+| `NCC` | Normalised cross-correlation, over the image or a mask (a second target): one modality. Streams. | |
+| `LNCC` | Local normalised cross-correlation, the mean of `cov^2 / (var_a var_b)` over `kernel`-wide windows: one modality, intensities that drift. Streams with its halo. | `kernel=9` |
+| `NMI` | Normalised mutual information `(H(A) + H(B)) / H(A, B)`, 1 to 2, whatever the modalities. Streams when both ranges are given. | `bins=64, output_range=None, target_range=None` |
 | `MAESaveMap` | MAE that also writes the error map. | `reduction="mean", dataset=None, group=None` |
 
 ## Segmentation and classification
@@ -76,6 +79,9 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `FocalLoss` | Focal loss; `alpha` weights each label. | `gamma=2.0, alpha=None, reduction="mean"` |
 | `Accuracy` | Classification accuracy. | |
 | `DiceSaveMap` | Dice that also writes the error map. | `labels=None, dataset=None, group=None` |
+| `Jaccard`, `VolumeDifference` | Per label, as Dice: intersection over union; relative volume difference `abs(V_out - V_ref) / V_ref`. Stream. | `labels=None` |
+| `HD95`, `ASSD` | Per label, in the reference's spacing (mm): the 95th percentile Hausdorff distance; the average symmetric surface distance. A label the output lacks scores the grid's diagonal. | `labels=None` |
+| `SurfaceDice` | Per label, the share of both surfaces within `tolerance` mm of the other (normalised surface distance). | `tolerance=1.0, labels=None` |
 
 ## Adversarial and perceptual
 
@@ -93,6 +99,9 @@ reduction, a criterion from another library) are averaged per batch instead.
 | --- | --- | --- |
 | `TRE` | Target registration error between landmarks. | |
 | `JacobianFolding`, `JacobianMin`, `JacobianLogStd` | How regular a displacement field (the output, read with its geometry) is: the fraction of voxels where its Jacobian determinant is at most 0, the minimum, the standard deviation of its log. The target is not read. | |
+| `BendingEnergy` | The mean squared second derivative of a displacement field (the output, read with its geometry), in 1/mm^2: 0 for an affine map. The target is not read. | |
+| `Displacement` | The length of a displacement field's vectors: their `mean`, `p95` or `max`. The target is not read. | `statistic="mean", name=None` |
+| `PointDistance` | The distance between the output's and the target's vectors, voxel by voxel: `mean`, `p95` or `max`, NaN left out. On two `WorldCoordinates` images, a round trip's error. | `statistic="mean", name=None` |
 | `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
 | `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
 | `Variance`, `Mean` | Variance or mean of the output (uncertainty). | |

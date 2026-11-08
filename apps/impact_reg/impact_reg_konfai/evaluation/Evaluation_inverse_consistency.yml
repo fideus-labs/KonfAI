@@ -1,0 +1,44 @@
+# konfai-apps eval APP --evaluation-file Evaluation_inverse_consistency.yml -i FORWARD --gt BACKWARD --gt FIXED
+# How far a registration and the one registered back (moving as the fixed image) are from undoing each other, read
+# alone (no reference): each fixed voxel is sent through the forward map, then the backward one, and its distance to
+# where it started is the round trip's error, in mm (mean and 95th percentile). The fixed image gives the grid; a
+# voxel the round trip leaves it from is left out.
+Evaluator:
+  metrics:
+    RoundTrip:
+      targets_criterions:
+        Start:
+          criterions_loader:
+            PointDistance:
+              statistic: mean
+              name: InverseConsistencyMean
+            PointDistance#2:
+              statistic: p95
+              name: InverseConsistencyP95
+  Dataset:
+    groups_src:
+      Reference_1:
+        groups_dest:
+          Start:
+            transforms:
+              WorldCoordinates: {}
+          RoundTrip:
+            transforms:
+              # One voxel wider: a round trip ending in the grid's outer half voxel reads its coordinates exact,
+              # where the border voxel's would be held (linear interpolation clamps there), under-reading the error.
+              Padding:
+                padding: [1, 1, 1, 1, 1, 1]
+              WorldCoordinates: {}
+              Resample:
+                reference: '{case}'
+                reference_group: Reference_1
+                transforms:
+                  Reference_0: false
+                  Volume_0: false
+                interpolation: linear
+                fill: .nan
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

@@ -140,3 +140,12 @@ class TestReadSummary:
         summary = Statistics(path).read()
 
         assert summary == {"PRED:SEG:MAE": pytest.approx(0.5)}
+
+
+def test_the_worst_30_percent_follow_the_metric_s_direction() -> None:
+    """Learn2Reg's robustness: the mean of the worst 30 % of cases, the lowest Dice, the highest TRE; at least one."""
+    values = [0.9, 0.1, 0.8, np.nan, 0.7, 0.2, 0.6, 0.5, 0.4, 0.3, 1.0]  # ten values: the worst three
+    assert Statistics.get_statistic(values, "max")["worst30"] == pytest.approx((0.1 + 0.2 + 0.3) / 3)
+    assert Statistics.get_statistic(values, "min")["worst30"] == pytest.approx((1.0 + 0.9 + 0.8) / 3)
+    assert Statistics.get_statistic([2.0], "min")["worst30"] == 2.0
+    assert "worst30" not in Statistics.get_statistic(values)
