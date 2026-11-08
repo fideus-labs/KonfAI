@@ -726,25 +726,33 @@ def config_environment(config_file: Path, *, root: str | None = None, state: str
     """Read a KonfAI config with the environment its builders need, the config's directory on ``sys.path`` so
     a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards. Reading rewrites a config,
     so the block is handed a private copy beside the file (a relative model YAML resolves against that directory),
-    removed afterwards: the caller's file is never written. A missing config is left to the builders, which refuse
-    it; a private copy that cannot be made is refused here. ``root`` and ``state`` serve a caller that builds no
-    workflow."""
+    removed afterwards: the caller's file is never written. The copy is a name this call creates, so a file
+    already beside the config and a copy an overlapping call holds are left alone. A missing config is left to the
+    builders, which refuse it; a private copy that cannot be made is refused here. ``root`` and ``state`` serve a
+    caller that builds no workflow."""
     import os
     import shutil
     import sys
+    import tempfile
 
     previous = {key: value for key, value in os.environ.items() if key.startswith("KONFAI_")}
-    private = config_file.with_name(f".{config_file.stem}.{os.getpid()}{config_file.suffix}")
-    working = config_file
+    private: Path | None = None
     if config_file.exists():
         try:
+            descriptor, name = tempfile.mkstemp(
+                suffix=config_file.suffix, prefix=f".{config_file.stem}.", dir=config_file.parent
+            )
+            os.close(descriptor)
+            private = Path(name)
             shutil.copyfile(config_file, private)
         except OSError as error:
+            if private is not None:
+                private.unlink(missing_ok=True)
             raise ConfigError(
                 f"Cannot make a private copy of '{config_file}' to compile from ({error}).",
-                "Free the name or make the config's folder writable: the caller's file is never compiled in place.",
+                "Make the config's folder writable: the caller's file is never compiled in place.",
             ) from error
-        working = private
+    working = private or config_file
     os.environ["KONFAI_config_file"] = str(working)
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
     if root is not None:
@@ -760,7 +768,7 @@ def config_environment(config_file: Path, *, root: str | None = None, state: str
             if key not in previous:
                 del os.environ[key]
         os.environ.update(previous)
-        if working == private:
+        if private is not None:
             private.unlink(missing_ok=True)
 
 

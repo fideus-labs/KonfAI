@@ -159,20 +159,44 @@ def test_a_missing_config_keeps_the_builders_refusal(tmp_path: Path) -> None:
         compile_transform(tmp_path / "Missing.yml", tmp_path / "Transforms")
 
 
-def test_a_private_copy_that_cannot_be_made_is_refused_and_the_config_kept(tmp_path: Path) -> None:
-    # Falling back to the caller's file would let the builders rewrite it, and the cleanup take a file not ours.
+def test_a_private_copy_that_cannot_be_made_is_refused_and_the_config_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Falling back to the caller's file would let the builders rewrite it; a copy cut short is not left behind.
+    import shutil
+
+    from konfai.portable import config_environment
+
+    def cut_short(source: Path, target: Path) -> None:
+        Path(target).write_text("Predic")
+        raise OSError(28, "No space left on device")
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    monkeypatch.setattr(shutil, "copyfile", cut_short)
+    with pytest.raises(ConfigError, match="private copy"):
+        with config_environment(config, root="Predictor", state="PREDICTION"):
+            pass
+    assert config.read_text() == "Predictor: {}\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["Prediction.yml"]
+
+
+def test_a_private_copy_takes_no_file_it_did_not_create(tmp_path: Path) -> None:
+    # A file already beside the config, and the copy an overlapping compile of the same config works on, are kept.
     import os
 
     from konfai.portable import config_environment
 
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
-    (tmp_path / f".Prediction.{os.getpid()}.yml").mkdir()
-    with pytest.raises(ConfigError, match="private copy"):
-        with config_environment(config, root="Predictor", state="PREDICTION"):
-            pass
-    assert config.read_text() == "Predictor: {}\n"
-    assert (tmp_path / f".Prediction.{os.getpid()}.yml").is_dir()
+    stranger = tmp_path / f".Prediction.{os.getpid()}.yml"
+    stranger.write_text("not konfai's")
+    with config_environment(config) as outer:
+        with config_environment(config) as inner:
+            assert inner not in (outer, stranger)
+        assert outer.read_text() == "Predictor: {}\n"
+    assert stranger.read_text() == "not konfai's"
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([config.name, stranger.name])
 
 
 def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
