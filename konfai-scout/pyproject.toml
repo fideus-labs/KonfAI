@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "konfai-scout"
+dynamic = ["version", "dependencies"]
+description = "KonfAI Scout: an agent that inspects segmentation, registration and synthesis results visually and reports localised defects with evidence and KonfAI Eval measurements"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Fideus Labs" }]
+
+# Dependencies live in setup.py: konfai is pinned to the exact scm-derived release version there, like every
+# other member of the lockstep family.
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.66"]  # Claude through the Anthropic API
+openai = ["openai>=1.40"]  # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio: a local VLM)
+claude-code = ["claude-agent-sdk>=0.2"]  # Claude under the user's Claude Code login, no API key
+codex = ["fastmcp>=2.10"]  # GPT under the user's ChatGPT login, through the Codex CLI (Scout's tools served over MCP)
+dev = ["pytest", "konfai-scout[anthropic,openai]"]
+
+[project.scripts]
+konfai-scout = "konfai_scout.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fideus-labs/KonfAI"
+Repository = "https://github.com/fideus-labs/KonfAI"
+Issues = "https://github.com/fideus-labs/KonfAI/issues"
+
+[tool.setuptools_scm]
+root = ".."
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+include = ["konfai_scout*"]
+
+[tool.setuptools.package-data]
+konfai_scout = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

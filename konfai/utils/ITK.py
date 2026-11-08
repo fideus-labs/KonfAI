@@ -122,6 +122,19 @@ def field_reach(dataset: Dataset, group: str, name: str) -> float:
     return longest
 
 
+def field_jacobian_determinant(block: np.ndarray, to_index: np.ndarray) -> np.ndarray:
+    """``det(I + du/dx)`` at every voxel of a field block ``[c, z, y, x]`` (components x, y, z in world units):
+    central differences along the grid's axes (one-sided at the block's faces, as ``np.gradient`` takes them),
+    taken to world axes through ``to_index``, the matrix from a world offset to grid indices. A block one voxel
+    thick along an axis has no derivative there."""
+    by_index = np.stack(
+        [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
+        axis=-1,
+    )
+    jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
+    return np.linalg.det(jacobian)
+
+
 #: The sufficient statistics of a field's Jacobian determinant over some voxels: how many, how many folded
 #: (``det <= 0``), the lowest determinant, the sum of the logs and of their squares (the determinant clipped to
 #: ``[1e-9, 1e9]`` first, so a fold counts as a vanishing volume rather than being left out).
@@ -146,13 +159,7 @@ def field_jacobian_sums(values: np.ndarray, core: tuple[slice, ...], to_index: n
         stop = min(start + planes, last)
         low, high = max(start - 1, 0), min(stop + 1, values.shape[1])
         block = values[:, low:high]
-        # du_c / d(index) along x, y, z (the block is [c, z, y, x]), then to world axes.
-        by_index = np.stack(
-            [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
-            axis=-1,
-        )[:, start - low : stop - low, core[1], core[2]]
-        jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
-        determinant = np.linalg.det(jacobian).ravel()
+        determinant = field_jacobian_determinant(block, to_index)[start - low : stop - low, core[1], core[2]].ravel()
         logs = np.log(np.clip(determinant, 1e-9, 1e9))
         count, folded = count + determinant.size, folded + int((determinant <= 0).sum())
         lowest = min(lowest, float(determinant.min()))

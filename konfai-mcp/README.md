@@ -211,6 +211,16 @@ At a glance, by stage:
   `get_job_status` / `cancel_job`, `wait_for_job`, `read_live_metrics`,
   `read_job_log`
 - **Apps**: see [Use a published app](#use-a-published-app-instead-of-training)
+- **Visual inspection (KonfAI Scout)**: `run_scout_inspection` (a tracked job: a vision
+  model looks at slices, zooms, overlays and measures regions with KonfAI Eval, then
+  reports localised defects with evidence), `read_scout_report`, `list_scout_reports`.
+  Needs `pip install konfai-scout`; images reach a cloud model only with
+  `allow_cloud_images=True`.
+- **FidOpt (the benchmark)**: `fidopt_list_datasets`, `fidopt_describe_dataset`,
+  `fidopt_list_methods`, `fidopt_table` read it through FidOpt's own code
+  (`KONFAI_MCP_FIDOPT` names the `fidopt` executable of a checkout); `fidopt_run` launches
+  the operations `KONFAI_MCP_FIDOPT_ALLOWED` lists (default `check`) as tracked jobs,
+  with `scout=` to inspect the scored outputs. Nothing of FidOpt is reimplemented here.
 - **Session lifecycle**: `create_session` / `switch_session` / `delete_session`,
   `import_experiment`, `export_run_record`
 

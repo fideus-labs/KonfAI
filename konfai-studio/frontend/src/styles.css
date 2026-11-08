@@ -4024,3 +4024,30 @@ dialog.modal-back::backdrop {
   color: var(--working);
   cursor: pointer;
 }
+
+
+/* ---- Scout: the visual inspection reports ---- */
+.scout { display: flex; flex-direction: column; gap: 8px; padding: 6px 8px; }
+.scout-list { display: flex; flex-direction: column; gap: 2px; }
+.scout-row { display: flex; gap: 8px; align-items: baseline; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 6px; color: inherit; cursor: pointer; }
+.scout-row.on, .scout-row:hover { border-color: rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.05); }
+.scout-name { font-weight: 600; }
+.scout-verdict { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.12); }
+.scout-verdict.defective { background: rgba(220, 60, 60, 0.35); }
+.scout-verdict.acceptable { background: rgba(60, 170, 90, 0.35); }
+.scout-verdict.insufficient_evidence { background: rgba(200, 160, 40, 0.35); }
+.scout-report { display: flex; flex-direction: column; gap: 10px; }
+.scout-conclusion { padding: 6px 8px; border-left: 3px solid rgba(255, 255, 255, 0.3); }
+.scout-obs { padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border-left: 3px solid #888; }
+.scout-obs.sev-minor { border-left-color: #6b8; }
+.scout-obs.sev-moderate { border-left-color: #cb5; }
+.scout-obs.sev-major { border-left-color: #e74; }
+.scout-obs.sev-critical { border-left-color: #e33; }
+.scout-obs-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.scout-kind { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.12); }
+.scout-kind.confirmed_error { background: rgba(220, 60, 60, 0.35); }
+.scout-kind.suspected_error { background: rgba(200, 160, 40, 0.35); }
+.scout-evidence { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.scout-evidence img { height: 96px; border-radius: 4px; cursor: zoom-in; border: 1px solid rgba(255, 255, 255, 0.15); }
+.scout-zoom { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; align-items: center; justify-content: center; z-index: 50; cursor: zoom-out; }
+.scout-zoom img { max-width: 92vw; max-height: 92vh; }

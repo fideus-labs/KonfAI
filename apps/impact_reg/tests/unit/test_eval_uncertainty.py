@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from impact_reg_konfai import cli
-from konfai.utils.dataset import write_landmarks
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, write_landmarks
 
 _SHAPE = (24, 24, 24)
 
@@ -131,20 +131,64 @@ def test_eval_keeps_every_modality(tmp_path: Path, toy: dict[str, Path], monkeyp
 def test_uncertainty_is_the_spread_of_the_vectors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, members: list[tuple[float, float, float]]
 ) -> None:
-    """The map is the RMS distance of the members' vectors to their mean (sample, N-1), in mm, voxel by voxel."""
+    """The map is the RMS distance of the members' vectors to their mean (sample, N-1), in mm, voxel by voxel, read
+    off the ensemble's stack (register --uncertainty writes it as konfai-apps' ensemble does)."""
+    from konfai_apps.ensemble import combine
+
+    for index in range(len(members)):
+        (tmp_path / f"m{index}" / "P000").mkdir(parents=True)
     fields = [
-        _write(np.broadcast_to(np.float32(member), (*_SHAPE, 3)).copy(), tmp_path / f"member_{index}.mha", vector=True)
+        _write(
+            np.broadcast_to(np.float32(member), (*_SHAPE, 3)).copy(),
+            tmp_path / f"m{index}" / "P000" / "DVF.mha",
+            vector=True,
+        )
         for index, member in enumerate(members)
     ]
+    stack = tmp_path / "Ensemble" / "P000" / "InferenceStack.mha"
+    combine(fields, "Mean", tmp_path / "Ensemble" / "P000" / "DVF.mha", "mha", stack)
     out = tmp_path / "Uncertainty"
-    code = _main(monkeypatch, ["uncertainty", "--dvf", *map(str, fields), "-o", str(out), "-q"])
+    code = _main(monkeypatch, ["uncertainty", "-i", str(stack), "-o", str(out), "-q"])
 
     assert code == 0
-    spread = sitk.ReadImage(str(out / "uncertainty" / "Uncertainty.mha"))
+    spread = sitk.ReadImage(str(next((out / "P000" / "Uncertainty" / "Map").rglob("*.mha"))))
     vectors = np.array(members)
     expected = np.sqrt(((vectors - vectors.mean(axis=0)) ** 2).sum(axis=1).sum() / (len(members) - 1))
     np.testing.assert_allclose(sitk.GetArrayFromImage(spread), expected, rtol=1e-6)
     assert spread.GetSpacing() == (2.0, 2.0, 2.0)
+
+
+def test_a_segmentation_s_disagreement_counts_the_background(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A binary segmentation pulled through two members shifted apart: where one member has the structure and the
+    other has not, half the members disagree with the majority. Left out, the background would agree everywhere."""
+    from konfai_apps.ensemble import combine
+
+    fields = []
+    for index, shift in enumerate((2.0, -2.0)):
+        (tmp_path / f"m{index}" / "P000").mkdir(parents=True)
+        field = sitk.GetImageFromArray(np.broadcast_to(np.float32([shift, 0.0, 0.0]), (*_SHAPE, 3)).copy(), True)
+        field.SetSpacing((2.0, 2.0, 2.0))
+        field.SetMetaData(DISPLACEMENT_FIELD_ATTRIBUTE, "true")  # as an engine's field is marked
+        sitk.WriteImage(field, str(tmp_path / f"m{index}" / "P000" / "DVF.mha"))
+        fields.append(tmp_path / f"m{index}" / "P000" / "DVF.mha")
+    stack = tmp_path / "Ensemble" / "P000" / "InferenceStack.mha"
+    combine(fields, "Mean", tmp_path / "Ensemble" / "P000" / "DVF.mha", "mha", stack)
+    labels = np.zeros(_SHAPE, dtype=np.uint8)
+    labels[6:18, 6:18, 6:18] = 1
+    seg = _write(labels, tmp_path / "moving_seg.mha")
+    out = tmp_path / "Uncertainty"
+    code = _main(monkeypatch, ["uncertainty", "-i", str(stack), "--gt-moving-seg", str(seg), "-o", str(out), "-q"])
+
+    assert code == 0
+    pulled = []
+    for field in fields:
+        transform = sitk.DisplacementFieldTransform(sitk.Cast(sitk.ReadImage(str(field)), sitk.sitkVectorFloat64))
+        image = sitk.ReadImage(str(seg))
+        pulled.append(sitk.GetArrayFromImage(sitk.Resample(image, image, transform, sitk.sitkNearestNeighbor, 0)))
+    expected = (pulled[0] != pulled[1]).mean() * 0.5
+    summary = json.loads((out / "Uncertainty_summary.json").read_text())
+    got = summary["case"]["Disagreement:None:SegmentationDisagreement"]["P000"]
+    assert expected > 0 and got == pytest.approx(expected, rel=1e-6)
 
 
 def test_landmarks_saved_in_ras_score_a_perfect_transform_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,11 +292,11 @@ def test_one_transform_serves_every_case(tmp_path: Path, toy: dict[str, Path], m
         ),
         (
             lambda t, d: ["-f", t["fixed"], "-m", t["moving"], "--transform", d / "Output"],
-            "Moved.mha', register's moved image or ensemble member",
+            "Moved.mha', register's moved image or ensemble stack",
         ),
         (
             lambda t, d: ["-f", t["fixed"], "-m", t["moving"], "--transform", d / "Fields"],
-            "A.h5', register's moved image or ensemble member",
+            "InferenceStack.mha', register's moved image or ensemble stack",
         ),
     ],
 )
@@ -264,23 +308,23 @@ def test_eval_refuses_groups_that_do_not_pair(
     (tmp_path / "Output" / "P000").mkdir(parents=True)  # what register leaves: the moved image beside the transform
     _identity_transform(tmp_path / "Output" / "P000" / "Transform.h5")
     _write(np.zeros(_SHAPE, np.float32), tmp_path / "Output" / "P000" / "Moved.mha")
-    (tmp_path / "Fields" / "P000" / "Ensemble").mkdir(parents=True)  # register --fields-only --keep-fields
-    for name in ("Transform.h5", "Ensemble/A.h5", "Ensemble/B.h5"):
-        _identity_transform(tmp_path / "Fields" / "P000" / name)
+    (tmp_path / "Fields" / "P000").mkdir(parents=True)  # register --fields-only --uncertainty: the stack beside it
+    _identity_transform(tmp_path / "Fields" / "P000" / "Transform.h5")
+    _write(np.zeros((*_SHAPE, 6), np.float32), tmp_path / "Fields" / "P000" / "InferenceStack.mha", vector=True)
     code = _main(monkeypatch, ["eval", *map(str, argv(toy, tmp_path)), "-o", str(tmp_path / "Evaluation"), "-q"])
 
     assert code == 1
     assert message in capsys.readouterr().err
 
 
-def test_eval_scores_the_ensemble_members_through_their_folder(
+def test_eval_scores_a_folder_of_transforms_case_by_case(
     tmp_path: Path, toy: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """register's Ensemble folder named itself is a list of transforms: one case per member."""
-    (tmp_path / "Ensemble").mkdir()
+    """A folder of transforms named itself is a list of them: one case per transform."""
+    (tmp_path / "Transforms").mkdir()
     for name in ("A.h5", "B.h5"):
-        _identity_transform(tmp_path / "Ensemble" / name)
-    argv = ["eval", "-f", str(toy["fixed"]), "-m", str(toy["moving"]), "--transform", str(tmp_path / "Ensemble")]
+        _identity_transform(tmp_path / "Transforms" / name)
+    argv = ["eval", "-f", str(toy["fixed"]), "-m", str(toy["moving"]), "--transform", str(tmp_path / "Transforms")]
 
     assert _main(monkeypatch, [*argv, "-o", str(tmp_path / "Evaluation"), "-q"]) == 0
     assert (tmp_path / "Evaluation" / "P001" / "Evaluation" / "Image").is_dir()

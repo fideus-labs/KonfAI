@@ -488,11 +488,14 @@ def _shares_h5_file(source: Dataset, destination: Dataset) -> bool:
 
 def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -> Attribute:
     """The header a sweep publishes: the plan-time case state, completed by what the chain's
-    stages added in ``__call__``: the same keys the whole-volume pass would leave at the Save."""
+    stages added in ``__call__`` and cleared of what they removed there (a stack's member count, the
+    mark of the field a spread was taken of): the same keys the whole-volume pass would leave at the Save."""
     attributes = Attribute(evolved)
     for key in scope.keys():
         if key not in keys_before and key not in attributes:
             attributes[key] = scope[key]
+    for key in keys_before - set(scope.keys()):
+        dict.pop(attributes, key, None)
     return attributes
 
 
