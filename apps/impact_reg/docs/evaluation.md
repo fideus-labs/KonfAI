@@ -46,7 +46,7 @@ disagree, it is not. `uncertainty` measures that disagreement voxel by voxel: th
 members' displacement vectors to their mean (sample, N−1), in mm.
 
 ```bash
-impact-reg-konfai register ConvexAdam_Composite FireANTs_Anatomix Elastix_IMPACT_Static \
+impact-reg-konfai register ConvexAdam#composite FireANTs#anatomix Elastix#impact_static \
     -f fixed.nii.gz -m moving.nii.gz -o Output --keep-fields --gpu 0
 impact-reg-konfai uncertainty --dvf Output/P000/Ensemble/*.h5 -o Output/P000
 ```

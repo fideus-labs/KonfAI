@@ -179,7 +179,7 @@ def test_an_image_too_small_for_the_impact_grid_says_so(monkeypatch) -> None:
     # Static mode: whole images (patch 0), one voxel size per model on a line.
     static_map = "(ImpactPatchSize0 0 0 0 0 0 0)\n(ImpactVoxelSize0 6 6 6 6 6 6)\n"
     rejected = "Description: ITK ERROR: IMPACT: the model TS/M730.pt rejected its input. Check the number of channels\n"
-    with pytest.raises(RuntimeError, match="FireANTs_SyN") as raised:
+    with pytest.raises(RuntimeError, match="FireANTs#syn") as raised:
         _elastix_run(monkeypatch, [rejected], 1, static_map, brain)
     assert "patch spans" not in str(raised.value)
     # A TotalSegmentator encoder's normalisation, handed a slab one voxel thick at 6 mm (an APEX brain section).

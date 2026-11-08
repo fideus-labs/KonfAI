@@ -46,7 +46,7 @@ prefer a GPU.
 | [`MRSegmentator`](MRSegmentator/) | `mrsegmentator-konfai segment` | multi-organ MR segmentation |
 | [`ImpactSeg`](ImpactSeg/) | `impact-seg-konfai segment body` | multimodal / multi-organ segmentation |
 | [`ImpactSynth`](ImpactSynth/) | `impact-synth-konfai synthesize MR` | synthetic CT from MR or CBCT |
-| [`ImpactReg`](ImpactReg/) | `impact-reg-konfai register FireANTs_SyN` | register two real patients, scored on their reference labels |
+| [`ImpactReg`](ImpactReg/) | `impact-reg-konfai register FireANTs#syn` | register two real patients, scored on their reference labels |
 
 `ImpactReg` is the most instructive of the five, and the only fully unsupervised task in this folder:
 it aligns **two different patients**, a real anatomical difference with no ground-truth field to
