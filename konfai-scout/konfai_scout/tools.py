@@ -433,6 +433,9 @@ class Toolbox:
         grid = self.renderer.grid
         bounds = grid_bounds(grid)
         facts = [float(v) for v in (*grid.spacing_xyz, *grid.size_zyx, *bounds.low_xyz, *bounds.high_xyz)]
+        for view in cited_views:  # a slice's position and extent are read off the view's header
+            facts += [float(x) for x in (view.position_mm or [])]
+            facts += [float(x) for part in view.box_mm.values() for x in part]
         unsourced = _unsourced_figures(description, cited, box, facts)
         if kind == "measured_property" and unsourced:
             raise ValueError(

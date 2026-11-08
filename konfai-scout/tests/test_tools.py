@@ -172,7 +172,11 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
     spoken = run(
         box,
         "note",
-        **{**measured, "description": "on the 1 x 1 x 2 mm grid, TRE = 5.563e-05 mm; Dice for label 2 is fine"},
+        **{
+            **measured,
+            "description": f"on the 1 x 1 x 2 mm grid, at z = {zoom['position_mm'][2]} mm, TRE = 5.563e-05 mm; "
+            "Dice for label 2 is fine",
+        },
         measurements=["m098"],
     )
     assert spoken["observation"]["kind"] == "measured_property" and not spoken["observation"]["notes"]
