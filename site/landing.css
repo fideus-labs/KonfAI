@@ -12,7 +12,6 @@
 .landing * { box-sizing: border-box; }
 .landing a { color: inherit; text-decoration: none; }
 .landing a:focus-visible, .landing button:focus-visible, .landing input:focus-visible { outline: 2px solid var(--k-hue-ink); outline-offset: 2px; }
-.landing .mono { font-family: var(--mono); }
 .landing .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
 
 /* ---- pill bar ---- */

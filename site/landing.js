@@ -11,32 +11,37 @@
   // pages under docs/ load this script with data-root="../": the index's urls are site-root relative
   var root = (document.currentScript && document.currentScript.getAttribute("data-root")) || "";
   if (input && box) {
-    var labels = { page: "page", docs: "docs", tool: "tool", app: "app" };
+    // a combobox over the listbox: the input keeps focus, aria-activedescendant names the option the arrows select
+    input.setAttribute("role", "combobox"); input.setAttribute("aria-autocomplete", "list");
     var sel = -1, hits = [];
+    function open(on) { box.classList.toggle("on", on); input.setAttribute("aria-expanded", on ? "true" : "false"); }
     function render(q) {
       q = q.trim().toLowerCase();
-      box.innerHTML = ""; sel = -1; hits = [];
-      if (!q) { box.classList.remove("on"); return; }
+      box.innerHTML = ""; sel = -1; hits = []; mark();
+      if (!q) { open(false); return; }
       hits = INDEX.filter(function (e) { return (e.t + " " + e.d).toLowerCase().indexOf(q) >= 0; }).slice(0, 8);
-      if (!hits.length) { box.innerHTML = '<div class="none">Nothing matches.</div>'; box.classList.add("on"); return; }
+      if (!hits.length) { box.innerHTML = '<div class="none">Nothing matches.</div>'; open(true); return; }
       hits.forEach(function (e, i) {
         var a = document.createElement("a"); a.href = root + e.u; a.setAttribute("role", "option"); a.id = "hit-" + i;
-        var k = document.createElement("span"); k.className = "k"; k.textContent = labels[e.k] || e.k;
+        var k = document.createElement("span"); k.className = "k"; k.textContent = e.k;
         var t = document.createElement("span"); t.className = "t"; t.textContent = e.t;
         var d = document.createElement("span"); d.className = "d"; d.textContent = e.d;
         t.appendChild(d); a.appendChild(k); a.appendChild(t); box.appendChild(a);
       });
-      box.classList.add("on");
+      open(true);
     }
-    function mark() { Array.prototype.forEach.call(box.children, function (c, i) { c.setAttribute("aria-selected", i === sel ? "true" : "false"); }); }
+    function mark() {
+      for (var i = 0; i < box.children.length; i++) box.children[i].setAttribute("aria-selected", i === sel ? "true" : "false");
+      if (sel >= 0) input.setAttribute("aria-activedescendant", "hit-" + sel); else input.removeAttribute("aria-activedescendant");
+    }
     input.addEventListener("input", function () { render(input.value); });
     input.addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape") { box.classList.remove("on"); input.blur(); }
+      if (ev.key === "Escape") { open(false); input.blur(); }
       else if (ev.key === "ArrowDown" && hits.length) { ev.preventDefault(); sel = (sel + 1) % hits.length; mark(); }
       else if (ev.key === "ArrowUp" && hits.length) { ev.preventDefault(); sel = (sel - 1 + hits.length) % hits.length; mark(); }
       else if (ev.key === "Enter" && hits.length) { location.href = root + hits[Math.max(sel, 0)].u; }
     });
-    document.addEventListener("click", function (ev) { if (!box.contains(ev.target) && ev.target !== input) box.classList.remove("on"); });
+    document.addEventListener("click", function (ev) { if (!box.contains(ev.target) && ev.target !== input) open(false); });
   }
 
   // ---- motion: a block rises as it scrolls into view (components.css .k-reveal); a figure counts up once ----
@@ -48,17 +53,17 @@
       el.textContent = Math.round(end * e); if (k < 1) requestAnimationFrame(tick);
     })(t0);
   }
-  if (still || !("IntersectionObserver" in window)) { Array.prototype.forEach.call(blocks, function (b) { b.classList.add("in"); }); }
+  if (still) { blocks.forEach(function (b) { b.classList.add("in"); }); }
   else {
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
         if (!e.isIntersecting) return;
         var el = e.target, i = el.parentNode ? Array.prototype.indexOf.call(el.parentNode.children, el) : 0;
         el.style.transitionDelay = (i % 3) * 60 + "ms"; el.classList.add("in"); io.unobserve(el);
-        Array.prototype.forEach.call(el.querySelectorAll("[data-count]"), count);
+        el.querySelectorAll("[data-count]").forEach(count);
       });
     }, { rootMargin: "0px 0px -8% 0px" });
-    Array.prototype.forEach.call(blocks, function (b) { io.observe(b); });
+    blocks.forEach(function (b) { io.observe(b); });
   }
 
   // ---- phone menu ----
