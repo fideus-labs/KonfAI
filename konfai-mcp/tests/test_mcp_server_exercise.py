@@ -243,3 +243,17 @@ def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
     assert comparison["metric_b"] == "Volume_0:Reference_0:Dice"
     assert comparison["case_alignment"] == "by order" and comparison["cases"] == 2
     assert comparison["per_case_delta_b_minus_a"] == {"1PC006": pytest.approx(0.2), "1PC032": pytest.approx(-0.05)}
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_summarize_session_answers_before_the_workspace_exists(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    mcp_server._activate_session("ghost")  # named by a host, its workspace never made (Studio's new experiment)
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return (await client.call_tool("summarize_session", {})).structured_content
+
+    payload = asyncio.run(scenario())
+    assert payload["exists"] is False and payload["next_actions"][0] == "initialize_session"

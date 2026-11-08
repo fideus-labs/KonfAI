@@ -2730,6 +2730,19 @@ def summarize_session(
     log_lines: Annotated[int, Field(description="Number of log lines when include_log_tail=True (default 50).")] = 50,
 ) -> dict[str, Any]:
     """Return one compact session snapshot for iterative agent loops."""
+    if not WORKSPACE_LAYOUT.session_workspace_exists():
+        # a session created and not yet initialised is a normal state, not an error: say so and point at the next step
+        return {
+            "session": WORKSPACE_LAYOUT.current_session,
+            "exists": False,
+            "readiness": {},
+            "configs": {},
+            "active_jobs": [],
+            "latest_job": None,
+            "metrics_summary": None,
+            "missing_configs": list(WORKFLOW_CONFIG_FILES),
+            "next_actions": ["initialize_session", "session"],
+        }
     summary = SESSION.session_summary()
     metrics_payload = SESSION.read_metrics_payload()
     payload: dict[str, Any] = {

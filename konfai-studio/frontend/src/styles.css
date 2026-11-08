@@ -946,6 +946,7 @@ dialog.modal-back::backdrop {
 }
 .vbar input {
   flex: 1;
+  min-width: 0;
   background: var(--inset);
   color: var(--ink);
   border: 1px solid var(--line-2);
@@ -2262,7 +2263,14 @@ dialog.modal-back::backdrop {
 .cfg {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
+}
+/* whatever sits beside the fixed-width tree shrinks with the pane instead of pushing past it (the viewer header
+   and its path field overflowed the column at laptop widths) */
+.cfg > :not(.tree):not(.cfg-files) {
+  flex: 1;
+  min-width: 0;
 }
 .cfg-files {
   width: 200px;

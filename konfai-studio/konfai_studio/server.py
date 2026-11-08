@@ -473,9 +473,9 @@ async def remember_file(req: DatasetPath) -> dict[str, list[str]]:
 # Claude model choices for the subscription/API backends; the local backend takes any name.
 _CLAUDE_MODELS = [
     {"id": "", "label": "Default"},
-    {"id": "claude-opus-4-8", "label": "Opus 4.8"},
-    {"id": "claude-sonnet-5", "label": "Sonnet 5"},
-    {"id": "claude-haiku-4-5", "label": "Haiku 4.5"},
+    {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
 ]
 
 

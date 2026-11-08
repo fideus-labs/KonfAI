@@ -57,7 +57,7 @@ def _require_claude_code() -> None:
         raise RuntimeError(f"The Claude Code brain needs the 'claude' CLI on PATH: install Claude Code, {switch}.")
 
 
-DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-4-8")
+DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-5-5")
 MAX_TOKENS = int(os.environ.get("KONFAI_STUDIO_MAX_TOKENS", "16000"))
 MAX_TURNS = int(os.environ.get("KONFAI_STUDIO_MAX_TURNS", "30"))
 
@@ -770,7 +770,7 @@ def _heuristic_title(text: str) -> str:
 
 # Naming an experiment is a small formatting job the user waits on with the answer already on screen:
 # it runs on the fast model, not the one driving the tools.
-SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-4-5")
+SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-5-5")
 
 
 async def _one_shot_claude(prompt: str) -> str:
