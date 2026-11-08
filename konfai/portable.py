@@ -2124,6 +2124,8 @@ def export_checkpoints(
         if not channels:
             raise ConfigError("could not derive in_channels from the config or model; pass --in-channels")
         examples = tuple(torch.randn(1, count, *patch_size) for count in [channels, *others])
+        # konfai blends a float32 output in float16 unless the model keeps it full (`full_precision_outputs`).
+        precision = "float32" if getattr(model, "full_precision_outputs", False) else "float16"
         # Default to the terminal float head; the graph's last output is often an integer Argmax.
         path, manifest = export_to_onnx(
             model,
@@ -2136,7 +2138,7 @@ def export_checkpoints(
             pad_value=pad_value,
             placement=placement,
             patch_stride=stride,
-            extra_manifest=dict(extra),
+            extra_manifest=extra | {"accumulation_dtype": precision},
             fold_pre=folds,
             model_filename=f"{model_id}.onnx",
             write_manifest=write_manifest,
