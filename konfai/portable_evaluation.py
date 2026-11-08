@@ -160,10 +160,6 @@ def _impact_reg(criterion: Any, _output_group: str, _out: Path) -> dict[str, Any
     }
 
 
-def _mean(_criterion: Any, _output_group: str, _out: Path) -> dict[str, Any]:
-    return {"metric": "mean"}
-
-
 #: Criterion class -> the step it compiles to. A subclass compiles as the class it extends (``DiceSaveMap`` is a
 #: ``Dice`` that writes its map), matched exactly so a criterion of the caller's own is refused, not approximated.
 CRITERIA: dict[str, Callable[[Any, str, Path], dict[str, Any]]] = {
@@ -175,7 +171,7 @@ CRITERIA: dict[str, Callable[[Any, str, Path], dict[str, Any]]] = {
     "SSIM": _ssim,
     "SAM_Perceptual": _sam_perceptual,
     "IMPACTReg": _impact_reg,
-    "Mean": _mean,
+    "Mean": lambda _criterion, _output_group, _out: {"metric": "mean"},
 }
 
 #: The folds over a stack's members (``konfai.data.transform.ensemble``) an uncertainty chain runs, by the op each

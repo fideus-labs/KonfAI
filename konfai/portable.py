@@ -1524,19 +1524,19 @@ def hoist_ensemble_tail(
             # A cast sets the dtype the rest of the tail reads and the output is written in.
             tail.append({"op": "cast", "dtype": step["dtype"]})
             continue
-        if op == "inverse" and stacked and op_of.get(step.get("of")) in INDEX_SELECTIONS:
-            of = step.get("of")
-            if op_of.get(of) != "pad":
-                raise ConfigError(
-                    f"assemble_program: the InferenceStack takes each copy before the inverse of '{of}'"
-                    f" ({op_of.get(of)}), which a program undoes on each copy only.",
-                    _or_konfai("Drop the InferenceStack", _PREDICT),
-                )
-            tail.append({"op": "pad", "padding": [-margin for margin in undone[of]["padding"]], "mode": "constant"})
-            continue
         if op == "inverse":
             of = step.get("of")
             kind = op_of.get(of)
+            if stacked and kind in INDEX_SELECTIONS:
+                if kind != "pad":
+                    raise ConfigError(
+                        f"assemble_program: the InferenceStack takes each copy before the inverse of '{of}'"
+                        f" ({kind}), which a program undoes on each copy only.",
+                        _or_konfai("Drop the InferenceStack", _PREDICT),
+                    )
+                padding = [-margin for margin in undone[of]["padding"]]
+                tail.append({"op": "pad", "padding": padding, "mode": "constant"})
+                continue
             if kind != "resample":
                 raise ConfigError(
                     f"assemble_program: cannot hoist the inverse of '{of}' ({kind}) past the reduction; "
@@ -1656,10 +1656,11 @@ def assemble_program(
         per_copy = 0
     tail: list[dict[str, Any]] = []
     copies_of = len(models) * len(passes)
+    stacked = bool(stack) and copies_of > 1
     if reduce == "merge_labels" and copies_of > 1:
         _refuse_values_past_the_merge(manifests[0], per_copy)
     elif copies_of > 1 or masks:
-        manifests, tail = hoist_ensemble_tail(manifests, per_copy, stacked=bool(stack) and copies_of > 1)
+        manifests, tail = hoist_ensemble_tail(manifests, per_copy, stacked)
 
     steps, copies = _model_steps(models, manifests, passes, aux)
     members = (
@@ -1672,13 +1673,14 @@ def assemble_program(
     )
     # Every copy sits on the same grid, the one each mask's buffer is resampled onto.
     mask_buffers = _mask_buffers(aux, copies[0], steps)
-    rows = _stack_rows(steps, copies, len(aux), stack, masks, mask_buffers) if stack and len(copies) > 1 else []
+    rows = _stack_rows(steps, copies, len(aux), stack, masks, mask_buffers) if stacked else []
     if folded:
         copies = _fold_models(steps, copies, len(models), folded)
     if len(copies) == 1 and not tail and not masks:
-        only = {**members[copies[0]]} if members else None
+        if copies[0] in members:  # the one copy's buffer is the output; folded models keep their own
+            members = {"output": members[copies[0]]}
         return {"steps": [*steps[:-1], {**steps[-1], "out": "output"}], "output": "output"} | (
-            {"members": {"output": only}} if only else {}
+            {"members": members} if members else {}
         )
 
     # A cast opening the tail is the dtype konfai folds the copies into, so it runs before the masks.
@@ -1691,7 +1693,7 @@ def assemble_program(
         if reduce == "merge_labels":
             op["classes"] = classes if classes is not None else [int(mf["output"]["channels"]) for mf in manifests]
         steps.append(op)
-    _append_tail(steps, ordered, cursor, mask_buffers)
+    _append_tail(steps, ordered, cursor, mask_buffers, "t", "output")
     program: dict[str, Any] = {"steps": steps, "output": "output"}
     if rows:
         steps.append({"op": "concat", "in": rows, "out": "stack"})
@@ -1703,13 +1705,13 @@ def _stack_rows(
     steps: list[dict[str, Any]],
     copies: list[str],
     nested: int,
-    mode: str,
+    mode: str | None,
     masks: list[dict[str, Any]],
     mask_buffers: dict[str, str],
 ) -> list[str]:
     """Reorder ``steps`` (the ``nested`` models, the copies, then the ops building the masks' buffers on the first
     copy's grid) so each copy's stack row follows the copy, the masks' buffers built after the first, and name the
-    rows: the copy, its label for ``Seg`` (konfai's ``InferenceStack`` takes it of the blended logits), each mask, in
+    rows: the copy, each mask (konfai's ``Mask`` runs on every logit before the stack), its label for ``Seg``, in
     float32. A copy is then held until its row is taken, not until the stack is."""
     models, built = steps[nested : nested + len(copies)], steps[nested + len(copies) :]
     del steps[nested:]
@@ -1718,18 +1720,10 @@ def _stack_rows(
         steps.append(step)
         if at == 0:
             steps.extend(built)
-        cursor = step["out"]
-        ops: list[dict[str, Any]] = [{"op": "argmax"}] if mode == "Seg" else []
-        ops += [
-            {"op": "mask", "value_outside": spec["value_outside"], "extra": [mask_buffers[spec["group"]]]}
-            for spec in masks
-        ]
-        for index, op in enumerate([*ops, {"op": "cast", "dtype": "float32"}]):
-            out = f"{step['out']}__s{index}"
-            args = {key: value for key, value in op.items() if key != "extra"}
-            steps.append({**args, "in": [cursor, *op.get("extra", [])], "out": out})
-            cursor = out
-        rows.append(cursor)
+        ops: list[dict[str, Any]] = [{"mask": spec} for spec in masks]
+        ops += [{"op": "argmax"}] if mode == "Seg" else []
+        ops.append({"op": "cast", "dtype": "float32"})
+        rows.append(_append_tail(steps, ops, step["out"], mask_buffers, f"{step['out']}__s", None))
     return rows
 
 
@@ -1771,12 +1765,18 @@ def _fold_models(steps: list[dict[str, Any]], copies: list[str], models: int, op
 
 
 def _append_tail(
-    steps: list[dict[str, Any]], ordered: list[dict[str, Any]], cursor: str, mask_buffers: dict[str, str]
-) -> None:
+    steps: list[dict[str, Any]],
+    ordered: list[dict[str, Any]],
+    cursor: str,
+    mask_buffers: dict[str, str],
+    prefix: str,
+    last: str | None,
+) -> str:
     """Append the run-once ops and the masks, in order, each reading the buffer ``cursor`` the one before
-    wrote, and the last writing ``output``. A tail op reads its ``extra`` buffers too."""
+    wrote and writing ``<prefix><index>``, the last ``last`` when given; the buffer the last wrote. A tail op
+    reads its ``extra`` buffers too."""
     for i, entry in enumerate(ordered):
-        out = "output" if i == len(ordered) - 1 else f"t{i}"
+        out = last if last and i == len(ordered) - 1 else f"{prefix}{i}"
         if "mask" in entry:
             spec = entry["mask"]
             mask = mask_buffers[spec["group"]]
@@ -1785,6 +1785,7 @@ def _append_tail(
             args = {key: value for key, value in entry.items() if key != "extra"}
             steps.append({**args, "in": [cursor, *entry.get("extra", [])], "out": out})
         cursor = out
+    return cursor
 
 
 def _model_inputs(manifest: dict[str, Any]) -> str | list[str]:
@@ -2259,6 +2260,7 @@ def compile_output(
     reduce = program_reduction(config, root, len(checkpoints), passes, output)
     fold = models_fold_first(config, root, len(checkpoints), output)
     stack, _ = _split_stack(config, root, output_spec(config, root, output))
+    names = [c.name for c in checkpoints if c is not None]
     program = assemble_program(
         models,
         reduce=reduce,
@@ -2268,7 +2270,7 @@ def compile_output(
         per_copy=per_copy,
         fold_models=fold,
         stack=None if stack is None else str(stack.get("mode", "mean")),
-        checkpoints=names if len(names := [c.name for c in checkpoints if c is not None]) == len(checkpoints) else None,
+        checkpoints=names if len(names) == len(checkpoints) else None,
     )
     return models, written, program
 

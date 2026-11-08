@@ -327,3 +327,22 @@ def test_a_stack_takes_each_copy_before_its_padding_is_undone_and_records_its_me
         "a": {"checkpoint": "fold_0.pt", "pass": 0},
         "b": {"checkpoint": "fold_1.pt", "pass": 0},
     }
+
+
+def test_a_seg_stack_row_masks_each_copy_before_taking_its_label():
+    # konfai's Mask runs on every logit before the InferenceStack takes the label, so a voxel outside the mask
+    # is label 0, not the mask's value_outside.
+    program = assemble_program(
+        [{"id": "a", "manifest": M}, {"id": "b", "manifest": M}],
+        reduce="mean",
+        aux={"aux": {"id": "aux", "manifest": M, "ops": []}},
+        masks=[{"group": "aux", "value_outside": -1.0}],
+        stack="Seg",
+    )
+    row = [step for step in program["steps"] if step["out"].startswith("a__s")]
+    assert [(step["op"], step["in"]) for step in row] == [
+        ("mask", ["a", "aux"]),
+        ("argmax", ["a__s0"]),
+        ("cast", ["a__s1"]),
+    ]
+    assert row[0]["value_outside"] == -1.0

@@ -1326,6 +1326,27 @@ def test_models_konfai_averages_before_a_per_copy_chain_fold_first(copies: str) 
     assert not models_fold_first(config, "Predictor", 1)
 
 
+def test_models_folded_first_into_one_copy_keep_their_members() -> None:
+    # konfai averages the models before a per-copy cast; on one pass that mean is the whole program, and the
+    # members a runtime selects by are the models' buffers, not the fold's.
+    config = _prediction({}, {"before_reduction_transforms": {"TensorCast": {"dtype": "float32"}}}, "Mean", 0)
+    passes = tta_passes(config, "Predictor")
+    manifest, _, per_copy = transform_manifest(config, "Predictor")
+    program = assemble_program(
+        [{"id": f"m{i}", "manifest": manifest} for i in range(2)],
+        reduce=program_reduction(config, "Predictor", 2, passes),
+        passes=passes,
+        per_copy=per_copy,
+        fold_models=models_fold_first(config, "Predictor", 2),
+        checkpoints=["fold_0.pt", "fold_1.pt"],
+    )
+    assert [step["out"] for step in program["steps"]] == ["m0", "m1", "mean__p0", "output"]
+    assert program["members"] == {
+        "m0": {"checkpoint": "fold_0.pt", "pass": 0},
+        "m1": {"checkpoint": "fold_1.pt", "pass": 0},
+    }
+
+
 def test_one_model_folds_its_test_time_copies_by_their_own_reduction() -> None:
     # konfai's combine hands one model's output back, and the copies fold by the output's `reduction`: that
     # fold is the program's only one, whatever `combine` says.
