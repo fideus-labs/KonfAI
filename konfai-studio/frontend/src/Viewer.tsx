@@ -19,6 +19,8 @@ function dimsLabel(nv: Niivue | null): string {
   return grid + mm;
 }
 
+const volumeUrl = (path: string) => `/files/volume?path=${encodeURIComponent(path)}`;
+
 // One NiiVue canvas that follows a path prop. Reused for the primary view and the compare pane; `onReady`
 // hands the instance up so the two panes can be crosshair/zoom-coupled.
 function Canvas({
@@ -75,7 +77,7 @@ function Canvas({
       .then(() => {
         if (seq !== loadSeqRef.current) return;
         return nv
-          .loadVolumes([{ url: `/files/volume?path=${encodeURIComponent(path)}`, name }])
+          .loadVolumes([{ url: volumeUrl(path), name }])
           .then(() => {
             // NiiVue reports a file it cannot read through its error handler and resolves all the
             // same: a load that landed no volume under the requested name failed.
@@ -148,11 +150,9 @@ export default function Viewer({
   // converted through the volume on screen, so nothing is applied before the requested path has loaded.
   const pendingFocus = useRef<{ mm: [number, number, number]; nonce: number } | null>(null);
   const appliedFocus = useRef(0);
-  const loadedPath = useRef<string | null>(null);
   const applyFocus = (nv: Niivue | null) => {
     const wanted = pendingFocus.current;
-    if (!nv || !wanted || loadedPath.current !== path || !nv.volumes.length || appliedFocus.current === wanted.nonce)
-      return;
+    if (!nv || !wanted || !path || nv.volumes[0]?.url !== volumeUrl(path) || appliedFocus.current === wanted.nonce) return;
     // Scout speaks ITK's LPS; NiiVue's world is RAS: flip x and y.
     const ras = [-wanted.mm[0], -wanted.mm[1], wanted.mm[2]];
     try {
@@ -269,10 +269,7 @@ export default function Viewer({
               nvA.current = nv;
               couple();
             }}
-            onLoaded={(nv) => {
-              loadedPath.current = path;
-              applyFocus(nv);
-            }}
+            onLoaded={applyFocus}
           />
           {compare && compareTarget === "a" && targetBadge}
         </div>

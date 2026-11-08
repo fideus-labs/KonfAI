@@ -302,7 +302,7 @@ class FidoptAdapter:
                 args.append("--scout-allow-cloud")
         for item in extra or []:
             # no '/' and no '..', so that no value steers FidOpt to a path; '=' and ',' are --try's LABEL=SETTINGS
-            if ".." in item or not re.fullmatch(r"--[a-z][a-z0-9-]*(=[A-Za-z0-9._:=,-]+)?|[A-Za-z0-9._:=,-]+", item):
+            if ".." in item or not re.fullmatch(r"[A-Za-z0-9._:=,-]+", item):
                 raise ValueError(f"extra argument {item!r}: flags and plain values only, no paths outside the corpus.")
             args.append(item)
         label = self.workspace_layout.sanitize_name(f"fidopt_{operation}_{method}_{dataset or 'none'}")
