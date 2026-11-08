@@ -306,3 +306,11 @@ def test_displacement_is_the_length_of_the_vectors() -> None:
     assert _measure(Displacement("p95"), field, attributes) == pytest.approx(np.percentile(lengths, 95), rel=1e-5)
     assert _measure(Displacement("max"), field, attributes) == pytest.approx(lengths.max())
     assert Displacement("p95").get_name() == "DisplacementP95"
+
+
+def test_jaccard_and_volume_difference_take_a_reference_on_another_grid() -> None:
+    """Both inherit Dice's ``resamples_target``: a reference of another shape is put on the output's grid."""
+    output, reference = _labels()
+    finer = torch.nn.functional.interpolate(reference.float(), scale_factor=2.0, mode="nearest")
+    for criterion in (Jaccard(), VolumeDifference()):
+        assert criterion(output, finer)[1] == pytest.approx(criterion(output, reference)[1], rel=1e-6)
