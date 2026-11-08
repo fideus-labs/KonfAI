@@ -34,6 +34,7 @@ import re
 import warnings
 from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from itertools import chain, combinations, islice, repeat, takewhile
 from pathlib import Path
 from typing import Any, cast
@@ -583,22 +584,14 @@ def _destination(root: str, file_format: str, group: str) -> dict[str, Any]:
     } | _store_of(root, file_format)
 
 
-def _backend_of(file_format: str) -> type[Any]:
-    """The backend konfai serves ``file_format`` with: every store spelling is the OME-Zarr one."""
-    from konfai.utils.dataset.backend import backend_for
-    from konfai.utils.utils import STORE_FORMS
-
-    token = file_format.lower().removeprefix(".")
-    return backend_for("omezarr" if f".{token}" in STORE_FORMS else token)
-
-
 def _entry_suffixes(file_format: str) -> list[str]:
     """Every suffix konfai counts ``<group>`` under when it asks whether a case is written (``""``: the bare
     name). A store's entries are datasets inside it, named by no suffix."""
     from konfai.utils.dataset import Dataset
+    from konfai.utils.dataset.backend import backend_for
     from konfai.utils.utils import STORE_FORMS, SUPPORTED_EXTENSIONS
 
-    backend = _backend_of(file_format)
+    backend = backend_for(file_format)
     if backend.single_store:
         return []
     if backend is Dataset.OmeZarrFile:  # every store spelling, then the bare directory
@@ -809,6 +802,7 @@ def _compile_group(
     from konfai.data import reduction
     from konfai.data.case_reduction import check_post_stages, split_chain
     from konfai.utils.dataset import Dataset
+    from konfai.utils.dataset.backend import backend_for
 
     _pre, reduce, post = split_chain(stages)
     if reduce is None:
@@ -836,8 +830,8 @@ def _compile_group(
     steps, write = compile_chain(listed(items[:at] + items[-1:]), group_dest, datasets)
     post_steps, _ = compile_chain(listed(items[at + 1 :]), group_dest, datasets)
     # konfai folds a reduction one region at a time, into a store or an uncompressed MetaImage or NIfTI.
-    token = write["format"].lower().removeprefix(".")
-    backend = _backend_of(token)
+    token = write["format"]
+    backend = backend_for(token)
     if not (backend.single_store or backend is Dataset.OmeZarrFile or token in ("mha", "nii")):
         raise TransformError(
             f"The chain reducing into '{reduce.output}' writes '{write['format']}', which konfai cannot write"
@@ -888,20 +882,15 @@ def _compile_expand(
     }
 
 
-#: What a suffix multiplies a budget by, as konfai spells them.
-_SCALE = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-
-
 def _budget_bytes(budget: Any) -> int | None:
-    """A ``memory_budget`` in bytes, or ``None`` when the config leaves it to the machine."""
+    """A ``memory_budget`` in bytes, read by konfai's own grammar (a bare number is GiB, ``"24GB"`` decimal,
+    ``"32GiB"`` binary), or ``None`` when the config leaves it to the machine."""
+    from konfai.utils.budget import parse_memory_budget_bytes
+
     budget = clean(budget)
-    if budget is None or budget == "auto":
+    if budget is None or str(budget).strip().lower() == "auto":
         return None
-    if isinstance(budget, (int, float)):
-        return int(budget)
-    text = str(budget).strip()
-    scale = _SCALE.get(text[-1].upper())
-    return int(float(text[:-1]) * scale) if scale else int(float(text))
+    return parse_memory_budget_bytes(budget)
 
 
 def source_of(spec: str) -> dict[str, str]:
@@ -993,33 +982,22 @@ def _file_stem(name: str) -> str:
     return re.sub(r"\W+", "_", name).strip("_")
 
 
-def outputs_node(config: dict[str, Any], root: str, output: str | None = None) -> Any:
-    """The config's ``outputs_dataset``, or the subtree of the one output ``output`` names: every reader of
-    an output's chain takes one output at a time, since a config may declare several."""
-    outputs = config.get(root, {}).get("outputs_dataset")
-    if output is None or not isinstance(outputs, dict):
-        return outputs
-    # A head is one module path; the config writes its separators as ':' and the predictor reads them as '.'.
-    wanted = _file_stem(output)
-    named = {_file_stem(key): key for key in outputs}
-    if wanted not in named:
-        raise ConfigError(
-            f"the config declares no output '{output}' (it declares {', '.join(outputs) or 'none'}).",
-        )
-    return {named[wanted]: outputs[named[wanted]]}
-
-
 def output_spec(config: dict[str, Any], root: str, output: str | None = None) -> dict[str, Any]:
     """The ``OutputDataset`` section of the output ``output`` names, or of the first declared when ``None``:
     the chains, the reduction and the blend that output runs. ``{}`` when the config declares none."""
-    outputs = outputs_node(config, root, output)
-    first = next(iter(outputs.values()), None) if isinstance(outputs, dict) else None
+    outputs = config.get(root, {}).get("outputs_dataset")
+    if not isinstance(outputs, dict):
+        return {}
+    if output is not None:
+        # A head is one module path; the config writes its separators as ':' and the predictor reads them as '.'.
+        named = {_file_stem(key): key for key in outputs}
+        if (wanted := named.get(_file_stem(output))) is None:
+            raise ConfigError(
+                f"the config declares no output '{output}' (it declares {', '.join(outputs) or 'none'}).",
+            )
+        outputs = {wanted: outputs[wanted]}
+    first = next(iter(outputs.values()), None)
     return _mapping((first or {}).get("OutputDataset"))
-
-
-def _chain_of(spec: dict[str, Any], key: str) -> dict[str, Any]:
-    """One of an output's chains, as bound: a mapping, ``{}`` for a chain that prepares nothing."""
-    return bound_chain(spec.get(key))
 
 
 def derive_blend(config: dict[str, Any], root: str, output: str | None = None) -> str | None:
@@ -1192,14 +1170,14 @@ def declares_inverse(name: str, params: Any) -> bool:
     """Whether the predictor undoes this chain entry after the forward: a ``TransformInverse`` whose
     ``apply_inverse`` is set, read from the class so a user's transform is treated like a shipped one."""
     from konfai.data.transform import TransformInverse
-    from konfai.utils.utils import get_module
 
     kwargs = {key: clean(value) for key, value in _mapping(params).items()}
+    cls = _stage_class(name)
+    if cls is None:  # a stage konfai cannot import: the config's own word
+        return bool(kwargs.get("inverse"))
+    if not issubclass(cls, TransformInverse):
+        return False
     try:
-        module, cls_name = get_module(base_name(name), "konfai.data.transform")
-        cls = getattr(module, cls_name)
-        if not (isinstance(cls, type) and issubclass(cls, TransformInverse)):
-            return False
         return bool(cls(**kwargs).apply_inverse)
     except Exception:
         return bool(kwargs.get("inverse"))
@@ -1290,7 +1268,7 @@ def _split_stack(
     when none does, and the stages that follow; an opening ``MergeLabels`` is split off too, the program's
     ``merge_labels`` op applying it. konfai's stack folds the first axis of what the reduction hands it, which
     holds every copy only when the models, and the test-time copies if any, combine by ``Concat``."""
-    items = list(_chain_of(spec, "after_reduction_transforms").items())
+    items = list(bound_chain(spec.get("after_reduction_transforms")).items())
     if items and base_name(items[0][0]) == "MergeLabels":
         return None, dict(items[1:])
     if not items or base_name(items[0][0]) != "InferenceStack":
@@ -1412,12 +1390,12 @@ def _post_chain(
     the final transforms. Softmax and argmax after the inverses decide a class on the output grid; before them,
     a resample of a label map would move every class boundary by a voxel."""
     before, _, _ = compile_pipeline(
-        _chain_of(spec, "before_reduction_transforms"), consumed=("Mask",) if masked else ()
+        bound_chain(spec.get("before_reduction_transforms")), consumed=("Mask",) if masked else ()
     )
     # The stack or the label merge that opens the chain is the reduce op `derive_reduction` names.
     stack, after_stack = _split_stack(config, root, spec)
     after, _, _ = compile_pipeline(after_stack)
-    final, _, _ = compile_pipeline(_chain_of(spec, "final_transforms"))
+    final, _, _ = compile_pipeline(bound_chain(spec.get("final_transforms")))
     op_of = _op_of(pre)
     for name in inverted:
         if op_of[name] not in INVERTIBLE_OPS:
@@ -1630,14 +1608,14 @@ def assemble_program(
     folded: list[dict[str, Any]] = []
     if fold_models and len(models) > 1:
         post = manifests[0].get("postprocessing", [])
-        folded = post[:per_copy]
-        moves = [step["op"] for step in folded if step["op"] in ("resample", *INDEX_SELECTIONS)]
+        moves = [step["op"] for step in post[:per_copy] if step["op"] in ("resample", *INDEX_SELECTIONS)]
         if moves and split_post(post, manifests[0].get("preprocessing", []), per_copy) > per_copy:
             raise ConfigError(
                 f"assemble_program: the per-copy '{moves[0]}' runs on the models' average, past the inverses each"
                 " model keeps, which konfai runs after it.",
                 _or_konfai("Combine the models by Concat", _PREDICT),
             )
+        folded = [_fold_op(step) for step in post[:per_copy]]
         manifests = [{**mf, "postprocessing": mf.get("postprocessing", [])[per_copy:]} for mf in manifests]
         per_copy = 0
     tail: list[dict[str, Any]] = []
@@ -1689,6 +1667,22 @@ def _model_steps(
             steps.append({"model": model["id"], "in": _model_inputs(copy), "out": out, "manifest": copy})
             copies.append(out)
     return steps, copies
+
+
+def _fold_op(step: dict[str, Any]) -> dict[str, Any]:
+    """A per-copy chain op as the program step running it on the models' average: a cast keeps its dtype, a
+    softmax or an argmax runs on the channel axis the body op implies. No other chain op has a body form, and
+    konfai runs the stage on the average, so the models cannot each run it in their own manifest."""
+    op = step["op"]
+    if op == "cast":
+        return {"op": "cast", "dtype": step["dtype"]}
+    if op in ("softmax", "argmax") and int(step.get("dim", 0)) == 0:
+        return {"op": op}
+    raise ConfigError(
+        f"assemble_program: '{op}' runs on the models' average before the copies fold, and a program runs a cast,"
+        " a softmax or an argmax alone on a buffer.",
+        _or_konfai("Combine the models by Concat", _PREDICT),
+    )
 
 
 def _fold_models(steps: list[dict[str, Any]], copies: list[str], models: int, ops: list[dict[str, Any]]) -> list[str]:
@@ -1762,7 +1756,7 @@ def _mask_buffers(aux: dict[str, dict[str, Any]], grid: str, steps: list[dict[st
         # konfai reads the file the nested app wrote, in the dtype its chain ends on when that is a cast.
         post = nested["manifest"].get("postprocessing") or []
         written = str(post[-1]["dtype"]) if post and post[-1]["op"] == "cast" else None
-        ops = json.loads(json.dumps(nested.get("ops") or []))
+        ops = deepcopy(nested.get("ops") or [])
         resolve_interpolation(ops, written)
         for index, step in enumerate(ops):
             out = f"{name}__{index}"
@@ -1798,7 +1792,7 @@ def derive_reduction(config: dict[str, Any], root: str, output: str | None = Non
     ``MergeLabels``, ``mean`` for an ``InferenceStack``, ``median_lower`` for one of ``mode: median``, which
     takes torch's lower middle where the ``Median`` reduction averages the middle pair."""
     spec = output_spec(config, root, output)
-    after = list(_chain_of(spec, "after_reduction_transforms"))
+    after = list(bound_chain(spec.get("after_reduction_transforms")))
     if after and base_name(after[0]) == "MergeLabels":
         return "merge_labels"
     stack, _ = _split_stack(config, root, spec)
@@ -2093,7 +2087,7 @@ def mask_specs(config: dict[str, Any], root: str, output: str | None = None) -> 
     """``Mask`` ops in ``before_reduction`` (masking the primary output by an auxiliary group's buffer):
     ``[{"group": <aux group name>, "value_outside": float}]``. A Mask reading a group no nested model builds
     is refused by name: the program holds no buffer for it."""
-    before = _chain_of(output_spec(config, root, output), "before_reduction_transforms")
+    before = bound_chain(output_spec(config, root, output).get("before_reduction_transforms"))
     built = aux_mask_groups(config, root)
     specs = []
     for name, params in before.items():
@@ -2155,7 +2149,7 @@ def models_fold_first(config: dict[str, Any], root: str, models: int, output: st
     mean, so it runs once per copy, on the average, and the copies then fold by the output's ``reduction``."""
     combine = _class_name(str(clean(config.get(root, {}).get("combine")) or "Mean"))
     spec = output_spec(config, root, output)
-    before, _, _ = compile_pipeline(_chain_of(spec, "before_reduction_transforms"), consumed=("Mask",))
+    before, _, _ = compile_pipeline(bound_chain(spec.get("before_reduction_transforms")), consumed=("Mask",))
     return models > 1 and combine == "Mean" and bool(before) and derive_reduction(config, root, output) is None
 
 
@@ -2203,14 +2197,9 @@ def compile_output(
 def _portable_root(path: str | Path) -> str:
     """A path the runtime resolves against its ``--root``: relative to the working directory when it
     sits below it, with slashes whatever the system compiling, absolute otherwise."""
-    import os
-
     text = str(path).rstrip("/") or "/"
-    try:
-        relative = os.path.relpath(text, Path.cwd())
-    except ValueError:  # on another Windows drive: no relative path reaches it
-        return text
-    return text if relative.startswith("..") else Path(relative).as_posix()
+    absolute, cwd = Path(text).absolute(), Path.cwd()
+    return absolute.relative_to(cwd).as_posix() if absolute.is_relative_to(cwd) else text
 
 
 def compile_prediction(

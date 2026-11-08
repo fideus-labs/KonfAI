@@ -199,28 +199,22 @@ def _write_onnx(
     output_names: list[str],
     opset: int = 18,
 ) -> None:
-    """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``. The dynamo
-    exporter writes weights as external data, inlined here. It also records every node's Python stack, and with
-    it the paths of the machine that exported, which a model handed to others does not carry."""
-    onnx = _require("onnx")
+    """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
+    inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
+    which a model handed to others does not carry."""
+    _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
+    from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
+
     with torch.no_grad():
-        torch.onnx.export(
-            module,
-            examples,
-            str(onnx_path),
-            opset_version=opset,
-            input_names=input_names,
-            output_names=output_names,
-            dynamo=True,
+        program = cast(
+            "torch.onnx.ONNXProgram",
+            torch.onnx.export(
+                module, examples, opset_version=opset, input_names=input_names, output_names=output_names, dynamo=True
+            ),
         )
-    exported = onnx.load(str(onnx_path))
-    for node in [*exported.graph.node, *(node for function in exported.functions for node in function.node)]:
-        kept = [prop for prop in node.metadata_props if prop.key != "pkg.torch.onnx.stack_trace"]
-        del node.metadata_props[:]
-        node.metadata_props.extend(kept)
-    onnx.save(exported, str(onnx_path), save_as_external_data=False)
-    onnx_path.with_name(onnx_path.name + ".data").unlink(missing_ok=True)
+    ClearMetadataAndDocStringPass()(program.model)
+    program.save(onnx_path, external_data=False)
 
 
 def export_to_onnx(
@@ -232,7 +226,7 @@ def export_to_onnx(
     opset: int = 18,
     input_name: str = "input",
     output_name: str = "output",
-    input_group: str = "Volume_0",
+    input_group: str | list[str] = "Volume_0",
     output_group: str = "output",
     patch_overlap: list[int] | None = None,
     extend_slice: int = 0,
@@ -255,6 +249,9 @@ def export_to_onnx(
         order its graph takes them; the ONNX is exported at these exact shapes (no dynamic axes). When a
         ModelPatch of the graph cuts it into several patches, an export whose head would see only the last
         one is refused.
+    input_group:
+        The group the first example holds, or one group per example. The manifest's ``input`` names the first;
+        each later one is a ``reads`` entry, in graph order, unless ``extra_manifest`` states its own ``reads``.
     output_module:
         Dotted name of the inference head to export (see :func:`list_output_modules`).
         When omitted, :func:`select_inference_head` picks the terminal floating-point head.
@@ -279,6 +276,11 @@ def export_to_onnx(
 
     model.eval()
     examples = example_input if isinstance(example_input, tuple) else (example_input,)
+    groups = [input_group] if isinstance(input_group, str) else list(input_group)
+    if len(groups) != len(examples):
+        raise PredictorError(
+            f"{len(examples)} example inputs, {len(groups)} input group(s): give one group per example."
+        )
     if output_module is None:
         output_module = select_inference_head(model, *examples)
     available = list_output_modules(model, *examples)
@@ -304,7 +306,7 @@ def export_to_onnx(
         "model": onnx_path.name,
         "opset": opset,
         "output_module": output_module,
-        "input": {"name": input_name, "group": input_group, "channels": input_shape[1], "dtype": "f32"},
+        "input": {"name": input_name, "group": groups[0], "channels": input_shape[1], "dtype": "f32"},
         "output": {"name": output_name, "group": output_group, "channels": int(output_shape[1]), "dtype": "f32"},
         "patch": {
             "size": spatial,
@@ -316,10 +318,15 @@ def export_to_onnx(
         },
         "geometry": {"mode": "preserve_from_input"},
     }
+    if len(examples) > 1:
+        manifest["reads"] = [
+            {"group": group, "channels": int(example.shape[1]), "preprocessing": []}
+            for group, example in zip(groups[1:], examples[1:], strict=True)
+        ]
     if extra_manifest:
         manifest.update(extra_manifest)
     if patch_overlap is None:
-        manifest["blend"] = "Overwrite"
+        manifest.setdefault("blend", "Overwrite")
     if write_manifest:
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return onnx_path, manifest
