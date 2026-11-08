@@ -35,10 +35,10 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 import torch
 
 from konfai.utils.errors import PredictorError
+from konfai.utils.utils import Placement
 
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
-    from konfai.utils.utils import Placement
 
 MANIFEST_VERSION = 4
 
@@ -279,8 +279,6 @@ def export_to_onnx(
     ``(onnx_path, manifest)``: the written ONNX path and the manifest dict (also written
     to ``manifest.json`` when ``write_manifest``).
     """
-    from konfai.utils.utils import Placement
-
     if placement not in get_args(Placement):
         raise PredictorError(f"placement '{placement}' is none of {', '.join(get_args(Placement))}.")
     if isinstance(pad_value, str) and pad_value not in ("edge", "min"):

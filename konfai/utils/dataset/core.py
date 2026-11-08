@@ -390,11 +390,6 @@ class Dataset:
             return f"{self.filename}{suffix}"
         return self.filename
 
-    @staticmethod
-    def store_root_for(filename: str | Path, file_format: str) -> str:
-        """:attr:`store_root` of a dataset named ``filename`` in ``file_format``."""
-        return Dataset(filename, file_format).store_root
-
     @property
     def path_on_disk(self) -> Path:
         """:attr:`store_root` as a path. Local roots only: a URI has no filesystem path."""

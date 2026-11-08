@@ -615,7 +615,7 @@ def _store_of(root: str, file_format: str) -> dict[str, str]:
     from konfai.utils.dataset import Dataset
     from konfai.utils.dataset.backend import backend_for
 
-    return {"store": Dataset.store_root_for(root, file_format)} if backend_for(file_format).single_store else {}
+    return {"store": Dataset(root, file_format).store_root} if backend_for(file_format).single_store else {}
 
 
 def _literal_group(group: str, error: type[KonfAIError]) -> str:
