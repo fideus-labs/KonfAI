@@ -182,7 +182,8 @@ class ConvexAdamEngine:
     The IMPACT feature models are fetched and probed once, by KonfAI (``repo:filename`` on Hugging Face), and reused
     across cases.
     Masks restrict every stage's similarity to where they are not 0, the linear stage and its seed included, as in the
-    FireANTs engine; a fixed mask with no voxel in it (a tile the tissue does not reach) gives a zero field.
+    FireANTs engine (the linear stage alone with deformable_masked off); a fixed mask with no voxel in it (a tile the
+    tissue does not reach) gives a zero field when a stage reads the masks, and is ignored with the image when none does.
     """
 
     def __init__(
@@ -207,6 +208,7 @@ class ConvexAdamEngine:
         lncc_kernel: int = 5,
         voxel_sampling: float = 1.0,
         balance_coarse_layers: bool = False,
+        deformable_masked: bool = True,
     ) -> None:
         # Checked here, before any download: past this point a bad value fails at the first case, or not at all.
         if stages and _itk_impact_predates_its_stages():
@@ -301,6 +303,7 @@ class ConvexAdamEngine:
         self._feature_map_update_interval = feature_map_update_interval
         self._lncc_kernel = lncc_kernel
         self._balance_coarse_layers = balance_coarse_layers
+        self._deformable_masked = deformable_masked
 
     def _model_configurations(self, stage: str, dimension: int) -> list:
         """One model configuration per feature model of ``stage``, built once and reused across cases.
@@ -551,8 +554,11 @@ class ConvexAdamEngine:
 
         ``coarse`` produces a field from scratch; ``fine`` refines the running field. So ``['coarse']`` is a
         coarse-only app, ``['fine']`` a fine-only app (zero warm-start), and ``['coarse', 'fine']`` chains both
-        (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain).
+        (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain). With
+        ``deformable_masked`` off, the stages read the whole image: the masks stay the linear stage's.
         """
+        if not self._deformable_masked:
+            fixed_mask = moving_mask = None
         field: itk.Image | None = None
         for stage in self._stages:
             field = (
@@ -574,6 +580,8 @@ class ConvexAdamEngine:
 
         ``fixed_mask`` and ``moving_mask`` (each on its image's grid, or resampled onto it by nearest neighbour)
         restrict every stage's similarity to where they are not 0, the linear stage and its seed included."""
+        if not (self._deformable_masked or self._linear):  # no stage reads them: nothing to prepare
+            fixed_mask = moving_mask = None
         if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
             # A fixed mask with no voxel in it leaves nothing to register: a zero field, as the elastix engine
             # returns (in a tiled run, every tile the tissue does not reach).
@@ -731,6 +739,12 @@ class RegistrationNet(network.Network):
             "the search alike, their total spread staying the raw one the coupling is calibrated on; a layer that "
             "does not vary weighs 0 (off = the raw costs, weighed by layers_weight alone). Experimental.",
         ] = False,
+        deformable_masked: Annotated[
+            bool,
+            "Restrict the coarse and fine stages to the masks as well. False keeps them for the affine "
+            "pre-alignment and its seed only, and the deformable stages read the whole image, as ConvexAdam's "
+            "authors run it (use_mask=False).",
+        ] = True,
         iterations: Annotated[
             int,
             Range(0, 100000),
@@ -832,6 +846,7 @@ class RegistrationNet(network.Network):
             lncc_kernel,
             voxel_sampling,
             balance_coarse_layers,
+            deformable_masked,
         )
         self.add_module(
             "Registration",

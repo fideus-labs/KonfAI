@@ -40,7 +40,7 @@ loaded whole.
 
 | Name | Purpose | Key arguments (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | yes | yes (the grid change) | yes |
+| `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0` (or `edge`), `inverse=True` | yes | yes (the grid change) | yes |
 | `Displace` | Move a point set (`.fcsv` landmarks) by the case's displacement field, read at each point as SimpleITK's `DisplacementFieldTransform` reads it, from the voxels around the point alone. | `field_group="DVF"` | no | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |

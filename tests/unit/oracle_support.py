@@ -492,9 +492,6 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
     own rank, so one table describes a 2-D case and a 3-D one.
     """
     spacing, shape = [2.0, 1.0, 3.0][:rank], [12, 8, 14][:rank]
-    # KonfAI's stored-map codec holds the 3-D rigid, affine and BSpline kinds only, so a 2-D case
-    # has no stored map to resample through: the refusal is pinned where it is raised, not swept.
-    stored_map = rank == 3
     # The axis order Flip and Permute default to, cut to the rank: "1|0|2" in 3-D, "1|0" in 2-D.
     axes = "|".join(str(axis) for axis in [1, 0, 2][:rank])
     return {
@@ -571,7 +568,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="CoarseField"),
                 atol=REGRID_ATOL,
             ),
-            StageCase(Resample(transforms={"transform": True}), atol=REGRID_ATOL, sweep=stored_map),
+            StageCase(Resample(transforms={"transform": True}), atol=REGRID_ATOL),
             # The same on an OBLIQUE case: a region's origin is the volume's map applied to its start,
             # one more rounding than the whole volume's index-to-world takes, and on oblique cosines
             # that rounding is not exact -- so a handful of voxels (measured: 1 in 64 in one patch,
@@ -586,7 +583,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
             # streamed and whole agree exactly on floats; int16 rounds the blend once, hence the LSB.
             StageCase(Resample(spacing=spacing, interpolation="cubic")),
             StageCase(Resample(spacing=spacing, interpolation="cubic"), group="Int16", atol=LSB_ATOL),
-            StageCase(Resample(transforms={"transform": True}, interpolation="cubic"), sweep=stored_map),
+            StageCase(Resample(transforms={"transform": True}, interpolation="cubic")),
             # A field on disk this registry cannot build: the streamed-equals-whole proof lives in
             # test_warp.py, where a field exists: including the measured, bound-less windows.
             StageCase(Resample(field="Dataset:h5", field_group="DVF"), sweep=False),
