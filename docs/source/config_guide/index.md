@@ -169,7 +169,10 @@ A list of `path`, `path:format` or `path:flag:format`:
 
 - `./Dataset:mha`, `./DicomDataset:dicom`, `./OmeDataset:omezarr`;
 - the flag `a` adds a dataset's cases to the others (union), `i` keeps only the cases present in all
-  (intersection): `./Predictions/TRAIN_01/Dataset:i:mha`.
+  (intersection): `./Predictions/TRAIN_01/Dataset:i:mha`;
+- a manifest of explicit entries, `./cases.yml:omezarr`, when the cases do not sit in the layout above (a
+  store in object storage, files from several folders): see
+  {doc}`../reference/components/storage-backends`.
 
 ### `groups_src` and `groups_dest`
 
