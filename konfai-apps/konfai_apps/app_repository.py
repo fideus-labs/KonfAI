@@ -38,7 +38,6 @@ from dataclasses import dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Union, get_args, get_origin
-from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -1955,7 +1954,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
     def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
         self._remote_server = remote_server
-        url = f"{remote_server.get_url()}/repo_apps/{quote(app_name, safe='/:@')}"
+        url = f"{remote_server.get_url()}/repo_apps/{app_name}"
         response = requests.get(
             url, headers=remote_server.get_headers(), timeout=remote_server.timeout, verify=remote_server.verify
         )
@@ -2033,7 +2032,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         def safe_name(value: str) -> str:
             return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
 
-        url = f"{self._remote_server.get_url()}/repo_apps_config/{quote(self._app_name, safe='/:@')}"
+        url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
         response = requests.get(
             url,
             headers=self._remote_server.get_headers(),
