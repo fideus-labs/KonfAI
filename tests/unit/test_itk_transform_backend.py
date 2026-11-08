@@ -46,12 +46,14 @@ def _field(seed: int = 0) -> np.ndarray:
     return (np.random.default_rng(seed).normal(size=(3, 4, 5, 6)) * 8).astype(np.float32)
 
 
-def _oracle(field: np.ndarray) -> "sitk.DisplacementFieldTransform":
-    """What ``sitk.WriteTransform`` would have written, held in memory instead."""
+def _oracle(field: np.ndarray, attributes: Attribute | None = None) -> "sitk.DisplacementFieldTransform":
+    """What ``sitk.WriteTransform`` would have written, held in memory instead: the field on the geometry of
+    ``attributes`` (the 3-D one above by default)."""
+    attributes = _attributes() if attributes is None else attributes
     image = sitk.GetImageFromArray(np.moveaxis(field, 0, -1).astype(np.float64), isVector=True)
-    image.SetOrigin(_ORIGIN)
-    image.SetSpacing(_SPACING)
-    image.SetDirection(_DIRECTION)
+    image.SetOrigin(attributes.get_np_array("Origin").tolist())
+    image.SetSpacing(attributes.get_np_array("Spacing").tolist())
+    image.SetDirection(attributes.get_np_array("Direction").tolist())
     return sitk.DisplacementFieldTransform(sitk.Cast(image, sitk.sitkVectorFloat64))
 
 
@@ -374,10 +376,7 @@ def test_a_2d_field_is_written_and_read_back(tmp_path: Path) -> None:
     """A 2-component 2-D displacement field is an entry too: written as the file SimpleITK writes, read back whole and
     by region."""
     field = np.random.RandomState(6).uniform(-1.5, 1.5, (2, 7, 9))
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray((4.0, -2.0))
-    attributes["Spacing"] = np.asarray((0.9, 1.3))
-    attributes["Direction"] = np.asarray((np.cos(0.2), -np.sin(0.2), np.sin(0.2), np.cos(0.2)))
+    attributes = geometry((4.0, -2.0), (0.9, 1.3), (np.cos(0.2), -np.sin(0.2), np.sin(0.2), np.cos(0.2)))
     dataset = Dataset(tmp_path / "out", "itktransform")
     dataset.write("Transform", "P000", field, attributes)
 
@@ -385,11 +384,7 @@ def test_a_2d_field_is_written_and_read_back(tmp_path: Path) -> None:
     assert shape == [2, 7, 9]
     np.testing.assert_allclose(back_attributes.get_np_array("Direction"), attributes.get_np_array("Direction"))
     oracle = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
-    image = sitk.GetImageFromArray(np.moveaxis(field, 0, -1), isVector=True)
-    image.SetOrigin((4.0, -2.0))
-    image.SetSpacing((0.9, 1.3))
-    image.SetDirection(tuple(attributes.get_np_array("Direction")))
-    want = sitk.DisplacementFieldTransform(sitk.Cast(image, sitk.sitkVectorFloat64))
+    want = _oracle(field, attributes)
     for point in ((5.0, -1.0), (7.5, 3.0)):
         assert oracle.TransformPoint(point) == pytest.approx(want.TransformPoint(point))
     assert dataset.bounded_region_reads("Transform", "P000")
