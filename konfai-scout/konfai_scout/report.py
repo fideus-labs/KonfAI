@@ -324,7 +324,6 @@ def render_markdown(report: Report) -> str:
     if not report.observations:
         lines += ["None recorded.", ""]
     views = {view.id: view for view in report.views}
-    measurements = {m.id: m for m in report.measurements}
     for o in report.observations:
         lines += [
             f"### {o.id}: {o.defect} ({o.kind}, {o.severity}, confidence {o.confidence:.2f})",
@@ -342,15 +341,8 @@ def render_markdown(report: Report) -> str:
                 f"{', '.join(o.second_reading.get('views') or [])}): {o.second_reading.get('text', '')}_",
                 "",
             ]
-        for mid in o.measurements:
-            m = measurements.get(mid)
-            if m is None:
-                continue
-            kind = "against a reference" if m.reference else "no reference"
-            values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items())
-            lines += [f"- {mid} ({m.kind}, {kind}, {_box_text(m.box_measured or m.box_requested)}): {values}"]
-        if o.measurements:
-            lines.append("")
+        if o.measurements:  # their values are under Measurements: the description quotes the ones that matter
+            lines += [f"Measurements: {', '.join(o.measurements)}.", ""]
         for vid in o.views:
             v = views.get(vid)
             if v is None:
@@ -378,7 +370,7 @@ def render_markdown(report: Report) -> str:
             + ("" if v.sent else " (rendered, not sent)")
             + f" — [{v.path}]({v.path})"
         ]
-    lines += ["", "## Tool calls", ""]
+    lines += ["", "## Tool calls", "", f"<details><summary>{len(report.tool_calls)} calls</summary>", ""]
     for c in report.tool_calls:
         status = "ok" if c.ok else f"error: {c.error}"
         lines += [
@@ -386,6 +378,8 @@ def render_markdown(report: Report) -> str:
             f"({status}, {c.duration_s:.1f} s)"
         ]
     lines += [
+        "",
+        "</details>",
         "",
         "## Record",
         "",

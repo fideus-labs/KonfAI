@@ -9,6 +9,7 @@ import pytest
 from konfai_scout import InspectionCase, ScoutConfig, inspect
 from konfai_scout.agent import parse_second_reading
 from konfai_scout.config import Budget
+from konfai_scout.prompts import PROMPT_VERSION
 from konfai_scout.providers.base import ProviderError, Turn, Usage
 from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, call, turn
 from konfai_scout.report import compare, defects_of, match_defects
@@ -32,7 +33,7 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
     else:
         assert "view" in tools
     assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(report.tool_calls)
-    assert report.case["truth_available"] and report.versions["prompt"] == "1.2"
+    assert report.case["truth_available"] and report.versions["prompt"] == PROMPT_VERSION
     assert report.prompts["system"].startswith("You are KonfAI Scout")
     summary = report.summary()
     assert summary["verdict"] == report.conclusion.verdict and summary["observations"][0]["defect"]
