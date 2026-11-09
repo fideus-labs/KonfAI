@@ -40,7 +40,7 @@ from konfai.utils.utils import Placement
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5  # 5: patch.stride under the monai and spread placements
 
 
 def _require(module: str) -> ModuleType:

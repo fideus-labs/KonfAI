@@ -20,7 +20,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
 | EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
-| one model's manifest | `konfai_edge_manifest` | 4 | the same |
+| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`) | KonfAI Edge with `patch.stride` (unreleased) |
 
 A bump on one side is a line in this table and in the runtime's README.
 
