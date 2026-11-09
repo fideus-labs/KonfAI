@@ -255,14 +255,28 @@ def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_recorded_input
                 if run != "EXPERIMENT":  # only the app run declares a direction, under its own name
                     payload["directions"] = {name: "max"}
                 metrics.write_text(json.dumps(payload), encoding="utf-8")
-            # the app was given 1PC032 then 1PC006: P000 is 1PC032, whatever the sorted names say
-            manifest = mcp_server.WORKSPACE_LAYOUT.job_manifest_path("app_job")
-            manifest.parent.mkdir(parents=True, exist_ok=True)
-            cases = {"P000": ["/data/1PC032/CT.mha"], "P001": ["/data/1PC006/CT.mha"]}
-            manifest.write_text(json.dumps({"output": str(workspace / "AppEvaluations" / "BUNDLE"), "cases": cases}))
+            output = workspace / "AppEvaluations" / "BUNDLE"
+            written = (output / "Metric_TRAIN.json").stat().st_mtime
+            layout = mcp_server.WORKSPACE_LAYOUT
+
+            def app_job(job_id: str, order: list[str], started: float, finished: float) -> None:
+                cases = {f"P{i:03d}": [f"/data/{name}/CT.mha"] for i, name in enumerate(order)}
+                layout.job_dir(job_id).mkdir(parents=True, exist_ok=True)
+                manifest = {"job_id": job_id, "output": str(output), "cases": cases}
+                layout.job_manifest_path(job_id).write_text(json.dumps(manifest))
+                state = {"job_id": job_id, "status": "done", "started_at": started, "finished_at": finished}
+                layout.job_state_path(job_id).write_text(json.dumps(state))
+
+            # an older run into the same output, in the other order, ended before these metrics were written; the
+            # run that wrote them was given 1PC032 then 1PC006: P000 is 1PC032, whatever the sorted names say
+            app_job("old", ["1PC006", "1PC032"], written - 100, written - 50)
+            app_job("new", ["1PC032", "1PC006"], written - 10, written + 10)
             result = await client.call_tool(
                 "compare_runs", {"run_a": "EXPERIMENT", "run_b": "BUNDLE", "metric": "Dice"}
             )
+            app_job("twin", ["1PC006", "1PC032"], written - 5, written + 5)  # two runs that could have written it
+            with pytest.raises(Exception, match="cannot be paired"):
+                await client.call_tool("compare_runs", {"run_a": "EXPERIMENT", "run_b": "BUNDLE", "metric": "Dice"})
             with pytest.raises(Exception, match="cannot be paired"):
                 await client.call_tool("compare_runs", {"run_a": "EXPERIMENT", "run_b": "UNRECORDED", "metric": "Dice"})
             return result.structured_content

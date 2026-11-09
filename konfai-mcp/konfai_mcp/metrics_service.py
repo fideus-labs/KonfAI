@@ -89,15 +89,24 @@ def metric_run_name(metrics_path: Path, workspace: Path) -> str:
     return metrics_path.parent.name
 
 
-def recorded_cases(metrics_path: Path, jobs_dir: Path) -> dict[str, list[str | None]] | None:
-    """An app run's ``P000`` -> its input files, as the job manifest whose output holds ``metrics_path`` recorded
-    them (konfai_apps names cases by input position); None for a run that recorded none."""
-    for manifest_path in jobs_dir.glob("*/manifest.json"):
+def recorded_cases(metrics_path: Path, layout: WorkspaceLayout) -> dict[str, list[str | None]] | None:
+    """An app run's ``P000`` -> its input files (konfai_apps names cases by input position), from the manifest of
+    the one finished job whose output holds ``metrics_path`` and which wrote it: the file's time falls between the
+    job's start and its end. None when no job answers, or several (two runs into one output, not told apart)."""
+    written = metrics_path.stat().st_mtime
+    found = []
+    for manifest_path in layout.jobs_dir().glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("cases") and manifest.get("output"):
-            if Path(manifest["output"]).resolve() in metrics_path.resolve().parents:
-                return manifest["cases"]
-    return None
+        if not (manifest.get("cases") and manifest.get("output")):
+            continue
+        if Path(manifest["output"]).resolve() not in metrics_path.resolve().parents:
+            continue
+        state_path = layout.job_state_path(str(manifest.get("job_id")))
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        start, end = state.get("started_at"), state.get("finished_at")
+        if state.get("status") == "done" and start is not None and end is not None and start <= written <= end:
+            found.append(manifest["cases"])
+    return found[0] if len(found) == 1 else None
 
 
 def cases_by_recorded_input(recorded: dict[str, list[str | None]], names: Iterable[str]) -> dict[str, str]:
@@ -488,8 +497,8 @@ class MetricsServiceMixin:
         """Per-case aligned comparison of two runs' evaluation metrics, direction-aware."""
         payload_a = self.run_metrics_payload(run_a, split=split, session=session)
         payload_b = self.run_metrics_payload(run_b, split=split, session=session)
-        jobs_dir = self._resolve_session_layout(session).jobs_dir()
-        recorded_a, recorded_b = (recorded_cases(Path(p["path"]), jobs_dir) for p in (payload_a, payload_b))
+        layout = self._resolve_session_layout(session)
+        recorded_a, recorded_b = (recorded_cases(Path(p["path"]), layout) for p in (payload_a, payload_b))
         cases_a = payload_a["metrics"].get("case", {})
         cases_b = payload_b["metrics"].get("case", {})
         pairs = [(name, name) for name in sorted(set(cases_a) & set(cases_b))]
@@ -540,8 +549,9 @@ class MetricsServiceMixin:
                 case_b_of = {a: b for a, b in case_b_of.items() if a in cases_a[name] and b in cases_b[name_b]}
                 if not case_b_of:
                     raise ValueError(
-                        f"'{run_a}' and '{run_b}' share no case name, and no app job manifest records which input "
-                        "each P000 case came from: their cases cannot be paired (equal counts are not one cohort)."
+                        f"'{run_a}' and '{run_b}' share no case name, and no one finished app job that wrote these "
+                        "metrics records which input each P000 case came from: their cases cannot be paired (equal "
+                        "counts are not one cohort)."
                     )
                 common_cases = sorted(case_b_of)
                 alignment = "by recorded input"
