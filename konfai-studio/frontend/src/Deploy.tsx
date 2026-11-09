@@ -110,10 +110,12 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       });
       if (entry.engine !== "konfai-edge")
         throw refuse(`This app runs on ${entry.engine ?? "no"} engine; Studio runs the KonfAI Edge apps.`);
+      const dir = entry.variants?.[0]?.weights;
+      const config = entry.configs?.find((c) => c.name === "app.json");
+      if (!dir || !config) throw refuse("This app's web/catalog.json entry names no variant weights or no app.json.");
       setMessage("loading the KonfAI Edge engine…");
       const engine = await engineOf(app.ref, entry.runtime);
-      const dir = entry.variants[0].weights;
-      const appJson = await (await fetched(app.ref, entry.configs.find((c) => c.name === "app.json")!.url)).text();
+      const appJson = await (await fetched(app.ref, config.url)).text();
       const programs = entry.variants.flatMap((v) => [v.program, v.uncertainty?.program, v.uncertainty?.evaluation]);
       const files = [...programs, ...(entry.evaluations ?? []).map((e) => e.program)]
         .filter((p): p is string => !!p && p.startsWith(`${dir}/`))

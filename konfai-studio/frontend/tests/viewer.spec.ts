@@ -37,3 +37,26 @@ test("a failed load says which file failed and shows no stale volume", async ({ 
   await expect(page.locator(".v-failed")).toContainText("missing.nii.gz", { timeout: 10_000 });
   await expect(page.locator(".v-dims")).toHaveCount(0);
 });
+
+test("a Go-to focus is dropped when another volume is picked before its own has loaded", async ({ page }) => {
+  // The requested volume is slow and another one is picked meanwhile: the old check took whichever volume
+  // loaded and put the first one's point on it.
+  const volume = tinyNifti();
+  await page.route("**/files/volume**", async (route) => {
+    if (route.request().url().includes("slow")) await new Promise((r) => setTimeout(r, 1000));
+    return route.fulfill({ status: 200, contentType: "application/gzip", body: volume });
+  });
+  await page.goto("/tests/harness.html");
+  const focus = { mm: [-2, -3, 4], nonce: 1, path: "/data/slow.nii.gz" };
+  await page.evaluate((focus) => (window as any).__mount("Viewer", { path: focus.path, focus }), focus);
+  await page.waitForTimeout(200);
+  await page.evaluate((focus) => (window as any).__mount("Viewer", { path: "/data/other.nii.gz", focus }), focus);
+  await expect(page.locator(".v-dims")).not.toHaveText("", { timeout: 10_000 });
+  const crosshair = () => page.evaluate(() => Array.from((window as any).__nv.scene.crosshairPos as number[]));
+  expect(await crosshair()).toEqual([0.5, 0.5, 0.5]);
+
+  // A focus into the volume on screen still lands.
+  const here = { ...focus, nonce: 2, path: "/data/other.nii.gz" };
+  await page.evaluate((focus) => (window as any).__mount("Viewer", { path: focus.path, focus }), here);
+  await expect.poll(crosshair).not.toEqual([0.5, 0.5, 0.5]);
+});

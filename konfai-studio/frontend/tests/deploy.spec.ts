@@ -5,7 +5,13 @@ import { tinyNifti } from "./nifti";
 // The app has an in-browser build but its engine does not load (here: the server has none of its files).
 // The pane says so and keeps Run disabled: a volume alone gives it nothing it could run.
 test("the Deploy pane keeps Run disabled while its engine is not ready", async ({ page }) => {
-  const entry = { name: "CT", engine: "konfai-edge", runtime: "CT/engine", configs: [], variants: [{ weights: "CT" }] };
+  const entry = {
+    name: "CT",
+    engine: "konfai-edge",
+    runtime: "CT/engine",
+    configs: [{ name: "app.json", url: "CT/app.json" }],
+    variants: [{ weights: "CT" }],
+  };
   await page.route("**/api/apps/web?**", (route) => route.fulfill({ json: entry }));
   await page.route("**/api/apps/web/file?**", (route) => route.fulfill({ status: 404, json: { detail: "no file" } }));
   await page.goto("/tests/harness.html");

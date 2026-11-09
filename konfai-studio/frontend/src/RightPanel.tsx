@@ -7,7 +7,7 @@ import { lazyWithRetry } from "./lazy";
 const Viewer = lazyWithRetry(() => import("./Viewer"));
 const Scout = lazyWithRetry(() => import("./Scout"));
 import type { JobStream, LiveStatus, Point, RunFeed, Series } from "./useJobStream";
-import type { PaneId } from "./Viewer";
+import type { Focus, PaneId } from "./Viewer";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { isRunning, jobState } from "./status";
@@ -536,7 +536,7 @@ function ExperimentView({
   session: string;
   volumePath: string | null;
   onVolumePathChange: (p: string) => void;
-  focus?: { mm: [number, number, number]; nonce: number } | null; // a Scout observation to put the crosshair on
+  focus?: Focus | null; // a Scout observation to put the crosshair on
   refresh?: number;
   dataset?: string; // re-read the experiment when one is picked: it mounts the input tree and a chip
   live?: boolean;
@@ -1403,7 +1403,7 @@ export default function RightPanel({
   const [validating, setValidating] = useState(false);
   const [note, setNote] = useState(""); // a refused action says why, instead of looking like a no-op
   // Where a Scout observation sits, in mm (LPS): the viewer puts its crosshair there once the volume is loaded.
-  const [scoutFocus, setScoutFocus] = useState<{ mm: [number, number, number]; nonce: number } | null>(null);
+  const [scoutFocus, setScoutFocus] = useState<Focus | null>(null);
 
   useEffect(() => {
     setHasEval(false);
@@ -1706,7 +1706,7 @@ export default function RightPanel({
               onGoTo={(image, mm) => {
                 // the observation's case image in the viewer, the crosshair on the observation
                 onVolumePathChange(image);
-                setScoutFocus({ mm, nonce: Date.now() });
+                setScoutFocus({ mm, nonce: Date.now(), path: image });
                 show("config");
               }}
             />

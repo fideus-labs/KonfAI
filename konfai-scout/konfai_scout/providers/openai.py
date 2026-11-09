@@ -79,32 +79,33 @@ class OpenAIProvider:
             if image.label:
                 content.append({"type": "text", "text": image.label})
             content.append(_image_part(image, self.detail))
-        self.messages.append({"role": "user", "content": content})
-        return self._call()
+        return self._call([{"role": "user", "content": content}])
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
+        pending: list[dict[str, Any]] = []
         images: list[dict[str, Any]] = []
         for result in results:
             text = result.text if not result.is_error else f"ERROR: {result.text}"
             if result.images:
                 text += f"\n({len(result.images)} image(s) of this result follow in the next message)"
-            self.messages.append({"role": "tool", "tool_call_id": result.call_id, "content": text})
+            pending.append({"role": "tool", "tool_call_id": result.call_id, "content": text})
             for image in result.images:
                 images.append({"type": "text", "text": f"Image for tool call {result.call_id}: {image.label}"})
                 images.append(_image_part(image, self.detail))
         if images:
-            self.messages.append({"role": "user", "content": images})
+            pending.append({"role": "user", "content": images})
         if tools is not None:
             self.tools = self._tools(tools)
-        return self._call()
+        return self._call(pending)
 
-    def _call(self) -> Turn:
+    def _call(self, pending: list[dict[str, Any]]) -> Turn:
+        """Send ``pending``: it joins the history once answered, so a retried turn is not sent twice."""
         import openai
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=self.messages,
+                messages=[*self.messages, *pending],
                 tools=self.tools or None,
                 max_completion_tokens=self.max_tokens,
             )
@@ -119,10 +120,11 @@ class OpenAIProvider:
         data = response.to_dict() if hasattr(response, "to_dict") else dict(response)
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        self.messages.append(
+        self.messages += [
+            *pending,
             {k: v for k, v in message.items() if k in ("role", "content", "tool_calls") and v is not None}
-            | {"role": "assistant"}
-        )
+            | {"role": "assistant"},
+        ]
         calls = []
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
