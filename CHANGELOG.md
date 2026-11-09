@@ -168,8 +168,9 @@ default evaluation mask is one channel, which a masked metric broadcasts over a 
 #### impact-reg: ensembles and uncertainty on the stack
 
 `register --keep-fields` and the `Ensemble/*.h5` folder are gone: `register --uncertainty` keeps the stack of the
-members (`InferenceStack.<ext>`). `uncertainty --dvf FIELDS` becomes `uncertainty -i STACK`, and its measures go
-under `<output>/<case>/Uncertainty/`.
+members (`InferenceStack.<ext>`) when there are members to stack, two or more presets, or one preset with `--tta` on
+a 3-D pair registered whole; a 2-D or tiled run of one preset keeps none and says so. `uncertainty --dvf FIELDS`
+becomes `uncertainty -i STACK` on that stack, and its measures go under `<output>/<case>/Uncertainty/`.
 
 ### ✨ Features
 
@@ -177,21 +178,23 @@ under `<output>/<case>/Uncertainty/`.
   a person would at a viewer. A vision-language model receives coverage montages, asks for slices, zooms and overlays
   (checkerboard, difference, field magnitude, Jacobian, deformed grid, labels, landmarks), measures regions through
   `konfai.evaluate`, and writes a versioned report of localised defects in millimetres, each citing its views and
-  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads every
-  error blind. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API
-  key, Claude Code (`claude-code`) and the Codex CLI (`codex`). Images leave the machine only under
-  `--allow-cloud-images`. konfai-mcp runs it (`konfai-mcp[scout]`) and Studio shows its report. With Claude through
-  Claude Code, two passes of synthetic controls found 17 of 18 planted defects and invented no error in six clean
-  inspections.
-- portable: `konfai.portable` compiles a TRANSFORM or PREDICTION config, an `Evaluation.yml` or an `Uncertainty.yml`
-  into a versioned JSON program that KonfAI Edge, the native and browser runtime, runs without Python; a prediction's
-  checkpoints are exported to ONNX beside it, a model that reads several groups included. The workflow is built
-  first, so every refusal KonfAI makes happens before a program exists; a stage or parameter the runtime does not
-  reproduce, or a model that runs Python on the case, is refused by name, and a key with no counterpart is warned
-  about. A program records its members, the inference stack, the window placement, the edge pad and fill, and the
-  precision KonfAI blends at: a CT through CT-FM's whole-body model then matches KonfAI's CPU prediction label for
-  label (411 of 2,951,889 labels differed). `konfai.portable_schema` is the contract as a JSON Schema. Compiling
-  never writes the caller's config. `docs/source/usage/portable.md` says what compiles.
+  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads every error
+  blind. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API key, Claude
+  Code (`claude-code`) and the Codex CLI (`codex`). Images go to a cloud provider only under `--allow-cloud-images`
+  (`allow_cloud_images` in a config file or a konfai-mcp call); a server named by `--base-url` receives them without
+  it when its address is loopback or when `--local-provider` declares it local, which may be another machine of your
+  network. konfai-mcp runs it (`konfai-mcp[scout]`) and Studio shows its report. With Claude through Claude Code, two
+  passes of synthetic controls found 17 of 18 planted defects and invented no error in six clean inspections.
+- portable: `konfai.portable` compiles a TRANSFORM or PREDICTION config, and `konfai.portable_evaluation` an
+  `Evaluation.yml` or an `Uncertainty.yml`, into a versioned JSON program that KonfAI Edge, the native and browser
+  runtime, runs without Python; a prediction's checkpoints are exported to ONNX beside it, a model that reads several
+  groups included. The workflow is built first, so every refusal KonfAI makes happens before a program exists; a stage
+  or parameter the runtime does not reproduce, or a model that runs Python on the case, is refused by name, and a key
+  with no counterpart is warned about. A program records its members, the inference stack, the window placement, the
+  edge pad and fill, and the precision KonfAI blends at: on a CT through CT-FM's whole-body model, 0 of 2,951,889
+  labels differ from KonfAI's CPU prediction, where 411 did, all on class boundaries, when the program blended at
+  float32. `konfai.portable_schema` is the contract as a JSON Schema. Compiling never writes the caller's config.
+  `docs/source/usage/portable.md` says what compiles.
 - studio: the Deploy pane runs an app on KonfAI Edge in the browser (WebGPU), with the engine and the compiled
   programs of the app's `web/` folder; it takes the members of the chosen ensemble from the app, shows the output
   over the input in NiiVue and offers it as a download. `onnxruntime-web` is dropped.
