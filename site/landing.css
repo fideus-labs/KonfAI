@@ -54,7 +54,7 @@
 .bar .menu svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; }
 
 /* ---- hero: the volume behind the headline, the text rising in four beats ---- */
-.hero.home { position: relative; overflow: hidden; margin-top: -68px; padding: 168px 24px 72px; text-align: center; isolation: isolate; }
+.hero.home { position: relative; overflow: hidden; margin-top: -68px; padding: 168px 24px 24px; text-align: center; isolation: isolate; }
 .hero.home::before { /* the glow: the engine's sage into Edge's violet, large and soft, behind the volume */
   content: ""; position: absolute; inset: -20% -10% auto; height: 120%; z-index: -2; pointer-events: none;
   background:
@@ -69,6 +69,21 @@
 .hero.home > :nth-child(4) { animation-delay: .14s; }
 .hero.home > :nth-child(5) { animation-delay: .21s; }
 .hero.home > :nth-child(6) { animation-delay: .28s; }
+.hero.home > :nth-child(7) { animation-delay: .35s; }
+/* the second half of the headline in the family's hues, drifting slowly */
+.hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--k-sage-ink), var(--k-teal-ink), var(--k-violet-ink), var(--k-sage-ink)) 0 0 / 300% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: k-hues 12s linear infinite; }
+@keyframes k-hues { to { background-position: 300% 0; } }
+/* the install line, copied with one click */
+.install {
+  display: inline-flex; align-items: center; gap: 10px; margin: 0 0 20px; padding: 7px 8px 7px 14px; cursor: pointer;
+  font: 13.5px var(--mono); color: var(--k-ink-2); background: color-mix(in srgb, var(--card) 80%, transparent);
+  border: 1px solid var(--line-2); border-radius: var(--k-r-2); transition: border-color var(--k-dur);
+}
+.install:hover { border-color: color-mix(in srgb, var(--k-sage) 55%, var(--line)); }
+.install .p { color: var(--k-sage-ink); }
+.install .copy, .copy-btn { font: 500 11px var(--sans); letter-spacing: .04em; color: var(--muted); padding: 3px 8px; border-radius: 6px; background: var(--card-2); }
+.install.done .copy, .copy-btn.done { color: var(--k-sage-ink); }
 .hero .eyebrow { font: 500 12px/1.6 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
 .hero .eyebrow b { font-weight: 500; color: var(--k-hue-ink); }
 .hero .eyebrow i { font-style: normal; color: var(--dim); margin: 0 .5em; }
@@ -250,6 +265,22 @@
   .foot .cols > div:first-child { grid-column: 1 / -1; }
   .foot .term { padding: 12px 16px; }
 }
+/* ---- the touches every page shares: a reading line in the bar, a light that follows the pointer, copy buttons ---- */
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+.sec { scroll-margin-top: 84px; }
+.bar-in { position: relative; }
+.bar-in::after {
+  content: ""; position: absolute; left: 16px; bottom: -1px; height: 2px; width: calc((100% - 32px) * var(--read, 0)); border-radius: 2px;
+  background: linear-gradient(90deg, var(--k-sage), var(--k-teal), var(--k-violet)); pointer-events: none;
+}
+.k-card:hover, .stage:hover, .how-step:hover {
+  background-image: radial-gradient(260px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--k-hue) 11%, transparent), transparent 70%);
+}
+.inner pre { position: relative; }
+.copy-btn { position: absolute; top: 8px; right: 8px; border: 1px solid var(--line); cursor: pointer; opacity: 0; transition: opacity var(--k-dur); }
+.inner pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .copy-btn { opacity: 1; } }
+
 @media (prefers-reduced-motion: reduce) {
   .landing * { transition: none !important; animation: none !important; }
   .mosaic .row { overflow-x: auto; } /* the corpus scrolls by hand instead of drifting */

@@ -142,6 +142,39 @@
     }, { threshold: 0.4 }).observe(tty);
   }
 
+  // ---- copy: the hero's install line, and a button on every code block of the inner pages ----
+  var copy = function (button, text) {
+    var done = function () {
+      button.classList.add("done"); var label = button.querySelector(".copy") || button, was = label.textContent;
+      label.textContent = "Copied"; setTimeout(function () { label.textContent = was; button.classList.remove("done"); }, 1500);
+    };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () {});
+  };
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () { copy(b, b.getAttribute("data-copy")); });
+  });
+  document.querySelectorAll(".inner pre").forEach(function (pre) {
+    var b = document.createElement("button"); b.type = "button"; b.className = "copy-btn"; b.textContent = "Copy";
+    b.addEventListener("click", function () { copy(b, pre.querySelector("code") ? pre.querySelector("code").innerText : pre.innerText.replace(/Cop(y|ied)$/, "")); });
+    pre.appendChild(b);
+  });
+
+  // ---- the reading line in the bar, and the light under the pointer on a card ----
+  var page = document.documentElement, ticking = false;
+  var read = function () {
+    ticking = false;
+    var max = page.scrollHeight - innerHeight;
+    page.style.setProperty("--read", max > 0 ? Math.min(1, scrollY / max).toFixed(4) : 0);
+  };
+  addEventListener("scroll", function () { if (!ticking) { ticking = true; requestAnimationFrame(read); } }, { passive: true });
+  read();
+  document.addEventListener("pointermove", function (e) {
+    var card = e.target.closest && e.target.closest(".k-card, .stage, .how-step");
+    if (!card) return;
+    var r = card.getBoundingClientRect();
+    card.style.setProperty("--mx", e.clientX - r.left + "px"); card.style.setProperty("--my", e.clientY - r.top + "px");
+  }, { passive: true });
+
   // ---- phone menu ----
   var bar = document.querySelector(".bar"), menu = document.getElementById("menu");
   if (bar && menu) menu.addEventListener("click", function () {
