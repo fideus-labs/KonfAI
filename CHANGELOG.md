@@ -135,9 +135,8 @@ The site's colours: a tinted ink ground, one hue per piece (engine sage, apps te
 steel blue, Scout coral) carried by kickers, card rails, bars and each inner page's accent, a sage-to-violet glow
 behind the hero; the inner pages share the landing's pill bar, search, footer and dark ground. Contrast measured
 at AA or better on every text role.
-A shared identity kit, `design/` (tokens with one hue per piece, self-hosted Archivo and IBM Plex, components, the
-volume hero as a module, a README), consumed by the site and by Studio: Studio takes the kit's type and hues while
-keeping its density; the landing's title sits on three lines at 1280 px and two at 1440, cards rise on scroll,
+The site's own identity, under `site/design/` (tokens with one hue per piece, self-hosted Archivo and IBM Plex,
+components, the volume hero as a module); Studio takes its type and hues while keeping its density; the landing's title sits on three lines at 1280 px and two at 1440, cards rise on scroll,
 figures count up.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 

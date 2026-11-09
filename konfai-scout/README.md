@@ -121,8 +121,8 @@ python examples/study_controls.py                    # clean cases against plant
 konfai-scout compare reports/*                       # one row per report
 ```
 
-`docs/report.md` is the schema, `docs/study.md` the study protocol, `docs/integrations.md` how KonfAI Eval,
-konfai-mcp, KonfAI Studio, FidOpt and FidLab use Scout.
+`docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use
+Scout.
 
 ## Development
 
