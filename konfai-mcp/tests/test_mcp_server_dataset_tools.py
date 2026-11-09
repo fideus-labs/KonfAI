@@ -19,6 +19,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -768,6 +769,12 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
             bounded_data = bounded.structured_content
             assert bounded_data["returned_lines"] == 10
             assert bounded_data["truncated"] is True
+
+            # a later page streams the range: the whole file is never read into memory
+            with patch.object(Path, "read_text", side_effect=AssertionError("whole file read")):
+                paged = await client.call_tool("read_file", {"path": str(long_txt), "offset": 9, "max_chars": 8})
+            assert paged.structured_content["content"] == "CASE_001"
+            assert paged.structured_content["truncated"] is True
 
             with pytest.raises(Exception, match="binary"):
                 await client.call_tool("read_file", {"path": str(binary)})

@@ -3659,15 +3659,8 @@ async def read_file(
         if not candidate.is_absolute():
             raise
         if offset:
-            # paging: the raw text from offset, whatever max_lines says (the summary is the first page's)
-            text = candidate.resolve().read_text(encoding="utf-8", errors="replace")
-            return {
-                "path": str(candidate.resolve()),
-                "offset": offset,
-                "content": text[offset : offset + max_chars],
-                "total_chars": len(text),
-                "truncated": offset + max_chars < len(text),
-            }
+            # paging: the raw text from offset, whatever max_lines says (the summary is the first page's), streamed
+            return read_text_range(candidate.resolve(), max_chars=max_chars, offset=offset)
         return read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=max_chars)
     if resolved.suffix.lower() in HDF5_SUFFIXES:
         # run_app writes a registration's Transform.h5 into the session: its summary, not a text dump.
