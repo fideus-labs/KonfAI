@@ -931,82 +931,77 @@ function Studio({ remote }: { remote: boolean }) {
               onReload={() => bumpRun(active)}
             />
           </div>
-          {phone ? (
-            <>
-              <nav className="panebar" aria-label="Panels">
+          {phone && (
+            <nav className="panebar" aria-label="Panels">
+              <button
+                className={pane === "chat" ? "pane-btn on" : "pane-btn"}
+                onClick={() => {
+                  setPane("chat");
+                  setSheetOpen(false);
+                }}
+              >
+                Conversation
+              </button>
+              {(
+                [
+                  ["config", "Workspace"],
+                  ["scout", "Scout"],
+                  ["runs", "Runs"],
+                ] as const
+              ).map(([tab, label]) => (
                 <button
-                  className={pane === "chat" ? "pane-btn on" : "pane-btn"}
-                  onClick={() => {
-                    setPane("chat");
-                    setSheetOpen(false);
-                  }}
+                  key={tab}
+                  className={pane === "right" && tabReq?.tab === tab ? "pane-btn on" : "pane-btn"}
+                  onClick={() => showRight(tab)}
                 >
-                  Conversation
+                  {label}
                 </button>
-                {(
-                  [
-                    ["config", "Workspace"],
-                    ["scout", "Scout"],
-                    ["runs", "Runs"],
-                  ] as const
-                ).map(([tab, label]) => (
-                  <button
-                    key={tab}
-                    className={pane === "right" && tabReq?.tab === tab ? "pane-btn on" : "pane-btn"}
-                    onClick={() => showRight(tab)}
-                  >
-                    {label}
-                  </button>
-                ))}
-                <button
-                  className={sheetOpen ? "pane-btn icon on" : "pane-btn icon"}
-                  aria-label={sheetOpen ? "Close the terminal" : "Open the terminal"}
-                  aria-expanded={sheetOpen}
-                  onClick={() => {
-                    setTerminalRequested(true);
-                    setSheetOpen((o) => !o);
-                  }}
-                >
-                  <TerminalIcon />
-                </button>
-              </nav>
-              {terminalRequested && (
-                <>
-                  {sheetOpen && <div className="term-sheet-back" onClick={() => setSheetOpen(false)} />}
-                  {/* hidden, never unmounted: Console's unmount closes its socket and the server kills the shell */}
-                  <div
-                    className="term-sheet"
-                    role="dialog"
-                    aria-label="Terminal"
-                    style={sheetOpen ? undefined : { display: "none" }}
-                  >
-                    <Suspense fallback={<div className="console-head" role="status">Opening terminal…</div>}>
-                      <Console initialOpen />
-                    </Suspense>
-                  </div>
-                </>
-              )}
-            </>
-          ) : terminalRequested ? (
-            <Suspense fallback={
-              <section className="console">
-                <div className="console-head" role="status">Opening terminal…</div>
-              </section>
-            }>
-              <Console initialOpen />
-            </Suspense>
+              ))}
+              <button
+                className={sheetOpen ? "pane-btn icon on" : "pane-btn icon"}
+                aria-label={sheetOpen ? "Close the terminal" : "Open the terminal"}
+                aria-expanded={sheetOpen}
+                onClick={() => {
+                  setTerminalRequested(true);
+                  setSheetOpen((o) => !o);
+                }}
+              >
+                <TerminalIcon />
+              </button>
+            </nav>
+          )}
+          {phone && sheetOpen && <div className="term-sheet-back" onClick={() => setSheetOpen(false)} />}
+          {terminalRequested ? (
+            <div
+              className={phone ? "term-sheet" : undefined}
+              role={phone ? "dialog" : undefined}
+              aria-label={phone ? "Terminal" : undefined}
+              style={phone ? (sheetOpen ? undefined : { display: "none" }) : { display: "contents" }}
+            >
+              {/* one Console for both layouts, hidden, never unmounted: its unmount closes its socket and the
+                  server kills the shell, so crossing the phone breakpoint must not swap it for another */}
+              <Suspense fallback={
+                <section className="console">
+                  <div className="console-head" role="status">Opening terminal…</div>
+                </section>
+              }>
+                <Console initialOpen />
+              </Suspense>
+            </div>
           ) : (
-            <section className="console">
-              <div className="console-head">
-                <button className="ctab on" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
-                  Terminal
-                </button>
-                <span className="cbar-spacer" />
-                <button className="toggle" aria-label="Open terminal" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
-                  <ChevronIcon open={false} />
-                </button>
-              </div>
-            </section>
+            !phone && (
+              <section className="console">
+                <div className="console-head">
+                  <button className="ctab on" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
+                    Terminal
+                  </button>
+                  <span className="cbar-spacer" />
+                  <button className="toggle" aria-label="Open terminal" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
+                    <ChevronIcon open={false} />
+                  </button>
+                </div>
+              </section>
+            )
           )}
         </div>
       </div>

@@ -52,4 +52,11 @@ test("on a phone, hiding the terminal sheet keeps its shell", async ({ page }) =
   await expect(page.locator(".term-sheet .xterm")).toBeVisible();
   await expect(page.locator(".term-sheet .cst")).toHaveText("connected");
   expect(shellConnections).toBe(opened);
+
+  // crossing the phone breakpoint keeps the same shell, both ways
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator(".console .cst")).toHaveText("connected");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".term-sheet .cst")).toHaveText("connected");
+  expect(shellConnections).toBe(opened);
 });
