@@ -225,6 +225,15 @@ def test_fidopt_refuses_a_dataset_the_corpus_lacks(
     second = mcp_server.FIDOPT.prepare_run("check", "lungmask", "", None, None, False, ["--gpu", "1"])
     assert first["run_name"] != second["run_name"]  # one folder per launch
     assert first["gpu"] == [] and second["gpu"] == [1]
+    # run without --gpu holds FidOpt's own default: GPU 0, or none when CUDA_VISIBLE_DEVICES hides every GPU
+    (tmp_path / "corpus" / "LCTSC_Seg").mkdir()
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    assert mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)["gpu"] == [0]
+    assert (
+        mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, ["--gpu", "cpu"])["gpu"] == []
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    assert mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)["gpu"] == []
 
 
 @pytest.mark.usefixtures("workspace_root")

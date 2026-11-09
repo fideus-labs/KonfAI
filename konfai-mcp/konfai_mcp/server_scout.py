@@ -175,8 +175,9 @@ class ScoutService:
         }
 
 
-def _gpu_of(args: list[str]) -> list[int]:
-    """The GPU ids a fidopt argv names (``--gpu 0,1`` or ``--gpu=0``), none when it names none."""
+def _gpu_of(args: list[str], default: list[int]) -> list[int]:
+    """The GPU ids a fidopt argv names (``--gpu 0,1`` or ``--gpu=0``; none for ``cpu``), ``default`` when it names
+    none."""
     for index, item in enumerate(args):
         value = (
             item.split("=", 1)[1]
@@ -187,7 +188,7 @@ def _gpu_of(args: list[str]) -> list[int]:
         )
         if value is not None:
             return [int(v) for v in value.split(",") if v.strip().isdigit()]
-    return []
+    return default
 
 
 class FidoptAdapter:
@@ -350,6 +351,7 @@ class FidoptAdapter:
             "command": [self.executable, *args],
             "kwargs": {"executable": self.executable, "args": args},
             "output": str(output),
-            # a FidOpt job holds the GPU its own --gpu names, none otherwise (check runs on CPU)
-            "gpu": _gpu_of(args),
+            # a FidOpt job holds the GPU its --gpu names, else FidOpt's own default (fidopt/cli.py): none for check,
+            # GPU 0 for run and tune, the CPU when CUDA_VISIBLE_DEVICES is set and empty
+            "gpu": _gpu_of(args, [] if operation == "check" or os.environ.get("CUDA_VISIBLE_DEVICES") == "" else [0]),
         }
