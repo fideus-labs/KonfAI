@@ -378,3 +378,47 @@ def test_an_out_of_memory_run_exits_with_its_own_code() -> None:
     with pytest.raises(SystemExit) as stopped, apps_cli_module._exit_on_refusal():
         raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 4.35 GiB")
     assert stopped.value.code == EXIT_OUT_OF_MEMORY
+
+
+def test_publish_checks_the_app_then_uploads_it_under_the_konfai_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An app missing a declared weight is refused before anything is sent; a complete one goes to the repository,
+    created when missing, whose card then declares the KonfAI library."""
+    from types import SimpleNamespace
+
+    import huggingface_hub
+    import konfai_apps.app_repository as repository_module
+
+    app = tmp_path / "CT_SEG"
+    app.mkdir()
+    manifest = {"display_name": "CT", "short_description": "S.", "description": "S.", "tta": 0, "mc_dropout": 0}
+    (app / "app.json").write_text(json.dumps({**manifest, "models": ["CV_0.pt"]}))
+    sent: list[tuple] = []
+
+    class _Hub:
+        def create_repo(self, repo_id: str, exist_ok: bool, private: bool | None) -> None:
+            sent.append(("repo", repo_id, exist_ok, private))
+
+        def upload_folder(self, **kwargs: Any) -> SimpleNamespace:
+            sent.append(("folder", kwargs["folder_path"], kwargs["path_in_repo"], kwargs["delete_patterns"]))
+            return SimpleNamespace(commit_url="https://hf.co/org/apps/commit/1")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Hub)
+    monkeypatch.setattr(huggingface_hub, "metadata_update", lambda repo_id, data, **_: sent.append(("card", data)))
+    monkeypatch.setattr(repository_module, "_release_tag", lambda repo_id: None)
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "publish", str(app), "org/apps"])
+
+    with pytest.raises(SystemExit):
+        apps_cli_module.main_apps()
+    assert "CV_0.pt" in capsys.readouterr().err and sent == []
+
+    (app / "CV_0.safetensors").write_bytes(b"")
+    apps_cli_module.main_apps()
+    assert sent == [
+        ("repo", "org/apps", True, None),
+        ("card", {"library_name": "konfai"}),
+        ("folder", app, "CT_SEG", "*"),
+    ]
+    assert "org/apps:CT_SEG is published" in capsys.readouterr().out

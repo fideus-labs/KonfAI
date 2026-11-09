@@ -726,6 +726,49 @@ def run_download_cli(kwargs: dict[str, Any]) -> None:
             print(f"[KonfAI-Apps] {filename} is ready.")
 
 
+def run_publish_cli(kwargs: dict[str, Any]) -> None:
+    """Upload a local app folder to a Hugging Face model repository whose card declares the KonfAI library.
+
+    The folder is read as an app first: an ``app.json`` that does not load, or a declared model whose weights the
+    folder lacks, stops the command before anything is sent.
+    """
+    from huggingface_hub import HfApi, metadata_update
+
+    from .app_repository import LocalAppRepositoryFromDirectory, _release_tag
+
+    folder = Path(kwargs["app"]).expanduser().resolve()
+    if not folder.is_dir():
+        raise AppRepositoryError(f"No app folder at '{folder}'.")
+    app = LocalAppRepositoryFromDirectory(folder.parent, folder.name)
+    missing = [name for name in app.get_checkpoints_name() if name not in app.get_checkpoints_name_available()]
+    if missing:
+        raise AppRepositoryError(f"'{folder.name}' declares weights its folder does not hold: {', '.join(missing)}.")
+
+    repo_id = kwargs["repo"]
+    api = HfApi()
+    api.create_repo(repo_id, exist_ok=True, private=kwargs["private"] or None)  # None: the account default
+    try:
+        metadata_update(repo_id, {"library_name": "konfai"}, commit_message="Declare the KonfAI library")
+    except ValueError as exc:  # the card names another library: replacing it is the author's call
+        raise AppRepositoryError(
+            f"The model card of '{repo_id}' declares another library_name: set it to konfai in its README.md, then "
+            "publish again."
+        ) from exc
+    commit = api.upload_folder(  # the remote app folder becomes a copy of the local one: a stale weight would load
+        repo_id=repo_id,
+        folder_path=folder,
+        path_in_repo=folder.name,
+        delete_patterns="*",
+        commit_message=f"Publish the {folder.name} app",
+    )
+    print(f"[KonfAI-Apps] {repo_id}:{folder.name} is published: {commit.commit_url}")
+    if (tag := _release_tag(repo_id)) is not None:
+        print(
+            f"[KonfAI-Apps] This konfai-apps reads the tag {tag} of {repo_id}, not main: run the upload as "
+            f"{repo_id}@main:{folder.name}, or move the tag."
+        )
+
+
 @_exit_on_refusal()
 def main_apps() -> None:
     """Entry point for the `konfai-apps` command-line interface."""
@@ -958,6 +1001,15 @@ def main_apps() -> None:
     bundle_p.add_argument("--in-channels", type=int, help="Override --onnx input channels (else read from config).")
     bundle_p.add_argument("--output-module", help="Named head to export for --onnx (default: last graph output).")
 
+    publish_p = subparsers.add_parser(
+        "publish", help="Upload a local app folder to a Hugging Face repository whose card declares KonfAI."
+    )
+    publish_p.add_argument("app", help="The local app folder, uploaded as <repo>/<folder name>/.")
+    publish_p.add_argument("repo", help="The Hugging Face model repository, 'owner/name', created when missing.")
+    publish_p.add_argument(
+        "--private", action="store_true", help="Create the repository private; an existing one keeps its visibility."
+    )
+
     list_p = subparsers.add_parser("list", help="List the apps of a repository.")
     list_p.add_argument("repo", help="A Hugging Face repository ('repo_id[@revision]') or a local directory of apps.")
     list_p.add_argument("--task", default=None, help="Only the apps declaring this task.")
@@ -1008,6 +1060,10 @@ def main_apps() -> None:
 
     if kwargs.get("command") == "download":
         run_download_cli(kwargs)
+        return
+
+    if kwargs.get("command") == "publish":
+        run_publish_cli(kwargs)
         return
 
     if kwargs.get("command") == "list":

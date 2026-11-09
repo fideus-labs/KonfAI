@@ -112,6 +112,7 @@ Runs a packaged app ({doc}`../usage/apps`).
 | `fine-tune` | fine-tune the app on a dataset |
 | `bundle` | build an app bundle, optionally with an ONNX model |
 | `download` | download an app's files for offline use |
+| `publish` | upload a local app folder to a Hugging Face repository |
 
 Options shared by `infer`, `eval`, `uncertainty`, `pipeline` and `fine-tune`:
 
@@ -140,7 +141,7 @@ Per command:
 | `fine-tune` | `name`, `-d/--dataset`, `--models` (which checkpoints), `--epochs`, `--it-validation`, `--lr`, `--batch-size`, `--config` |
 
 `bundle NAME` takes `--out`, `--app-json`, `--config` and `--checkpoint`. `download APP [FILES…]` takes
-`--no-force-update`. Run `--help` on either for details.
+`--no-force-update`. `publish FOLDER REPO` takes `--private`. Run `--help` on any of them for details.
 
 ### Tuning an app without editing it
 
