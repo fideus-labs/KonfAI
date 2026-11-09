@@ -14,20 +14,21 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The performance gate: run the series, compare it to this host's committed baseline, fail on a
-regression.
+"""The performance gate: run the series, compare it to this host's baseline, fail on a regression.
 
     pixi run perf-check                       # run_all, then compare against baselines/<host>.json
     python benchmarks/perf/perf_check.py --baseline results/<host>/<stamp>-all.json
 
 A baseline is a ``run_all`` result taken on a quiet machine (the gate refuses otherwise) and copied
-by hand to ``baselines/<host>.json``; ``compare.py`` states what is comparable (the commit's dirty
+by hand to ``baselines/<host>.json``, or to the directory ``KONFAI_PERF_BASELINES`` names. It stays on
+that machine, never in git. ``compare.py`` states what is comparable (the commit's dirty
 flag, the GPU, the power profile, the thread pin) and fails past 10 % of time or 15 % of memory.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,11 +49,11 @@ def main() -> None:
         "--quick", action="store_true", help="smoke pass; comparison will reject it as release evidence"
     )
     args, extra = parser.parse_known_args()
-    baseline = args.baseline or PERF_DIR / "baselines" / f"{machine_class()}.json"
-    if not baseline.is_file():
-        raise SystemExit(
-            f"[perf] no baseline for this machine class: {baseline} (take one with run_all.py on a quiet machine)"
-        )
+    baselines = Path(os.environ.get("KONFAI_PERF_BASELINES") or PERF_DIR / "baselines")
+    baseline = (args.baseline or baselines / f"{machine_class()}.json").resolve()  # compare.py runs from PERF_DIR
+    if not baseline.is_file():  # evidence the gate cannot use (exit 2), not a regression (exit 1)
+        print(f"[perf] no baseline for this machine class: {baseline} (take one with run_all.py on a quiet machine)")
+        sys.exit(2)
     argv = [sys.executable, str(PERF_DIR / "run_all.py"), *extra]
     if args.force:
         argv.append("--force")

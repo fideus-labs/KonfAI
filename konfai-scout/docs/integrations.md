@@ -4,9 +4,9 @@ Scout works alone: `konfai-scout inspect` with a case given by roles. The rest o
 calls only KonfAI Eval.
 
 ```
-FidLab ──orchestrates──▶ FidOpt ──scores with──▶ KonfAI Eval ◀──measures regions with── Scout
-                           │ optionally                                                   ▲
-                           └──────────────── inspects a case with ────────────────────────┘
+FidOpt ──scores with──▶ KonfAI Eval ◀──measures regions with── Scout
+  │ optionally                                                    ▲
+  └─────────────────── inspects a case with ──────────────────────┘
 konfai-mcp ── exposes ── Scout (run_scout_inspection, read_scout_report)
            ── exposes ── a FidOpt adapter (fidopt_catalog,
                                             fidopt_table, fidopt_run)
@@ -60,11 +60,3 @@ flags on `fidopt tune`. After the rows are scored, while the method's outputs ar
 `results/<machine>/<method>/<dataset>.scout/<case>/` with a `summary.json`. The rows and the published scores do
 not change; the reports are a complementary evaluation. Images of a test case leave the machine only under
 `--scout-allow-cloud`, and `fidopt publish` never sends a report.
-
-## FidLab
-
-A round may ask for Scout: `"scout": true` in `rounds/next.json` (or `plan.json`), which the runner turns into
-`fidopt tune ... --scout $FIDLAB_SCOUT` when the host sets `FIDLAB_SCOUT` (a provider and model), with
-`--scout-allow-cloud` only when the host also sets `FIDLAB_SCOUT_ALLOW_CLOUD=1`. The result of the round carries,
-per label, the summaries of the reports (observations, verdicts, counts), never an image: the sandbox reads text.
-Scout inspects development cases only, like everything the runner does.

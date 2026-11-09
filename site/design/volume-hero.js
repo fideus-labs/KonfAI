@@ -13,7 +13,7 @@
 // optional: planes, three [solid, ink] hex pairs for the axial, sagittal and coronal planes; sweep, one pair for
 // the patch; ground, the hex of the page below (the bottom of the canvas fades into it); wire, the hex of the cube
 // and the grids; fps (30); grid, lines per plane (8); scale, the cube's size as a fraction of the shorter side
-// (0.42); centre, [x, y] as fractions of the canvas ([0.5, 0.36]). The defaults read the kit's tokens from the
+// (0.42); centre, [x, y] as fractions of the canvas ([0.5, 0.36]). The defaults read the site's tokens from the
 // canvas (--k-sage, --k-steel, --k-violet, --k-night). prefers-reduced-motion draws one still frame; a hidden tab
 // stops the loop and a visible one restarts it. Returns { stop }.
 

@@ -157,7 +157,7 @@ Without `#PRESET` it starts from the app's base config.
 operator the apps declare for their checkpoints (`Mean` by default, `Median`, `Vote`). With `-uncertainty` the stack
 of every member is kept beside it as `InferenceStack.<ext>` (the output's form where it keeps the member count:
 MetaImage, NRRD, OME-Zarr; MetaImage otherwise), and `konfai-run.json` names the members in its order. The references
-may be presets of one app or apps of matching outputs, on the same grid (docs/design/ensembles.md). Every member
+may be presets of one app or apps of matching outputs, on the same grid. Every member
 writes its field, never a registration's native form (an affine, a B-spline), since it is averaged; a run that
 another averages or composes is told so with `--dense-transforms`, which a remote server's job receives too.
 

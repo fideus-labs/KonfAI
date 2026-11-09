@@ -12,7 +12,6 @@ prune tests
 prune benchmarks
 prune docker
 prune site
-prune design
 prune .claude
 prune .github
 exclude pixi.lock AGENTS.md CLAUDE.md logo.png .pre-commit-config.yaml .readthedocs.yaml

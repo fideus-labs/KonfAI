@@ -31,4 +31,4 @@ To switch it on:
 
 The pages use relative links only, so they also serve from any sub-path or from another static host.
 The Edge demo is meant to land under `edge/` here; `docs/edge.html` says so and will link to it. The visual identity (fonts, tokens,
-components, the hero) is `design/` at the repository root, copied here by `design/sync.sh`.
+components, the hero) is `design/` here; Studio keeps its own copy of the fonts and tokens in `konfai-studio/frontend/src/design/`.
