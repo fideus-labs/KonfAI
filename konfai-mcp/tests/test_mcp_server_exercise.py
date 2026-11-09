@@ -220,7 +220,7 @@ def test_fidopt_refuses_a_dataset_the_corpus_lacks(
 
 
 @pytest.mark.usefixtures("workspace_root")
-def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
+def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_recorded_input(
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
     from test_mcp_server_run_records import _metric_json
@@ -234,23 +234,31 @@ def test_compare_runs_pairs_a_metric_under_two_names_and_cases_by_order(
             for run, name, values in (
                 ("EXPERIMENT", "PRED:SEG:Dice", {"1PC006": 0.5, "1PC032": 0.6}),
                 ("BUNDLE", "Volume_0:Reference_0:Dice", {"P000": 0.7, "P001": 0.55}),
+                ("UNRECORDED", "Volume_0:Reference_0:Dice", {"P000": 0.7, "P001": 0.55}),
             ):
-                metrics = workspace / "Evaluations" / run / "Metric_TRAIN.json"
+                metrics = workspace / "AppEvaluations" / run / "Metric_TRAIN.json"
                 metrics.parent.mkdir(parents=True, exist_ok=True)
                 payload = json.loads(_metric_json(name, values))
-                if run == "BUNDLE":  # only run B declares a direction, under its own name
+                if run != "EXPERIMENT":  # only the app run declares a direction, under its own name
                     payload["directions"] = {name: "max"}
                 metrics.write_text(json.dumps(payload), encoding="utf-8")
+            # the app was given 1PC032 then 1PC006: P000 is 1PC032, whatever the sorted names say
+            manifest = mcp_server.WORKSPACE_LAYOUT.job_manifest_path("app_job")
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            cases = {"P000": ["/data/1PC032/CT.mha"], "P001": ["/data/1PC006/CT.mha"]}
+            manifest.write_text(json.dumps({"output": str(workspace / "AppEvaluations" / "BUNDLE"), "cases": cases}))
             result = await client.call_tool(
                 "compare_runs", {"run_a": "EXPERIMENT", "run_b": "BUNDLE", "metric": "Dice"}
             )
+            with pytest.raises(Exception, match="cannot be paired"):
+                await client.call_tool("compare_runs", {"run_a": "EXPERIMENT", "run_b": "UNRECORDED", "metric": "Dice"})
             return result.structured_content
 
     comparison = asyncio.run(scenario())["metrics"]["PRED:SEG:Dice"]
     assert comparison["metric_b"] == "Volume_0:Reference_0:Dice"
     assert comparison["direction_source"] == "declared"
-    assert comparison["case_alignment"] == "by order" and comparison["cases"] == 2
-    assert comparison["per_case_delta_b_minus_a"] == {"1PC006": pytest.approx(0.2), "1PC032": pytest.approx(-0.05)}
+    assert comparison["case_alignment"] == "by recorded input" and comparison["cases"] == 2
+    assert comparison["per_case_delta_b_minus_a"] == {"1PC006": pytest.approx(0.05), "1PC032": pytest.approx(0.1)}
 
 
 @pytest.mark.usefixtures("workspace_root")

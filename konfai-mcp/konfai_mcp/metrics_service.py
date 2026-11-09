@@ -22,6 +22,7 @@ this mixin."""
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -84,6 +85,30 @@ def metric_run_name(metrics_path: Path, workspace: Path) -> str:
         except ValueError:
             continue
     return metrics_path.parent.name
+
+
+def recorded_cases(metrics_path: Path, jobs_dir: Path) -> dict[str, list[str | None]] | None:
+    """An app run's ``P000`` -> its input files, as the job manifest whose output holds ``metrics_path`` recorded
+    them (konfai_apps names cases by input position); None for a run that recorded none."""
+    for manifest_path in jobs_dir.glob("*/manifest.json"):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("cases") and manifest.get("output"):
+            if Path(manifest["output"]).resolve() in metrics_path.resolve().parents:
+                return manifest["cases"]
+    return None
+
+
+def cases_by_recorded_input(recorded: dict[str, list[str | None]], names: Iterable[str]) -> dict[str, str]:
+    """``P000`` -> the one case of ``names`` its recorded input files sit in: their case folder or file name."""
+    wanted = set(names)
+    pairs: dict[str, str] = {}
+    for case, files in recorded.items():
+        found = wanted & {
+            part for file in files if file for part in (Path(file).parent.name, Path(file).name.split(".")[0])
+        }
+        if len(found) == 1:
+            pairs[case] = found.pop()
+    return pairs
 
 
 class MetricsServiceMixin:
@@ -459,6 +484,8 @@ class MetricsServiceMixin:
         """Per-case aligned comparison of two runs' evaluation metrics, direction-aware."""
         payload_a = self.run_metrics_payload(run_a, split=split, session=session)
         payload_b = self.run_metrics_payload(run_b, split=split, session=session)
+        jobs_dir = self._resolve_session_layout(session).jobs_dir()
+        recorded_a, recorded_b = (recorded_cases(Path(p["path"]), jobs_dir) for p in (payload_a, payload_b))
         cases_a = payload_a["metrics"].get("case", {})
         cases_b = payload_b["metrics"].get("case", {})
         pairs = [(name, name) for name in sorted(set(cases_a) & set(cases_b))]
@@ -499,11 +526,21 @@ class MetricsServiceMixin:
             common_cases = sorted(set(cases_a[name]) & set(cases_b[name_b]))
             case_b_of = {case: case for case in common_cases}
             alignment = "by name"
-            if not common_cases and len(cases_a[name]) == len(cases_b[name_b]) and cases_a[name]:
-                # two runs that named their cases differently (1PC006 vs P000): paired in sorted order, said so
-                common_cases = sorted(cases_a[name])
-                case_b_of = dict(zip(common_cases, sorted(cases_b[name_b]), strict=True))
-                alignment = "by order"
+            if not common_cases:
+                # An app run names its cases P000.. by input position, and its job manifest records each one's
+                # input files, whose case folder or file name is the other run's case. Without it, no pairing.
+                if recorded_b is not None:
+                    case_b_of = {a: b for b, a in cases_by_recorded_input(recorded_b, cases_a[name]).items()}
+                elif recorded_a is not None:
+                    case_b_of = cases_by_recorded_input(recorded_a, cases_b[name_b])
+                case_b_of = {a: b for a, b in case_b_of.items() if a in cases_a[name] and b in cases_b[name_b]}
+                if not case_b_of:
+                    raise ValueError(
+                        f"'{run_a}' and '{run_b}' share no case name, and no app job manifest records which input "
+                        "each P000 case came from: their cases cannot be paired (equal counts are not one cohort)."
+                    )
+                common_cases = sorted(case_b_of)
+                alignment = "by recorded input"
             deltas = {
                 case: float(cases_b[name_b][case_b_of[case]]) - float(cases_a[name][case]) for case in common_cases
             }
