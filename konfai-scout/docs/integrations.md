@@ -57,13 +57,13 @@ the job stream Studio already shows.
 
 ## FidOpt
 
-`fidopt run METHOD DATASET --scout PROVIDER[:MODEL] [--scout-mode fixed|active] [--scout-allow-cloud]` and the same
-flags on `fidopt tune`. After the rows are scored, while the method's outputs are still on disk, each case is staged
-(the images as `.mha`, the field, the truth the dataset gives) and inspected; the reports land beside the rows under
-`results/<machine>/<method>/<dataset>.scout/<case>/` with a `summary.json`. The rows and the published scores do
-not change; the reports are a complementary evaluation. Images of a test case leave the machine only under
-`--scout-allow-cloud`, and `fidopt publish` never sends a report. What an agent may read of a case it must not
-identify is an export, never the report itself:
+`fidopt run METHOD DATASET --scout PROVIDER[:MODEL] [--scout-allow-cloud]` and the same flags on `fidopt tune`. After
+the rows are scored, while the method's outputs are still on disk, each case is inspected, and its report lands beside
+the rows under `results/<machine>/<method>/<dataset>.scout/<case>/`, with its `counts` export (`counts.json`). The rows
+and the published scores do not change; the reports are a complementary evaluation. A development case is handed its
+truth and its scores; a test case only its images and the method's output, never its truth. Images leave the machine
+only under `--scout-allow-cloud`, and `fidopt publish` never sends a report. What an agent may read of a case it must
+not identify is an export, never the report itself:
 
 ```bash
 konfai-scout export results/<machine>/<method>/<dataset>.scout/<case> --level counts --out <case>.counts.json
@@ -74,8 +74,7 @@ and the counts by kind, defect and severity only (`docs/report.md`).
 
 ## FidLab
 
-A round may ask for Scout: `"scout": true` in `rounds/next.json` (or `plan.json`), which the runner turns into
-`fidopt tune ... --scout $FIDLAB_SCOUT` when the host sets `FIDLAB_SCOUT` (a provider and model), with
-`--scout-allow-cloud` only when the host also sets `FIDLAB_SCOUT_ALLOW_CLOUD=1`. The result of the round carries,
-per label, the summaries of the reports (observations, verdicts, counts), never an image: the sandbox reads text.
-Scout inspects development cases only, like everything the runner does.
+FidLab runs no inspection itself: the reports are FidOpt's, made when `--scout` was asked. `fidlab.py scout EXPERIMENT`
+reads, from the runner, the `report.md` of each label's development cases (only their counts for a blind experiment,
+whose reports name the method) and, for the one submission to the hidden test, the `counts` exports of its test cases
+alone, without their names. The sandbox reads text, never an image.
