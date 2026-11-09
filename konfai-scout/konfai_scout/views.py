@@ -244,7 +244,8 @@ class Renderer:
     def window(self, role: str) -> tuple[float, float]:
         if role not in self._windows:  # KonfAI's bounded passes: the volume is never held for its window
             volume = self.volume(role)
-            low, high = volume.quantile(0.01), volume.quantile(0.99)
+            # the 99.9th: a hyperintense lesion (DWI, contrast) fills well under 1 % of a volume and must not saturate
+            low, high = volume.quantile(0.01), volume.quantile(0.999)
             self._windows[role] = (low, high if high > low else low + 1.0)
         return self._windows[role]
 
@@ -295,7 +296,7 @@ class Renderer:
         rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop)
         self._count += 1
         view_id = f"v{self._count:03d}"  # on the image before anything else: a model cites what it reads there
-        header = self._header_text(frame, index, mode, resolved_window, extra).format(id=view_id)
+        header = self._header_text(frame, index, mode, resolved_window, extra, crop).format(id=view_id)
         image, mapping = self._display(rgb, frame, index, crop, header)
         view = self._record(view_id, frame, index, mode, resolved_window, image, mapping, extra, crop, sent)
         return self._png(image, view), view
@@ -358,7 +359,8 @@ class Renderer:
         draw = ImageDraw.Draw(sheet)
         extra = {"tiles": placed, "indices": indices}
         title = (
-            f"{{id}} {plane} montage of {len(indices)} slices | {mode} | window {self._window_text(resolved_window)}"
+            f"{{id}} {self._plane_name(frame)} montage of {len(indices)} slices | {mode} | "
+            f"window {self._window_text(resolved_window)}"
         )
         self._count += 1
         view_id = f"v{self._count:03d}"
@@ -584,21 +586,38 @@ class Renderer:
     def _axis_letter(self, frame: PlaneFrame) -> str:
         return "xyz"[self._world_axis(frame)]
 
-    def _position(self, frame: PlaneFrame, index: int) -> np.ndarray:
+    def _position(self, frame: PlaneFrame, index: int, crop: tuple[slice, slice] | None = None) -> np.ndarray:
+        """The world point at the centre of what is shown: the slice's, or the zoom's."""
         center = [(n - 1) / 2 for n in reversed(self.grid.size_zyx)]
         center[2 - frame.array_axis] = float(index)
+        if crop is not None:
+            center[2 - frame.rows_axis] = (crop[0].start + crop[0].stop - 1) / 2
+            center[2 - frame.cols_axis] = (crop[1].start + crop[1].stop - 1) / 2
         return self.grid.index_to_world.apply(np.array(center))
+
+    def _plane_name(self, frame: PlaneFrame) -> str:
+        """The plane, and its tilt when the grid is oblique: the world coordinate then changes across the view."""
+        normal = axis_world_vector(self.grid, frame.array_axis)
+        cosine = abs(normal[self._world_axis(frame)]) / max(float(np.linalg.norm(normal)), 1e-12)
+        tilt = float(np.degrees(np.arccos(min(cosine, 1.0))))
+        return frame.plane + (f" tilted {tilt:.0f}°" if tilt >= 1 else "")
 
     def _window_text(self, window: list[float] | None) -> str:
         return "n/a" if window is None else f"[{window[0]:.4g}, {window[1]:.4g}]"
 
     def _header_text(
-        self, frame: PlaneFrame, index: int, mode: str, window: list[float] | None, extra: dict[str, object]
+        self,
+        frame: PlaneFrame,
+        index: int,
+        mode: str,
+        window: list[float] | None,
+        extra: dict[str, object],
+        crop: tuple[slice, slice] | None,
     ) -> str:
-        position = self._position(frame, index)
+        position = self._position(frame, index, crop)
         depth = self.grid.size_zyx[frame.array_axis]
         text = (
-            f"{{id}} {frame.plane} {self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm "
+            f"{{id}} {self._plane_name(frame)} {self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm "
             f"(slice {index}/{depth - 1}) | {mode} | window {self._window_text(window)}"
         )
         scale = extra.get("scale")
@@ -717,7 +736,7 @@ class Renderer:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
         box = self.grid.world_box(tuple(slice(a, b) for a, b in zip(lo, hi, strict=True)))
-        position = self._position(frame, index)
+        position = self._position(frame, index, crop)
         view = View(
             id=view_id,
             kind="slice",
