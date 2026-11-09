@@ -92,9 +92,9 @@ pixi run perf-check
 # once a release is out, or when a bench joins the series: this run becomes the host's baseline, kept on that
 # machine and out of git (a baseline says only what one machine measured); KONFAI_PERF_BASELINES moves it
 # (a quiet machine and a clean tree; a baseline missing a bench makes every comparison invalid)
-mkdir -p benchmarks/perf/baselines
-cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.json benchmarks/perf/baselines/<host>.json
-cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.md benchmarks/perf/baselines/<host>.md
+BASELINES="${KONFAI_PERF_BASELINES:-benchmarks/perf/baselines}" && mkdir -p "$BASELINES"
+cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.json "$BASELINES/<host>.json"
+cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.md "$BASELINES/<host>.md"
 ```
 
 The comparison exits **0** only for a complete comparable series, **1** for a measured regression,
