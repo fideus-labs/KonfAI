@@ -30,17 +30,17 @@ from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import torch
 
 from konfai.utils.errors import PredictorError
+from konfai.utils.utils import Placement
 
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
-    from konfai.utils.utils import Placement
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5  # 5: patch.stride under the monai and spread placements
 
 
 def _require(module: str) -> ModuleType:
@@ -233,6 +233,7 @@ def export_to_onnx(
     extend_slice: int = 0,
     pad_value: float | str | None = None,
     placement: Placement = "pad",
+    patch_stride: list[float] | None = None,
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
@@ -262,6 +263,9 @@ def export_to_onnx(
         overlap and last-patch assignment. An explicit zero list means disjoint patches.
     placement:
         The ``Patch.placement`` the config states, written into the manifest's patch.
+    patch_stride:
+        Per-axis unrounded step between windows under placements ``monai`` and ``spread``, which ``patch_overlap``
+        rounds; written into the manifest's patch when given.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
     model_filename:
@@ -275,6 +279,10 @@ def export_to_onnx(
     ``(onnx_path, manifest)``: the written ONNX path and the manifest dict (also written
     to ``manifest.json`` when ``write_manifest``).
     """
+    if placement not in get_args(Placement):
+        raise PredictorError(f"placement '{placement}' is none of {', '.join(get_args(Placement))}.")
+    if isinstance(pad_value, str) and pad_value not in ("edge", "min"):
+        raise PredictorError(f"pad_value '{pad_value}' is none of 'edge', 'min' or a number.")
     out_dir = Path(output_dir)
     onnx_path = out_dir / model_filename
 
@@ -327,6 +335,8 @@ def export_to_onnx(
         },
         "geometry": {"mode": "preserve_from_input"},
     }
+    if patch_stride is not None:
+        manifest["patch"]["stride"] = patch_stride
     if len(examples) > 1:
         manifest["reads"] = [
             {"group": group, "channels": int(example.shape[1]), "preprocessing": []}

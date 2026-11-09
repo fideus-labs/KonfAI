@@ -132,6 +132,73 @@ def test_a_stage_konfai_does_not_carry_to_its_writer_is_refused_with_what_konfai
         steps({stage: params, "Write": {"dataset": "./Out:mha"}}, "CT")
 
 
+def test_compiling_works_on_a_private_copy_and_never_writes_the_callers_config(tmp_path: Path) -> None:
+    # The builders write their defaults back: a read-only config, or one saved during a compile, stays the caller's.
+    import os
+
+    from konfai.portable import config_environment
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    config.chmod(0o444)
+    previous = os.environ.get("KONFAI_config_file")
+    with config_environment(config, root="Predictor", state="PREDICTION") as working:
+        assert Path(os.environ["KONFAI_config_file"]) == working and working.parent == tmp_path and working != config
+        working.write_text("Predictor: {resolved: true}\n")
+        config.chmod(0o644)
+        config.write_text("Predictor: {edited: true}\n")
+    assert config.read_text() == "Predictor: {edited: true}\n"
+    assert os.environ.get("KONFAI_config_file") == previous
+    assert [path.name for path in tmp_path.iterdir()] == ["Prediction.yml"]
+
+
+def test_a_missing_config_keeps_the_builders_refusal(tmp_path: Path) -> None:
+    from konfai.portable import compile_transform
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        compile_transform(tmp_path / "Missing.yml", tmp_path / "Transforms")
+
+
+def test_a_private_copy_that_cannot_be_made_is_refused_and_the_config_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Falling back to the caller's file would let the builders rewrite it; a copy cut short is not left behind.
+    import shutil
+
+    from konfai.portable import config_environment
+
+    def cut_short(source: Path, target: Path) -> None:
+        Path(target).write_text("Predic")
+        raise OSError(28, "No space left on device")
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    monkeypatch.setattr(shutil, "copyfile", cut_short)
+    with pytest.raises(ConfigError, match="private copy"):
+        with config_environment(config, root="Predictor", state="PREDICTION"):
+            pass
+    assert config.read_text() == "Predictor: {}\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["Prediction.yml"]
+
+
+def test_a_private_copy_takes_no_file_it_did_not_create(tmp_path: Path) -> None:
+    # A file already beside the config, and the copy an overlapping compile of the same config works on, are kept.
+    import os
+
+    from konfai.portable import config_environment
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    stranger = tmp_path / f".Prediction.{os.getpid()}.yml"
+    stranger.write_text("not konfai's")
+    with config_environment(config) as outer:
+        with config_environment(config) as inner:
+            assert inner not in (outer, stranger)
+        assert outer.read_text() == "Predictor: {}\n"
+    assert stranger.read_text() == "not konfai's"
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted([config.name, stranger.name])
+
+
 def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
     # konfai's Statistics records Image* keys on the case and hands its input back (alters_values False):
     # the values and the grid are the chain's without it, and the keys are the attribute sidecar the
@@ -146,6 +213,27 @@ def test_a_stage_that_alters_no_value_compiles_to_no_step() -> None:
     assert steps(chain, "CT") == steps(
         {"Clip": {"min_value": 0.0, "max_value": 400.0}, "Write": {"dataset": "./Out:mha"}}, "CT"
     )
+
+
+def test_a_statistics_subclass_replacing_call_must_restate_that_it_alters_no_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import konfai.portable as portable
+    from konfai.data.transform import Statistics
+
+    class Shifted(Statistics):
+        def __call__(self, name, tensors, cache_attribute):
+            return tensors + 1
+
+    class Recorded(Shifted):
+        alters_values = False
+
+    class Plain(Statistics):
+        pass
+
+    classes = {cls.__name__: cls for cls in (Shifted, Recorded, Plain)}
+    monkeypatch.setattr(portable, "_stage_class", classes.get)
+    assert [portable.records_only(name) for name in classes] == [False, True, True]
 
 
 def test_a_save_compiles_to_a_step_naming_the_destination_a_write_would() -> None:
@@ -1471,19 +1559,18 @@ def _tiny_prediction(
     return config
 
 
-@pytest.mark.parametrize("placement", [None, "pad", "monai", "spread"])
 def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A real Prediction.yml over the tests' tiny segmentation model and two of its checkpoints: the predictor
     # builds, each checkpoint exports beside the program, and the autouse check holds the program to the schema.
-    # Each model's manifest carries the Patch.placement konfai places its windows with, pad when unstated.
+    # Each model's manifest carries the Patch.placement konfai places its windows with, and its unrounded step.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
     import torch
     from konfai.portable import compile_prediction
 
-    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", placement)
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", "monai")
     from TinySeg import TinySegNet
 
     checkpoints = [tmp_path / f"fold_{index}.pt" for index in range(2)]
@@ -1505,7 +1592,8 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     # konfai blends the folds' float32 outputs in float16, which the runtime is told to do alike.
     assert {step["manifest"]["accumulation_dtype"] for step in steps[:2]} == {"float16"}
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
-    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == [placement or "pad"] * 2
+    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == ["monai"] * 2
+    assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
 
 
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1544,7 +1632,8 @@ def test_a_weightless_model_running_python_on_the_case_is_refused_by_name(
 def _reducing_config(tmp_path: Path, transforms: str) -> Path:
     """A Transform.yml over two small MetaImage cases whose one chain runs ``transforms``."""
     import numpy as np
-    import SimpleITK as sitk
+
+    sitk = pytest.importorskip("SimpleITK")
 
     for case in ("CASE_000", "CASE_001"):
         (tmp_path / "Raw" / case).mkdir(parents=True, exist_ok=True)
@@ -2036,7 +2125,7 @@ def test_an_explicitly_disabled_patch_combine_keeps_the_last_patch(value) -> Non
     assert derive_blend(config, "Predictor") == "Overwrite"
 
 
-@pytest.mark.parametrize(("pad_value", "expected"), [(-1.0, -1.0), ("edge", "edge"), (None, "min")])
+@pytest.mark.parametrize(("pad_value", "expected"), [(-1.0, -1.0), ("edge", "edge"), (None, "min"), ("None", "min")])
 def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float | str | None, expected) -> None:
     # A pad_value left null pads with the minimum of the window konfai reads, not with 0.
     from konfai.portable import derive_onnx_params
@@ -2045,13 +2134,48 @@ def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float |
     assert derive_onnx_params(config, "Predictor")[3] == expected
 
 
+@pytest.mark.parametrize(
+    ("patch", "expected"),
+    [
+        ({}, "pad"),
+        ({"placement": "None"}, "pad"),
+        ({"placement": "monai"}, "monai"),
+        ({"placement": "spread"}, "spread"),
+    ],
+)
+def test_the_placement_a_patch_states_reaches_the_manifest(patch: dict[str, str], expected: str) -> None:
+    from konfai.portable import derive_placement
+
+    assert derive_placement(patch) == expected
+
+
 def test_a_placement_konfai_does_not_know_is_refused() -> None:
     # The runtime would place the windows otherwise than the config says.
     from konfai.portable import derive_placement
 
-    config = {"Predictor": {"Dataset": {"Patch": {"patch_size": [16, 16], "placement": "centre"}}}}
     with pytest.raises(ConfigError, match="placement 'centre'"):
-        derive_placement(config, "Predictor")
+        derive_placement({"patch_size": [16, 16], "placement": "centre"})
+
+
+@pytest.mark.parametrize(
+    ("patch", "exported", "expected"),
+    [
+        # Patch 5, overlap 0.25: konfai steps by 3.75 (MONAI truncates it to 3); the integer overlap, 1, would step by 4.
+        ({"overlap": 0.25}, [5], [3.75]),
+        ({"overlap": "25%"}, [8, 16], [6.0, 12.0]),
+        ({"overlap": 2}, [5], [3]),
+        # Left unset, konfai's monai and spread step on the default fraction of the patch: nothing is case-dependent.
+        ({}, [5], [4.0]),
+        # A 2.5-D axis drops out of the step as it does of the overlap.
+        ({"patch_size": [1, 8, 12], "overlap": [0, 0.25, "50%"]}, [8, 12], [6.0, 6.0]),
+    ],
+)
+def test_a_monai_or_spread_placement_exports_the_step_konfai_walks(
+    patch: dict[str, object], exported: list[int], expected: list[float]
+) -> None:
+    from konfai.portable import derive_stride
+
+    assert derive_stride(patch, exported) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("size", [[0, 16, 16], [16, 0, 16], [16, 16, -1]])

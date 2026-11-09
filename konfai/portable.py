@@ -615,7 +615,7 @@ def _store_of(root: str, file_format: str) -> dict[str, str]:
     from konfai.utils.dataset import Dataset
     from konfai.utils.dataset.backend import backend_for
 
-    return {"store": Dataset.store_root_for(root, file_format)} if backend_for(file_format).single_store else {}
+    return {"store": Dataset(root, file_format).store_root} if backend_for(file_format).single_store else {}
 
 
 def _literal_group(group: str, error: type[KonfAIError]) -> str:
@@ -714,26 +714,46 @@ def _built(config_file: str | Path, build: Callable[[Path], Any]) -> Iterator[tu
     refusals run first, and the file as the build left it: every default the build bound is written in it. A
     TRANSFORM binds its stages as it builds; a PREDICTION binds them only when its dataset is prepared, so the
     stages of a prediction's file hold the parameters their author spelled and each op supplies the rest. The
-    caller's file is restored as it was once the block ends."""
+    caller's file is never written (:func:`config_environment`)."""
     config_file = Path(config_file).resolve()
-    with config_environment(config_file, keep_file=True):
-        workflow = build(config_file)
-        yield workflow, YAML(typ="safe").load(config_file.read_text())
+    with config_environment(config_file) as working:
+        workflow = build(working)
+        yield workflow, YAML(typ="safe").load(working.read_text())
 
 
 @contextmanager
-def config_environment(
-    config_file: Path, *, root: str | None = None, state: str | None = None, keep_file: bool = False
-) -> Iterator[None]:
+def config_environment(config_file: Path, *, root: str | None = None, state: str | None = None) -> Iterator[Path]:
     """Read a KonfAI config with the environment its builders need, the config's directory on ``sys.path`` so
-    a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards and, with ``keep_file``,
-    the file, which reading rewrites. ``root`` and ``state`` serve a caller that builds no workflow."""
+    a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards. Reading rewrites a config,
+    so the block is handed a private copy beside the file (a relative model YAML resolves against that directory),
+    removed afterwards: the caller's file is never written. The copy is a name this call creates, so a file
+    already beside the config and a copy an overlapping call holds are left alone. A missing config is left to the
+    builders, which refuse it; a private copy that cannot be made is refused here. ``root`` and ``state`` serve a
+    caller that builds no workflow."""
     import os
+    import shutil
     import sys
+    import tempfile
 
     previous = {key: value for key, value in os.environ.items() if key.startswith("KONFAI_")}
-    snapshot = config_file.read_bytes() if keep_file else None
-    os.environ["KONFAI_config_file"] = str(config_file)
+    private: Path | None = None
+    if config_file.exists():
+        try:
+            descriptor, name = tempfile.mkstemp(
+                suffix=config_file.suffix, prefix=f".{config_file.stem}.", dir=config_file.parent
+            )
+            os.close(descriptor)
+            private = Path(name)
+            shutil.copyfile(config_file, private)
+        except OSError as error:
+            if private is not None:
+                private.unlink(missing_ok=True)
+            raise ConfigError(
+                f"Cannot make a private copy of '{config_file}' to compile from ({error}).",
+                "Make the config's folder writable: the caller's file is never compiled in place.",
+            ) from error
+    working = private or config_file
+    os.environ["KONFAI_config_file"] = str(working)
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
     if root is not None:
         os.environ["KONFAI_ROOT"] = root
@@ -741,15 +761,15 @@ def config_environment(
         os.environ["KONFAI_STATE"] = state
     sys.path.insert(0, str(config_file.parent))
     try:
-        yield
+        yield working
     finally:
         sys.path.remove(str(config_file.parent))
-        if snapshot is not None:
-            config_file.write_bytes(snapshot)
         for key in [key for key in os.environ if key.startswith("KONFAI_")]:
             if key not in previous:
                 del os.environ[key]
         os.environ.update(previous)
+        if private is not None:
+            private.unlink(missing_ok=True)
 
 
 def compile_chain(
@@ -965,18 +985,32 @@ def inference_patch(config: dict[str, Any], root: str) -> dict[str, Any]:
     return _mapping((config.get(root) or {}).get("Dataset", {}).get("Patch"))
 
 
-def derive_overlap(patch: dict[str, Any], patch_size: list[int]) -> list[int] | None:
-    """Resolve KonfAI's overlap forms on the exported patch, retaining its 2.5-D axes."""
-    from konfai.data.patching.blend import blend_overlap
-
+def _overlap_spec(patch: dict[str, Any], patch_size: list[int]) -> Any:
+    """The ``Patch.overlap`` on the exported axes, retaining its 2.5-D axes; ``None`` when the config states none."""
     raw = clean(patch.get("overlap"))
-    if isinstance(raw, bool) or raw is None or (isinstance(raw, int) and raw < 0):
+    if isinstance(raw, bool) or (isinstance(raw, int) and raw < 0):
         return None
     if isinstance(raw, list) and len(raw) != len(patch_size):
         declared = [int(size) for size in patch.get("patch_size", [])]
         if len(raw) == len(declared):
             raw = [value for value, size in zip(raw, declared, strict=True) if size > 1]
-    return blend_overlap(raw, patch_size)
+    return raw
+
+
+def derive_overlap(patch: dict[str, Any], patch_size: list[int]) -> list[int] | None:
+    """Resolve KonfAI's overlap forms on the exported patch, retaining its 2.5-D axes."""
+    from konfai.data.patching.blend import blend_overlap
+
+    raw = _overlap_spec(patch, patch_size)
+    return None if raw is None else blend_overlap(raw, patch_size)
+
+
+def derive_stride(patch: dict[str, Any], patch_size: list[int]) -> list[float]:
+    """The unrounded step between windows on each exported axis, which placements ``monai`` and ``spread`` walk
+    (``get_patch_slices_from_shape``): a fraction's ``patch * (1 - fraction)``, which the integer overlap rounds."""
+    from konfai.utils.utils import resolve_overlap
+
+    return resolve_overlap(_overlap_spec(patch, patch_size), patch_size, [size + 1 for size in patch_size], step=True)
 
 
 def _file_stem(name: str) -> str:
@@ -1021,29 +1055,25 @@ def check_blend(overlap: list[int] | None, blend: str | None) -> None:
         )
 
 
-def derive_placement(config: dict[str, Any], root: str) -> Placement:
-    """The ``Dataset.Patch.placement`` the run places its windows with (``pad`` when unstated), refused when konfai
-    knows no such placement: the runtime would place them otherwise."""
+def derive_placement(patch: dict[str, Any]) -> Placement:
+    """The ``placement`` of a ``Dataset.Patch`` section (``pad`` when unstated), refused when konfai knows no such
+    placement: the runtime would place the windows otherwise."""
     from konfai.utils.utils import Placement
 
-    placement = clean(inference_patch(config, root).get("placement")) or "pad"
+    placement = clean(patch.get("placement")) or "pad"
     if placement not in get_args(Placement):
-        raise ConfigError(
-            f"Patch.placement '{placement}' is none of {', '.join(get_args(Placement))}.",
-            "Set placement to pad (the default), monai or spread.",
-        )
+        raise ConfigError(f"Patch.placement '{placement}' is none of {', '.join(get_args(Placement))}.")
     return cast(Placement, placement)
 
 
-def derive_onnx_params(
-    config: dict[str, Any], root: str
-) -> tuple[list[int] | None, int | None, int, float | str | None]:
+def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | None, int | None, int, float | str]:
     """Best-effort ``(patch_size, in_channels, extend_slice, pad_value)`` from a prediction config, ``None`` for
     what it does not state. ``patch_size`` drops a singleton slice dim (2.5D); ``in_channels`` reads the
-    model's ``nb_channel``, else its ``in_channels``, else its first ``channels``."""
+    model's ``nb_channel``, else its ``in_channels``, else its first ``channels``. ``pad_value`` left null pads with
+    the minimum of the window konfai reads (`Patch._pad_constant`)."""
     patch_size: list[int] | None = None
     extend_slice = 0
-    pad_value: float | str | None = None
+    pad_value: float | str = "min"
     patch = inference_patch(config, root)
     if patch:
         raw = patch.get("patch_size")
@@ -1060,13 +1090,11 @@ def derive_onnx_params(
             extend_slice = raw_extend
         elif isinstance(raw_extend, str) and raw_extend.lstrip("-").isdigit():
             extend_slice = int(raw_extend)
-        raw_pad = patch.get("pad_value")
+        raw_pad = clean(patch.get("pad_value"))
         if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool):
             pad_value = float(raw_pad)
         elif raw_pad == "edge":
             pad_value = raw_pad
-        elif raw_pad is None:
-            pad_value = "min"  # konfai pads with the minimum of the window it reads (`Patch._pad_constant`)
 
     in_channels: int | None = None
     for model in map(_mapping, _mapping(_mapping(config.get(root)).get("Model")).values()):
@@ -1211,7 +1239,11 @@ def records_only(name: str) -> bool:
     from konfai.data.transform import Save
 
     cls = _stage_class(name)
-    return cls is not None and not cls.alters_values and not issubclass(cls, Save)
+    if cls is None or cls.alters_values or issubclass(cls, Save):
+        return False
+    # A subclass that overrides __call__ inherits the declaration of code it replaced: it must restate it.
+    declaring = next(base for base in cls.__mro__ if {"__call__", "alters_values"} & vars(base).keys())
+    return "alters_values" in vars(declaring)
 
 
 def is_save(name: str) -> bool:
@@ -2079,6 +2111,8 @@ def export_checkpoints(
     others = list(islice(chain(stated[1:], repeat(1)), max(len(inputs), 1) - 1))
     patch = inference_patch(config, root)
     overlap = derive_overlap(patch, patch_size) if patch else None
+    placement = derive_placement(patch)
+    stride = None if placement == "pad" else derive_stride(patch, patch_size)
     extra, folds, per_copy = transform_manifest(config, root, masked=masked, output=output, others=others)
     blend = derive_blend(config, root, output)
     check_blend(overlap, blend)
@@ -2110,7 +2144,8 @@ def export_checkpoints(
             patch_overlap=overlap,
             extend_slice=extend_slice,
             pad_value=pad_value,
-            placement=derive_placement(config, root),
+            placement=placement,
+            patch_stride=stride,
             extra_manifest=extra | {"accumulation_dtype": precision},
             fold_pre=folds,
             model_filename=f"{model_id}.onnx",
@@ -2301,7 +2336,11 @@ def compile_output(
 
 def _portable_root(path: str | Path) -> str:
     """A path the runtime resolves against its ``--root``: relative to the working directory when it
-    sits below it, with slashes whatever the system compiling, absolute otherwise."""
+    sits below it, with slashes whatever the system compiling, absolute otherwise. Only an output is written
+    here: a remote root is refused, as konfai refuses to write one."""
+    from konfai.utils.uri import refuse_write
+
+    refuse_write(path)
     text = str(path).rstrip("/") or "/"
     absolute, cwd = Path(text).absolute(), Path.cwd()
     return absolute.relative_to(cwd).as_posix() if absolute.is_relative_to(cwd) else text
