@@ -174,6 +174,26 @@ def test_plan_transform_is_covered_by_that_guard(
     assert leftovers and not leftovers[0].exists()
 
 
+def test_run_transform_checks_the_inputs_of_the_config_file_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """An alternate chain is checked for its own inputs, not Transform.yml's, by the plan and by the launch."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    workspace = Path(server.SESSION.config_path("transform")).parent
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "Transform.yml").write_text("Transformer:\n  name: DEFAULT\n", encoding="utf-8")
+    alternate = "Transformer:\n  name: MASKS\n  Dataset:\n    dataset_filenames:\n    - ./Missing/\n"
+    (workspace / "Transform_masks.yml").write_text(alternate, encoding="utf-8")
+    monkeypatch.setattr(server, "_run_api_in_subprocess", lambda *_: pytest.fail("planned past the blocker"))
+    monkeypatch.setattr(server, "_launch_job", lambda *_, **__: pytest.fail("launched past the blocker"))
+
+    for dry_run in (True, False):
+        blocked = server.run_transform(dry_run=dry_run, config_file="Transform_masks.yml")
+        assert blocked["error_type"] == "MissingArtifact"
+        assert blocked["config_path"].endswith("Transform_masks.yml")
+
+
 def test_concurrent_validations_only_remove_their_own_scratch(tmp_path: Path) -> None:
     config = tmp_path / "Config.yml"
     config.write_bytes(b"Trainer:\r\n  epochs: 1\r\n")

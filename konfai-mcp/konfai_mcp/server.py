@@ -3362,7 +3362,7 @@ def _tool_run_transform(
     """Launch a dataset transform job from the current session `Transform.yml`."""
     config_path = _resolve_transform_config(config_file)
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
-    blocked = SESSION.workflow_blocker("transform")
+    blocked = SESSION.workflow_blocker("transform", config_path=config_path)
     if blocked is not None:
         return blocked
     job_spec = _runtime_job_spec(
@@ -3392,7 +3392,7 @@ def _tool_plan_transform(
 ) -> dict[str, Any]:
     """Plan the transform without running it: per-case verdicts, budget, and what needs attention."""
     config_path = _resolve_transform_config(config_file)
-    blocked = SESSION.workflow_blocker("transform")
+    blocked = SESSION.workflow_blocker("transform", config_path=config_path)
     if blocked is not None:
         return blocked
     with discard_scratch_configs(config_path) as scratch:
