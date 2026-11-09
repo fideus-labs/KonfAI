@@ -511,8 +511,27 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
             assert package.structured_content["source"] == "imported"
             assert len(subprocess_calls) == 3
 
-    # The review reads no signature it would have to import into the server process.
-    assert mcp_server.SESSION._component_signature_for_classpath(tmp_path / "C.yml", "json:JSONDecoder") is None
+    # The review routes the same way: an import ('pkg:Class', a bare builtin) goes to the subprocess, a local
+    # File:Class stays in-process, and a failed subprocess leaves the review without the signature.
+    review_calls: list[str] = []
+
+    def spy_review(target: str, kwargs: dict[str, object], timeout_s: float | None = None) -> dict[str, object]:
+        review_calls.append(str(kwargs["classpath"]))
+        return real_summarize(**kwargs)
+
+    monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", spy_review)
+    review = mcp_server.SESSION._component_signature_for_classpath
+    (tmp_path / "Loss.py").write_text("class MyLoss:\n    def __init__(self, a: float = 1.0): ...\n")
+    assert review(tmp_path / "C.yml", "json:JSONDecoder")["source"] == "imported"
+    assert review(tmp_path / "C.yml", "Dice")["ok"]
+    assert review(tmp_path / "C.yml", "Loss:MyLoss")["source"] == "local"
+    assert review_calls == ["json:JSONDecoder", "Dice"]
+
+    def timed_out(*_: object, **__: object) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", timed_out)
+    assert review(tmp_path / "C.yml", "json:JSONDecoder") is None
 
     asyncio.run(scenario())
 

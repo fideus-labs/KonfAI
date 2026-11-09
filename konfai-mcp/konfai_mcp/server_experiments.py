@@ -35,9 +35,9 @@ from .server_support import (
     WORKFLOW_CONFIG_FILES,
     WorkspaceLayout,
     available_templates,
+    classpath_requires_import,
     default_group_map,
     load_template_configs,
-    names_installed_package,
     summarize_classpath_signature,
     template_dir,
     template_groups,
@@ -531,9 +531,16 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     def _component_signature_for_classpath(self, config_path: Path, classpath: str) -> dict[str, Any] | None:
         if not isinstance(classpath, str) or not classpath.strip():
             return None
-        if names_installed_package(classpath, config_path.parent):
-            return None  # reading 'pkg:Class' would import pkg into the server; the review goes without it
-        return summarize_classpath_signature(classpath, workspace_dir=config_path.parent)
+        if not classpath_requires_import(classpath, config_path.parent):
+            return summarize_classpath_signature(classpath, workspace_dir=config_path.parent)
+        try:  # an import ('UNet', 'pkg:Class') runs isolated, as inspect_object_signature does
+            return mcp_runner.run_api_in_subprocess(
+                "konfai_mcp.server_support:summarize_classpath_signature",
+                {"classpath": classpath, "workspace_dir": config_path.parent},
+                timeout_s=120,
+            )
+        except Exception:  # the signature only enriches the review, which goes without it
+            return None
 
     def _build_warning(
         self,

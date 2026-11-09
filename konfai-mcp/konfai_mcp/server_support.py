@@ -960,6 +960,30 @@ def names_installed_package(classpath: str, workspace_dir: Path | None) -> bool:
     return not (workspace_dir / f"{parts[0]}.py").is_file() and importlib.util.find_spec(parts[0]) is not None
 
 
+def classpath_requires_import(classpath: str, workspace_dir: Path | None) -> bool:
+    """True when summarize_classpath_signature would import the classpath's module in-process.
+
+    A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
+    (a single-token module before the colon, resolved as a workspace .py, no installed package of that name)
+    are parsed statically and never imported. Everything else (an installed 'package.module:Class' or
+    'package:Class', the colon form 'package:module:Class'
+    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name) triggers
+    importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
+    only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
+    """
+    normalized = classpath.strip()
+    if not normalized:
+        return False  # let summarize_classpath_signature raise its own ValueError in-process
+    if normalized.endswith(".yml") or normalized.startswith("default|"):
+        return False
+    # Local 'File:Class' == exactly one colon and a single-token module with no dot (mirrors
+    # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
+    colon_parts = [part for part in normalized.split(":") if part]
+    if len(colon_parts) == 2 and "." not in colon_parts[0]:
+        return names_installed_package(normalized, workspace_dir)
+    return True
+
+
 def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = None) -> dict[str, Any]:
     """Summarize one local or imported configurable object by classpath."""
     normalized = classpath.strip()
