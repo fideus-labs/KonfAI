@@ -84,7 +84,11 @@ def test_errors_are_reported_to_the_model_and_logged(fixtures, tmp_path):
     assert "unknown tool" in run(box, "fly")["error"]
     assert "bad arguments" in run(box, "view", nowhere=1)["error"]
     assert "no voxel" in run(box, "region_stats", box_mm={"min": [900, 900, 900], "max": [901, 901, 901]})["error"]
-    assert [c.ok for c in box.calls] == [False, False, False]
+    nan = float("nan")  # what json.loads makes of an OpenAI-compatible server's NaN
+    assert "confidence" in run(box, "conclude", verdict="acceptable", summary="s", confidence=nan)["error"]
+    note = run(box, "note", kind="suspected_error", defect="leak", severity="minor", confidence=nan, description="x")
+    assert "confidence" in note["error"]
+    assert [c.ok for c in box.calls] == [False] * 5 and box.conclusion is None and not box.observations
     assert all(c.error for c in box.calls)
 
 

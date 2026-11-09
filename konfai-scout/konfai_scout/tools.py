@@ -392,6 +392,8 @@ class Toolbox:
             raise ValueError(f"defect is one of {DEFECTS[self.case.task]}")
         if severity not in SEVERITIES:
             raise ValueError(f"severity is one of {SEVERITIES}")
+        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
+            raise ValueError("confidence is a number between 0 and 1")
         known_views = {v.id: v for v in self.renderer.views}
         known_measurements = {m.id: m for m in self.measurements}
         views = list(views or [])
@@ -486,6 +488,8 @@ class Toolbox:
     ) -> tuple[dict[str, Any], list[ImageContent]]:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict is one of {VERDICTS}")
+        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
+            raise ValueError("confidence is a number between 0 and 1")
         reason = None
         if verdict == "defective" and not any(o.kind == "confirmed_error" for o in self.observations):
             reason = (
