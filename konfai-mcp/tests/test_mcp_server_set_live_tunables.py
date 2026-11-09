@@ -67,6 +67,12 @@ def test_set_live_tunables_writes_a_revisioned_control_file(
             job.proc = cast(Any, _Running())
             mcp_server.JOB_REGISTRY.jobs[job.job_id] = job
 
+            # A rate or an interval that is not positive is refused before any control file is written.
+            for bad in ({"lr": -0.01}, {"lr": 0.0}, {"it_validation": 0}):
+                with pytest.raises(fastmcp.exceptions.ToolError):
+                    await client.call_tool("control_training", bad)
+            assert not (run_dir / "control.json").exists()
+
             result = await client.call_tool("control_training", {"lr": 1e-4, "it_validation": 5})
             payload = result.structured_content
             assert payload["ok"] is True

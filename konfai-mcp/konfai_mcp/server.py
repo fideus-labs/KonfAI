@@ -3816,9 +3816,9 @@ def get_job_status(
 def control_training(
     job_id: Annotated[str | None, Field(description="The training job; omitted: the running one.")] = None,
     lr: Annotated[
-        float | None, Field(description="New learning rate, applied now and kept by a running scheduler.")
+        float | None, Field(gt=0, description="New learning rate, applied now and kept by a running scheduler.")
     ] = None,
-    it_validation: Annotated[int | None, Field(description="New validation interval, in iterations.")] = None,
+    it_validation: Annotated[int | None, Field(gt=0, description="New validation interval, in iterations.")] = None,
     validate_now: Annotated[bool, Field(description="Run a validation pass at the next iteration.")] = False,
     kind: Annotated[WorkflowKind, Field(description="Job kind to target when job_id is omitted.")] = "train",
 ) -> dict[str, Any]:
