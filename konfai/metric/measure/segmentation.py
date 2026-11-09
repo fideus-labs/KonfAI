@@ -369,7 +369,8 @@ class MissingLabels(Criterion):
         output, target = (map_.round() if map_.is_floating_point() else map_ for map_ in Dice._masked(output, targets))
         missing = []
         for item in range(output.shape[0]):
-            held = set(torch.unique(target[item]).long().tolist()) - {0}
+            reference = torch.unique(target[item])
+            held = set(reference[reference.isfinite()].long().tolist()) - {0}  # NaN is no label, as for Dice
             written = set(torch.unique(output[item]).long().tolist())
             missing.append(len((held if self._labels is None else held & set(self._labels)) - written))
         value = float(np.mean(missing))

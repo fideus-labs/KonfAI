@@ -211,6 +211,9 @@ def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
     assert MissingLabels(labels=[1, 7])(output, reference)[1] == 0.0
     binary = reference > 0  # a bool map, as Dice takes it
     assert MissingLabels()(torch.zeros_like(binary), binary)[1] == 1.0
+    unread = reference[1:].float()
+    unread[0, 0, 7] = float("nan")  # voxels the reference does not label: no label, even masked out (NaN * 0)
+    assert MissingLabels()(reference[1:], unread)[1] == MissingLabels()(reference[1:], unread, unread == 1)[1] == 0.0
     mask = torch.zeros_like(reference)
     mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
     assert MissingLabels()(output, reference, mask)[1] == 0.0
