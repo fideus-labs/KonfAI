@@ -3,7 +3,7 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
-## v1.9.0 (2026-11-09)
+## v1.8.9 (2026-11-09)
 
 ### 💥 Breaking changes
 
