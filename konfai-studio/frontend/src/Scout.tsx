@@ -9,7 +9,7 @@ import { RefreshIcon } from "./icons";
 // "Go to" loads the case's image in the viewer and puts the crosshair on the observation.
 
 type Box = { min: number[]; max: number[] };
-type SecondReading = { answer?: string | null; sentence?: string | null; views?: string[] } | null;
+type SecondReading = { answer?: string | null; text?: string | null; views?: string[] } | null;
 type Observation = {
   id: string;
   kind: string;
@@ -352,7 +352,7 @@ export default function Scout({
                   ))}
                   {o.second_reading && o.second_reading.answer && (
                     <div className={`second-reading ${o.second_reading.answer}`}>
-                      <b>Blind second reading: {words(o.second_reading.answer)}.</b> {o.second_reading.sentence}
+                      <b>Blind second reading: {words(o.second_reading.answer)}.</b> {o.second_reading.text}
                     </div>
                   )}
                   {o.measurements.length > 0 && (
