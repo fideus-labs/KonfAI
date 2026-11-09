@@ -49,7 +49,7 @@ def main() -> None:
         "--quick", action="store_true", help="smoke pass; comparison will reject it as release evidence"
     )
     args, extra = parser.parse_known_args()
-    baselines = Path(os.environ.get("KONFAI_PERF_BASELINES", PERF_DIR / "baselines"))
+    baselines = Path(os.environ.get("KONFAI_PERF_BASELINES") or PERF_DIR / "baselines")
     baseline = (args.baseline or baselines / f"{machine_class()}.json").resolve()  # compare.py runs from PERF_DIR
     if not baseline.is_file():  # evidence the gate cannot use (exit 2), not a regression (exit 1)
         print(f"[perf] no baseline for this machine class: {baseline} (take one with run_all.py on a quiet machine)")

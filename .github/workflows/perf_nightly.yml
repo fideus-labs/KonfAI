@@ -2,8 +2,9 @@ name: perf_nightly
 
 # The performance gate, nightly, on a self-hosted runner with the GPU (a shared GitHub runner gives
 # times within 2x of themselves). Register the runner on the machine that holds the baseline, with the
-# labels below, and set KONFAI_PERF_BASELINES in the runner's environment to the directory that holds
-# <machine>.json, outside the checkout (actions/checkout cleans it); without one the job exits 2.
+# labels below, and set in the runner's environment KONFAI_PERF_MACHINE, the baseline's name (on Actions the
+# class is otherwise gha-<image>), and KONFAI_PERF_BASELINES, the directory that holds <machine>.json, outside
+# the checkout (actions/checkout cleans it). Without a baseline the job exits 2.
 # A regression opens an issue; evidence the gate cannot use (a busy machine) fails the job only.
 on:
   schedule:

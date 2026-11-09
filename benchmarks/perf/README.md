@@ -89,12 +89,14 @@ pixi run --environment dev python benchmarks/perf/run_all.py            # add --
 pixi run --environment dev python benchmarks/perf/compare.py results/<host>/<baseline>.json results/<host>/<run>.json
 # the release gate: the series, then the comparison to baselines/<host>.json (exit 1 on a regression)
 pixi run perf-check
-# once a release is out, or when a bench joins the series: this run becomes the host's baseline, kept on that
-# machine and out of git (a baseline says only what one machine measured); KONFAI_PERF_BASELINES moves it
+# once a release is out, or when a bench joins the series: this run becomes the baseline of its machine class
+# (KONFAI_PERF_MACHINE, else the host name), kept on that machine and out of git: a baseline says only what one
+# machine measured. KONFAI_PERF_BASELINES moves it to a directory outside the checkout, which git then never sees
 # (a quiet machine and a clean tree; a baseline missing a bench makes every comparison invalid)
-BASELINES="${KONFAI_PERF_BASELINES:-benchmarks/perf/baselines}" && mkdir -p "$BASELINES"
-cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.json "$BASELINES/<host>.json"
-cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.md "$BASELINES/<host>.md"
+BASELINES="${KONFAI_PERF_BASELINES:-benchmarks/perf/baselines}" MACHINE="${KONFAI_PERF_MACHINE:-$(hostname)}"
+mkdir -p "$BASELINES"
+cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.json "$BASELINES/$MACHINE.json"
+cp benchmarks/perf/results/<host>/<stamp>-<sha>-all.md "$BASELINES/$MACHINE.md"
 ```
 
 The comparison exits **0** only for a complete comparable series, **1** for a measured regression,
