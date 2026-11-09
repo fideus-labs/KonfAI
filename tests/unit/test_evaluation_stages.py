@@ -20,11 +20,12 @@ reproduces: SimpleITK's filter and transform, NumPy's percentile."""
 
 import numpy as np
 import pytest
-import SimpleITK as sitk
 import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import MeasureError
+
+sitk = pytest.importorskip("SimpleITK")
 
 
 def gaussian_filter(array: np.ndarray, sigma: float) -> np.ndarray:
@@ -190,6 +191,8 @@ def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
     output[0][output[0] == 2] = 0  # the first item loses label 2
     output[0, 0, 5] = 9  # a label the reference lacks is not counted
     assert MissingLabels()(output, reference)[1] == 0.5  # one of the first item, none of the second
+    probabilities = torch.nn.functional.one_hot(output[:, 0], 10).movedim(-1, 1).float()
+    assert MissingLabels()(probabilities, reference)[1] == 0.5  # one channel per label: read as its argmax
     assert MissingLabels(labels=[1, 7])(output, reference)[1] == 0.0
     mask = torch.zeros_like(reference)
     mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
@@ -201,12 +204,16 @@ def test_missing_labels_compares_a_reference_of_another_shape():
     from types import SimpleNamespace
 
     from konfai.evaluator import Evaluator
-    from konfai.metric.measure import MissingLabels
+    from konfai.metric.measure import Dice, MissingLabels
 
     output, reference = torch.ones(1, 1, 4, 4, 4), torch.ones(1, 1, 8, 8, 8)
     evaluator = SimpleNamespace(metrics={"Out": {"Ref": [MissingLabels()]}})
     assert Evaluator._voxelwise_pairs(evaluator, {"Out": output, "Ref": reference}) == {}
-    assert MissingLabels()(output, reference)[1] == 0.0
+    reference[:, :, 4:] = 2  # a label the output lacks, outside the mask
+    assert MissingLabels()(output, reference)[1] == 1.0
+    mask = (reference == 1).float()  # on the reference's grid: put on the output's with the reference
+    assert MissingLabels()(output, reference, mask)[1] == 0.0
+    assert Dice()(output, reference, mask)[1] == {1: pytest.approx(1.0)}
 
 
 def test_missing_labels_is_weighed_by_its_items():

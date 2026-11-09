@@ -302,8 +302,10 @@ class Dice(Criterion):
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """The pair with every voxel outside the mask sent to the background, when a mask is given.
-        The bool mask multiplies in each tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel
-        for the same product."""
+        The reference and the masks are put on the output's grid first (``on_grid``), or a mask on
+        either grid of a pair on two could not multiply both. The bool mask multiplies in each
+        tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel for the same product."""
+        targets = tuple(Dice.on_grid(output, target) for target in targets)
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return output, targets[0]
@@ -315,13 +317,13 @@ class Dice(Criterion):
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
         self._check_probabilities(output)
-        output, target = self._masked(output, targets)
-        if tuple(target.shape[2:]) != tuple(output.shape[2:]):
+        if any(tuple(target.shape[2:]) != tuple(output.shape[2:]) for target in targets):
             raise MeasureError(
                 "Dice can only stream patches when output and target share the spatial grid",
-                f"output {tuple(output.shape[2:])} vs target {tuple(target.shape[2:])}",
+                f"output {tuple(output.shape[2:])} vs targets {[tuple(target.shape[2:]) for target in targets]}",
                 "Evaluate this pair whole (unset the memory budget) or resample the prediction first.",
             )
+        output, target = self._masked(output, targets)
         if output.shape[1] > 1:
             return Dice._soft_sums(output, target, self._labels)
         return Dice._hard_sums(output, target, self._labels)
@@ -349,7 +351,8 @@ class Dice(Criterion):
 class MissingLabels(Criterion):
     """How many labels of the reference the output lacks: the structures a segmentation did not find, or those a
     registration's warp lost. ``labels`` restricts the count to those labels, where the reference holds them;
-    without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. Metric only."""
+    without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. An output of one
+    channel per label, as ``Dice`` reads it, counts its argmax. Metric only."""
 
     loss_capable = False
     batch_mean = True  # the mean of one count per item
@@ -360,8 +363,9 @@ class MissingLabels(Criterion):
         self._labels = labels
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        if output.shape[1] > 1:
+            output = output.argmax(1, keepdim=True)
         output, target = Dice._masked(output, targets)
-        target = Dice.on_grid(output, target)
         missing = []
         for item in range(output.shape[0]):
             held = set(torch.unique(target[item].round().long()).tolist()) - {0}
