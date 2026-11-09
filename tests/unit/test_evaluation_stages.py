@@ -194,6 +194,8 @@ def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
     probabilities = torch.nn.functional.one_hot(output[:, 0], 10).movedim(-1, 1).float()
     assert MissingLabels()(probabilities, reference)[1] == 0.5  # one channel per label: read as its argmax
     assert MissingLabels(labels=[1, 7])(output, reference)[1] == 0.0
+    binary = reference > 0  # a bool map, as Dice takes it
+    assert MissingLabels()(torch.zeros_like(binary), binary)[1] == 1.0
     mask = torch.zeros_like(reference)
     mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
     assert MissingLabels()(output, reference, mask)[1] == 0.0

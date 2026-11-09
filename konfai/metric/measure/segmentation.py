@@ -365,11 +365,12 @@ class MissingLabels(Criterion):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         if output.shape[1] > 1:
             output = output.argmax(1, keepdim=True)
-        output, target = Dice._masked(output, targets)
+        # only a float map is rounded: torch has no round for a bool one
+        output, target = (map_.round() if map_.is_floating_point() else map_ for map_ in Dice._masked(output, targets))
         missing = []
         for item in range(output.shape[0]):
-            held = set(torch.unique(target[item].round().long()).tolist()) - {0}
-            written = set(torch.unique(output[item].round().long()).tolist())
+            held = set(torch.unique(target[item]).long().tolist()) - {0}
+            written = set(torch.unique(output[item]).long().tolist())
             missing.append(len((held if self._labels is None else held & set(self._labels)) - written))
         value = float(np.mean(missing))
         return torch.tensor(value, dtype=torch.float32, device=output.device), value
