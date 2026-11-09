@@ -20,62 +20,33 @@
   · <a href="https://www.arxiv.org/abs/2508.09823"><strong>Paper</strong></a>
 </p>
 
-**KonfAI is a declarative medical-imaging execution engine, and the family around it.** One configuration trains,
-predicts and evaluates a model, patch by patch, on images of any size, and the resolved YAML is the record of the run.
-Around the engine, the same method is inspected by Scout, scored by FidOpt on 311 datasets, and shipped as an app to
-the command line, 3D Slicer, Hugging Face and, with KonfAI Edge, a browser tab. You drive it from the command line,
-Python, 3D Slicer or a conversation in KonfAI Studio; an agent reaches the same pieces through KonfAI MCP.
-
-The whole family on one page: **[fideus-labs.github.io/KonfAI](https://fideus-labs.github.io/KonfAI/)**.
+**KonfAI is a declarative engine for medical-imaging AI, and the pieces around it**: build a method in YAML,
+inspect it, score it and ship it. The whole family on one page:
+**[fideus-labs.github.io/KonfAI](https://fideus-labs.github.io/KonfAI/)**.
 
 ## The family
 
 | Piece | What it does | Get it |
 | --- | --- | --- |
-| **KonfAI** | The engine, this repository. `TRAIN`, `PREDICTION`, `EVALUATION` and `TRANSFORM`, each from one YAML; regional reads from ITK, DICOM, HDF5 and OME-Zarr; test-time augmentation, ensembles, overlap reconstruction and geometry handled for you | `pip install "konfai[imaging]"` |
-| **KonfAI Apps** | One contract for a packaged model, from a folder, Hugging Face or an HTTP server. Five published: TotalSegmentator-KonfAI, MRSegmentator-KonfAI, ImpactSynth, ImpactSeg, IMPACT-Reg | `pip install konfai-apps` · [`apps/`](apps) · [Hugging Face](https://huggingface.co/VBoussot) |
-| **3D Slicer** | SlicerKonfAI runs the apps, with evaluation and uncertainty; SlicerImpactReg runs the registration presets and inspects their results | [SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) · [SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg) |
-| **KonfAI MCP** | Fifty tools, one per object: an agent inspects a dataset, writes and validates configs, launches, follows and compares runs, and packages an app | `pip install konfai-mcp` · [guide](https://konfai.readthedocs.io/en/latest/usage/mcp.html) |
-| **KonfAI Studio** | A chat web UI over the MCP server: inspect, train, predict, evaluate, compare and view the volumes from one conversation, with your own model endpoint | `pip install konfai-studio` · [guide](https://konfai.readthedocs.io/en/latest/usage/studio.html) |
-| **KonfAI Scout** | Looks at a segmentation, a registration or a synthesis the way a person would at a viewer, and reports where it is wrong, with the views that show it and KonfAI Eval's measurements | [`konfai-scout/`](konfai-scout) |
-| **KonfAI Edge** | The Rust runtime that runs the apps in a browser tab with no server, as Web Components another page embeds with one import; its demo is coming to the website | [what it is](https://fideus-labs.github.io/KonfAI/docs/edge.html) |
-| **FidOpt** | An open benchmark for registration, segmentation and synthesis: 311 datasets, 3,353 held-out test cases, one evaluation for every method. A method on its board is a KonfAI app | [fidopt.io](https://fidopt.io/) |
-
-## Where it goes
+| **KonfAI** | Trains, predicts and evaluates, one YAML per workflow, on images of any size | `pip install "konfai[imaging]"` |
+| **KonfAI Scout** | Inspects a result like a person at a viewer and shows where it is wrong | [`konfai-scout/`](konfai-scout) |
+| **FidOpt** | The open benchmark: 311 datasets, the same rules for every method | [fidopt.io](https://fidopt.io/) |
+| **KonfAI Apps** | Five published models behind one contract: local, on Hugging Face or over HTTP | `pip install konfai-apps` |
+| **3D Slicer** | The apps and the registration presets inside Slicer | [SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) · [SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg) |
+| **KonfAI Edge** | The same apps in a browser tab, with no server (coming) | [what it is](https://fideus-labs.github.io/KonfAI/docs/edge.html) |
+| **KonfAI Studio** | A chat over your dataset, with your own model endpoint | `pip install konfai-studio` |
+| **KonfAI MCP** | Fifty tools for Claude Code, Codex or any MCP client | `pip install konfai-mcp` |
 
 > An agent that develops a method should be able to ask a trusted service how good it is, and iterate, the way a
 > person submits to a challenge, but in a loop. ([FidOpt](https://fidopt.io/))
 
-Each piece above is one stage of that loop. KonfAI runs a method, Scout inspects its results, FidOpt judges it on a
-hidden test, and what wins ships as an app anyone can run, from the command line, 3D Slicer or a browser tab. A person
-can drive every stage, and so can an agent.
-
-KonfAI has powered **top-ranking MICCAI 2025 challenge results** across segmentation, registration and synthesis:
-[SynthRAD2025 T1](https://github.com/vboussot/Synthrad2025_Task_1) ·
-[SynthRAD2025 T2](https://github.com/vboussot/Synthrad2025_Task_2) ·
-[CURVAS PDACVI](https://github.com/vboussot/CurvasPDACVI) ·
-[TrackRAD2025](https://github.com/vboussot/TrackRAD2025) ·
-[Panther](https://github.com/vboussot/Panther) ·
-[CURVAS](https://github.com/vboussot/CURVAS).
-**Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823)
-(Boussot & Dillenseger, 2025).
-
-## Where to start
-
-- **The whole picture?** The [website](https://fideus-labs.github.io/KonfAI/).
-- **Running a published model?** One command, see [Real workloads](#real-workloads-one-app-contract).
-- **Adapting an experiment?** The [Quickstart](#quickstart-first-smoke-run): train, predict, evaluate.
-- **Building an app?** [`konfai-apps`](https://konfai.readthedocs.io/en/latest/usage/apps.html).
-- **Working through an agent?** [KonfAI MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html) or [KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html).
-- **Contributing?** [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md).
+Every piece above runs today. Next, an agent closes that loop, and KonfAI Edge puts what wins in a browser tab.
 
 ---
 
 ## The engine
 
-One configuration model connects storage, transforms, model graphs, losses, training, prediction, evaluation and
-output geometry. The resolved YAML is the experiment record: inspectable, diffable, and runnable by a researcher or a
-program.
+One YAML describes a workflow, from storage to output geometry, and the resolved file records the run.
 
 ```yaml
 Trainer:
@@ -90,42 +61,26 @@ Trainer:
 konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 ```
 
-### Why KonfAI?
+- **Scale.** Patches are read by region from ITK, HDF5, DICOM and OME-Zarr when the preprocessing streams, and through
+  a bounded buffer when it does not; prediction handles batching, test-time augmentation, ensembles, overlap and geometry.
+- **Reproduce.** Defaults are written into the YAML, and configs travel with their runs.
+- **Keep your stack.** Regular PyTorch and MONAI components plug in, and selected MONAI, nnU-Net, torchvision and
+  segmentation-models-pytorch models have documented paths:
+  [when to use KonfAI, or another tool](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html).
 
-- **Scale.** Dataset patches can be read regionally from ITK, HDF5, DICOM, and
-  OME-Zarr when preprocessing is stream-compatible; a bounded buffer preserves
-  correctness when it is not. Prediction owns batching, TTA, ensembles,
-  reductions, overlap reconstruction, geometry, and output writing.
-- **Reproduce.** Training, prediction, and evaluation share named datasets and
-  inspectable model graphs. Defaults are materialised into the YAML and configs
-  travel with run artifacts.
-- **Ship and automate.** Package the stable workflow as a local, Hugging Face,
-  or remote App, use it from 3D Slicer, or let an MCP client operate the same
-  validated builders and workspaces.
-
-Already use another stack? Keep it. KonfAI can instantiate regular PyTorch and
-MONAI components, and its catalog includes documented compatibility paths for
-selected MONAI, nnU-Net, torchvision, and segmentation-models-pytorch models.
-[See when to use KonfAI, or another tool.](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html)
-
-### One engine owns the complete medical workflow
-
-| Layer | What KonfAI makes executable |
-| --- | --- |
-| **Storage and data** | Cases, modality groups, geometry, regional reads, transforms, cache/buffer policy, dataset patches |
-| **Learning** | Named model graph, intermediate supervision, losses, metrics, optimizer, schedules, dataset- and model-level patching |
-| **Inference** | Checkpoints, patch batches, TTA, ensembles, reductions, overlap blending, inverse transforms, medical-image outputs |
-| **Evidence** | Resolved configs, checkpoints, statistics, predictions, per-case and aggregate evaluation JSON |
-| **Delivery** | Local/Hugging Face Apps, HTTP jobs, external 3D Slicer client, uncertainty, evaluation, fine-tuning |
-| **Automation** | Dataset inspection, config validation, smoke tests, jobs, metrics, run comparison through MCP |
-
-That vertical integration is the product. YAML is its durable, inspectable
-interface, not the value proposition by itself.
+Six top-ranking MICCAI 2025 challenge results were built with it:
+[SynthRAD2025 T1](https://github.com/vboussot/Synthrad2025_Task_1) ·
+[SynthRAD2025 T2](https://github.com/vboussot/Synthrad2025_Task_2) ·
+[CURVAS PDACVI](https://github.com/vboussot/CurvasPDACVI) ·
+[TrackRAD2025](https://github.com/vboussot/TrackRAD2025) ·
+[Panther](https://github.com/vboussot/Panther) ·
+[CURVAS](https://github.com/vboussot/CURVAS).
+Paper: [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823)
+(Boussot & Dillenseger, 2025).
 
 ## Real workloads, one App contract
 
-The same App interface already ships full segmentation, synthesis and
-registration systems, not reduced demonstration networks:
+The five published apps are full systems, not demonstration networks:
 
 | App | Workload | Medium case (249 × 246 × 246), RTX PRO 5000 |
 | --- | --- | --- |
@@ -135,27 +90,15 @@ registration systems, not reduced demonstration networks:
 | **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | 3.3 s / 1.7 GB RAM / 3.9 GB VRAM |
 | **IMPACT-Reg** | 12 multimodal presets of three engines: elastix+IMPACT, ConvexAdam and FireANTs | `FireANTs#syn`: 108 s / 6.3 GB RAM / 16.0 GB VRAM |
 
-Every figure is the medium case of the bundle's own small/medium/large table
-(see the bundle READMEs under
-[`apps/`](https://github.com/fideus-labs/KonfAI/tree/main/apps)), measured with
-`benchmarks/perf/bench_apps.py` on 2026-09-09; the ratios against the original
-tools span the three cases. They are evidence of executable scale, not a
-cross-task leaderboard. The shared measurement protocol and the runnable harness
-are in [`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks).
-The bundles share the same App contract across local directories,
-Hugging Face and HTTP, with SlicerKonfAI for general Apps and SlicerImpactReg
-for dedicated registration.
-
-Consuming a published workflow does **not** require authoring YAML. Install its
-task-specific CLI and run one command, or address the same bundle through
-`konfai-apps`; the complete configuration remains available when you need to
-inspect, evaluate, fine-tune, or automate it.
+Each figure is the medium case of the app's own table (see [`apps/`](https://github.com/fideus-labs/KonfAI/tree/main/apps)),
+measured with `benchmarks/perf/bench_apps.py` on 2026-09-09; the ratios span its three cases. Running an app needs no
+YAML:
 
 ```bash
 pip install impact_synth_konfai
 impact-synth-konfai synthesize MR -i input_mr.nii.gz -o output/
 
-# The same packaged workflow through the generic App runtime
+# the same app through the generic runtime
 konfai-apps infer VBoussot/ImpactSynth:MR -i input_mr.nii.gz -o output/
 ```
 
@@ -329,44 +272,6 @@ for classpaths and constructor arguments.
 
 Not limited to these: any importable class (`monai.losses:DiceLoss`,
 `torch:nn:L1Loss`, or a local `Model:MyNet`) works via the `module:Class` form.
-
----
-
-## Automate workflows through MCP
-
-KonfAI is built to serve as a **deterministic backend for LLM-driven
-experimentation**. Through the **KonfAI-MCP server**, a client can:
-
-- inspect datasets and infer their structure
-- generate and validate YAML configurations
-- launch training / prediction / evaluation / transform runs
-- read live metrics, compare runs, and iterate
-
-Every execution stays **reproducible, structured, and grounded in the same YAML
-workflows** a human would run, bridging LLM reasoning and real experimental
-execution. See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
-for the current status.
-
----
-
-## KonfAI Studio
-
-**[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** is
-a single chatbot web UI over the MCP server. Point it at your own dataset and,
-from the conversation alone, inspect the data, author or reuse a model, train,
-predict, evaluate, compare runs, and view the volumes in a built-in NiiVue
-viewer. Every step is a `konfai-mcp` tool call, the compute staying on your
-machine. It is a product surface over `konfai-mcp`, not a new engine, and it
-ships **no API key**: you bring your own LLM, your Claude Code subscription by
-default, the Claude API with your key, or a fully local OpenAI-compatible server
-such as Ollama or vLLM.
-
-```bash
-pip install konfai-studio
-konfai-studio            # -> http://127.0.0.1:8730
-```
-
-→ **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)**
 
 ---
 
