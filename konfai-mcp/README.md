@@ -359,9 +359,10 @@ The exact client configuration depends on the MCP host, but the intended
 entrypoint is the package command, not an ad hoc wrapper script.
 
 What Codex does with these tools, measured with codex-cli 0.167: the tools hinted read-only
-(`describe_*`, `inspect_*`, `read_*`, `get_*`, `list_*`, `summarize_session`, `leaderboard`,
-`compare_runs`, `preview_volume`, `fidopt_catalog`, `fidopt_table`) run without approval; every other tool
-asks for one, `check_component` and `check_config` included (their runtime checks run session code), which
+(`describe_*` but `describe_app` and `describe_model_outputs`, `inspect_*`, `read_*`, `get_*`, `list_*`,
+`summarize_session`, `leaderboard`, `compare_runs`, `diff_run_configs`, `design_config_strategy`, `preview_volume`,
+`fidopt_catalog`, `fidopt_table`) run without approval; every other tool asks for one, `check_component`,
+`check_config`, `describe_model_outputs` and `describe_app` included (they can run session or app code), which
 an interactive session grants and `codex exec` (non-interactive) refuses whatever `approval_policy` or
 `default_tools_approval_mode` says. Drive a session, a config or a job from Codex
 interactively, or from Claude Code. Two Codex defaults to raise: `tool_timeout_sec` (60 s; a

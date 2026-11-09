@@ -190,10 +190,11 @@ def test_read_only_and_destructive_tools_are_hinted(load_mcp_server: Callable[[]
 
     annotations = asyncio.run(scenario())
     assert set(mcp_server.READ_ONLY_TOOLS) <= set(annotations)  # every hinted name is a tool
-    assert annotations["describe_app"].read_only_hint is True
+    assert annotations["read_file"].read_only_hint is True
     assert annotations["delete_run"].destructive_hint is True
     assert not (annotations["run_train"] and annotations["run_train"].read_only_hint)
-    for name in ("check_component", "check_config"):  # a runtime check imports and runs session code
+    # each can import and run session or app code: a runtime check, the model build, the app's parameters
+    for name in ("check_component", "check_config", "describe_model_outputs", "describe_app"):
         assert not (annotations[name] and annotations[name].read_only_hint), name
 
 
