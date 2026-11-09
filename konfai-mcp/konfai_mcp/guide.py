@@ -290,8 +290,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "fidopt_catalog": (
         "FidOpt's benchmark catalogue through its own code: one line per dataset (task, anatomy, modalities, cases; "
         "task= and anatomy= narrow it) and the methods of the task; with dataset=<name>, that dataset's descriptor "
-        "(cases, truth, labels, licence) and the methods of its task. corpus says which datasets are built here "
-        "(FIDOPT_DATA): fidopt_run scores those only. Downloads nothing. Next: fidopt_table, fidopt_run."
+        "(cases, truth, labels, licence) and the methods of its task. corpus lists the dataset folders built here "
+        "(FIDOPT_DATA); a derived dataset reads its source's. Downloads nothing. Next: fidopt_table, fidopt_run."
     ),
     "fidopt_table": (
         "A FidOpt dataset's board (fidopt table --json): one line per method and machine, published scores and "

@@ -298,19 +298,8 @@ class FidoptAdapter:
                 f"fidopt {operation!r} is not allowed on this server (KONFAI_MCP_FIDOPT_ALLOWED={','.join(self.allowed)})."
             )
         self.available()
-        if dataset:
-            # the corpus is FidOpt's own: a job that would die on it seven seconds in is refused here instead
-            data_root = os.environ.get("FIDOPT_DATA")
-            if not data_root:
-                raise ValueError(
-                    "FIDOPT_DATA is not set in the server's environment: the folder that holds FidOpt's corpus, one "
-                    "folder per dataset. Set it where the server starts (the MCP config's env)."
-                )
-            if not (Path(data_root).expanduser() / dataset).is_dir():
-                raise ValueError(
-                    f"dataset '{dataset}' is not in the corpus at {data_root}: build it first (FidOpt's CONTRIBUTING "
-                    "says how), or pick a dataset that is there."
-                )
+        # where a dataset's cases live is FidOpt's to resolve (a derived dataset reads its source's folder, tune its
+        # development corpus): a missing corpus is FidOpt's own error in the job log
         args = [operation, self._check_name(method, "method")]
         if operation == "check":
             if dataset:

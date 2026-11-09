@@ -206,7 +206,7 @@ def test_read_only_and_destructive_tools_are_hinted(load_mcp_server: Callable[[]
         assert not (annotations[name] and annotations[name].read_only_hint), name
 
 
-def test_fidopt_refuses_a_dataset_the_corpus_lacks(
+def test_fidopt_run_leaves_the_corpus_to_fidopt_and_holds_its_default_gpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
 ) -> None:
     fake = tmp_path / "fidopt"
@@ -214,21 +214,17 @@ def test_fidopt_refuses_a_dataset_the_corpus_lacks(
     monkeypatch.setenv("KONFAI_MCP_FIDOPT", str(fake))
     monkeypatch.setenv("KONFAI_MCP_FIDOPT_ALLOWED", "check,run")
     monkeypatch.delenv("FIDOPT_DATA", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     mcp_server = load_mcp_server()
-    with pytest.raises(ValueError, match="FIDOPT_DATA"):
-        mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)
-    monkeypatch.setenv("FIDOPT_DATA", str(tmp_path / "corpus"))
-    (tmp_path / "corpus").mkdir()
-    with pytest.raises(ValueError, match="not in the corpus"):
-        mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)
+    # AMOS_CTCT_Seg has no folder of its own (it reads AMOS_CTCT): FidOpt resolves the corpus, not the server
+    derived = mcp_server.FIDOPT.prepare_run("run", "lungmask", "AMOS_CTCT_Seg", None, None, False, None)
+    assert derived["kwargs"]["args"] == ["run", "lungmask", "AMOS_CTCT_Seg"]
     first = mcp_server.FIDOPT.prepare_run("check", "lungmask", "", None, None, False, None)
     second = mcp_server.FIDOPT.prepare_run("check", "lungmask", "", None, None, False, ["--gpu", "1"])
     assert first["run_name"] != second["run_name"]  # one folder per launch
     assert first["gpu"] == [] and second["gpu"] == [1]
     # run without --gpu holds FidOpt's own default: GPU 0, or none when CUDA_VISIBLE_DEVICES hides every GPU
-    (tmp_path / "corpus" / "LCTSC_Seg").mkdir()
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    assert mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, None)["gpu"] == [0]
+    assert derived["gpu"] == [0]
     assert (
         mcp_server.FIDOPT.prepare_run("run", "lungmask", "LCTSC_Seg", None, None, False, ["--gpu", "cpu"])["gpu"] == []
     )
