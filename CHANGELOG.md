@@ -3,9 +3,33 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
-## Unreleased
+## v1.8.9 (2026-11-09)
 
 ### 💥 Breaking changes
+
+#### NumPy 2 and torch 2.5
+
+konfai requires `numpy>=2` and `torch>=2.5`, where it took any NumPy and `torch>=2.3`: konfai-apps' packager loads a
+run's checkpoint under `torch.serialization.safe_globals`, which torch has since 2.5, and lets through the NumPy
+scalar types of `numpy._core` and `numpy.dtypes`, which NumPy has since 2.0. Upgrade an environment pinned below
+either. `konfai[omezarr]` and `konfai[imaging]` take `ngff-zarr>=0.49`, and konfai-mcp `fastmcp>=4`.
+
+#### OME-Zarr geometry in standard transformations
+
+KonfAI writes an OME-Zarr store as NGFF 0.6: each level's scale and translation, an RFC-5 rotation (an affine for a
+reflection or mixed units) and RFC-4 LPS axes, so another NGFF reader recovers the grid. The private `Origin`,
+`Spacing` and `Direction` attributes are no longer written, and a store whose geometry lives only there is refused
+rather than read without its direction: write it again from its source with this version. Standard NGFF 0.4 and 0.5
+scale/translation stores still read.
+
+#### KonfAI Edge manifests at version 5
+
+An exported model's manifest is keyed `konfai_edge_manifest`, must be the current version, 5, and states
+`patch.placement` (and `patch.stride` under `monai` and `spread`). A manifest or a program exported before this
+version is refused: export the model again with this version (`konfai-apps bundle --onnx`).
+konfai-apps' `export_onnx_into_bundle` is replaced by `export_portable_into_bundle`. Studio's Deploy pane no longer
+runs a bare `model.onnx`: `/api/apps/manifest` and `/api/apps/model` are removed, and an app without a `web/` folder
+(the published bundles, until theirs ship) is answered with a 404 that says so.
 
 #### konfai-mcp: 50 tools instead of 68, one per object
 
@@ -116,6 +140,172 @@ volume hero as a module, a README), consumed by the site and by Studio: Studio t
 keeping its density; the landing's title sits on three lines at 1280 px and two at 1440, cards rise on scroll,
 figures count up.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
+
+#### impact-reg: presets are `APP#PRESET`
+
+impact-reg-konfai runs the three engine apps of `VBoussot/ImpactReg` (ConvexAdam, Elastix, FireANTs), the twelve
+former apps being their presets, and the old names no longer resolve: `FireANTs_SyN` is `FireANTs#syn`,
+`Generic_Rigid` is `Elastix#rigid`, `ConvexAdam_Composite` is `ConvexAdam#composite`;
+`apps/impact_reg/docs/presets.md` lists all twelve.
+
+#### impact-reg: the native transform
+
+`transform_type: affine` is gone from the elastix and FireANTs engines: `native`, the default, writes the transform
+the engine found, an affine for a linear map, elastix's rigid then B-spline as a composite, a field for what is
+dense. A single-preset registration's `Transform.h5` therefore holds that transform rather than a field (42.7 KB for
+`Elastix#rigid_bspline` on a HippocampusMR pair, where the field weighs 6.3 MB). `--set transform_type=field` gives
+the field back. An ensemble, a TTA or a tiled run still writes a field.
+
+#### impact-reg: evaluation through konfai-apps
+
+`impact-reg-konfai eval` is `konfai-apps eval` of the transform with the configs it ships, which take the transform
+as `Volume_0` and the fixed and moving data as `Reference_0` and `Reference_1`. The Jacobian is reported under the
+criteria's keys: `Transform:Jacobian:folded_fraction`, `:min` and `:sd_log` become
+`Transform:Transform:JacobianFolding`, `JacobianMin` and `JacobianLogStd`; every other key is unchanged.
+`Evaluation_with_jacobian.yml` is now `Evaluation_no_reference.yml`, its results under `NoReference/`. konfai-apps'
+default evaluation mask is one channel, which a masked metric broadcasts over a multi-channel image as before.
+
+#### impact-reg: ensembles and uncertainty on the stack
+
+`register --keep-fields` and the `Ensemble/*.h5` folder are gone: `register --uncertainty` keeps the stack of the
+members (`InferenceStack.<ext>`) when there are members to stack, two or more presets, or one preset with `--tta` on
+a 3-D pair registered whole; a 2-D or tiled run of one preset keeps none and says so. `uncertainty --dvf FIELDS`
+becomes `uncertainty -i STACK` on that stack, and its measures go under `<output>/<case>/Uncertainty/`.
+
+### ✨ Features
+
+- scout: KonfAI Scout, the new `konfai-scout` package, inspects one segmentation, registration or synthesis result as
+  a person would at a viewer. A vision-language model receives coverage montages, asks for slices, zooms and overlays
+  (checkerboard, difference, field magnitude, Jacobian, deformed grid, labels, landmarks), measures regions through
+  `konfai.evaluate`, and writes a versioned report of localised defects in millimetres, each citing its views and
+  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads blind every
+  error that names its box. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API key, Claude
+  Code (`claude-code`) and the Codex CLI (`codex`). Images go to a cloud provider only under `--allow-cloud-images`
+  (`allow_cloud_images` in a config file or a konfai-mcp call); a server named by `--base-url` receives them without
+  it when its address is loopback or when `--local-provider` declares it local, which may be another machine of your
+  network. konfai-mcp runs it (`konfai-mcp[scout]`) and Studio shows its report. With Claude through Claude Code, two
+  passes of synthetic controls found 17 of 18 planted defects and invented no error in six clean inspections.
+- portable: `konfai.portable` compiles a TRANSFORM or PREDICTION config, and `konfai.portable_evaluation` an
+  `Evaluation.yml` or an `Uncertainty.yml`, into a versioned JSON program that KonfAI Edge, the native and browser
+  runtime, runs without Python; a prediction's checkpoints are exported to ONNX beside it, a model that reads several
+  groups included. The workflow is built first, so every refusal KonfAI makes happens before a program exists; a stage
+  or parameter the runtime does not reproduce, or a model that runs Python on the case, is refused by name, and a key
+  with no counterpart is warned about. A program records its members, the inference stack, the window placement, the
+  edge pad and fill, and the precision KonfAI blends at: on a CT through CT-FM's whole-body model, 0 of 2,951,889
+  labels differ from KonfAI's CPU prediction, where 411 did, all on class boundaries, when the program blended at
+  float32. `konfai.portable_schema` is the contract as a JSON Schema. Compiling never writes the caller's config.
+  `docs/source/usage/portable.md` says what compiles.
+- studio: the Deploy pane runs an app on KonfAI Edge in the browser (WebGPU), with the engine and the compiled
+  programs of the app's `web/` folder; it takes the members of the chosen ensemble from the app, shows the output
+  over the input in NiiVue and offers it as a download. `onnxruntime-web` is dropped.
+- patching: `Patch.placement` chooses where the windows of an axis sit: `pad` (the default, as before), `monai` (the
+  last window ends on the volume's last voxel, as MONAI's sliding window, and a `Gaussian` blend is floored at 1e-3)
+  or `spread` (nnU-Net's `compute_steps_for_sliding_window`). Under `monai` and `spread`, an axis shorter than the
+  window is padded on both sides. `Patch.pad_value: edge` and `Resample(fill: edge)` pad with the border value, as
+  MONAI's `replicate` and `border`. MONAI's wholeBody CT bundle ported with `placement: monai` differs from
+  `monai.bundle run` on 0.001 to 0.02 % of the labels. Published apps keep `pad`: no output changes.
+- network: `konfai.network.external.ExternalNet` runs code that is not a PyTorch module (a package, a repository at
+  a commit, a command-line tool, a binary release) as a KonfAI model: an app's `model.py` writes a function of the
+  case's images, and the tool gets KonfAI's readers, writers and patching. `konfai_apps.pinned` fetches what it needs
+  once into `$KONFAI_TOOLS_CACHE` (a repository at a commit, a file checked by its hash, a uv environment), safely
+  under parallel runs. See "Run code you already have" in the adoption guide.
+- config: `!include FILE[#KEY.KEY]` puts in place of a block the block another config file holds: a path relative to
+  the including file, an absolute one, or `owner/name[@revision]:path` in a Hugging Face repository. Apps that share a
+  `Dataset` section or a model's settings keep it in one file. The write-back keeps the `!include` line, not the
+  block; a cycle, a missing key or a value that is not a block is refused by name.
+- dataset: a `.gz` on a format token writes the entry compressed, wherever a format is declared (`dataset_filename`,
+  `Save`, `Write`, evaluation maps): `mha.gz`, `mhd.gz`, `nrrd.gz`, `tif.gz` and `tiff.gz` beside `nii.gz` and
+  `gipl.gz`. MetaImage, NRRD and TIFF compress inside the file, which keeps its suffix and reads back under the plain
+  token; a compressed entry is written whole, not by region. A cohort of synthetic CTs takes about 4 GB instead of
+  45. `:nrrd.gz`, accepted and then refused at write time, now writes a compressed `.nrrd`.
+- dataset: a `dataset_filenames` entry may name a YAML or JSON manifest (`./cases.yml:i:omezarr@1`) giving
+  `CASE: {GROUP: path-or-uri}`, the entries of a case wherever they sit; `:omezarr` reads it, read-only. konfai-apps'
+  `-i`, `--gt` and `--mask` take an OME-Zarr URI (`s3://bucket/scan.ome.zarr`) and read the store in place, chunk by
+  chunk; a typo or a missing credential is refused at staging. On a public S3 bucket: staging 1.1 s, one 8³ region
+  2.3 s, nothing else transferred. `--host`, `uncertainty` and a server upload refuse a URI.
+- dataset: 2-D transforms are stored and read back: the codec holds Euler2D and the 2-D affine and B-spline beside
+  the 3-D kinds (a translation, a versor or a similarity is stored as the affine it is), the `itktransform` backend
+  reads and writes a 2-D field by region as a 3-D one, and a 2-D image warps through a stored 2-D map as SimpleITK
+  warps it.
+- konfai-apps: an app holds presets, named ways to run it, declared in its `app.json` as a description and a list of
+  `NAME=VALUE`, and chosen with `#`: `VBoussot/ImpactReg:ConvexAdam#composite`, or `host:port:app#preset|token` on a
+  server. A preset applies after `Prediction.yml` and before the run's own `--set`, and changes method parameters
+  only. `konfai-apps show APP#PRESET`; `list` shows each app's presets;
+  `konfai-apps preset save APP[#PRESET] NAME --set ...` keeps one of your own under `~/.konfai/presets`
+  (`$KONFAI_PRESETS_DIR`), which never hides a published one of the same name. The Python API and the app server
+  take `get_presets`, `use_preset` and `save_preset`; konfai-mcp's app tools take `ref#preset`.
+- konfai-apps: `infer`, `pipeline` and `fine-tune` take `--output-format [OUTPUT=]FORMAT` and `--seed N`. A dotted
+  `--set` name starts at the model (`--set models.0.layers_mask=01`); a full path from `Predictor.` or `Trainer.`
+  keeps its meaning. Every inference writes `konfai-run.json` beside its outputs: the app, its revision, its preset,
+  every `--set` in order, and an `identity` shared by every run of the same configuration.
+- konfai-apps: `eval` and `pipeline` score a registration from the transform it wrote: a `.tfm`, or a `.h5` no ITK
+  image reader takes, is read as a transform, and the evaluation config pulls the moving side through it
+  (`Volume_0`). `--gt` is optional, for a measure of the output alone. `TransformPoints` pushes landmarks through
+  stored transforms, so a TRE needs no inverted field; `JacobianFolding`, `JacobianMin` and `JacobianLogStd` measure
+  a field with its geometry, a 2-D field as one plane; a field stored as a vector image (ANTs' `Warp.nii.gz`) reads
+  as a transform. On affine and field transforms in `.h5`, `.itk.txt` and `.mha`, the MAE and the TRE are
+  SimpleITK's and the Dice within 3e-4.
+- konfai-apps: `infer APP#a APP#b ...` ensembles app references: one run per reference, every member (a preset, a
+  checkpoint, a TTA copy) reduced once by the app's `combine` (`Mean`, `Median`, `Vote`), so a vote counts every
+  member. With `-uncertainty` the stack of all members is kept beside the output: one volume, member-major channels,
+  `konfai_members: M` in its header (a MetaImage beside a NIfTI or an ITK transform output).
+  `konfai-apps uncertainty APP -i STACK` evaluates it with the `Uncertainty*.yml` an app declares
+  (`inputs_uncertainties`).
+  `Resample` and `TransformPoints` apply each member of a stacked transform, and spread criteria read a stack: the
+  spread of a field's vectors, of landmarks pushed through every member with its calibration against the TRE, and
+  the disagreement of a propagated segmentation.
+- data: a registration writes the transform it found wherever no mean is taken of it: a prediction's header may name
+  a transform file, which an `:itktransform` output writes in place of the field. A TTA mean, an ensemble member or
+  a tile writes the field (a TTA of an affine wrote the first copy's matrix as the mean's). `TransformToField`
+  samples a stored transform on the fixed image's grid, so the measures of a field read it.
+- metric: the measures a registration benchmark reports, streamed as the existing criteria are: Jaccard, the relative
+  volume difference, HD95, ASSD and the surface Dice at a tolerance; NMI, NCC and LNCC for images without
+  annotation (moments in float64, so they hold on MR and CT intensities); a field's bending energy and displacement
+  lengths; with `Fill` and `WorldCoordinates`, the share of the fixed grid sent outside the moving image and an
+  inverse consistency (`PointDistance`); `worst30`, the mean of a metric's worst 30 % of cases (Learn2Reg's DSC30 and
+  TRE30). impact-reg-konfai's configs gain them, and `Evaluation_inverse_consistency.yml` measures a registration
+  against the one registered back.
+- metric: `MissingLabels` counts the labels of the reference the output lacks (a structure a segmentation missed or a
+  warp lost), and `TRE(percentile=...)` reports that percentile of a case's landmark errors. New stages: `Otsu()`, a
+  body mask from ITK's Otsu threshold; `KeepLabels(group)`, the labels another group of the case also holds, read
+  block by block; `Displace(field_group)`, landmarks moved by the case's displacement field.
+- impact-reg: ConvexAdam's `deformable_masked: false` keeps the masks for the affine pre-alignment only and
+  registers the whole image, as the authors' `convex_adam_MIND` does: on an AbdomenMRCT pair, Dice 0.721 masked,
+  0.805 unmasked, 0.804 for the authors' code. It defaults to `true`: the presets run as before.
+
+### 🐛 Bug Fixes
+
+- metric: a masked SSIM averages its map over the mask's voxels in the cropped extent, as SynthRAD's evaluation
+  does. Every voxel outside the mask compared two zeros and scored 1 (a constant image scored 0.93 on an AutoPET
+  case), so a masked SSIM reported before is higher than the same SSIM now.
+- metric: a masked `Dice`, `DiceSaveMap`, `Jaccard` or `MissingLabels` whose reference sits on another grid than the
+  output raised a broadcast error; the reference and its masks are put on the output's grid first.
+- augmentation: undoing a test-time flip of a displacement field raised `KeyError`, so no registration app could run
+  with TTA; a test-time mirror records its grid's directions as a training draw does.
+- predictor: an oblique case whose finalize chain undoes a `Resample` then a `Canonical` came out with the wrong
+  shape; such a stage now takes the buffered path. A failed streamed write aborts and removes its temporary file
+  instead of raising `BufferError`.
+- evaluator: a whole-case error map is written on its output's grid, in the format the config asks for; it took the
+  header of whichever group came first and could come out as a `.npy`.
+- omezarr: an RFC-5 `affine` whose matrix sits in an array of the store, as ngff-zarr 0.52 writes it, reads in the
+  `:omezarr` backend and in impact-reg's `apply` and `eval`, where it raised `KeyError: 'affine'`.
+- runtime: a DDP rank no longer aborts or hangs at exit: `cleanup()` collects the DistributedDataParallel wrapper
+  before destroying its process group (on two cores, 0 of 30 runs failed, 9 of 30 before).
+
+### ⚡ Performance
+
+- resample: a stored B-spline's region is bounded by the control points around it rather than the whole lattice's
+  range, so one large coefficient no longer widens every window: a cube of a 976 GB hemisphere scan on S3, through a
+  B-spline with coefficients up to 64.8 mm, streams in 26 s at a 1.17 GiB peak where it was planned whole-volume.
+  Pricing a region takes 0.2 to 0.7 ms instead of 0.03.
+- dataset: a multi-channel volume is handed to SimpleITK as a contiguous array: a 134 MB float32 volume of four
+  channels writes in 0.16 s instead of 0.24, the same bytes.
+
+### 📝 Documentation
+
+- New pages and sections: running a workflow without Python (`usage/portable.md`), "Run code you already have" in the
+  adoption guide, "Sharing a block between files" in the config guide, a manifest of explicit entries and the
+  OME-Zarr geometry KonfAI writes in the storage backends reference, and the design notes on presets and ensembles.
 
 ## v1.8.8 (2026-11-02)
 
