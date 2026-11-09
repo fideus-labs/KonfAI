@@ -1276,7 +1276,7 @@ class ImpactRegKonfAIApp:
                 if sources == members and len(presets) == 1:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
-                    # An ensemble is konfai-apps' (docs/design/ensembles.md): every member reduced into the field,
+                    # An ensemble is konfai-apps' (konfai_apps/ensemble.py): every member reduced into the field,
                     # slab by slab, the members on one grid. With --uncertainty their stack is kept beside it, built
                     # here, or for a 2-D pair once its members are planes again (below).
                     form = _form(members[0])

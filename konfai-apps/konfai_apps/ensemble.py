@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Ensembles of app references, ``konfai-apps infer APP#a APP#b ...`` (docs/design/ensembles.md).
+"""Ensembles of app references, ``konfai-apps infer APP#a APP#b ...``.
 
 A member of an ensemble is one run of a model, whatever tells it from the others: a preset, a checkpoint, a TTA copy.
 A reference's own checkpoints and TTA copies stay in its predictor run, which hands over its stack when it holds

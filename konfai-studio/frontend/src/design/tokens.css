@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* KonfAI identity: the tokens every surface of the family reads (the site, Studio, the sister sites).
-   A consumer maps its own semantic names onto these (README.md shows how) and never redefines a value. */
+/* KonfAI identity: the tokens the site and Studio read. A page maps its own semantic names onto these and never
+   redefines a value. */
 :root {
   /* ---- Hues. One per piece of the family. The solid is for fills, rails, marks and meters; the ink is the
      same hue as text on a dark ground (every ink reads at 10:1 or better on --k-night). ---- */

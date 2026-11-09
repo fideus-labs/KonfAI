@@ -89,7 +89,8 @@ pixi run --environment dev python benchmarks/perf/run_all.py            # add --
 pixi run --environment dev python benchmarks/perf/compare.py results/<host>/<baseline>.json results/<host>/<run>.json
 # the release gate: the series, then the comparison to baselines/<host>.json (exit 1 on a regression)
 pixi run perf-check
-# once a release is out, or when a bench joins the series: this run becomes the host's baseline
+# once a release is out, or when a bench joins the series: this run becomes the host's baseline, kept on that
+# machine (baselines/ is not committed: a baseline says only what one machine measured)
 # (a quiet machine and a clean tree; a baseline missing a bench makes every comparison invalid)
 cp results/<host>/<stamp>-<sha>-all.json baselines/<host>.json
 cp results/<host>/<stamp>-<sha>-all.md baselines/<host>.md

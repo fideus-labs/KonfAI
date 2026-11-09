@@ -741,7 +741,7 @@ def main_apps() -> None:
             type=str,
             nargs="+" if several else None,
             help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets"
-            + ("; several, an ensemble of their members (docs/design/ensembles.md)" if several else ""),
+            + ("; several, an ensemble of their members" if several else ""),
         )
         parser.add_argument("--host", type=str, default=None, help="Server host")
         parser.add_argument("--port", type=int, default=8000, help="Server port")

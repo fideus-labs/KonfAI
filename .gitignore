@@ -29,3 +29,6 @@ KonfAI_Workspaces/
 konfai-mcp/tests/fixtures/
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+
+# A perf baseline belongs to the machine that took it: kept there, never committed
+benchmarks/perf/baselines/
