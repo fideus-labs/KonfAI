@@ -223,3 +223,10 @@ def test_write_inputs_names_a_store_uri_in_the_remote_manifest(tmp_path: Path, m
     KonfAIApp._clear_dataset()
 
     assert not manifest.exists()
+
+
+def test_a_local_path_given_as_text_is_a_local_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URI is the only input kept as text: a caller's plain string names a local file, not a URI to refuse."""
+    (tmp_path / "scan.mha").touch()
+    monkeypatch.chdir(tmp_path)
+    assert KonfAIApp._list_input_units(["scan.mha"]) == [(Path("scan.mha"), ".mha")]

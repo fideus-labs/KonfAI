@@ -9,7 +9,7 @@ measures the misalignment before registration).
 | Modality | Options | Metric | Unit |
 |---|---|---|---|
 | image | `-f` / `-m`, optional `--mask` (on the fixed grid) | the fixed image against the warped moving one, inside the mask: MAE (one modality, one scale), NMI (any modalities), NCC and LNCC (one modality); and the share of the fixed grid sent outside the moving image | intensity unit; 1 to 2; -1 to 1; 0 to 1; 0 to 1 |
-| segmentation | `--gt-fixed-seg` / `--gt-moving-seg` | every label of the fixed segmentation, and their mean: Dice, Jaccard, relative volume difference; HD95, ASSD; surface Dice at 2 mm | 0 to 1; mm; 0 to 1 |
+| segmentation | `--gt-fixed-seg` / `--gt-moving-seg` | every label of the fixed segmentation, and their mean: Dice, Jaccard, relative volume difference; HD95, ASSD; surface Dice at 2 mm | Dice, Jaccard 0 to 1, relative volume difference 0 and up; mm; 0 to 1 |
 | landmarks | `--gt-fixed-fid` / `--gt-moving-fid` | TRE: each fixed landmark pushed through the transform, against its moving partner | mm |
 
 When the transform is a displacement field or a B-spline, `eval` also reports its **measures without reference**: from the

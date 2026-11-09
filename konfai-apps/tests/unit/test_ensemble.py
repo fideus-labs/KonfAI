@@ -180,3 +180,8 @@ def test_the_checkpoints_an_app_runs_by_default_are_members(tmp_path: Path) -> N
     np.testing.assert_allclose(output, np.median(np.concatenate(list(members.values())), 0), atol=1e-6)
     record = json.loads((tmp_path / "out" / "konfai-run.json").read_text(encoding="utf-8"))
     assert record["members"] == ["A [1/2]", "A [2/2]", "B [1/2]", "B [2/2]"]
+
+
+def test_a_dicom_output_s_stack_is_a_metaimage() -> None:
+    """A DICOM series has no form: its stack is written as MetaImage, with its suffix, not as a bare ``InferenceStack``."""
+    assert ensemble.stack_file("") == "InferenceStack.mha"

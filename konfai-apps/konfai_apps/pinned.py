@@ -64,7 +64,7 @@ def _staged(target: Path) -> Iterator[Path]:
 def pinned_source(name: str, url: str, commit: str) -> Path:
     """The authors' repository at ``commit``, cloned once into the cache: an app runs the code it was measured with,
     never a moving branch."""
-    target = cache_dir() / f"{name}-{commit[:12]}"
+    target = cache_dir() / f"{name}-{commit[:12]}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
     if not target.exists():
         with _staged(target) as part:
             subprocess.run(["git", "clone", "--quiet", url, str(part)], check=True)  # nosec B603 B607
