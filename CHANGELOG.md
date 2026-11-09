@@ -178,8 +178,8 @@ becomes `uncertainty -i STACK` on that stack, and its measures go under `<output
   a person would at a viewer. A vision-language model receives coverage montages, asks for slices, zooms and overlays
   (checkerboard, difference, field magnitude, Jacobian, deformed grid, labels, landmarks), measures regions through
   `konfai.evaluate`, and writes a versioned report of localised defects in millimetres, each citing its views and
-  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads every error
-  blind. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API key, Claude
+  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads blind every
+  error that names its box. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API key, Claude
   Code (`claude-code`) and the Codex CLI (`codex`). Images go to a cloud provider only under `--allow-cloud-images`
   (`allow_cloud_images` in a config file or a konfai-mcp call); a server named by `--base-url` receives them without
   it when its address is loopback or when `--local-provider` declares it local, which may be another machine of your
