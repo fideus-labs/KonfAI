@@ -55,7 +55,7 @@
     <p class="agentband hue-studio"><span class="k-kicker">Your way</span><span>The command line, Python, 3D Slicer or a chat in <a href="studio.html">KonfAI Studio</a>; agents through <a href="mcp.html">KonfAI MCP</a>.</span></p>
     <ol class="stages">
       <li class="stage data"><span class="node"></span><span class="k-kicker">Data</span><h3>Your images</h3><p>ITK, DICOM, HDF5, OME-Zarr, read by region.</p><code class="call">./Dataset:mha</code></li>
-      <li class="stage hue-engine"><span class="node"></span><span class="k-kicker">Build</span><h3>KonfAI</h3><p>One YAML to train, predict and evaluate.</p><code class="art">Config.yml</code><code class="call">konfai TRAIN</code></li>
+      <li class="stage hue-engine"><span class="node"></span><span class="k-kicker">Build</span><h3>KonfAI</h3><p>A YAML per workflow: train, predict, evaluate.</p><code class="art">Config.yml</code><code class="call">konfai TRAIN</code></li>
       <li class="stage hue-scout"><span class="node"></span><span class="k-kicker">Inspect</span><h3>Scout</h3><p>Reads the result like a person and boxes what is wrong.</p><code class="art">verdict + boxes</code><code class="call">konfai-scout inspect</code></li>
       <li class="stage hue-mcp"><span class="node"></span><span class="k-kicker">Score</span><h3>FidOpt</h3><p>Same held-out cases, same rules, every method.</p><code class="art">the board</code><code class="call">fidopt run</code></li>
       <li class="back" aria-label="Not better yet: tune, retrain and score again"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="M83.3 0 V58 Q83.3 88 76 88 H24 Q16.7 88 16.7 58 V8"/></svg><span>not better yet: tune, retrain, score again</span></li>
@@ -81,7 +81,7 @@
 <section class="sec wrap">
   <div class="head k-reveal"><h2>The pieces<small>Each one stands alone.</small></h2></div>
   <div class="cards">
-    <a class="k-card k-reveal hue-engine" href="docs/get-started.html"><span class="k-kicker">Engine</span><h3>KonfAI</h3><p>Patch-native training and inference from one YAML, with the PyTorch and MONAI parts you already use. Six MICCAI 2025 challenge results.</p><span class="go">Get started →</span></a>
+    <a class="k-card k-reveal hue-engine" href="docs/get-started.html"><span class="k-kicker">Engine</span><h3>KonfAI</h3><p>Patch-native training and inference, one YAML per workflow, with the PyTorch and MONAI parts you already use. Six MICCAI 2025 challenge results.</p><span class="go">Get started →</span></a>
     <a class="k-card k-reveal hue-apps" href="apps.html"><span class="k-kicker">Apps</span><h3>KonfAI Apps</h3><p>TotalSegmentator, MRSegmentator, ImpactSynth, ImpactSeg and IMPACT-Reg, behind one contract: local, on Hugging Face or over HTTP.</p><span class="go">See the apps →</span></a>
     <a class="k-card k-reveal hue-scout" href="scout.html"><span class="k-kicker">Inspection</span><h3>KonfAI Scout</h3><p>Inspects a segmentation, a registration or a synthesis like a person at a viewer, and shows where it is wrong.</p><span class="go">How it reads a result →</span></a>
     <a class="k-card k-reveal full hue-studio" href="studio.html"><span class="txt"><span class="k-kicker">Studio</span><h3>KonfAI Studio</h3><p>A chat over your dataset: inspect, train, evaluate and look at the volumes, with your own model endpoint.</p><span class="go">Open Studio →</span></span><img class="shot" src="assets/studio-screenshot.png" alt="KonfAI Studio: the conversation beside the workspace and the viewer" loading="lazy" width="1600" height="900"></a>

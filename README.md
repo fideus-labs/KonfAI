@@ -20,7 +20,7 @@
   · <a href="https://www.arxiv.org/abs/2508.09823"><strong>Paper</strong></a>
 </p>
 
-**KonfAI is a declarative engine for medical-imaging AI, and the pieces around it**: build a method from one YAML,
+**KonfAI is a declarative engine for medical-imaging AI, and the pieces around it**: build a method in YAML,
 inspect it, score it and ship it. The whole family on one page:
 **[fideus-labs.github.io/KonfAI](https://fideus-labs.github.io/KonfAI/)**.
 
@@ -28,7 +28,7 @@ inspect it, score it and ship it. The whole family on one page:
 
 | Piece | What it does | Get it |
 | --- | --- | --- |
-| **KonfAI** | Trains, predicts and evaluates from one YAML, on images of any size | `pip install "konfai[imaging]"` |
+| **KonfAI** | Trains, predicts and evaluates, one YAML per workflow, on images of any size | `pip install "konfai[imaging]"` |
 | **KonfAI Scout** | Inspects a result like a person at a viewer and shows where it is wrong | [`konfai-scout/`](konfai-scout) |
 | **FidOpt** | The open benchmark: 311 datasets, the same rules for every method | [fidopt.io](https://fidopt.io/) |
 | **KonfAI Apps** | Five published models behind one contract: local, on Hugging Face or over HTTP | `pip install konfai-apps` |
@@ -61,8 +61,8 @@ Trainer:
 konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 ```
 
-- **Scale.** Patches are read by region from ITK, HDF5, DICOM and OME-Zarr; prediction handles batching, test-time
-  augmentation, ensembles, overlap and geometry.
+- **Scale.** Patches are read by region from ITK, HDF5, DICOM and OME-Zarr when the preprocessing streams, and through
+  a bounded buffer when it does not; prediction handles batching, test-time augmentation, ensembles, overlap and geometry.
 - **Reproduce.** Defaults are written into the YAML, and configs travel with their runs.
 - **Keep your stack.** Regular PyTorch and MONAI components plug in, and selected MONAI, nnU-Net, torchvision and
   segmentation-models-pytorch models have documented paths:
