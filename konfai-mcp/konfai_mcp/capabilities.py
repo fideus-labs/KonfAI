@@ -91,15 +91,16 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "multi-model setups (GAN, teacher-student): requires a Network subclass, not a black-box wrap",
         ],
         "safe_actions": [
-            "inspect_dataset, list_components, describe_*, inspect_object_signature",
+            "inspect_dataset, list_components, describe_config_schema, describe_extension_points",
             "write_workflow_config / write_session_file (authoring)",
-            "check_config (level 'review' is side-effect-free), check_component (no import side effects)",
-            "check_component with a kind (executes a custom transform/criterion contract in an isolated subprocess)",
-            "read_live_metrics, leaderboard, summarize_session (read-only)",
+            "check_config at level 'review' and check_component without a kind (static, nothing imported)",
+            "read_live_metrics, leaderboard, summarize_session without include_validation",
         ],
         "risky_actions_prefer_human_confirmation": [
             "run_train / run_prediction / run_evaluation (commits GPU/compute)",
-            "executing agent-authored or downloaded Python (validation imports workspace code)",
+            "executing agent-authored or downloaded Python: check_component with a kind, check_config past 'review', "
+            "inspect_object_signature, describe_model_outputs, describe_app with parameters, summarize_session with "
+            "include_validation (each imports or builds workspace or app code in a subprocess, not a sandbox)",
             "adding an external dependency or accepting its license",
             "selecting the final model / preparing a submission",
             "destructive dataset operations (move/overwrite)",
