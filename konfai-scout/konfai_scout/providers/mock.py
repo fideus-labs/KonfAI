@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from ..views import DEFAULT_MODE
 from .base import ImageContent, ToolCall, ToolResult, ToolSpec, Turn, Usage
 
 Policy = Callable[[str, list[dict[str, Any]], list[ToolSpec]], Turn]
@@ -97,6 +98,9 @@ class HeuristicProvider(ScriptedProvider):
         self.stats_asked = False
         self.results: list[dict[str, Any]] = []
         self.n = 0
+        self.leads: list[tuple[str, dict[str, Any]]] = []
+        self.leads_seen = False
+        self.lead_views: list[str] = []
 
     def _tool_names(self) -> set[str]:
         return {t.name for t in self.tools}
@@ -119,6 +123,10 @@ class HeuristicProvider(ScriptedProvider):
         match = re.search(r"Task: (\w+)", text)
         self.task = match.group(1) if match else "segmentation"
         self.coverage_views = re.findall(r"^- (v\d+):", text, flags=re.MULTILINE)
+        self.leads = [
+            (lead, json.loads(box))
+            for lead, box in re.findall(r"^- (l\d+) \w+, box (\{.*?\}):", text, flags=re.MULTILINE)
+        ]
         return self._plan([])
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
@@ -157,6 +165,26 @@ class HeuristicProvider(ScriptedProvider):
         self.step += 1
         if self.step == 1 and "montage" in names:
             return turn(self._call("montage", plane="axial"), text="Coverage first.")
+        if self.leads and not self.leads_seen and "view" in names:  # then every lead, before anything else
+            self.leads_seen = True
+            return turn(
+                *[
+                    self._call(
+                        "view",
+                        plane="axial",
+                        mode=DEFAULT_MODE.get(self.task, "image"),
+                        position_mm=None,
+                        index=None,
+                        window=None,
+                        label=None,
+                        zoom=box,
+                    )
+                    for _, box in self.leads
+                ],
+                text="Looking at each lead.",
+            )
+        if self.leads_seen and not self.lead_views:
+            self.lead_views = [r["view"]["id"] for r in parsed if "view" in r]
         asked = any("region" in r for r in self.results) or any(
             r.get("error") and "region_stats" in str(r.get("text", "")) for r in self.results
         )
@@ -207,13 +235,13 @@ class HeuristicProvider(ScriptedProvider):
                 self._call(
                     "note",
                     kind=kind,
-                    defect=self.suspect["defect"],
+                    defect=self.suspect["defect"] if kind != "measured_property" else "other",
                     severity=severity,
                     confidence=0.8 if kind == "confirmed_error" else 0.5,
                     description=self.suspect["why"] + (f"; {measured['text']}" if measured else ""),
-                    box_mm=self.suspect["box"],
+                    box_mm=self.leads[0][0] if self.leads else self.suspect["box"],
                     plane="axial",
-                    views=[v for v in [self.view_id] if v] or self.coverage_views[:1],
+                    views=self.lead_views[:1] or [v for v in [self.view_id] if v] + self.coverage_views,
                     measurements=measurement_ids,
                 )
             )

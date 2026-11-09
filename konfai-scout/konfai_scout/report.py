@@ -161,6 +161,8 @@ class Report:
     transcript_path: str | None = None
     #: The blind second reading of the error observations, when asked: model, counts by answer, transcript path.
     second_reading: dict[str, Any] | None = None
+    #: The survey's leads (id, kind, box, reason) and the slice views that looked at each.
+    leads: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -188,6 +190,7 @@ class Report:
             error=data.get("error"),
             transcript_path=data.get("transcript_path"),
             second_reading=data.get("second_reading"),
+            leads=list(data.get("leads") or []),
         )
 
     def save(self, out: Path) -> Path:
@@ -348,6 +351,14 @@ def render_markdown(report: Report) -> str:
             if v is None:
                 continue
             lines += [f"![{vid}: {v.plane} {v.mode}]({v.path})", ""]
+    if report.leads:
+        lines += ["## Leads", ""]
+        lines += [
+            f"- {lead['id']} {lead['kind']}: {lead['reason']}. "
+            + (f"Looked at in {', '.join(lead['views'])}." if lead.get("views") else "Not looked at.")
+            for lead in report.leads
+        ]
+        lines.append("")
     lines += ["## Prior evaluation (KonfAI Eval, whole case)", ""]
     if report.prior_evaluation:
         lines += [f"- {k} = {value_text(v)}" for k, v in report.prior_evaluation.items()] + [""]

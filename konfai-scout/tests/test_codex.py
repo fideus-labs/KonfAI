@@ -98,13 +98,15 @@ def _provider(monkeypatch, script: list[dict], **kwargs) -> tuple[CodexProvider,
 
 def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path, monkeypatch):
     case, _ = fixtures["segmentation"]
+    world = case.grid.world_box()  # a small box at the centre, which the central slice shows
+    centre = {"center": ((world.low_xyz + world.high_xyz) / 2).tolist(), "size": 6.0}
     script = [
         {
             "calls": [
                 ("view", VIEW),
                 ("view", {**VIEW, "mode": "both"}),
                 ("region_stats", {"box_mm": {"center": [0.0, 0.0, 0.0], "size": 10.0}}),  # refused: the budget is spent
-                ("note", lambda views: {**NOTE, "views": views[:1]}),
+                ("note", lambda views: {**NOTE, "views": views[:1], "box_mm": centre}),
                 ("conclude", CONCLUDE),
             ]
         }
@@ -154,7 +156,7 @@ def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path,
 
 
 def test_a_silent_turn_is_reminded_on_the_resumed_session_and_failures_are_classified(fixtures, tmp_path, monkeypatch):
-    case, _ = fixtures["segmentation_no_truth"]
+    case, _ = fixtures["segmentation_clean"]
     script = [{"calls": [], "text": "looks fine"}, {"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}]
     provider, fake = _provider(monkeypatch, script)
     config = ScoutConfig(provider="codex", allow_cloud_images=True, retry_wait_seconds=0.0, max_px=200)
@@ -165,7 +167,8 @@ def test_a_silent_turn_is_reminded_on_the_resumed_session_and_failures_are_class
     assert "Nothing was recorded" in fake.prompts[1] and not fake.prompts[1].startswith("You are KonfAI Scout")
 
     provider, fake = _provider(
-        monkeypatch, [{"fail": "rate limit exceeded (429)"}, {"calls": [("conclude", CONCLUDE)]}]
+        monkeypatch,
+        [{"fail": "rate limit exceeded (429)"}, {"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}],
     )
     report = inspect(case, config, tmp_path / "transient", provider=provider)
     assert report.error is None and len(fake.commands) == 2  # retried once, on the same thread

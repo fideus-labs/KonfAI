@@ -25,11 +25,12 @@ from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import RegionEvaluator, konfai_version, load_prior
 from .measure import label_stats
-from .planes import box_around, box_center, box_from_dict, box_size, describe_grid
+from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers.pricing import cost_usd, price_of
 from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
+from .survey import Lead, leads_text, survey
 from .tools import Toolbox
 from .views import DEFAULT_MODE, Renderer, ViewError
 
@@ -124,6 +125,7 @@ class Inspector:
         self.renderer = Renderer(case, self.out / "work", config, self.out / "evidence")
         self.evaluator = RegionEvaluator(case, config, self.out / "work", self.renderer.derived)
         self.toolbox = Toolbox(case, config, self.renderer, self.evaluator)
+        self.toolbox.closing = lambda: self.budget.exhausted() is not None
         self.usage = Usage()
         self.price = price_of(config.model or "", config.prices)
         self.budget = BudgetState(config, time.time())
@@ -140,7 +142,10 @@ class Inspector:
         tools = self.toolbox.specs(exploration)
         self.provider.start(system, tools)
         images, views_text = self._coverage()
-        card = case_card(self.case, prior, self._labels_summary(), self.renderer.modes(), views_text)
+        self.toolbox.leads, survey_text = self._survey(exploration)
+        card = case_card(
+            self.case, prior, self._labels_summary(), self.renderer.modes(), f"{views_text}\n\n{survey_text}"
+        )
         try:
             if getattr(self.provider, "drives_tools", False):
                 self._run_driven(card, images)
@@ -299,11 +304,21 @@ class Inspector:
         }
 
     def _crops(self, observation: Observation) -> tuple[list[ImageContent], list[str], list[str]]:
-        """The region of an observation, twice its box (at least a dozen voxels), in the second reader's modes."""
+        """The region of an observation, twice its box (at least a dozen voxels), in the second reader's modes, on
+        the slice the first reader cited (the box's centre slice may miss what a large box holds elsewhere)."""
         box = box_from_dict(observation.box_mm)
         spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
         zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, 12.0 * spacing))
         plane = observation.plane or "axial"
+        known = {v.id: v for v in self.renderer.views}
+        cited = [
+            known[v]
+            for v in observation.views
+            if v in known and known[v].kind == "slice" and box_intersection(box_from_dict(known[v].box_mm), box)
+        ]
+        index = None
+        if cited:
+            plane, index = cited[0].plane, cited[0].index
         modes = [m for m in SECOND_READING_MODES[self.case.task] if m in self.renderer.modes()][:3]
         if self.case.task == "registration" and observation.defect in ("folding", "implausible_deformation"):
             modes = [*modes[:2], "jacobian"]
@@ -311,7 +326,7 @@ class Inspector:
         ids: list[str] = []
         lines: list[str] = []
         for mode in modes:
-            png, view = self.renderer.render(plane, mode, zoom=zoom)
+            png, view = self.renderer.render(plane, mode, index=index, zoom=zoom)
             images.append(ImageContent(png, f"[{view.id}]"))
             ids.append(view.id)
             legend = view.extra.get("legend")
@@ -341,6 +356,14 @@ class Inspector:
                     images.append(ImageContent(png, f"[{view.id}]"))
                     lines.append(f"- {view.id}: {plane} central slice, mode {mode}")
         return images, "\n".join(lines)
+
+    def _survey(self, active: bool) -> tuple[list[Lead], str]:
+        """The leads, and their text for the case card: a survey that fails costs the leads, not the inspection."""
+        try:
+            leads = survey(self.renderer)
+        except Exception as error:
+            return [], f"Leads: the survey failed ({type(error).__name__}: {error})."
+        return leads, leads_text(leads, active)
 
     def _labels_summary(self) -> dict[str, object]:
         role = {"segmentation": "prediction", "registration": "fixed_labels", "synthesis": None}[self.case.task]
@@ -423,6 +446,7 @@ class Inspector:
             },
             error=self.error,
             transcript_path="transcript.json",
+            leads=[{**lead.to_dict(), "views": self.toolbox.lead_views(lead)} for lead in self.toolbox.leads],
             second_reading=self.second_reading,
         )
         report.save(self.out)

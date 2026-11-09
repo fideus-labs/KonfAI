@@ -10,6 +10,7 @@ import json
 import math
 import re
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -24,6 +25,7 @@ from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation, value_text
 from .report import ToolCall as ToolCallRecord
+from .survey import Lead
 from .views import WINDOW_PRESETS, Renderer, ViewError
 
 _BOX = {
@@ -61,6 +63,10 @@ class Toolbox:
         self.observations: list[Observation] = []
         self.conclusion: Conclusion | None = None
         self.images_sent = 0
+        #: Where the survey says to look; in active mode `conclude` waits until each was looked at.
+        self.leads: list[Lead] = []
+        #: Whether the budget is spent: then a conclusion is taken as it comes.
+        self.closing: Callable[[], bool] = lambda: False
 
     # ------------------------------------------------------------------ schemas
 
@@ -168,7 +174,9 @@ class Toolbox:
                         "severity": {"type": "string", "enum": list(SEVERITIES)},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "description": {"type": "string"},
-                        "box_mm": _nullable(_BOX),
+                        "box_mm": _nullable(
+                            {"anyOf": [_BOX, {"type": "string", "description": "A lead's id: its box is taken."}]}
+                        ),
                         "plane": _nullable({"type": "string", "enum": list(PLANES)}),
                         "views": {
                             "type": "array",
@@ -394,6 +402,11 @@ class Toolbox:
             raise ValueError(f"severity is one of {SEVERITIES}")
         if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
             raise ValueError("confidence is a number between 0 and 1")
+        if kind == "measured_property" and defect != "other":
+            raise ValueError(
+                f"a measured_property is a number, not a defect: a {defect} is a suspected_error or a "
+                "confirmed_error; a property takes defect 'other'"
+            )
         known_views = {v.id: v for v in self.renderer.views}
         known_measurements = {m.id: m for m in self.measurements}
         views = list(views or [])
@@ -403,6 +416,11 @@ class Toolbox:
             raise ValueError(
                 f"unknown evidence id(s) {unknown}; cite ids returned by view, montage, measure or region_stats"
             )
+        if isinstance(box_mm, str):  # a lead's id: its box, rather than coordinates read off a view
+            leads = {lead.id: lead for lead in self.leads}
+            if box_mm not in leads:
+                raise ValueError(f"no lead {box_mm!r}; leads: {', '.join(leads) or 'none'}")
+            box_mm = leads[box_mm].box_mm
         box = box_from_dict(box_mm) if box_mm else None
         cited_views = [known_views[v] for v in views]
         cited = [known_measurements[m] for m in measurements]
@@ -415,6 +433,15 @@ class Toolbox:
         if kind != "measured_property":
             if not cited_views:
                 raise ValueError("an error cites at least one view that shows it")
+            grid_box = self.renderer.grid.world_box()
+            if box is None or (
+                defect not in GLOBAL_DEFECTS
+                and np.prod(box.high_xyz - box.low_xyz) > 0.25 * np.prod(grid_box.high_xyz - grid_box.low_xyz)
+            ):
+                raise ValueError(
+                    "an error says where it is: a box (or a lead's id) over less than a quarter of the image; only a "
+                    f"defect that can be everywhere ({', '.join(GLOBAL_DEFECTS)}) may span it"
+                )
             if box is not None and not any(_shows(v, box, self.renderer.grid) for v in cited_views):
                 raise ValueError(
                     f"none of the cited views shows the box {box_to_dict(box)}: cite a view that covers it, or "
@@ -490,11 +517,30 @@ class Toolbox:
             raise ValueError(f"verdict is one of {VERDICTS}")
         if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
             raise ValueError("confidence is a number between 0 and 1")
+        errors = [o for o in self.observations if o.kind != "measured_property"]
+        if verdict == "defective" and not errors:
+            raise ValueError("a defective verdict rests on error observations: note them first")
+        serious = [o.id for o in errors if o.severity in ("major", "critical") and o.confidence >= 0.5]
+        if verdict != "defective" and serious:
+            raise ValueError(
+                f"{', '.join(serious)} records a major error at confidence 0.5 or more: the verdict is 'defective'"
+            )
+        unseen = [lead.id for lead in self.leads if not self.lead_views(lead)]
+        if unseen and self.config.mode == "active" and not self.closing():
+            raise ValueError(
+                f"lead(s) {', '.join(unseen)} not looked at: render a slice through each box (a view zoomed on it), "
+                "judge what it shows, then conclude"
+            )
         reason = None
+        if unseen:
+            reason = f"lead(s) {', '.join(unseen)} not looked at"
         if verdict == "defective" and not any(o.kind == "confirmed_error" for o in self.observations):
-            reason = (
-                "the verdict is 'defective' with no confirmed error recorded: it rests on suspected errors; "
-                "read it as 'likely defective'"
+            reason = "; ".join(
+                [
+                    *([reason] if reason else []),
+                    "the verdict is 'defective' with no confirmed error recorded: it "
+                    "rests on suspected errors; read it as 'likely defective'",
+                ]
             )
         self.conclusion = Conclusion(
             verdict=verdict,
@@ -505,6 +551,11 @@ class Toolbox:
         )
         record.summary = f"{verdict} ({confidence:.2f})"
         return {"conclusion": {"verdict": verdict, "note": reason}, "summary": record.summary}, []
+
+    def lead_views(self, lead: Lead) -> list[str]:
+        """The slice views (not montage tiles) that show some of a lead's box."""
+        box = box_from_dict(lead.box_mm)
+        return [v.id for v in self.renderer.views if v.kind == "slice" and _shows(v, box, self.case.grid)]
 
 
 def _number(value: object) -> float | None:
@@ -543,6 +594,9 @@ def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:
         return False
     return box_intersection(box_from_dict(view.box_mm), box) is not None
 
+
+#: Defects that may span the whole image; any other error is local.
+GLOBAL_DEFECTS = ("blur", "intensity_bias", "over_smoothing")
 
 _NUMBER = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
 _UNIT_FIGURE = re.compile(

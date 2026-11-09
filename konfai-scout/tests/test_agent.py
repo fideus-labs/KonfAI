@@ -9,6 +9,7 @@ import pytest
 from konfai_scout import InspectionCase, ScoutConfig, inspect
 from konfai_scout.agent import parse_second_reading
 from konfai_scout.config import Budget
+from konfai_scout.planes import box_to_dict
 from konfai_scout.prompts import PROMPT_VERSION
 from konfai_scout.providers.base import ProviderError, Turn, Usage
 from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, call, turn
@@ -82,7 +83,7 @@ def test_the_budget_ends_an_endless_explorer(fixtures, tmp_path):
 
 
 def test_a_retryable_provider_error_is_retried_and_a_fatal_one_recorded(fixtures, tmp_path):
-    case, _ = fixtures["segmentation"]
+    case, _ = fixtures["segmentation_clean"]
     script = [turn(call("conclude", 1, verdict="acceptable", summary="fine", confidence=0.6))]
     provider = ScriptedProvider(list(script), raise_at={1: ProviderError("overloaded", retryable=True)})
     config = ScoutConfig(provider="mock", retry_wait_seconds=0.0, max_px=200)
@@ -112,7 +113,7 @@ def test_a_refusal_and_a_silent_model_are_recorded(fixtures, tmp_path):
 
 
 def test_tool_errors_do_not_end_the_inspection(fixtures, tmp_path):
-    case, _ = fixtures["registration_no_ref"]
+    case, _ = fixtures["registration_clean"]
     script = [
         turn(
             call(
@@ -132,11 +133,11 @@ def test_tool_errors_do_not_end_the_inspection(fixtures, tmp_path):
                 "note",
                 2,
                 kind="suspected_error",
-                defect="other",
+                defect="over_smoothing",  # a defect that may span the image, so the whole grid is a place
                 severity="minor",
                 confidence=0.5,
                 description="d",
-                box_mm=None,
+                box_mm=box_to_dict(case.grid.world_box()),
                 plane=None,
                 views=["v001"],
                 measurements=[],

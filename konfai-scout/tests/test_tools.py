@@ -58,10 +58,15 @@ def test_notes_need_known_evidence_and_confirmation_needs_a_measurement(fixtures
         severity="minor",
         confidence=0.5,
         description="x",
+        box_mm=view["box_mm"],
         views=[view["id"]],
         measurements=[],
     )["observation"]
     assert downgraded["kind"] == "suspected_error" and downgraded["notes"]
+    nowhere = {"kind": "suspected_error", "severity": "minor", "confidence": 0.5, "description": "x"}
+    assert "says where" in run(box, "note", **nowhere, defect="leak", views=[view["id"]], measurements=[])["error"]
+    whole = box_to_dict(box.case.grid.world_box())
+    assert "says where" in run(box, "note", **nowhere, defect="leak", box_mm=whole, views=[view["id"]])["error"]
     wrong = run(
         box,
         "note",
@@ -133,9 +138,14 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
     # a figure needs a source: the measurement that holds it, cited
     stats = run(box, "region_stats", box_mm=cube)
     mid, voxels = stats["measurement"]["id"], stats["region"]["truth_labels"]["2"]["voxels"]
+    named = {"kind": "measured_property", "defect": "missing_structure", "severity": "minor", "confidence": 0.9}
+    assert (
+        "not a defect"
+        in run(box, "note", **named, description="x", box_mm=cube, plane=None, views=[], measurements=[mid])["error"]
+    )
     measured = {
         "kind": "measured_property",
-        "defect": "missing_structure",
+        "defect": "other",
         "severity": "major",
         "confidence": 0.9,
         "box_mm": cube,
@@ -168,7 +178,7 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
     assert not _defect_by_definition(Measurement("m1", "konfai_eval", False, None, None, {"F:JacobianFolding": None}))
     assert _defect_by_definition(Measurement("m2", "konfai_eval", False, None, None, {"F:JacobianFolding": 0.01}))
     assert _defect_by_definition(Measurement("m3", "konfai_eval", False, None, None, {"F:JacobianMin": float("nan")}))
-    assert [c.ok for c in box.calls].count(False) == 4
+    assert [c.ok for c in box.calls].count(False) == 5
     far = run(box, "region_stats", box_mm=blob)["measurement"]["id"]
     assert "measurement of the region" in run(box, "note", **confirmed, measurements=[far])["error"]
     # the figures of the case card (spacing, size, bounds) and scientific notation are sourced; "label 2" is no figure

@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
 
-PROMPT_VERSION = "1.3"
+PROMPT_VERSION = "1.5"
 
 SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
 write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
@@ -30,6 +30,8 @@ coronal (along y), sagittal (along x). A box is {{"min": [x, y, z], "max": [x, y
 - suspected_error: something that looks wrong in a view but is not established by a measurement against a reference.
 - confirmed_error: an error established by a measurement you cite: against a reference (a truth), or one that is an \
 error by definition (a folded displacement field, non-finite values).
+Report the result's defects only: an artefact of the image, an anatomical variant or a flaw of the reference is not \
+one unless the result follows it.
 Without a reference you cannot confirm an error from appearance, you cannot report a metric that needs one (Dice, \
 MAE, TRE...), and you must not claim anatomical certainty or a diagnosis: you judge the result, not the patient. \
 "insufficient_evidence" is a legitimate verdict. Never invent a number: every value you write comes from a tool result. \
@@ -47,9 +49,8 @@ the warped image against the fixed one), then compare with the reference when th
 what you saw. Describe what you see so that a reader opening the cited view finds it: which structure, which edge, \
 which direction, how far. Record each finding with `note` as soon as it is established, citing the view ids (as \
 printed on each image) and the measurement ids that support it, with a confidence from 0 to 1. Prefer few, \
-decisive views. Every finding goes through `note`, a doubt you did not settle included: it is a suspected_error, not \
-a remark in the conclusion. Finish with `conclude`: the verdict and why, in a few sentences that cite the observations \
-instead of repeating them. Your budget: {budget}.
+decisive views. Every finding goes through `note`. Finish with `conclude`: the verdict and why, in a few sentences \
+that cite the observations instead of repeating them. Your budget: {budget}.
 
 ## Severity
 minor: cosmetic, no consequence on a measure or a decision. moderate: a visible local error that changes a measure \
@@ -62,11 +63,10 @@ Defect types: {defects}.
 {extra}"""
 
 PROCEDURES = {
-    "active": "Start from the coverage views you were given (one montage per plane). Then explore: ask for slices in "
-    "other planes, zoom on anything suspect with a small box, switch modes to separate the image from the "
-    "result, and measure regions (KonfAI Eval computes the metrics in the box). Explore where the result "
-    "is most likely to be wrong: boundaries between structures, small or thin structures, the edges of the "
-    "field of view, regions of poor contrast.",
+    "active": "Start from the coverage views (one montage per plane) and the leads: regions where a deterministic "
+    "survey found the result most likely wrong, each with why; a lead is not a finding. Look at every lead, then "
+    "explore: slices in other planes, a zoom on anything suspect, modes that separate the image from the result, "
+    "and measurements of regions (KonfAI Eval computes the metrics in the box).",
     "fixed": "You see a fixed set of views and cannot ask for more. You may measure regions and ask for their "
     "statistics. Record what these views support and conclude.",
 }

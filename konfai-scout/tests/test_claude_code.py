@@ -125,13 +125,15 @@ def _provider(monkeypatch, script: list[dict]) -> tuple[ClaudeCodeProvider, Fake
 
 def test_the_session_drives_the_tools_under_the_budget_and_the_record_is_complete(fixtures, tmp_path, monkeypatch):
     case, _ = fixtures["segmentation"]
+    world = case.grid.world_box()  # a small box at the centre, which the central slice shows
+    centre = {"center": ((world.low_xyz + world.high_xyz) / 2).tolist(), "size": 6.0}
     script = [
         {
             "calls": [
                 ("view", VIEW),
                 ("view", {**VIEW, "mode": "both"}),
                 ("region_stats", {"box_mm": {"center": [0.0, 0.0, 0.0], "size": 10.0}}),  # refused: the budget is spent
-                ("note", lambda views: {**NOTE, "views": views[:1]}),
+                ("note", lambda views: {**NOTE, "views": views[:1], "box_mm": centre}),
                 ("conclude", CONCLUDE),
             ]
         }
@@ -178,7 +180,7 @@ def _png_of(result: dict) -> bytes:
 
 
 def test_a_silent_session_is_reminded_on_the_same_session(fixtures, tmp_path, monkeypatch):
-    case, _ = fixtures["segmentation_no_truth"]
+    case, _ = fixtures["segmentation_clean"]
     script = [
         {"calls": [], "text": "looks fine to me"},
         {"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]},

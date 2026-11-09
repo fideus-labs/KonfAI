@@ -33,6 +33,7 @@ An inspection leaves one directory:
 | `budget` | the limits, what was spent, what exhausted the budget if anything |
 | `error` | a provider failure or a refusal, when one ended the inspection |
 | `second_reading` | when asked: the reader's model, how many error observations were re-read and the counts by answer, the path of its transcripts |
+| `leads` | the survey's leads (id, kind, box, the reason it stands out) and the slice views that looked at each |
 
 ## Statements
 
@@ -60,17 +61,39 @@ properly:
   no tool returned does not enter the report as a measurement;
 - a confirmation rests on a measurement of the region it describes: a `confirmed_error` whose cited measurements
   were all taken outside its box is refused. A measurement taken elsewhere may be cited beside one of the region,
-  as context; a note says which.
+  as context; a note says which;
+- a `measured_property` is a number, not a defect: it names no defect type (a blur is an error, not a property);
+- an error says where it is: a box over less than a quarter of the image, or a lead's id (its box is taken, rather
+  than coordinates read off a view). Only a defect that can be everywhere (`blur`, `intensity_bias`,
+  `over_smoothing`) may span the image.
 
 Two softer rules downgrade or mark instead of refusing: a confirmation whose cited measurements hold no value
 against a reference (a box outside the truth gives `None`, which proves nothing) and show no error by definition
 becomes a `suspected_error`; a figure in an error's description that no cited measurement holds stays, with the note
 that it was read from a view. The Markdown rendition shows every note in italics under its observation.
 
+### The leads, and what `conclude` asks
+
+Before the model's first turn a deterministic survey of the case lists leads, each a box and the reason it stands
+out, on the case card. Segmentation: stretches of a label's boundary where the image has almost no edge (a cut
+through a homogeneous lesion, a hole, a leak into tissue that does not differ, a component on nothing), components
+whose contrast against their surroundings is unlike the main component's, and with a truth the clusters of
+disagreement. Registration: folded voxels, and cells of about 16 mm where the edges of the warped and fixed images
+correlate much less than elsewhere in the case (edges, so that two modalities compare; voxels the warp read outside
+the moving image are left out). Synthesis with a target: clusters where the error, smoothed inside the mask, is
+several times the case's typical error and at least 3 % of the target's range, off the target's strongest edges. A
+lead is not a finding and its figures are not measurements; the model looks and judges.
+
+In active mode `conclude` refuses until every lead has been looked at through a slice of its box (a montage tile
+does not count), unless the budget is spent: then the unseen leads are named in the conclusion's `reason`. It also
+keeps the verdict in line with the observations: `defective` needs an error observation, and an error of severity
+major or critical at confidence 0.5 or more makes the verdict `defective`.
+
 ### The blind second reading
 
 With `second_reading` (CLI `--second-reading`), a fresh session of the same model re-reads every error observation
-that has a box: it receives crops of that box (twice its size, at least a dozen voxels) in two or three modes, the
+that has a box: it receives crops of that box (twice its size, at least a dozen voxels) in two or three modes, on the
+slice the first reader cited when one shows the box (the centre slice of a large box may miss what it holds), the
 claim as written, and nothing else: not the method, not the history, not the measurements. It answers `VISIBLE`,
 `NOT_VISIBLE` or `UNSURE` with one sentence, recorded on the observation as `second_reading` and summed up in the
 report's `second_reading` field. Nothing is removed or re-judged: a confirmation stands on its measurement, and a
