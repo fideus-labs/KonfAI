@@ -224,7 +224,7 @@ def test_missing_labels_compares_a_reference_of_another_shape():
     from types import SimpleNamespace
 
     from konfai.evaluator import Evaluator
-    from konfai.metric.measure import Dice, MissingLabels
+    from konfai.metric.measure import Dice, Jaccard, MissingLabels
 
     output, reference = torch.ones(1, 1, 4, 4, 4), torch.ones(1, 1, 8, 8, 8)
     evaluator = SimpleNamespace(metrics={"Out": {"Ref": [MissingLabels()]}})
@@ -233,7 +233,7 @@ def test_missing_labels_compares_a_reference_of_another_shape():
     assert MissingLabels()(output, reference)[1] == 1.0
     mask = (reference == 1).float()  # on the reference's grid: put on the output's with the reference
     assert MissingLabels()(output, reference, mask)[1] == 0.0
-    assert Dice()(output, reference, mask)[1] == {1: pytest.approx(1.0)}
+    assert Dice()(output, reference, mask)[1] == Jaccard()(output, reference, mask)[1] == {1: pytest.approx(1.0)}
 
 
 def test_missing_labels_is_weighed_by_its_items():

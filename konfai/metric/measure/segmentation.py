@@ -426,7 +426,7 @@ class _LabelRatio(Dice):
         return (1 - mean if cls.maximize else mean), result
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
-        return self.combine_metric([self.partial_metric(output, Dice.on_grid(output, targets[0]), *targets[1:])])
+        return self.combine_metric([self.partial_metric(output, *(Dice.on_grid(output, target) for target in targets))])
 
 
 class Jaccard(_LabelRatio):
