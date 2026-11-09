@@ -1916,9 +1916,9 @@ class TransformPoints(Transform):
     inverted. ``transforms`` maps each GROUP to whether to invert it (a rigid or affine map only), the LAST declared
     applied first, as in ``Resample``.
 
-    A 3-D displacement field is read around each point alone (:func:`~konfai.utils.ITK.displace_points`), so a few
-    points never hold the field in memory. Any other transform is read whole and applied to the axes it has: a 2-D
-    one moves x and y and leaves z, where a 2-D image's landmarks sit.
+    A 3-D displacement field is read around each point alone (:func:`~konfai.utils.ITK.displace_points`) when its
+    store reads a region, and whole otherwise. Any other transform is read whole and applied to the axes it has: a
+    2-D one moves x and y and leaves z, where a 2-D image's landmarks sit.
     """
 
     locality = LocalityKind.WHOLE_VOLUME  # a set of points, read whole: there is no region of it to stream
@@ -1976,7 +1976,7 @@ class TransformPoints(Transform):
 
 class Displace(TransformPoints):
     """Points carried by the case's displacement field ``field_group``: ``TransformPoints`` of that one group, not
-    inverted, so a 3-D field is read around each point alone."""
+    inverted: a 3-D field is read around each point alone when its store reads a region, and whole otherwise."""
 
     def __init__(self, field_group: str = "DVF") -> None:
         super().__init__({field_group: False})
