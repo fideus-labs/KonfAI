@@ -3387,11 +3387,15 @@ def _tool_run_transform(
 
 
 def _tool_plan_transform(
+    gpu: int | list[int] | None = None,
     cpu: int | None = None,
     overwrite: bool = False,
     config_file: str | None = None,
 ) -> dict[str, Any]:
-    """Plan the transform without running it: per-case verdicts, budget, and what needs attention."""
+    """Plan the transform without running it: per-case verdicts, budget, and what needs attention, for the ranks the
+    same devices would launch (the plan divides the shared budget by them)."""
+    _device_args(gpu, cpu)  # the launch's own check: gpu and cpu exclusive, cpu > 0
+    ranks = len(_normalize_int_list(gpu, field_name="gpu") or []) or max(1, int(cpu or 1))
     config_path = _resolve_transform_config(config_file)
     blocked = SESSION.workflow_blocker("transform", config_path=config_path)
     if blocked is not None:
@@ -3403,7 +3407,7 @@ def _tool_plan_transform(
                 "workspace_dir": str(SESSION.workspace_dir()),
                 "config": str(config_path),
                 "scratch_path": str(scratch),
-                "cpu": max(1, int(cpu or 1)),
+                "ranks": ranks,
                 "overwrite": bool(overwrite),
             },
         )
@@ -3744,7 +3748,7 @@ def run_transform(
     timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     if dry_run:
-        return _tool_plan_transform(cpu=cpu, overwrite=overwrite, config_file=config_file)
+        return _tool_plan_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, config_file=config_file)
     return _launched(
         _tool_run_transform(
             gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process, config_file=config_file

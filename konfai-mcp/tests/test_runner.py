@@ -194,6 +194,27 @@ def test_run_transform_checks_the_inputs_of_the_config_file_it_runs(
         assert blocked["config_path"].endswith("Transform_masks.yml")
 
 
+def test_run_transform_plans_for_the_ranks_it_would_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """A dry run sizes the plan for the launch's rank count, two GPUs being two ranks, and refuses the device
+    arguments the launch refuses."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    config_path = Path(server.SESSION.config_path("transform"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("Transformer:\n  name: TEST\n", encoding="utf-8")
+    ranks: list[int] = []
+    monkeypatch.setattr(server, "_run_api_in_subprocess", lambda _target, kwargs: ranks.append(kwargs["ranks"]) or {})
+
+    server.run_transform(dry_run=True, gpu=[0, 1])
+    server.run_transform(dry_run=True, cpu=3)
+    server.run_transform(dry_run=True)
+    assert ranks == [2, 3, 1]
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        server.run_transform(dry_run=True, gpu=0, cpu=2)
+
+
 def test_concurrent_validations_only_remove_their_own_scratch(tmp_path: Path) -> None:
     config = tmp_path / "Config.yml"
     config.write_bytes(b"Trainer:\r\n  epochs: 1\r\n")

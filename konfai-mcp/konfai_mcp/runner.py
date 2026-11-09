@@ -944,11 +944,11 @@ def plan_transform_api(
     *,
     workspace_dir: str,
     config: str,
-    cpu: int = 1,
+    ranks: int = 1,
     overwrite: bool = False,
     scratch_path: str | None = None,
 ) -> dict[str, Any]:
-    """Child entrypoint for the TRANSFORM dry-run: plan every case, write nothing.
+    """Child entrypoint for the TRANSFORM dry-run: plan every case for ``ranks`` processes, write nothing.
 
     The plan is the workflow's own verdict, not a prediction (it opens and removes a real
     region-write on each destination), so it is the one thing an agent should read before launching
@@ -972,7 +972,7 @@ def plan_transform_api(
                 transforms_dir=(workspace / "Transforms").resolve(),
             ),
         )
-        plan = workflow.compute_plan(max(1, int(cpu)), bool(overwrite))
+        plan = workflow.compute_plan(max(1, int(ranks)), bool(overwrite))
     counts: dict[str, int] = {}
     for entry in plan.entries:
         counts[entry.verdict] = counts.get(entry.verdict, 0) + 1
