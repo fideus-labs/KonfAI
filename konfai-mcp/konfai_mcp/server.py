@@ -141,8 +141,6 @@ READ_ONLY_TOOLS = frozenset(
         "describe_app",
         "inspect_dataset",
         "read_file",
-        "check_component",
-        "check_config",
         "describe_config_schema",
         "inspect_object_signature",
         "list_components",

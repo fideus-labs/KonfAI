@@ -193,6 +193,8 @@ def test_read_only_and_destructive_tools_are_hinted(load_mcp_server: Callable[[]
     assert annotations["describe_app"].read_only_hint is True
     assert annotations["delete_run"].destructive_hint is True
     assert not (annotations["run_train"] and annotations["run_train"].read_only_hint)
+    for name in ("check_component", "check_config"):  # a runtime check imports and runs session code
+        assert not (annotations[name] and annotations[name].read_only_hint), name
 
 
 def test_fidopt_refuses_a_dataset_the_corpus_lacks(
