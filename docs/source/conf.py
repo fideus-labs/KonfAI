@@ -44,13 +44,16 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-html_static_path = ["_static"]
+# site/design/ is the KonfAI identity the landing page serves: its fonts.css, fonts/ and tokens.css land in _static/.
+html_static_path = ["_static", "../../site/design"]
 exclude_patterns = ["_build", "build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "shibuya"
 html_title = "KonfAI documentation"
 html_favicon = os.path.abspath("../../logo.png")
-html_css_files = ["custom.css"]
+# The site's self-hosted faces, then its --k-* tokens, which custom.css maps the theme onto.
+# _templates/partials/webfonts.html replaces the theme's Google Fonts link.
+html_css_files = ["fonts.css", "tokens.css", "custom.css"]
 html_js_files = ["mermaid-fit.js"]
 
 # The KonfAI logo is a full wordmark (mark + "KonfAI"). We use transparent-
@@ -62,13 +65,16 @@ html_js_files = ["mermaid-fit.js"]
 html_theme_options = {
     "light_logo": "_static/konfai-logo-light.png",
     "dark_logo": "_static/konfai-logo-dark.png",
-    # Persistent header links: the five pages a reader comes back to from anywhere.
+    # The radix scale nearest the site's sage; custom.css then sets every accent step shibuya reads from the tokens.
+    "accent_color": "jade",
+    # Persistent header links: the five pages a reader comes back to from anywhere, and the KonfAI site.
     "nav_links": [
         {"title": "Quickstart", "url": "quickstart"},
         {"title": "Config guide", "url": "config_guide/index"},
         {"title": "Models", "url": "reference/components/models"},
         {"title": "CLI", "url": "reference/cli"},
         {"title": "Apps", "url": "usage/apps"},
+        {"title": "KonfAI site", "url": "https://fideus-labs.github.io/KonfAI/", "external": True},
     ],
 }
 
