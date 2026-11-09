@@ -40,7 +40,8 @@ inspect it, score it and ship it. The whole family on one page:
 > An agent that develops a method should be able to ask a trusted service how good it is, and iterate, the way a
 > person submits to a challenge, but in a loop. ([FidOpt](https://fidopt.io/))
 
-Every piece above runs today. Next, an agent closes that loop, and KonfAI Edge puts what wins in a browser tab.
+Every piece above runs today. Next, FidLab closes that loop: an agent tunes or writes a method, FidOpt scores each
+version, and KonfAI Edge puts what wins in a browser tab.
 
 ---
 
