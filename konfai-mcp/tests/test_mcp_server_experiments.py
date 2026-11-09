@@ -197,6 +197,35 @@ def test_label_statistics_for_integer_groups(
     asyncio.run(scenario())
 
 
+def test_a_single_valued_mask_is_called_empty_for_0_and_whole_volume_otherwise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    sitk = pytest.importorskip("SimpleITK")
+    dataset_dir = tmp_path / "dataset"
+    for case in range(2):
+        case_dir = dataset_dir / f"CASE_{case:03d}"
+        case_dir.mkdir(parents=True)
+        for group, value in (("EMPTY", 0), ("FULL", 1)):
+            mask = np.full((4, 8, 8), value, dtype=np.uint8)
+            sitk.WriteImage(sitk.GetImageFromArray(mask), str(case_dir / f"{group}.mha"))
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> list[str]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            inspected = await client.call_tool(
+                "inspect_dataset", {"dataset_dir": str(dataset_dir), "groups": ["EMPTY", "FULL"], "extension": "mha"}
+            )
+            return inspected.structured_content["warnings"]
+
+    warnings = asyncio.run(scenario())
+    assert any("'EMPTY'" in w and "is empty" in w for w in warnings)
+    assert any("'FULL'" in w and "restricts nothing" in w for w in warnings)
+    assert not any("'EMPTY'" in w and "restricts nothing" in w for w in warnings)
+
+
 def test_infer_dataset_structure_is_task_neutral(tmp_path: Path) -> None:
     service = _service(tmp_path)
     case_dir = tmp_path / "Dataset" / "case_001"

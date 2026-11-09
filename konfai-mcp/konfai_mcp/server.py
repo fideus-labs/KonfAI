@@ -1199,9 +1199,13 @@ def _tool_inspect_dataset(
     for group, group_statistics in statistics.items():
         labels = group_statistics.get("labels") or {}
         if labels.get("count") == 1:
+            value = labels["unique"][0]
             warnings.append(
-                f"group '{group}' holds the single value {labels['unique'][0]} in every sampled case: as a mask it "
-                "restricts nothing (a metric or a validation 'inside' it is whole-volume)"
+                f"group '{group}' holds only 0 in every sampled case: as a mask it is empty (a metric or a validation "
+                "'inside' it covers no voxel)"
+                if value == 0
+                else f"group '{group}' holds the single value {value} in every sampled case: as a mask it restricts "
+                "nothing (a metric or a validation 'inside' it is whole-volume)"
             )
     fingerprints = {
         group: json.dumps(group_statistics.get("statistics"), sort_keys=True, default=str)
