@@ -91,8 +91,7 @@ class AnthropicProvider:
             if image.label:
                 content.append({"type": "text", "text": image.label})
             content.append(_image_block(image))
-        self.messages.append({"role": "user", "content": content})
-        return self._call()
+        return self._call({"role": "user", "content": content})
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
         blocks = []
@@ -110,15 +109,15 @@ class AnthropicProvider:
                     **({"is_error": True} if result.is_error else {}),
                 }
             )
-        self.messages.append({"role": "user", "content": blocks})
         if tools is not None:
             self.tools = [
                 {"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True}
                 for t in tools
             ]
-        return self._call()
+        return self._call({"role": "user", "content": blocks})
 
-    def _call(self) -> Turn:
+    def _call(self, pending: dict[str, Any]) -> Turn:
+        """Send ``pending``: it joins the history once answered, so a retried turn is not sent twice."""
         import anthropic
 
         request: dict[str, Any] = {
@@ -126,7 +125,7 @@ class AnthropicProvider:
             "max_tokens": self.max_tokens,
             "system": [{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
             "tools": self.tools,
-            "messages": self.messages,
+            "messages": [*self.messages, pending],
         }
         if self.effort:
             request["output_config"] = {"effort": self.effort}
@@ -148,7 +147,7 @@ class AnthropicProvider:
             raise ProviderError(f"connection error: {error}", retryable=True) from error
         data = response.to_dict() if hasattr(response, "to_dict") else dict(response)
         content = data.get("content") or []
-        self.messages.append({"role": "assistant", "content": content})
+        self.messages += [pending, {"role": "assistant", "content": content}]
         text = "\n".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
         calls = [
             ToolCall(id=str(block["id"]), name=str(block["name"]), arguments=dict(block.get("input") or {}))

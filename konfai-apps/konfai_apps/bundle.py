@@ -377,7 +377,7 @@ def export_portable_into_bundle(
     ``<id>.onnx`` per checkpoint plus ``program.json``: the program :func:`konfai.portable.compile_output`
     assembles, every checkpoint on every test-time pass, the nested models a ``Mask`` reads, folded by the
     reduction the config declares. The patch geometry, transforms, blend, and reduction are all read from
-    the config: nothing is per-app. The config file is restored afterwards because reading it mutates it.
+    the config: nothing is per-app. Reading a config mutates it, so the export reads a private copy of it.
     """
     import yaml
 
@@ -395,7 +395,7 @@ def export_portable_into_bundle(
     # `None` stands for "the config's own checkpoint", so the export is uniform over both cases.
     selected: list[str | None] = list(checkpoints) if checkpoints else [None]
     ensemble = len(selected) > 1
-    with config_environment(config_path, root=root, state="PREDICTION", keep_file=True):
+    with config_environment(config_path, root=root, state="PREDICTION"):
         # A relative checkpoint is the bundle's own file; `None` is the weights the model builds with.
         weights = [
             None
@@ -406,6 +406,11 @@ def export_portable_into_bundle(
             for checkpoint in selected
         ]
         ids = [Path(checkpoint).stem if ensemble and checkpoint is not None else "model" for checkpoint in selected]
+        if len(set(ids)) < len(ids):
+            raise AppMetadataError(
+                f"Two checkpoints of {selected} share a file stem, the id their exported models are written under. "
+                "Rename them (fold0_best.pt, fold1_best.pt) before exporting."
+            )
         # The nested models a Mask reads, exported first: a chain the program cannot run is refused before
         # the bundle's own models are.
         aux = {
@@ -440,13 +445,16 @@ def export_portable_into_bundle(
 
 
 def _bundle_checkpoint(bundle: Path, name: str) -> Path:
-    """The bundle's checkpoint ``name``, found as konfai-apps finds it: as spelled, else with a weight suffix
-    added, ``.safetensors`` (what a bundle ships) before ``.pt`` (an older bundle's)."""
+    """The bundle's checkpoint ``name``, found as konfai-apps finds it: as spelled, else as published (a ``.pt``
+    is a ``.safetensors`` in a bundle), else with a weight suffix added, ``.safetensors`` before ``.pt`` (an older
+    bundle's)."""
     from konfai_apps.app_repository import WEIGHTS
 
     path = bundle / Path(name).name
-    if path.exists() or path.name.endswith(WEIGHTS):
+    if path.exists():
         return path
+    if path.name.endswith(WEIGHTS):
+        return bundle / _published(path.name)
     candidates = [path.with_name(path.name + suffix) for suffix in WEIGHTS]
     return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
 

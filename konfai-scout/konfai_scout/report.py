@@ -193,9 +193,10 @@ class Report:
     def save(self, out: Path) -> Path:
         out = Path(out)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.json").write_text(
-            json.dumps(self.to_dict(), indent=2, allow_nan=False, default=_json_default), encoding="utf-8"
-        )
+        # JSON has no NaN or infinity, which a prior evaluation or a measurement can hold: they are written as the
+        # strings "NaN", "Infinity" and "-Infinity", so a confirmation resting on one stays readable as such
+        finite = json.loads(json.dumps(self.to_dict(), default=_json_default), parse_constant=str)
+        (out / "report.json").write_text(json.dumps(finite, indent=2, allow_nan=False), encoding="utf-8")
         (out / "report.md").write_text(render_markdown(self), encoding="utf-8")
         return out / "report.json"
 

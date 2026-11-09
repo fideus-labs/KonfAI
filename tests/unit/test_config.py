@@ -1824,3 +1824,23 @@ def test_the_api_writes_an_included_block_in_place_and_anchors_its_model_yaml(tm
     assert copy.parent != folder and "!include" not in copy.read_text(encoding="utf-8")
     tree = _load_tree(copy)["Predictor"]
     assert (tree["Model"]["classpath"], tree["Dataset"]["batch_size"]) == (str(folder.resolve() / "UNet.yml"), 2)
+
+
+def test_a_run_s_record_anchors_a_relative_model_yaml(tmp_path: Path) -> None:
+    """The record lies under the run's output, where a model YAML named beside the config is no file: it is anchored
+    to the config's folder, and an unchanged config still matches the record it left."""
+    from konfai.utils.config import _record_tree, snapshot
+
+    folder, archive = tmp_path / "experiment", tmp_path / "Predictions" / "RUN"
+    folder.mkdir()
+    archive.mkdir(parents=True)
+    (folder / "UNet.yml").write_text("name: UNet\n", encoding="utf-8")
+    config_path = folder / "Prediction.yml"
+    config_path.write_text("Predictor:\n  Model:\n    classpath: UNet.yml\n", encoding="utf-8")
+
+    snapshot(config_path, archive / "Prediction.yml")
+
+    record = _load_tree(archive / "Prediction.yml")
+    assert record["Predictor"]["Model"]["classpath"] == str(folder.resolve() / "UNet.yml")
+    base = config_path.resolve().parent
+    assert _record_tree(archive / "Prediction.yml", base)[0] == _record_tree(config_path, base)[0]

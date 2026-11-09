@@ -135,7 +135,7 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field_through_the_grap
     engine._deformable_masked = False
     with pytest.raises(AttributeError):
         EngineRegistration(engine, fuse_texpr=False)(
-            image, image, torch.zeros_like(image), torch.ones_like(image), [[geometry] for _ in range(4)]
+            image, image, torch.zeros_like(image), torch.ones_like(image), attributes=[[geometry] for _ in range(4)]
         )
 
 

@@ -281,11 +281,42 @@ def _inline(tree: object) -> bool:
     return changed
 
 
+def _anchor_model_paths(tree: object, base: Path) -> bool:
+    """Make every relative model-YAML ``classpath`` under ``tree`` absolute against ``base``;
+    whether any changed. The catalog spelling (``default|Name.yml``) is not a path."""
+    changed = False
+    if isinstance(tree, dict):
+        classpath = tree.get("classpath")
+        if (
+            isinstance(classpath, str)
+            and "|" not in classpath
+            and Path(classpath).suffix.lower() in {".yaml", ".yml"}
+            and not Path(classpath).is_absolute()
+        ):
+            tree["classpath"] = str((base / classpath).resolve())
+            changed = True
+        for value in tree.values():
+            changed = _anchor_model_paths(value, base) or changed
+    elif isinstance(tree, list):
+        for value in tree:
+            changed = _anchor_model_paths(value, base) or changed
+    return changed
+
+
+def _record_tree(path: Path, base: Path) -> tuple[dict, bool]:
+    """``path``'s tree as a run's record holds it, and whether that differs from the file: every included block in
+    place, every relative model YAML anchored to ``base``, the folder it resolved from (the record lies elsewhere)."""
+    tree = _load_tree(path)
+    inlined = _inline(tree)
+    return tree, _anchor_model_paths(tree, base) or inlined
+
+
 def snapshot(source: Path, target: Path) -> None:
-    """Copy the config ``source`` to ``target`` as the record of a run: an included block is written in place, so
-    the record stands alone where it lies and a later change of the included file does not change it."""
-    tree = _load_tree(source)
-    if _inline(tree):
+    """Copy the config ``source`` to ``target`` as the record of a run: an included block is written in place and a
+    relative model YAML anchored, so the record stands alone where it lies and a later change of the included file
+    does not change it."""
+    tree, rewritten = _record_tree(source, source.resolve().parent)
+    if rewritten:
         _write_tree(target, tree)
     else:
         shutil.copyfile(source, target)

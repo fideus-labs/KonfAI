@@ -10,6 +10,7 @@ import json
 import math
 import re
 import time
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -391,6 +392,8 @@ class Toolbox:
             raise ValueError(f"defect is one of {DEFECTS[self.case.task]}")
         if severity not in SEVERITIES:
             raise ValueError(f"severity is one of {SEVERITIES}")
+        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
+            raise ValueError("confidence is a number between 0 and 1")
         known_views = {v.id: v for v in self.renderer.views}
         known_measurements = {m.id: m for m in self.measurements}
         views = list(views or [])
@@ -485,6 +488,8 @@ class Toolbox:
     ) -> tuple[dict[str, Any], list[ImageContent]]:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict is one of {VERDICTS}")
+        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
+            raise ValueError("confidence is a number between 0 and 1")
         reason = None
         if verdict == "defective" and not any(o.kind == "confirmed_error" for o in self.observations):
             reason = (
@@ -551,16 +556,16 @@ _METRIC_FIGURE = re.compile(
 )
 
 
-def _figures(description: str) -> list[tuple[str, float, bool]]:
-    """The figures a description states: as written, as a number, and whether they are percentages."""
+def _figures(description: str) -> list[tuple[str, str, bool]]:
+    """The figures a description states: as written, the number alone, and whether they are percentages."""
     description = description.translate({0x2212: "-", 0x2013: "-"})  # a minus sign, an en dash: hyphens
-    out: list[tuple[str, float, bool]] = []
+    out: list[tuple[str, str, bool]] = []
     for match in _UNIT_FIGURE.finditer(description):
         for text in (match.group(1), match.group(2)):
             if text:
-                out.append((f"{text} {match.group(3)}", float(text), match.group(3) == "%"))
+                out.append((f"{text} {match.group(3)}", text, match.group(3) == "%"))
     for match in _METRIC_FIGURE.finditer(description):
-        out.append((" ".join(match.group(0).split()), float(match.group(1)), False))
+        out.append((" ".join(match.group(0).split()), match.group(1), False))
     return out
 
 
@@ -578,8 +583,9 @@ def _unsourced_figures(
     if box is not None:
         pool += [float(x) for x in (*box.low_xyz, *box.high_xyz)]
     unsourced = []
-    for text, value, percent in _figures(description):
-        decimals = len(text.split()[0].partition(".")[2]) if percent or text.split()[0][0].isdigit() else 0
+    for text, number, percent in _figures(description):
+        value = float(number)
+        decimals = -int(Decimal(number).as_tuple().exponent)  # the digits written, the exponent counted
         candidates = [(value, decimals)] + ([(value / 100.0, decimals + 2)] if percent else [])
         if not any(_same(c, p, d) for c, d in candidates for p in pool):
             unsourced.append(text)

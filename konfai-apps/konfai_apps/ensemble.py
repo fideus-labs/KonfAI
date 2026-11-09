@@ -59,7 +59,7 @@ def stack_file(form: str) -> str:
     """The stack's file name beside an output of ``form`` (``.ome.zarr``, ``.nii.gz``): in that form where its header
     keeps the member count (:func:`~konfai.data.transform.ensemble.holds_stack`), as MetaImage otherwise. A case's
     ``.h5`` is a transform file."""
-    token = "itktransform" if form == ".h5" else format_token(form)
+    token = "itktransform" if form == ".h5" else format_token(form, directory=not form)
     return f"{STACK}{form if holds_stack(token) else '.mha'}"
 
 

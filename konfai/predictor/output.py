@@ -513,6 +513,9 @@ class OutputDataset(Dataset, NeedDevice):
                     source_attribute.pop(key)
             else:
                 source_attribute[key] = value
+        if len(input_dataset.patch.get_patch_slices(index_augmentation)) > 1:
+            # The first patch's native form: the case assembled from several patches is that transform nowhere.
+            drop_native_form(source_attribute)
         if index_dataset not in self.output_layer_accumulator:
             self.output_layer_accumulator[index_dataset] = {}
             self.attributes[index_dataset] = {}

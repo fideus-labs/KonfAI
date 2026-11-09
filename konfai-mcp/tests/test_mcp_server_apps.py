@@ -1486,3 +1486,53 @@ def test_prepare_registration_evaluate_pairs_what_it_scores(tmp_path: Path) -> N
     # No transform scores the pair as it is: the misalignment a registration starts from.
     before = service.prepare_registration_evaluate(fixed_seg=[fixed], moving_seg=[moving])
     assert before["kwargs"]["transforms"] == []
+
+
+def _app_with_a_model(tmp_path: Path) -> Path:
+    """A local app whose model module leaves a mark when imported, with a preset of a bare model parameter: checked
+    against the model's signature, the preset would import it."""
+    app_dir = _write_local_app(tmp_path)
+    (app_dir / "Prediction.yml").write_text(
+        "Predictor:\n  Model:\n    classpath: Model:Net\n    Net:\n      iterations: 1\n", encoding="utf-8"
+    )
+    (app_dir / "Model.py").write_text(
+        "from pathlib import Path\nPath(__file__).with_name('imported').touch()\n\n\nclass Net:\n    pass\n",
+        encoding="utf-8",
+    )
+    manifest = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+    manifest["presets"] = {"fast": {"description": "", "set": ["iterations=2"]}}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return app_dir
+
+
+def test_describe_app_of_a_preset_does_not_import_the_app_s_model(tmp_path: Path) -> None:
+    """Reading the manifest in the server process names the preset without importing the app's code."""
+    app_dir = _app_with_a_model(tmp_path)
+
+    payload = _service(tmp_path).describe_app(f"{app_dir}#fast")
+
+    assert payload["preset"] == "fast" and not (app_dir / "imported").exists()
+
+
+def test_export_app_of_a_preset_with_overrides_does_not_import_the_app_s_model(tmp_path: Path) -> None:
+    """The export bakes the preset and the overrides into the copy by name, in the server process, importing nothing."""
+    app_dir = _app_with_a_model(tmp_path)
+    target = tmp_path / "exported"
+
+    _service(tmp_path).export_app(f"{app_dir}#fast", str(target), config_overrides=["iterations=3"])
+
+    assert not (app_dir / "imported").exists() and not (target / "imported").exists()
+    assert "iterations: 3" in (target / "Prediction.yml").read_text(encoding="utf-8")
+
+
+def test_export_app_refuses_a_preset_that_sets_the_seed_without_importing_the_model(tmp_path: Path) -> None:
+    """A preset sets method parameters only: the server refuses one that sets the seed as a run would, by its path."""
+    app_dir = _app_with_a_model(tmp_path)
+    manifest = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+    manifest["presets"]["seeded"] = {"description": "", "set": ["Predictor.manual_seed=7"]}
+    (app_dir / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(Exception, match="the method's parameters"):
+        _service(tmp_path).export_app(f"{app_dir}#seeded", str(tmp_path / "exported"))
+
+    assert not (app_dir / "imported").exists() and not (tmp_path / "exported").exists()

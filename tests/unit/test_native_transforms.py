@@ -18,12 +18,14 @@
 field written wherever a mean or another format needs it, and sampled back on the fixed grid to be measured."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
 sitk = pytest.importorskip("SimpleITK")
+pytest.importorskip("h5py")
 
 from konfai.data.augmentation import Flip  # noqa: E402
 from konfai.data.transform import LocalityKind, TransformToField  # noqa: E402
@@ -135,6 +137,30 @@ def test_a_mean_of_copies_writes_the_field_on_either_route(tmp_path: Path, monke
 
     assert whole_volume is not streamed
     assert list(written.shape) == [3, 6, 4, 3] and not native.exists()
+
+
+@pytest.mark.parametrize(("patches", "kept"), [(1, True), (2, False)])
+def test_a_multi_patch_case_writes_the_assembled_field(tmp_path: Path, patches: int, kept: bool) -> None:
+    """One patch is the whole case and keeps its native transform; a field assembled from several is no patch's."""
+    _, data, header, native = _field_with_its_transform(tmp_path)
+    regions = [tuple(slice(i * 2, (i + 1) * 2) for _ in range(3)) for i in range(patches)]
+    patch = SimpleNamespace(
+        patch_size=[2, 2, 2],
+        placement="pad",
+        get_patch_slices=lambda augmentation: regions,
+        get_sweep_axis=lambda augmentation: 0,
+    )
+    case = SimpleNamespace(cache_attributes=[header], name="P000", patch=patch)
+    output = OutputDataset.__new__(OutputDataset)
+    output.group_dest, output._attributes, output.nb_data_augmentation, output.patch_combine = "Transform", {}, 1, None
+    output.output_layer_accumulator, output.attributes, output.names, output._stream_plans = {}, {}, {}, {}
+    output._streaming_enabled = False
+    output._inverses = lambda dataset, patch: []  # type: ignore[method-assign]
+    dataset = SimpleNamespace(get_dataset_from_index=lambda group, index: case)
+
+    output._ensure_case_state(0, 0, torch.from_numpy(data), dataset, header, None)  # type: ignore[arg-type]
+
+    assert (TRANSFORM_FILE_ATTRIBUTE in output.attributes[0][0][0]) is kept and native.exists() is kept
 
 
 def test_a_caller_that_averages_asks_for_the_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

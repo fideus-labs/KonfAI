@@ -34,7 +34,7 @@ on Hugging Face `VBoussot/ImpactReg`. Work from a preset; change it only where a
    TRE; same modality: MAE), always against the same metrics without `--transform` (the starting misalignment). A
    deformable result must not fold: `eval` reports the Jacobian's folded fraction for field transforms.
 5. **Tune one thing at a time** with `--set`, re-measure, keep what helps (see *Tuning order*).
-6. **Several good presets?** Ensemble them (`register A B C --keep-fields`) and map where they disagree
+6. **Several good presets?** Ensemble them (`register A B C --uncertainty`) and map where they disagree
    (`uncertainty`): high spread marks where the registration should not be trusted.
 
 ## Choosing a preset
@@ -109,7 +109,7 @@ anything runs. A setting that works for a cohort belongs in a copied preset fold
   transform land on the moving ones.
 - `eval` and `apply` take the **original** moving data; they apply the transform themselves. `apply --labels` for
   segmentations (nearest neighbour). There is no inverse: register the other way round for the other direction.
-- Ensembles average fields voxel by voxel: ensemble presets of the same nature (not a rigid with deformables).
+- Ensembles average fields voxel by voxel: ensemble presets of the same nature (not a rigid with deformables). `--uncertainty` keeps the members as the case's `InferenceStack`.
 - `register.json` beside the outputs records the inputs of each case (`P000`, ... in input order), versions,
   overrides and runtime.
 - In KonfAI Studio (konfai-mcp), `run_app_infer` on a registration app runs this same `register` (Transform.h5, Moved,

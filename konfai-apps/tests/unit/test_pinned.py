@@ -69,3 +69,20 @@ def test_a_cached_file_is_kept_when_it_matches_its_hash_and_fetched_again_when_i
     # A match is reused without a download: the source is gone.
     release.unlink()
     assert fetch(release.as_uri(), target, sha256).read_bytes() == b"new release"
+
+
+def test_two_repositories_at_one_commit_do_not_share_a_clone(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from konfai_apps import pinned
+
+    def fake_git(command: list[str], check: bool) -> None:
+        if command[1] == "clone":
+            Path(command[-1]).mkdir()
+
+    monkeypatch.setenv("KONFAI_TOOLS_CACHE", str(tmp_path))
+    monkeypatch.setattr(pinned.subprocess, "run", fake_git)
+    commit = "c" * 40
+    assert pinned.pinned_source("tool", "https://a/tool", commit) != pinned.pinned_source(
+        "tool", "https://b/tool", commit
+    )

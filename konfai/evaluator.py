@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -475,21 +476,18 @@ class Evaluator(DistributedObject):
                     true_loss = outcome.materialized()
                     if outcome.map is not None and getattr(metric, "dataset", None):
                         with self._clock.phase("map"):
-                            self._write_map(metric, output_group, name, outcome.map, batch_sample[output_group])
+                            self._write_map(metric, output_group, outcome.map, batch_sample[output_group])
 
-                    direction = "max" if getattr(metric, "maximize", False) else "min"
-                    Evaluator._record_value(result, statistics, base_key, true_loss, direction)
+                    Evaluator._record_value(result, base_key, true_loss)
         if len(self.metrics) > 0:
             statistics.add(result, name)
         return result
 
-    def _write_map(self, metric: Any, output_group: str, name: str, map_: torch.Tensor, output: BatchDataItem) -> None:
-        """Write a metric's whole-case map beside the case, on its output's grid: the header of the first group
-        holding the case could be a landmark set's, with no geometry (the map then went to a .npy), in an order
-        that changed from one run to the next."""
+    def _write_map(self, metric: Any, output_group: str, map_: torch.Tensor, output: BatchDataItem) -> None:
+        """Write a metric's whole-case map beside the case, on its output's grid."""
         filename, _, file_format = split_path_spec(metric.dataset)
         group = metric.group if metric.group else output_group
-        Dataset(filename, file_format).write(group, name, map_.squeeze(0).numpy(), Attribute(output.attribute[0]))
+        Dataset(filename, file_format).write(group, output.name[0], map_.squeeze(0).numpy(), output.attribute[0])
 
     def _voxelwise_pairs(self, tensors: dict[str, torch.Tensor]) -> dict[tuple[str, str], list[str]]:
         """Each output and target group a metric compares voxel to voxel, with those metrics' names. A metric
@@ -598,29 +596,19 @@ class Evaluator(DistributedObject):
             return {group: self._on(batch_sample[group].tensor, self._device) for group in sorted(groups)}
 
     @staticmethod
-    def _record_value(
-        result: dict[str, float],
-        statistics: Statistics,
-        base_key: str,
-        true_loss: float | dict,
-        direction: str,
-    ) -> None:
+    def _record_value(result: dict[str, float], base_key: str, true_loss: float | dict) -> None:
         """Record one metric value: a dict records each component plus their NaN-skipping mean."""
         if isinstance(true_loss, dict):
             total = 0.0
             count = 0
             for k, v in true_loss.items():
-                component_key = f"{base_key}:{k}"
-                result[component_key] = v
-                statistics.directions[component_key] = direction
+                result[f"{base_key}:{k}"] = v
                 if not np.isnan(v):
                     total += v
                     count += 1
             result[base_key] = total / count if count > 0 else np.nan
-            statistics.directions[base_key] = direction
         else:
             result[base_key] = true_loss
-            statistics.directions[base_key] = direction
 
     def _update_streamed(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
         """Accumulate one PATCH's partial states; record the case when its next sibling arrives. Cases
@@ -741,10 +729,9 @@ class Evaluator(DistributedObject):
         result: dict[str, float] = {}
         for (output_group, target_group, index), (metric, states) in self._pending.items():
             true_loss = CriterionResult.of(metric.combine_metric(states), metric.get_name()).materialized()
-            direction = "max" if getattr(metric, "maximize", False) else "min"
             criteria = self.metrics[output_group][target_group]
             base_key = criterion_keys(output_group, target_group, (m.get_name() for m in criteria))[index]
-            Evaluator._record_value(result, statistics, base_key, true_loss, direction)
+            Evaluator._record_value(result, base_key, true_loss)
         for sink in self._map_sinks.values():
             sink.close()
         self._map_sinks = {}
@@ -850,7 +837,25 @@ class Evaluator(DistributedObject):
             )
         if global_rank == 0:
             statistics.set_aside.update(set_aside)
+            statistics.directions = self._directions(
+                key for measures, _ in outputs for row in measures.values() for key in row
+            )
             statistics.write([measures for measures, _ in outputs])
+
+    def _directions(self, keys: Iterable[str]) -> dict[str, str]:
+        """Each reported key's direction, off the metric the config names for it (a component ``base:part`` takes its
+        metric's): a row restored from an interrupted run or gathered from another rank carries none of its own."""
+        metrics = {
+            key: "max" if getattr(metric, "maximize", False) else "min"
+            for output_group, targets in self.metrics.items()
+            for target_group, criteria in targets.items()
+            for key, metric in zip(
+                criterion_keys(output_group, target_group, (m.get_name() for m in criteria)), criteria, strict=True
+            )
+        }
+        return {
+            key: direction for key in keys for base, direction in metrics.items() if f"{key}:".startswith(f"{base}:")
+        }
 
     def _clock_report(self, label: str, min_seconds: float = 1.0) -> str | None:
         """One line accounting for a split's wall clock, or ``None`` below ``min_seconds``: the wait for
