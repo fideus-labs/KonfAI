@@ -102,7 +102,7 @@
       <button type="button" class="how-step hue-engine" aria-pressed="false"><span class="k-kicker">2 · One command</span><b>Train, predict, evaluate</b><span>Patches are read regionally from ITK, HDF5, DICOM and OME-Zarr; prediction owns batching, test-time augmentation, ensembles, overlap reconstruction, geometry and output writing.</span></button>
       <button type="button" class="how-step hue-apps" aria-pressed="false"><span class="k-kicker">3 · One app</span><b>Package and run anywhere</b><span>A trained session packages as an app: a local folder, a Hugging Face repository or an HTTP server, run from the one-line CLI, konfai-apps, 3D Slicer, an agent through MCP, and, with Edge, a browser tab.</span></button>
     </div>
-    <div class="tty k-reveal"><div class="tty-bar"><i></i><i></i><i></i><span>~/experiment</span></div><pre><code id="tty"><span class="c"># examples/Registration/Config.yml, in part</span>
+    <div class="tty k-reveal"><div class="tty-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/experiment</span></div><pre aria-hidden="true"><code id="tty"><span class="c"># examples/Registration/Config.yml, in part</span>
 Trainer:
   Model:
     classpath: registration.registration.VoxelMorph
@@ -114,7 +114,7 @@ Trainer:
 <span class="p">$</span> konfai PREDICTION -c Prediction.yml --models Checkpoints/&lt;run&gt;/&lt;checkpoint&gt;.pt --gpu 0
 <span class="p">$</span> konfai EVALUATION -c Evaluation.yml
 <span class="p">$</span> pip install konfai-apps
-<span class="p">$</span> konfai-apps infer VBoussot/TotalSegmentator-KonfAI:total -i ct.nii.gz -o out/</code></pre></div>
+<span class="p">$</span> konfai-apps infer VBoussot/TotalSegmentator-KonfAI:total -i ct.nii.gz -o out/</code></pre><p class="vh">The commands, in order: pip install "konfai[imaging]"; konfai TRAIN -c Config.yml --gpu 0; konfai PREDICTION -c Prediction.yml --models Checkpoints/&lt;run&gt;/&lt;checkpoint&gt;.pt --gpu 0; konfai EVALUATION -c Evaluation.yml; pip install konfai-apps; konfai-apps infer VBoussot/TotalSegmentator-KonfAI:total -i ct.nii.gz -o out/.</p></div>
   </div>
 </section>
 
