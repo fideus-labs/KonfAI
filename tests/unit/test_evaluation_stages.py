@@ -23,7 +23,7 @@ import pytest
 import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import MeasureError
+from konfai.utils.errors import MeasureError, TransformError
 
 sitk = pytest.importorskip("SimpleITK")
 
@@ -113,6 +113,21 @@ def test_keep_labels_takes_a_map_isin_has_no_kernel_for(dtype):
     stage.set_datasets([_Store(MOVING=(np.zeros((1, 4, 4, 4), np.uint8), Attribute()))])  # holds 0 alone
     kept = stage("a", fixed, Attribute())
     assert kept.dtype == dtype and not kept.any()
+
+
+@pytest.mark.parametrize("extension", ["mha", "gipl"])
+def test_keep_labels_refuses_a_map_it_would_read_whole(tmp_path, extension):
+    # A GIPL cannot serve a region alone: its labels would be read off the whole volume, which no plan counts.
+    (tmp_path / "a").mkdir()
+    sitk.WriteImage(sitk.Image([4, 4, 4], sitk.sitkUInt8) + 1, str(tmp_path / "a" / f"MOVING.{extension}"))
+    stage = KeepLabels("MOVING")
+    stage.set_datasets([Dataset(str(tmp_path), extension)])
+    fixed = torch.tensor([[[[0, 1, 2]]]], dtype=torch.uint8)
+    if extension == "gipl":
+        with pytest.raises(TransformError, match="MOVING"):
+            stage("a", fixed, Attribute())
+    else:
+        assert stage("a", fixed, Attribute()).flatten().tolist() == [0, 1, 0]
 
 
 def _field(size, spacing, origin, rotation, components) -> sitk.Image:

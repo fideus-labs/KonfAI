@@ -356,7 +356,8 @@ class KeepLabels(Transform):
 
     A label is then scored only when both maps hold it: on the fixed labels, ``group`` names the moving
     labels before any warp, so that a label the warp erases still counts. The other map's labels are read once per
-    case, block by block; the stage is then voxel by voxel.
+    case, block by block; the stage is then voxel by voxel. A store that cannot serve a region alone (GIPL) is
+    refused: it would be read whole, a read no plan counts.
     """
 
     locality = LocalityKind.POINTWISE
@@ -376,6 +377,13 @@ class KeepLabels(Transform):
                 raise TransformError(
                     f"'KeepLabels' found no map of group '{self.group}' for case '{name}'.",
                     "Name a group every case holds: KeepLabels: {group: MOVING_LABELS}.",
+                )
+            if not dataset.bounded_region_reads(self.group, name):
+                raise TransformError(
+                    f"'KeepLabels' would read the map of group '{self.group}' for case '{name}' whole: its store"
+                    " cannot serve a region alone.",
+                    "Store that group in a format read by region (.mha, .nii or OME-Zarr), so that its labels are"
+                    " read block by block.",
                 )
             labels: set[int] = set()
             for block in dataset.iter_data_blocks(self.group, name)():
