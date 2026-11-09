@@ -115,6 +115,17 @@ def test_keep_labels_takes_a_map_isin_has_no_kernel_for(dtype):
     assert kept.dtype == dtype and not kept.any()
 
 
+def test_keep_labels_refuses_a_uint64_label_int64_cannot_hold():
+    huge = np.full((1, 2, 2, 2), 2**64 - 1, np.uint64)
+    stage = KeepLabels("MOVING")
+    stage.set_datasets([_Store(MOVING=(np.full((1, 2, 2, 2), -1, np.int64), Attribute()))])
+    with pytest.raises(TransformError, match="2\\^63-1"):  # wrapped to -1, it would have matched the -1 held
+        stage("a", torch.from_numpy(huge), Attribute())
+    stage.set_datasets([_Store(MOVING=(huge, Attribute()))])
+    with pytest.raises(TransformError, match="2\\^63-1"):
+        stage("b", torch.zeros(1, 2, 2, 2, dtype=torch.int64), Attribute())
+
+
 @pytest.mark.parametrize("extension", ["mha", "gipl"])
 def test_keep_labels_refuses_a_map_it_would_read_whole(tmp_path, extension):
     # A GIPL cannot serve a region alone: its labels would be read off the whole volume, which no plan counts.

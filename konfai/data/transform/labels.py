@@ -343,6 +343,7 @@ class Otsu(Transform):
 
 
 #: The types isin and where have no kernel for, and the type each is compared in, which holds all its values.
+_RELABEL = "Relabel the map (labels are small integers) or store it as uint32/int64."
 _COMPARED_AS = {
     torch.bool: torch.uint8,
     torch.uint16: torch.int32,
@@ -388,11 +389,18 @@ class KeepLabels(Transform):
             labels: set[int] = set()
             for block in dataset.iter_data_blocks(self.group, name)():
                 labels.update(int(label) for label in np.unique(block))
+            if labels and max(labels) > torch.iinfo(torch.int64).max:
+                raise TransformError(
+                    f"'KeepLabels' found a label above 2^63-1 in the map of group '{self.group}' for case '{name}'.",
+                    _RELABEL,
+                )
             self._held[name] = torch.tensor(sorted(labels), dtype=torch.int64)
         return self._held[name]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         held = self.held(name)
+        if tensor.dtype is torch.uint64 and bool((tensor.view(torch.int64) < 0).any()):  # int64 would wrap it
+            raise TransformError(f"'KeepLabels' was handed a map of case '{name}' with a label above 2^63-1.", _RELABEL)
         values = tensor.to(_COMPARED_AS.get(tensor.dtype, tensor.dtype))
         if not values.is_floating_point():  # a label this map's type cannot hold is not in it
             held = held[(held >= torch.iinfo(values.dtype).min) & (held <= torch.iinfo(values.dtype).max)]
