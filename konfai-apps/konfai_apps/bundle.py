@@ -161,8 +161,8 @@ def _konfai_scalar_globals() -> list[Any]:
     """The non-tensor types a KonfAI run pickles into its checkpoint (epoch counters as numpy scalars, config
     floats as ruamel scalars): let through the weights-only unpickler, which holds no code of its own."""
     import numpy as np
+    from numpy._core import multiarray
 
-    multiarray = (getattr(np, "_core", None) or np.core).multiarray  # numpy 2 / numpy 1
     allowed: list[Any] = [np.dtype, np.ndarray, multiarray.scalar, multiarray._reconstruct]
     allowed += [getattr(np.dtypes, name) for name in dir(np.dtypes) if name.endswith("DType")]
     try:

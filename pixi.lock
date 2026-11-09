@@ -2285,9 +2285,9 @@ packages:
 - pypi: ./
   name: konfai
   requires_dist:
-  - torch>=2.3
+  - torch>=2.5
   - tqdm
-  - numpy
+  - numpy>=2
   - ruamel-yaml
   - psutil
   - safetensors

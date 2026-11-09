@@ -85,7 +85,8 @@ setup(
         # streamable HTTP (MCP spec rev 2025-03-26) has been there since 2.10.2.
         "fastmcp>=4",
         "ruamel.yaml",
-        "numpy",
+        # 2.0, as konfai declares it: konfai_apps.bundle reads np._core and np.dtypes.
+        "numpy>=2",
         # Checks a written config against KonfAI's schema (konfai.config_schema.config_errors).
         "jsonschema",
     ],
