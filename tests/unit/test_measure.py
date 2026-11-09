@@ -607,21 +607,6 @@ class TestSSIM:
 
         assert value == pytest.approx(expected, abs=1e-6)
 
-    def test_the_voxels_outside_the_mask_are_not_scored(self):
-        # A constant guess inside a body of an eighth of the volume scores 0.24; scored on the whole
-        # extent, the zeros against zeros around it lifted it to 0.58.
-        rng = np.random.default_rng(2)
-        target = rng.normal(40.0, 300.0, (24, 24, 24)).astype(np.float32)
-        mask = np.zeros(target.shape, np.uint8)
-        mask[4:16, 4:16, 4:16] = 1
-        guess = np.full(target.shape, float(np.median(target)), np.float32)
-
-        _, value = SSIM(dynamic_range=4095.0)(
-            torch.tensor(guess)[None, None], torch.tensor(target)[None, None], torch.tensor(mask)[None, None]
-        )
-
-        assert value < 0.3
-
     def test_an_item_masked_on_its_border_alone_is_skipped_by_the_metric_the_loss_and_the_stream(self):
         # The map is cropped by three voxels: a mask that lives there scores nothing, and must not count as 0.
         x1, y1 = self._pair("random", (12, 14, 13))

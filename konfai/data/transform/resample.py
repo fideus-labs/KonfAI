@@ -1975,8 +1975,7 @@ class TransformPoints(Transform):
 
 
 class Displace(TransformPoints):
-    """Points carried by the case's displacement field ``field_group``: ``TransformPoints`` of that one group, not
-    inverted: a 3-D field is read around each point alone when its store reads a region, and whole otherwise."""
+    """Points carried by the case's displacement field ``field_group``: ``TransformPoints`` of it, not inverted."""
 
     def __init__(self, field_group: str = "DVF") -> None:
         super().__init__({field_group: False})

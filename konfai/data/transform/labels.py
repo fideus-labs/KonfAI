@@ -368,10 +368,9 @@ class KeepLabels(Transform):
     def __init__(self, group: str = "default") -> None:
         super().__init__()
         self.group = group
-        self._held: dict[str, torch.Tensor] = {}
+        self._held: dict[str, torch.Tensor] = {}  # per case, the labels the other map holds, background included
 
-    def held(self, name: str) -> torch.Tensor:
-        """The labels the case's other map holds, background included."""
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if name not in self._held:
             dataset = self.dataset_holding(self.group, name)
             if dataset is None:
@@ -395,10 +394,7 @@ class KeepLabels(Transform):
                     _RELABEL,
                 )
             self._held[name] = torch.tensor(sorted(labels), dtype=torch.int64)
-        return self._held[name]
-
-    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        held = self.held(name)
+        held = self._held[name]
         if tensor.dtype is torch.uint64 and bool((tensor.view(torch.int64) < 0).any()):  # int64 would wrap it
             raise TransformError(f"'KeepLabels' was handed a map of case '{name}' with a label above 2^63-1.", _RELABEL)
         values = tensor.to(_COMPARED_AS.get(tensor.dtype, tensor.dtype))

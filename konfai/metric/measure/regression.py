@@ -263,7 +263,7 @@ class SSIM(MaskedLoss):
 
     @staticmethod
     def _map_sum(
-        x: torch.Tensor, y: torch.Tensor, data_range: float, keep: torch.Tensor | None = None
+        x: torch.Tensor, y: torch.Tensor, data_range: float, keep: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor | int]:
         """The sum (float64) and voxel count of skimage's SSIM map over the valid region of one
         ``[N, *spatial]`` pair, its operations in skimage's order; with ``keep`` (bool, the valid
@@ -360,10 +360,10 @@ class SSIM(MaskedLoss):
     @staticmethod
     def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
         """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent, or over
-        the mask's voxels in it; NaN for a mask with none there."""
+        the mask's voxels in it."""
         SSIM._check_extent(x)
         total, count = SSIM._map_sum_over(x, y, mask, data_range, None)
-        return total / count if count else float("nan")
+        return total / count
 
     @staticmethod
     def _differentiable_ssim(
@@ -375,10 +375,8 @@ class SSIM(MaskedLoss):
             return SSIM._map(x.double(), y.double(), data_range).mean()
         x, y = torch.where(mask, x, 0.0), torch.where(mask, y, 0.0)
         ssim_map = SSIM._map(x.double(), y.double(), data_range)
-        radius = (SSIM.window - 1) // 2
-        centres = mask[(slice(None), *(slice(radius, size - radius) for size in mask.shape[1:]))].expand_as(ssim_map)
-        # an empty selection keeps a finite value and a zero gradient
-        return torch.where(centres, ssim_map, 0.0).sum() / centres.sum().clamp(min=1)
+        centres = mask[(slice(None), *(slice(SSIM.halo, size - SSIM.halo) for size in mask.shape[1:]))]
+        return torch.where(centres, ssim_map, 0.0).sum() / centres.expand_as(ssim_map).sum()
 
     def _pairs(
         self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
@@ -389,11 +387,10 @@ class SSIM(MaskedLoss):
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
         mask = None if mask is None else mask.to(device=output.device)
-        radius = (SSIM.window - 1) // 2
         for batch in range(output.shape[0]):
             mask_b = scored = None if mask is None else mask[batch, ...]
             if mask_b is not None and all(size >= SSIM.window for size in mask_b.shape[1:]):
-                scored = mask_b[(slice(None), *(slice(radius, size - radius) for size in mask_b.shape[1:]))]
+                scored = mask_b[(slice(None), *(slice(SSIM.halo, size - SSIM.halo) for size in mask_b.shape[1:]))]
             if scored is not None and not torch.any(scored):
                 yield None
             else:

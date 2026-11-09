@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, image_to_data
 from konfai.utils.errors import MeasureError, TransformError
 
 sitk = pytest.importorskip("SimpleITK")
@@ -43,9 +43,6 @@ class _Store:
     def is_dataset_exist(self, group: str, name: str) -> bool:
         return group in self.groups
 
-    def read_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
-        return self.groups[group]
-
     def read_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         self.regions.append((group, slices))
         return self.groups[group][0][slices], self.groups[group][1]
@@ -59,16 +56,6 @@ class _Store:
     def iter_data_blocks(self, group: str, name: str):
         array = self.groups[group][0]
         return lambda: (array[:, index] for index in range(array.shape[1]))
-
-
-def _geometry(image: sitk.Image) -> Attribute:
-    return Attribute(
-        {
-            "Origin": np.asarray(image.GetOrigin()),
-            "Spacing": np.asarray(image.GetSpacing()),
-            "Direction": np.asarray(image.GetDirection()),
-        }
-    )
 
 
 @pytest.mark.parametrize("dtype", [np.int16, np.float32])
@@ -159,13 +146,6 @@ def _whole_field(field: sitk.Image, points: np.ndarray) -> np.ndarray:
     return np.array([[*transform.TransformPoint(p[:rank].tolist()), *p[rank:]] for p in points])
 
 
-def _displaced(field: sitk.Image, points: np.ndarray) -> tuple[np.ndarray, "_Store"]:
-    store = _Store(DVF=(np.moveaxis(sitk.GetArrayFromImage(field), -1, 0), _geometry(field)))
-    stage = Displace("DVF")
-    stage.set_datasets([store])
-    return stage("a", torch.from_numpy(points), Attribute()).numpy(), store
-
-
 def test_displace_moves_points_as_the_whole_fields_transform_does_reading_a_block_a_point():
     rotation = sitk.VersorTransform((0.2, -0.3, 0.4), 0.54).GetMatrix()
     field = _field((24, 20, 16), (1.5, 0.8, 2.5), (-30.0, 10.0, 5.0), rotation, 3)
@@ -176,7 +156,10 @@ def test_displace_moves_points_as_the_whole_fields_transform_does_reading_a_bloc
     ]
     beyond = field.TransformContinuousIndexToPhysicalPoint((26.0, 5.0, 5.0))  # past the field: ITK's own rule there
     points = np.array([*inside, beyond])
-    moved, store = _displaced(field, points)
+    store = _Store(DVF=image_to_data(field))
+    stage = Displace("DVF")
+    stage.set_datasets([store])
+    moved = stage("a", torch.from_numpy(points), Attribute()).numpy()
     assert np.allclose(moved, _whole_field(field, points), atol=1e-9) and not np.allclose(moved[:-1], points[:-1])
     assert len(store.regions) == len(points)  # one read a point, never the field whole
     assert all(s.stop - s.start <= 2 for _, slices in store.regions for s in slices[1:])
@@ -247,17 +230,11 @@ def test_missing_labels_compares_a_reference_of_another_shape():
     assert Dice()(output, reference, mask)[1] == Jaccard()(output, reference, mask)[1] == {1: pytest.approx(1.0)}
 
 
-def test_missing_labels_is_weighed_by_its_items():
-    # A logged mean weighs each batch by its item count: batches of [0, 0] and [1] missing labels report 1/3.
-    from konfai.metric.measure import MissingLabels
-
-    assert MissingLabels.batch_mean
-
-
-def test_missing_labels_takes_no_loss_role():
+def test_missing_labels_is_weighed_by_its_items_and_takes_no_loss_role():
     from konfai.metric.measure import MissingLabels
     from konfai.network.network.loaders import CriterionsAttr
 
-    assert not MissingLabels().loss_capable
+    # A logged mean weighs each batch by its item count: batches of [0, 0] and [1] missing labels report 1/3.
+    assert MissingLabels.batch_mean and not MissingLabels().loss_capable
     with pytest.raises(MeasureError):
         CriterionsAttr(is_loss=True).settle_role(MissingLabels(), "k")
