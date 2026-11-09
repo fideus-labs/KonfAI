@@ -266,19 +266,19 @@ def program_schema() -> dict[str, Any]:
         "patch": _object(
             {
                 "size": _array(_INTEGER),
-                # null keeps konfai's own case-dependent overlap and last-patch assignment (manifest version 4).
+                # null keeps konfai's own case-dependent overlap and last-patch assignment.
                 "overlap": {"type": ["array", "null"], "items": _INTEGER},
                 "dim": _INTEGER,
                 "extend_slice": _INTEGER,
                 "pad_value": _PAD,
-                # Where the windows of an axis sit (konfai's Patch.placement); absent, pad, as before the key.
+                # Where the windows of an axis sit (konfai's Patch.placement).
                 "placement": {"enum": ["pad", "monai", "spread"]},
                 # The unrounded step between windows, per axis, that placements monai and spread walk
                 # (`resolve_overlap(step=True)`); absent under pad, whose step is `size - overlap`.
                 "stride": _array(_NUMBER),
                 "batch": _INTEGER,
             },
-            ["size", "overlap", "dim", "extend_slice", "pad_value"],
+            ["size", "overlap", "dim", "extend_slice", "pad_value", "placement"],
         ),
         "read": _object(
             {"group": _STRING, "channels": _INTEGER, "preprocessing": _ref("chain")},
@@ -286,8 +286,7 @@ def program_schema() -> dict[str, Any]:
         ),
         "manifest": _object(
             {
-                # The runtime reads a manifest from version 1; an explicit overlap is what the earlier ones carried.
-                "konfai_edge_manifest": {"type": "integer", "minimum": 1, "maximum": MANIFEST_VERSION},
+                "konfai_edge_manifest": {"const": MANIFEST_VERSION},
                 "model": _STRING,
                 "opset": _INTEGER,
                 "output_module": _STRING,
