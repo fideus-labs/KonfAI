@@ -60,7 +60,7 @@
   <div class="cards">
     <div class="k-card k-reveal"><span class="k-kicker">1 · One config</span><h3>A YAML per workflow</h3><p>Config.yml for the Trainer, Prediction.yml for the Predictor, Evaluation.yml for the Evaluator, Transform.yml for the Transformer. The resolved file is the record of the run.</p><pre><code>pip install "konfai[imaging]"</code></pre></div>
     <div class="k-card k-reveal"><span class="k-kicker">2 · One command</span><h3>Train, predict, evaluate</h3><p>Dataset patches are read regionally from ITK, HDF5, DICOM and OME-Zarr stores; prediction owns batching, test-time augmentation, ensembles, overlap reconstruction, geometry and output writing.</p><pre><code>konfai TRAIN -c Config.yml --gpu 0
-konfai PREDICTION -c Prediction.yml --gpu 0
+konfai PREDICTION -c Prediction.yml --models Checkpoints/&lt;run&gt;/&lt;checkpoint&gt;.pt --gpu 0
 konfai EVALUATION -c Evaluation.yml</code></pre></div>
     <div class="k-card k-reveal"><span class="k-kicker">3 · One app</span><h3>Package and run anywhere</h3><p>A trained session packages as an app: a local folder, a Hugging Face repository or an HTTP server, run from the one-line CLI, konfai-apps, 3D Slicer, an agent through MCP, and, with Edge, a browser tab.</p><pre><code>pip install konfai-apps
 konfai-apps infer VBoussot/TotalSegmentator-KonfAI:total -i ct.nii.gz -o out/</code></pre></div>
