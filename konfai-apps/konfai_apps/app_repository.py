@@ -1105,8 +1105,9 @@ class LocalAppRepository(AppRepositoryInfo):
             data = YAML().load(file)
         root = "Predictor" if (data or {}).get("Predictor") else "Trainer"
         for name in (override.partition("=")[0].strip() for override in overrides):
-            resolved = ".".join(key for key in name.split(".") if key)  # as apply_overrides reads Predictor..Dataset
-            if resolved.startswith((f"{root}.manual_seed", f"{root}.Dataset", f"{root}.outputs_dataset")):
+            keys = [key for key in name.split(".") if key]  # as apply_overrides reads Predictor..Dataset
+            # the root itself (Predictor.={...}) replaces the seed, the data and the outputs with the rest
+            if keys[:1] == [root] and (len(keys) == 1 or keys[1] in ("manual_seed", "Dataset", "outputs_dataset")):
                 raise AppRepositoryError(
                     f"The {what} of app '{self.get_name()}' sets '{name}': a preset sets the method's parameters, "
                     "never the seed, the data or the outputs.",

@@ -338,6 +338,7 @@ def test_list_shows_each_app_s_presets(capsys: pytest.CaptureFixture) -> None:
         "Predictor.Dataset.batch_size",
         "Predictor..Dataset.batch_size",
         "Predictor.outputs_dataset.x",
+        "Predictor.",
     ],
 )
 def test_a_preset_sets_no_seed_data_or_output(tmp_path: Path, name: str) -> None:
