@@ -193,8 +193,16 @@ def test_read_only_and_destructive_tools_are_hinted(load_mcp_server: Callable[[]
     assert annotations["read_file"].read_only_hint is True
     assert annotations["delete_run"].destructive_hint is True
     assert not (annotations["run_train"] and annotations["run_train"].read_only_hint)
-    # each can import and run session or app code: a runtime check, the model build, the app's parameters
-    for name in ("check_component", "check_config", "describe_model_outputs", "describe_app"):
+    # each can import code: session or app code (a runtime check, the model build, the app's parameters) or an
+    # installed module a classpath names (a signature, the review summarize_session(include_validation) runs)
+    for name in (
+        "check_component",
+        "check_config",
+        "describe_model_outputs",
+        "describe_app",
+        "inspect_object_signature",
+        "summarize_session",
+    ):
         assert not (annotations[name] and annotations[name].read_only_hint), name
 
 
