@@ -144,3 +144,10 @@ def test_read_training_curves_from_tfevents(
                 await client.call_tool("read_training_curves", {"run_name": "MISSING"})
 
     asyncio.run(scenario())
+
+
+def test_a_recorded_input_keeps_the_dots_of_its_case_name() -> None:
+    from konfai_mcp.metrics_service import cases_by_recorded_input
+
+    recorded = {"P000": ["/flat/patient.2.nii.gz"], "P001": ["/flat/patient.nii.gz"]}
+    assert cases_by_recorded_input(recorded, ["patient", "patient.2"]) == {"P000": "patient.2", "P001": "patient"}

@@ -27,6 +27,8 @@ from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from konfai.utils.utils import storage_form
+
 from .live_parse import parse_live_metric_line
 from .server_jobs import Job
 from .server_support import WorkspaceLayout, read_text_tail
@@ -99,12 +101,14 @@ def recorded_cases(metrics_path: Path, jobs_dir: Path) -> dict[str, list[str | N
 
 
 def cases_by_recorded_input(recorded: dict[str, list[str | None]], names: Iterable[str]) -> dict[str, str]:
-    """``P000`` -> the one case of ``names`` its recorded input files sit in: their case folder or file name."""
+    """``P000`` -> the one case of ``names`` its recorded input files sit in: their case folder, or their file name
+    without the extension KonfAI reads them under (``patient.2.nii.gz`` is case ``patient.2``)."""
     wanted = set(names)
     pairs: dict[str, str] = {}
     for case, files in recorded.items():
+        paths = [Path(file) for file in files if file]
         found = wanted & {
-            part for file in files if file for part in (Path(file).parent.name, Path(file).name.split(".")[0])
+            part for path in paths for part in (path.parent.name, path.name.removesuffix(storage_form(path)))
         }
         if len(found) == 1:
             pairs[case] = found.pop()
