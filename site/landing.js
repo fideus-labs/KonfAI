@@ -50,7 +50,7 @@
     var end = parseFloat(el.getAttribute("data-count")), t0 = performance.now();
     (function tick(now) {
       var k = Math.min(1, (now - t0) / 900), e = 1 - Math.pow(1 - k, 3);
-      el.textContent = Math.round(end * e); if (k < 1) requestAnimationFrame(tick);
+      el.textContent = Math.round(end * e).toLocaleString("en-US"); if (k < 1) requestAnimationFrame(tick);
     })(t0);
   }
   if (still) { blocks.forEach(function (b) { b.classList.add("in"); }); }
@@ -61,9 +61,86 @@
         var el = e.target, i = el.parentNode ? Array.prototype.indexOf.call(el.parentNode.children, el) : 0;
         el.style.transitionDelay = (i % 3) * 60 + "ms"; el.classList.add("in"); io.unobserve(el);
         el.querySelectorAll("[data-count]").forEach(count);
+        el.querySelectorAll(".ways a").forEach(function (a, j) { a.style.transitionDelay = 120 + j * 70 + "ms"; });
       });
     }, { rootMargin: "0px 0px -8% 0px" });
     blocks.forEach(function (b) { io.observe(b); });
+  }
+
+  // ---- the loop: a pulse walks the stages, goes back once from the score to the engine, then on to ship ----
+  var map = document.getElementById("loopmap");
+  if (map) {
+    var stages = map.querySelectorAll(".stage"), back = map.querySelector(".back"),
+      pulse = map.querySelector(".pulse"), trail = map.querySelector(".trail");
+    var SEQ = [0, 1, 2, 3, "back", 2, 3, 4, 5], at = 0, last = 0, timer = 0, seen = false;
+    var centre = function (k) {
+      var n = stages[k].querySelector(".node").getBoundingClientRect(), m = map.getBoundingClientRect();
+      return [n.left + n.width / 2 - m.left, n.top + n.height / 2 - m.top];
+    };
+    var show = function (k) { // the pulse on stage k, the trail from the first stage to it, along the rail's axis
+      var p = centre(k), o = centre(0), down = Math.abs(centre(1)[0] - o[0]) < 2;
+      last = k;
+      pulse.style.transform = "translate(" + p[0] + "px," + p[1] + "px)";
+      pulse.style.setProperty("--pulse", getComputedStyle(stages[k]).getPropertyValue("--k-hue"));
+      trail.style.left = o[0] - (down ? 1 : 0) + "px"; trail.style.top = o[1] - (down ? 0 : 1) + "px";
+      trail.style.width = down ? "2px" : p[0] - o[0] + "px"; trail.style.height = down ? p[1] - o[1] + "px" : "2px";
+    };
+    var step = function () {
+      var s = SEQ[at], k = s === "back" ? 1 : s; // back: the score sends the method to the engine again
+      if (at === 0) stages.forEach(function (x) { x.classList.remove("seen"); });
+      stages.forEach(function (x) { x.classList.remove("on"); });
+      back.classList.toggle("on", s === "back");
+      stages[k].classList.add("on", "seen"); show(k); pulse.classList.add("on");
+      at = (at + 1) % SEQ.length;
+    };
+    var run = function () { clearInterval(timer); timer = 0; if (seen && !document.hidden) { step(); timer = setInterval(step, 1700); } };
+    if (still) stages.forEach(function (x) { x.classList.add("seen"); });
+    else {
+      new IntersectionObserver(function (e) { seen = e[0].isIntersecting; run(); }, { threshold: 0.25 }).observe(map);
+      document.addEventListener("visibilitychange", run);
+      addEventListener("resize", function () { if (timer) show(last); });
+    }
+  }
+
+  // ---- how it works: the terminal types the chosen step, then the next one ----
+  var tty = document.getElementById("tty"), steps = document.querySelectorAll(".how-step");
+  var SCRIPT = [
+    ["# examples/Registration/Config.yml, in part", "Trainer:", "  Model:", "    classpath: registration.registration.VoxelMorph",
+      "    VoxelMorph:", "      dim: 2", "      int_steps: 7", "$ pip install \"konfai[imaging]\""],
+    ["$ konfai TRAIN -c Config.yml --gpu 0", "$ konfai PREDICTION -c Prediction.yml --models Checkpoints/<run>/<checkpoint>.pt --gpu 0",
+      "$ konfai EVALUATION -c Evaluation.yml"],
+    ["$ pip install konfai-apps", "$ konfai-apps infer VBoussot/TotalSegmentator-KonfAI:total -i ct.nii.gz -o out/"]
+  ];
+  if (tty && steps.length) {
+    var cur = 0, typing = 0, near = false, waiting = false;
+    var later = function (fn, ms) { if (still) fn(); else typing = setTimeout(fn, ms); };
+    var play = function (k) {
+      clearTimeout(typing); cur = k; waiting = false; tty.textContent = "";
+      steps.forEach(function (b, i) { b.setAttribute("aria-pressed", i === k ? "true" : "false"); });
+      var lines = SCRIPT[k], li = 0, ci = 0, target = null, cursor = document.createElement("span");
+      cursor.className = "cursor"; if (!still) tty.appendChild(cursor); else cursor = null;
+      (function tick() {
+        if (li === lines.length) { if (!still) typing = setTimeout(next, 2600); return; }
+        var text = lines[li];
+        if (!target) { // a line: a comment in the dim ink, a command after its prompt, YAML as it is
+          var box = document.createElement("span");
+          if (text[0] === "#") box.className = "c";
+          if (text.slice(0, 2) === "$ ") { var p = document.createElement("span"); p.className = "p"; p.textContent = "$"; box.appendChild(p); box.appendChild(document.createTextNode(" ")); ci = 2; }
+          target = document.createTextNode(""); box.appendChild(target); tty.insertBefore(box, cursor);
+        }
+        target.data += still ? text.slice(ci) : text.charAt(ci); ci = still ? text.length : ci + 1;
+        if (ci < text.length) return later(tick, text[0] === "$" ? 24 : 9);
+        tty.insertBefore(document.createTextNode("\n"), cursor); li++; ci = 0; target = null;
+        later(tick, text[0] === "$" ? 420 : 90);
+      })();
+    };
+    var next = function () { if (near) play((cur + 1) % SCRIPT.length); else waiting = true; };
+    steps.forEach(function (b, i) { b.addEventListener("click", function () { play(i); }); });
+    if (still) steps.forEach(function (b) { b.setAttribute("aria-pressed", "false"); }); // the full script shows until a step is chosen
+    else new IntersectionObserver(function (e) {
+      near = e[0].isIntersecting;
+      if (near && (waiting || !typing)) play(waiting ? (cur + 1) % SCRIPT.length : 0);
+    }, { threshold: 0.4 }).observe(tty);
   }
 
   // ---- phone menu ----

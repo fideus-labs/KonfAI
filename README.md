@@ -1,35 +1,81 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/logo.png" alt="KonfAI" width="360" />
-  <h1>Medical-imaging workflows, executable end to end</h1>
-  <p><strong>From images on disk to reproducible experiments, production inference, and reusable clinical applications.</strong></p>
-  <p>
-    <a href="https://pypi.org/project/konfai/"><img src="https://img.shields.io/pypi/v/konfai" alt="PyPI version" /></a>
-    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+" /></a>
-    <a href="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml"><img src="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg" alt="CI" /></a>
-    <a href="https://konfai.readthedocs.io/en/latest/"><img src="https://readthedocs.org/projects/konfai/badge/?version=latest" alt="Documentation" /></a>
-    <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0" /></a>
-  </p>
-  <p>
-    <a href="https://konfai.readthedocs.io/en/latest/quickstart.html"><strong>Quickstart</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/examples/visual-gallery.html"><strong>See it on real data</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/usage/large-images.html"><strong>Large images</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html"><strong>Bring PyTorch or MONAI</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/usage/apps.html"><strong>Ship an App</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/usage/mcp.html"><strong>Automate with MCP</strong></a>
-    · <a href="https://konfai.readthedocs.io/en/latest/usage/studio.html"><strong>KonfAI Studio</strong></a>
-  </p>
-</div>
+<p align="center">
+  <a href="https://fideus-labs.github.io/KonfAI/"><img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/konfai-ecosystem.webp" alt="KonfAI, medical-imaging AI from the dataset to the browser. Your images are built and run by KonfAI, inspected by Scout, scored by FidOpt, shipped as KonfAI Apps and, soon, run in a browser tab by KonfAI Edge; people drive every stage from the command line, Python, 3D Slicer or Studio, and agents through KonfAI MCP." width="1280" /></a>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/konfai/"><img src="https://img.shields.io/pypi/v/konfai" alt="PyPI version" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+" /></a>
+  <a href="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml"><img src="https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://konfai.readthedocs.io/en/latest/"><img src="https://readthedocs.org/projects/konfai/badge/?version=latest" alt="Documentation" /></a>
+  <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache-2.0" /></a>
+</p>
+
+<p align="center">
+  <a href="https://fideus-labs.github.io/KonfAI/"><strong>Website</strong></a>
+  · <a href="https://konfai.readthedocs.io/en/latest/"><strong>Docs</strong></a>
+  · <a href="https://konfai.readthedocs.io/en/latest/quickstart.html"><strong>Quickstart</strong></a>
+  · <a href="https://konfai.readthedocs.io/en/latest/usage/apps.html"><strong>Apps</strong></a>
+  · <a href="https://huggingface.co/VBoussot"><strong>Hugging Face</strong></a>
+  · <a href="https://fidopt.io/"><strong>FidOpt</strong></a>
+  · <a href="https://www.arxiv.org/abs/2508.09823"><strong>Paper</strong></a>
+</p>
+
+**KonfAI is a declarative medical-imaging execution engine, and the family around it.** One configuration trains,
+predicts and evaluates a model, patch by patch, on images of any size, and the resolved YAML is the record of the run.
+Around the engine, the same method is inspected by Scout, scored by FidOpt on 311 datasets, and shipped as an app to
+the command line, 3D Slicer, Hugging Face and, with KonfAI Edge, a browser tab. You drive it from the command line,
+Python, 3D Slicer or a conversation in KonfAI Studio; an agent reaches the same pieces through KonfAI MCP.
+
+The whole family on one page: **[fideus-labs.github.io/KonfAI](https://fideus-labs.github.io/KonfAI/)**.
+
+## The family
+
+| Piece | What it does | Get it |
+| --- | --- | --- |
+| **KonfAI** | The engine, this repository. `TRAIN`, `PREDICTION`, `EVALUATION` and `TRANSFORM`, each from one YAML; regional reads from ITK, DICOM, HDF5 and OME-Zarr; test-time augmentation, ensembles, overlap reconstruction and geometry handled for you | `pip install "konfai[imaging]"` |
+| **KonfAI Apps** | One contract for a packaged model, from a folder, Hugging Face or an HTTP server. Five published: TotalSegmentator-KonfAI, MRSegmentator-KonfAI, ImpactSynth, ImpactSeg, IMPACT-Reg | `pip install konfai-apps` · [`apps/`](apps) · [Hugging Face](https://huggingface.co/VBoussot) |
+| **3D Slicer** | SlicerKonfAI runs the apps, with evaluation and uncertainty; SlicerImpactReg runs the registration presets and inspects their results | [SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) · [SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg) |
+| **KonfAI MCP** | Fifty tools, one per object: an agent inspects a dataset, writes and validates configs, launches, follows and compares runs, and packages an app | `pip install konfai-mcp` · [guide](https://konfai.readthedocs.io/en/latest/usage/mcp.html) |
+| **KonfAI Studio** | A chat web UI over the MCP server: inspect, train, predict, evaluate, compare and view the volumes from one conversation, with your own model endpoint | `pip install konfai-studio` · [guide](https://konfai.readthedocs.io/en/latest/usage/studio.html) |
+| **KonfAI Scout** | Looks at a segmentation, a registration or a synthesis the way a person would at a viewer, and reports where it is wrong, with the views that show it and KonfAI Eval's measurements | [`konfai-scout/`](konfai-scout) |
+| **KonfAI Edge** | The Rust runtime that runs the apps in a browser tab with no server, as Web Components another page embeds with one import; its demo is coming to the website | [what it is](https://fideus-labs.github.io/KonfAI/docs/edge.html) |
+| **FidOpt** | An open benchmark for registration, segmentation and synthesis: 311 datasets, 3,353 held-out test cases, one evaluation for every method. A method on its board is a KonfAI app | [fidopt.io](https://fidopt.io/) |
+
+## Where it goes
+
+> An agent that develops a method should be able to ask a trusted service how good it is, and iterate, the way a
+> person submits to a challenge, but in a loop. ([FidOpt](https://fidopt.io/))
+
+Each piece above is one stage of that loop. KonfAI runs a method, Scout inspects its results, FidOpt judges it on a
+hidden test, and what wins ships as an app anyone can run, from the command line, 3D Slicer or a browser tab. A person
+can drive every stage, and so can an agent.
+
+KonfAI has powered **top-ranking MICCAI 2025 challenge results** across segmentation, registration and synthesis:
+[SynthRAD2025 T1](https://github.com/vboussot/Synthrad2025_Task_1) ·
+[SynthRAD2025 T2](https://github.com/vboussot/Synthrad2025_Task_2) ·
+[CURVAS PDACVI](https://github.com/vboussot/CurvasPDACVI) ·
+[TrackRAD2025](https://github.com/vboussot/TrackRAD2025) ·
+[Panther](https://github.com/vboussot/Panther) ·
+[CURVAS](https://github.com/vboussot/CURVAS).
+**Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823)
+(Boussot & Dillenseger, 2025).
+
+## Where to start
+
+- **The whole picture?** The [website](https://fideus-labs.github.io/KonfAI/).
+- **Running a published model?** One command, see [Real workloads](#real-workloads-one-app-contract).
+- **Adapting an experiment?** The [Quickstart](#quickstart-first-smoke-run): train, predict, evaluate.
+- **Building an app?** [`konfai-apps`](https://konfai.readthedocs.io/en/latest/usage/apps.html).
+- **Working through an agent?** [KonfAI MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html) or [KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html).
+- **Contributing?** [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md).
 
 ---
 
-**KonfAI is a declarative medical-imaging execution engine.** It turns a
-reproducible research workflow into patch-native training, complete
-medical-image inference, and a reusable application, without giving up the
-PyTorch and MONAI components you already trust.
+## The engine
 
-One configuration model connects storage, transforms, model graphs, losses,
-training, prediction, evaluation, and output geometry. The resolved YAML is the
-experiment record: inspectable, diffable, and runnable by a researcher or a program.
+One configuration model connects storage, transforms, model graphs, losses, training, prediction, evaluation and
+output geometry. The resolved YAML is the experiment record: inspectable, diffable, and runnable by a researcher or a
+program.
 
 ```yaml
 Trainer:
@@ -44,40 +90,7 @@ Trainer:
 konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 ```
 
-<p align="center">
-  <picture>
-    <source media="(max-width: 640px)" srcset="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow-mobile.svg" width="720" height="1330" />
-    <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow.svg" alt="KonfAI reads medical data regionally, executes transforms and PyTorch graphs patch by patch, reconstructs outputs, and delivers medical datasets, Apps, HTTP services, Slicer workflows, and automated experiments." width="1100" height="458" />
-  </picture>
-</p>
-
-KonfAI has powered **top-ranking MICCAI-challenge results** across segmentation,
-registration, and synthesis:
-[SynthRAD2025 T1](https://github.com/vboussot/Synthrad2025_Task_1) ·
-[SynthRAD2025 T2](https://github.com/vboussot/Synthrad2025_Task_2) ·
-[CURVAS PDACVI](https://github.com/vboussot/CurvasPDACVI) ·
-[TrackRAD2025](https://github.com/vboussot/TrackRAD2025) ·
-[Panther](https://github.com/vboussot/Panther) ·
-[CURVAS](https://github.com/vboussot/CURVAS)
-
-> 📄 **Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823) (Boussot & Dillenseger, 2025)
-
-> 🤖 **MCP tools.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
-> so an MCP client can drive the *entire* experiment loop (inspect a dataset, author & validate YAML,
-> launch train / predict / evaluate / transform, monitor jobs, compare runs), always grounded in the same
-> reproducible configs a human would run. → **[MCP workflows](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
-
----
-
-## Where to start
-
-- **Evaluating KonfAI?** → the App benchmark table below, then [the docs landing](https://konfai.readthedocs.io/en/latest/).
-- **Running a published model?** → the one-command App install ([Real workloads](#real-workloads-one-app-contract)).
-- **Adapting an experiment?** → the [Quickstart](#quickstart-first-smoke-run) (train → predict → evaluate).
-- **Building an App?** → [`konfai-apps`](https://konfai.readthedocs.io/en/latest/usage/apps.html).
-- **Contributing?** → [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md).
-
-## Why KonfAI?
+### Why KonfAI?
 
 - **Scale.** Dataset patches can be read regionally from ITK, HDF5, DICOM, and
   OME-Zarr when preprocessing is stream-compatible; a bounded buffer preserves
@@ -95,7 +108,7 @@ MONAI components, and its catalog includes documented compatibility paths for
 selected MONAI, nnU-Net, torchvision, and segmentation-models-pytorch models.
 [See when to use KonfAI, or another tool.](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html)
 
-## One engine owns the complete medical workflow
+### One engine owns the complete medical workflow
 
 | Layer | What KonfAI makes executable |
 | --- | --- |
@@ -219,7 +232,7 @@ konfai EVALUATION -y --cpu 1 --config Evaluation.yml
 python quickstart.py verify
 ```
 
-> 💡 After a run, `Config.yml` will contain the resolved defaults KonfAI
+> After a run, `Config.yml` will contain the resolved defaults KonfAI
 > materialised. That's expected, and it's what makes runs reproducible.
 
 `verify` fails unless the four predictions carry the geometry of their CT and
@@ -265,7 +278,7 @@ runs it on the demo data; a MONAI Bundle imports the same way
 
 ---
 
-## 🩻 How volumes are read
+## How volumes are read
 
 Volumes are read as patches. Whether the volume is *also* held in RAM depends on
 the workflow's loading regime (training caches, and `memory_budget` makes that
@@ -319,15 +332,15 @@ Not limited to these: any importable class (`monai.losses:DiceLoss`,
 
 ---
 
-## 🤖 Automate workflows through MCP
+## Automate workflows through MCP
 
 KonfAI is built to serve as a **deterministic backend for LLM-driven
 experimentation**. Through the **KonfAI-MCP server**, a client can:
 
-- 🔎 inspect datasets and infer their structure
-- 📝 generate and validate YAML configurations
-- 🚀 launch training / prediction / evaluation / transform runs
-- 📈 read live metrics, compare runs, and iterate
+- inspect datasets and infer their structure
+- generate and validate YAML configurations
+- launch training / prediction / evaluation / transform runs
+- read live metrics, compare runs, and iterate
 
 Every execution stays **reproducible, structured, and grounded in the same YAML
 workflows** a human would run, bridging LLM reasoning and real experimental
@@ -336,7 +349,7 @@ for the current status.
 
 ---
 
-## 💬 KonfAI Studio
+## KonfAI Studio
 
 **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** is
 a single chatbot web UI over the MCP server. Point it at your own dataset and,
@@ -357,27 +370,9 @@ konfai-studio            # -> http://127.0.0.1:8730
 
 ---
 
-## Ecosystem
-
-| Package | What it is |
-| --- | --- |
-| **`konfai`** | the core framework (this repo) |
-| **`konfai-apps`** | package a workflow as an app: [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/usage/python-api.html#apps-the-konfai-apps-package) |
-| **App bundles** (`apps/`) | ready-to-run: `impact-synth`, `impact-seg`, `mrsegmentator`, `totalsegmentator`, `impact-reg` |
-| **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run segmentation, synthesis, evaluation, and uncertainty Apps from 3D Slicer |
-| **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
-| **KonfAI-MCP** | expose KonfAI to MCP clients: inspect data, author configs, launch and monitor runs |
-| **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp`: inspect data, train, predict, evaluate, and compare from one conversation |
-| **[KonfAI Scout](konfai-scout/README.md)** | a vision-language agent that inspects a segmentation, registration or synthesis result slice by slice and reports localised defects with evidence and KonfAI Eval measurements |
-
-See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
-for what is shipped vs. in-progress.
-
----
-
 ## Documentation
 
-📚 **Full docs: <https://konfai.readthedocs.io/en/latest/>**
+**Full docs: <https://konfai.readthedocs.io/en/latest/>**
 
 - [Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html): first end-to-end run
 - [Core concepts](https://konfai.readthedocs.io/en/latest/config_guide/index.html): how YAML becomes Python objects
@@ -386,7 +381,7 @@ for what is shipped vs. in-progress.
 - [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/models.html): everything you can configure
 - [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html): runnable Segmentation, Synthesis & Registration workflows, a model of your own in ten lines, a public 2.4 GB OME-Zarr read where it lives, plus five published-app demos
 
-🐳 **Docker:** `vboussot/konfai`,
+**Docker:** `vboussot/konfai`,
 [guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html#docker).
 
 ---
