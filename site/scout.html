@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b12">
+<title>KonfAI Scout</title>
+<meta name="description" content="An agent that inspects a segmentation, registration or synthesis result and reports localised defects with evidence.">
+<link rel="stylesheet" href="design/fonts.css">
+<link rel="stylesheet" href="design/tokens.css">
+<link rel="stylesheet" href="design/components.css">
+<link rel="stylesheet" href="landing.css">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/konfai-logo.png">
+</head>
+<body class="landing inner hue-scout">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="index.html"><img src="assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="docs/get-started.html">Engine</a><a href="apps.html">Apps</a><a href="docs/edge.html">Edge</a><a href="studio.html">Studio</a><a href="mcp.html">MCP</a><a href="scout.html" aria-current="page">Scout</a><a href="docs/index.html">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" aria-expanded="false" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</header>
+<main>
+
+<section class="hero small">
+  <img src="assets/konfai-scout-logo.png" alt="" width="360" height="94">
+  <h1>KonfAI Scout</h1>
+  <p>An agent that looks at your segmentation, registration or synthesis the way you would, and tells you where it is wrong. A score says how good a result is; Scout says where and why. It inspects one case at a viewer, slice by slice, zooms on what looks off, switches overlays to tell the image from the result, asks KonfAI Eval to measure the suspect region, and writes a report of localised defects with their type, severity, uncertainty, the views that show them and the measurements that support them.</p>
+  <pre><code>pip install konfai-scout[anthropic]        # Claude through the Anthropic API
+pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)
+pip install konfai-scout[claude-code]      # Claude under your Claude Code login, no API key
+pip install konfai-scout[codex]            # GPT under your ChatGPT login (the Codex CLI), no API key</code></pre>
+</section>
+
+<section>
+  <h2>How it works</h2>
+  <ul>
+    <li><strong>It explores.</strong> Coverage first, a montage per plane, then targeted views: slices, zooms, checkerboards, difference maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.</li>
+    <li><strong>It measures with KonfAI Eval, not with a scorer of its own.</strong> A region is cropped and scored by <code>konfai.evaluate</code> with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian and displacement statistics without one. Reading, warping and geometry are KonfAI's too.</li>
+    <li><strong>It keeps its statements apart, and enforces it.</strong> A measured property, a suspected error (seen, not proven) and a confirmed error (a cited measurement) are distinct, and without a truth nothing is confirmed from appearance. The <code>note</code> tool refuses an error that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken elsewhere. "Insufficient evidence" is a legitimate conclusion. On request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and its answer stands in the report next to the first reader's.</li>
+    <li><strong>It leaves a record.</strong> A versioned JSON report with versions, configuration, prompts, every tool call, every view, every measurement, cost and duration, and a Markdown rendition with the evidence images. Two modes, fixed views and active exploration.</li>
+    <li><strong>It works with Claude, GPT or a local vision model</strong> through an OpenAI-compatible server, and sends images to a cloud API only when told to.</li>
+  </ul>
+  <pre><code>konfai-scout inspect --task segmentation --name case01 \
+    --input image=ct.nii.gz --input prediction=seg.nii.gz --input truth=gt.nii.gz \
+    --labels 1=liver,2=spleen --evaluation Evaluations/run/Metric_TRAIN.json \
+    --out reports/case01 --provider anthropic --allow-cloud-images</code></pre>
+  <p>Scout is a package of the KonfAI family (<a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-scout"><code>konfai-scout/</code></a> in the repository), pinned to the <code>konfai</code> release it ships with: every volume is read through KonfAI's dataset backends (image files, OME-Zarr stores, DICOM series, ITK transform files), a registration is warped by KonfAI's own <code>Resample</code>, and every measurement is KonfAI Eval's. The <a href="mcp.html">MCP server</a> runs it as a tracked job (<code>run_scout_inspection</code>, <code>read_scout_report</code>), and <a href="studio.html">Studio</a> shows its reports in a panel.</p>
+</section>
+
+</main>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
+</footer>
+<script src="landing.js" data-root="" defer></script>
+</body>
+</html>

@@ -35,6 +35,7 @@ from .server_support import (
     WORKFLOW_CONFIG_FILES,
     WorkspaceLayout,
     available_templates,
+    classpath_requires_import,
     default_group_map,
     load_template_configs,
     summarize_classpath_signature,
@@ -87,7 +88,11 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         run_name: str | None = None,
     ) -> list[Path]:
         if models:
-            return [Path(model).expanduser().resolve() for model in models]
+            # a relative path is the session's (Checkpoints/<run>/<file>.pt), not the server's cwd
+            return [
+                (path if path.is_absolute() else self.workspace_dir() / path).resolve()
+                for path in (Path(model).expanduser() for model in models)
+            ]
         return self.discover_model_paths(limit=limit, run_name=run_name)
 
     def _workflow_runtime_root(self, workflow: str) -> Path:
@@ -112,8 +117,6 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         return {
             "train": statuses.get("train", {}).get("ready", False),
             "prediction": statuses.get("prediction", {}).get("ready", False),
-            "prediction_requires_models": statuses.get("prediction", {}).get("config_present", False)
-            and bool(statuses.get("prediction", {}).get("missing_models")),
             "evaluation": statuses.get("evaluation", {}).get("ready", False),
             "transform": statuses.get("transform", {}).get("ready", False),
             "configs_present": {
@@ -136,7 +139,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         next_actions: list[str] = list(STAGE_ACTIONS.get(stage, []))
         configs_present = readiness["configs_present"]
         if configs_present.get("train"):
-            next_actions.extend(["review_config_semantics", "validate_config_semantics"])
+            next_actions.append("check_config")
         if readiness.get("train"):
             next_actions.append("run_train")
         if readiness.get("prediction"):
@@ -144,15 +147,13 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         if readiness.get("evaluation"):
             next_actions.append("run_evaluation")
         if readiness.get("transform"):
-            # The plan first, always: run_transform writes a dataset, and the plan is what says how
-            # much and how: including whether the run would refuse before writing a byte.
-            next_actions.extend(["plan_transform", "run_transform"])
+            next_actions.append("run_transform")
         if not all(configs_present.values()):
             next_actions.append("write_workflow_config")
         if any(readiness["blocked"][workflow]["missing_paths"] for workflow in self.ordered_workflows()):
             next_actions.extend(["inspect_dataset", "prepare_dataset_aliases"])
         if not next_actions:
-            next_actions = ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
+            next_actions = ["inspect_dataset", "design_config_strategy", "initialize_session"]
         return list(dict.fromkeys(next_actions))
 
     def _config_validation_payloads(
@@ -332,6 +333,9 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "patching_considerations": self.strategy_patching_considerations(modeling_intent),
         }
 
+        options = self.example_options(dataset_groups, requested_workflows)
+        # no template requested: the best compatible one is selected, so the plan names its seed
+        chosen = example or next((option["name"] for option in options if option["compatible"]), None)
         return {
             "ok": True,
             "task": task_name,
@@ -341,9 +345,16 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "workflows": requested_workflows,
             "group_roles": normalized_roles,
             "modeling_intent": modeling_intent,
-            "compatible_examples": self.example_options(dataset_groups, requested_workflows),
+            "compatible_examples": options,
             "selected_example": (
-                {"name": example, "summary_resource": f"template://{example}/summary"} if example is not None else None
+                {
+                    "name": chosen,
+                    "requested": example is not None,
+                    "summary_resource": f"template://{chosen}/summary",
+                    "seed": f"initialize_session(from_example='{chosen}')",
+                }
+                if chosen is not None
+                else None
             ),
             "config_plan": config_plan,
             "customization_options": {
@@ -352,13 +363,13 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                 "can_reference_external_libraries": True,
                 "can_write_local_components": True,
                 "recommended_local_files": ["Model.py", "Loss.py", "Transform.py", "Augmentation.py"],
-                "discovery_tools": ["list_components", "describe_extension_points", "check_external_dependency"],
+                "discovery_tools": ["list_components", "describe_extension_points", "check_component"],
                 "signature_tool": "inspect_object_signature",
                 "write_tool": "write_session_file",
                 "how_to_customize": [
                     "Prefer a built-in component (list_components) when one fits.",
                     "Otherwise reference an installed library class directly by classpath, e.g. "
-                    "`monai.losses:DiceLoss` (vet it with check_external_dependency); no wrapper needed when its "
+                    "`monai.losses:DiceLoss` (vet it with check_component); no wrapper needed when its "
                     "forward convention already matches the KonfAI base.",
                     "Write a local wrapper (write_session_file) only when the convention differs or you need "
                     "custom logic; see describe_extension_points for the base class and contract.",
@@ -383,12 +394,10 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                 else None
             ),
             "next_actions": (
-                ["initialize_session", "write_workflow_config", "inspect_object_signature", "review_config_semantics"]
+                ["initialize_session", "write_workflow_config", "inspect_object_signature", "check_config"]
                 if not unresolved_questions
                 else (
-                    ["browse_dataset", "inspect_dataset", "design_config_strategy"]
-                    if dataset_ambiguity
-                    else ["design_config_strategy"]
+                    ["inspect_dataset", "design_config_strategy"] if dataset_ambiguity else ["design_config_strategy"]
                 )
             ),
             "next_resources": ["guide://config-design", "docs://dataset-mapping"] if unresolved_questions else [],
@@ -522,7 +531,16 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     def _component_signature_for_classpath(self, config_path: Path, classpath: str) -> dict[str, Any] | None:
         if not isinstance(classpath, str) or not classpath.strip():
             return None
-        return summarize_classpath_signature(classpath, workspace_dir=config_path.parent)
+        if not classpath_requires_import(classpath, config_path.parent):
+            return summarize_classpath_signature(classpath, workspace_dir=config_path.parent)
+        try:  # an import ('UNet', 'pkg:Class') runs isolated, as inspect_object_signature does
+            return mcp_runner.run_api_in_subprocess(
+                "konfai_mcp.server_support:summarize_classpath_signature",
+                {"classpath": classpath, "workspace_dir": config_path.parent},
+                timeout_s=120,
+            )
+        except Exception:  # the signature only enriches the review, which goes without it
+            return None
 
     def _build_warning(
         self,
@@ -596,7 +614,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                     if not isinstance(loaders, dict):
                         continue
                     for criterion_name in loaders:
-                        if criterion_name not in generic_names:
+                        if criterion_name.removesuffix("Loss").removesuffix("Metric") not in generic_names:
                             specialized.add(criterion_name)
         return sorted(specialized)
 
@@ -810,7 +828,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                         "extra support files or assumptions that are not obvious from the YAML alone."
                     ),
                     observed={"components": specialized_components},
-                    suggested_next_checks=["docs://examples", "template://Synthesis/summary", "guide://config-design"],
+                    suggested_next_checks=["docs://examples", "guide://config-design"],
                 )
             )
         if normalized_workflow == "train" and not non_input_groups:
@@ -879,7 +897,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         payload["next_actions"] = (
             ["write_session_file", "write_workflow_config", "inspect_object_signature", "summarize_session"]
             if payload["blocking_issues"]
-            else ["validate_config_semantics", "summarize_session"]
+            else ["check_config", f"run_{workflow}", "summarize_session"]
         )
         return payload
 
@@ -1204,5 +1222,5 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "semantic_reviews": semantic_reviews,
         }
         validation["active_jobs"] = [self.job_payload(job) for job in self.active_jobs()]
-        validation["next_actions"] = ["review_config_semantics", "validate_config_semantics", "summarize_session"]
+        validation["next_actions"] = ["check_config", "summarize_session"]
         return validation

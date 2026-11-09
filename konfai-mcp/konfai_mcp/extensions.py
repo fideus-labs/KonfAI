@@ -22,7 +22,7 @@ Two gaps this closes:
   external-library classpath syntax (``lib.module:Class``) are not surfaced anywhere in the MCP
   tool surface: the agent is biased toward copying/wrapping when it could often reference an
   installed library class directly. ``describe_extension_points`` makes the contract explicit.
-* There is no way to vet an external dependency before integrating a brick. ``check_external_dependency``
+* There is no way to vet an external dependency before integrating a brick. ``check_component``
   reports importability/version/license without importing the module into the server process
   (``find_spec``/``importlib.metadata`` only), so external import side-effects never run here.
 """
@@ -101,8 +101,8 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
         "config_location": "Trainer.Dataset.groups_src.<src>.groups_dest.<dest>.transforms.<Name> (or patch_transforms).",
         "direct_external": "An external image op rarely satisfies transform_shape: wrap it.",
         "local_wrapper": "Subclass Transform; implement __call__ AND transform_shape exactly.",
-        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it: run run_component_smoke_test, which asserts transform_shape(shape) == __call__(...).shape for you.",
-        "verify_tool": "run_component_smoke_test(classpath, kind='transform'): executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
+        "gotcha": "Patch planning pre-computes slicing from transform_shape BEFORE data load. A wrong shape silently corrupts reassembly (no crash). A forward smoke test alone won't catch it: run check_component, which asserts transform_shape(shape) == __call__(...).shape for you.",
+        "verify_tool": "check_component(classpath, kind='transform'): executes the transform_shape/__call__ contract on dummy tensors in an isolated spawn subprocess.",
         "list_tool": "list_components('transform')",
     },
     "scheduler": {
@@ -154,10 +154,9 @@ def describe_extension_points(kind: str | None = None) -> dict[str, Any]:
         ),
         "next_actions": [
             "list_components",
-            "check_external_dependency",
+            "check_component",
             "inspect_object_signature",
             "write_session_file",
-            "run_component_smoke_test",
         ],
     }
     if kind is None:
@@ -245,7 +244,8 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
     cleaned = module.strip()
     if not cleaned:
         raise ValueError("module must not be empty.")
-    full = cleaned.split(":", 1)[0]
+    full, _, pointed = cleaned.partition(":")
+    object_name = object_name or pointed or None
     top = full.split(".", 1)[0]
 
     try:
@@ -295,5 +295,5 @@ def check_external_dependency(module: str, object_name: str | None = None) -> di
         ),
     }
     if object_name:
-        payload["inspect_classpath"] = f"{cleaned}:{object_name}" if ":" not in cleaned else cleaned
+        payload["inspect_classpath"] = f"{full}:{object_name}"
     return payload

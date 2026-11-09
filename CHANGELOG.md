@@ -3,6 +3,120 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
+## Unreleased
+
+### 💥 Breaking changes
+
+#### konfai-mcp: 50 tools instead of 68, one per object
+
+The MCP surface merges every list/read/create/switch variant into the tool of its object, with the variant as an
+argument: `session(action=...)` replaces create_session, switch_session, delete_session and import_experiment;
+`read_file` replaces read_session_file, read_dataset_file and read_template_file; `check_config(level=...)` replaces
+review_config_semantics and validate_config_semantics; `inspect_dataset(browse=True)` replaces browse_dataset;
+`run_transform(dry_run=True)` replaces plan_transform; `check_component` replaces check_external_dependency and
+run_component_smoke_test; `get_job_status(wait=True)` replaces wait_for_job and `get_job_status()` list_jobs;
+`control_training` replaces set_live_tunables and request_validation; `describe_app(parameters=True)` replaces
+list_app_parameters; `fetch_app` replaces import_app and export_app (`path`); `app_sources(action=...)` replaces
+register_app_source and unregister_app_source; `read_scout_report()` lists the reports; `fidopt_catalog` replaces
+fidopt_list_datasets, fidopt_describe_dataset and fidopt_list_methods. The server now declares instructions (what
+it does, when to search its tools), marks six entry tools to load upfront under Claude Code's tool search, and
+describes every tool in one short paragraph; listed schemas drop pydantic's `anyOf [T, null]`, `default: null` and
+the free-form output schemas: the tool list a client loads drops from ~26,600 to ~14,800 tokens.
+Every call appends one line (tool, session, ok, ms) to `tool_calls.jsonl` in the workspaces root.
+A Claude Code run driving the server end to end (session, dataset, config, training) reported what a client
+meets: `read_file` now reads a resource URI (`docs://`, `guide://`, `template://`) for clients that cannot read
+resources; no message, hint or description names a retired tool any more (a test scans every string); the
+`specialized_components_require_review` warning no longer fires on `CrossEntropyLoss` or `DiceLoss`; `cpu`
+parameters say what they are (KonfAI `--cpu` worker processes); `session(action='list')` says whether a host
+pinned the session; `summarize_session` names the missing configs and carries the latest job's last metrics;
+`read_live_metrics` drops repeated entries; `check_config` says every level includes the review. A second run
+(training, prediction, evaluation) added: `preview_volume` returns the plane's min, max, mean and unique values
+beside the image; a clean `check_config` review suggests the matching `run_*`; launch payloads no longer repeat
+`get_job_status`; `check_config` reports `setup.world_size` (was `size`); readiness says `prediction_config_present`
+(was `prediction_requires_models`). A third run added: `initialize_session` seeds a workspace that holds only
+directories without `overwrite`; a finished train, prediction or evaluation job lists its `outputs`;
+`design_config_strategy` selects the best compatible template and names its seed; the redundant readiness flag is
+gone (`blocked.prediction.missing_models` says it); `write_workflow_config` always returns `schema_errors`; the
+CUDA notice stays quiet when `cpu` was asked for. A fourth run added: `inspect_object_signature` resolves a bare
+builtin name (`Dice`) through the catalog; a checkpoint path given to `check_config` is the session's when relative;
+`session(action='create', from_example=...)` creates and seeds in one call; the step-0 tqdm line of a stage (which
+repeats the previous stage's values) is no longer parsed as a metric; an isolated subprocess error starts with the
+exception's own line; `leaderboard` without a metric no longer carries an empty `leaderboard` list; one wording for
+every `gpu` and `cpu` parameter. A fifth run (no tool error left) asked for `wait=True` on `run_train`,
+`run_resume`, `run_prediction`, `run_evaluation` and `run_transform`: the launch then returns the job's final status,
+one call instead of two; `split` descriptions say that an evaluation run writes `Metric_TRAIN.json` whatever cases it
+scored.
+A run on real data (a lung segmentation app on Learn2Reg CT scans, stored in HU + 1024, which the agent
+diagnosed and corrected through `set_parameters`) added: the Scout service follows a session switch (reports
+landed in `default`); an app job's manifest maps `P000`... to the source files of each input group; `read_file` on
+an unknown resource URI lists the resources; `preview_volume` reports the volume's size, spacing, origin and
+direction from the header; `inspect_dataset` says when a folder is flat (one file per case) and repeats a
+statistics-failure reason once; `set_parameters` says a dotted config path works; `run_scout_inspection` accepts
+the `claude-code` and `codex` providers (no API key).
+A run registering a Learn2Reg inspiration/expiration pair with impact-reg presets (Dice 0.839 unregistered, 0.842
+rigid, 0.915 B-spline; Scout inspected the field) added: `run_registration_evaluate` writes its output inside the
+session like every app job and reserves no GPU when it scores only label maps or landmarks; the device-conflict
+error says `gpu=[]` is a CPU-only job; a finished app job lists its outputs and carries `Evaluation_summary.json`
+when it wrote one; the `mask` parameter of `run_app` says how a registration takes its masks.
+A run fine-tuning a local MR-to-sCT app on 75 SynthRAD cases (one epoch, 64 min on the GPU; the fine-tuned
+model lost every bone, which whole-volume MAE missed and Scout caught) added: `run_app`, `fine_tune_app` and
+`run_registration_evaluate` take `wait` like the workflow launchers; `leaderboard` and `summarize_session` report
+whole metrics only (a 117-label Dice is one row, `per_label_metrics` counts the rest); a single-token classpath
+(`konfai_apps:X`) is imported when a package answers to the name instead of being mistaken for a session file; the
+server instructions name `docs://index`; `describe_app` checks a local bundle's configs against the installed KonfAI's
+schema (`config_checks`), so an obsolete key is known before the first job instead of after three failed ones.
+Three more runs (FidOpt's catalogue, adopting an on-disk experiment and packaging it, a transform pipeline on
+Learn2Reg CT) added: tools are hinted read-only or destructive (Codex runs the read-only ones without approval);
+`fidopt_run` refuses a dataset the corpus lacks before launching, names one folder per launch, reserves no GPU
+unless `--gpu` says so, and takes `wait`; `fidopt_catalog` is one line per dataset with `task=`/`anatomy=` filters,
+the methods of the task, and the corpus state; the FidOpt adapter follows a session switch; `read_file` honours
+`offset` on dataset text files; `package_app_from_session` resolves relative config names in the session and loads
+checkpoints with KonfAI's own loader (konfai-apps); `compare_runs` pairs a metric under two names and cases by order
+when the runs named them differently; `read_training_curves` keeps one point per step, in order; `run_transform`
+takes `config_file` and reports its real devices; `inspect_dataset` names an inverted layout; a finished app job
+carries its case names; `docs://dataset-mapping` states the layout.
+A run steering a training (live tunables, cancel, resume, compare, delete) added: the check subprocess forces
+single-process loading on what KonfAI now reads (`_num_workers`), so `check_config(train_step)` no longer dies on
+`num_workers > 0`; `check_config(setup)` reports `iterations_per_epoch`; a cancelled or failed training lists its
+outputs and `newest_checkpoint`.
+A synthesis experiment from scratch (one epoch on 34 SynthRAD abdomen cases, evaluated inside the body) added:
+`inspect_dataset` warns about a group holding one value (a mask of ones), two groups with identical statistics and
+groups on different grids; `read_file` pages through a dataset text file with `offset`; the check's
+`iterations_per_epoch` says it is counted on the data the check built.
+Driving KonfAI Studio in a browser (dataset chosen, a lung training designed and run by its Claude Code brain,
+prediction, evaluation, viewer, Scout) added: Studio's model list and defaults name the current Claude 5 family; a
+job whose process just exited gets a few seconds before the feed paints it failed (a finished Scout inspection read
+as a failed run); the pane beside the file tree shrinks with its column at laptop widths; `summarize_session`
+answers for a session whose workspace is not made yet; the packager's weights-only load also admits ruamel's
+`Anchor` and `ScalarString`, which every checkpoint written from a YAML config carries. A plain static site for the
+ecosystem lives under `site/`.
+Studio's SCOUT tab shows the whole report: verdict band (confidence, case, task, model, mode, when, budget, cost),
+the conclusion, one card per observation (kind, severity, location in mm, notes, the blind second reading, the
+measurements it cites, a filmstrip of the views it cites with a lightbox), the uncited views collapsed, report.md on
+demand; `/api/scout/report` carries the views' metadata, the date and the duration. Studio's design rests on one
+token set (type, spacing, radii, colour roles), with a light theme following the system preference, tool-call cards
+collapsed to one line (open when the call failed), and a readable measure for the assistant's prose.
+Studio is responsive: three panes from 1200 px, the experiments rail as a drawer between 768 and 1199 px, one
+column under 768 px with an app bar, a Conversation · Workspace · Scout · Runs bar, a sticky composer whose
+selectors fold into a settings popover, chips and the Scout filmstrip scrolling sideways, the terminal as a bottom
+sheet, full-screen modals; one control height per pointer (32 px, 40 px touch), inline SVG icons, no horizontal
+page scroll at 360, 390 and 430 px (a Playwright spec at 390x844 keeps it so). The site gains a curated
+documentation section (`site/docs/`: get started, configuration, workflows, datasets, apps, agents and MCP, Scout,
+Studio, Edge) written from the repository's own docs, and a GitHub Pages workflow triggered by hand only.
+The site's landing is a designed page in the fidopt.io family: a pill bar with a search over the pages, the docs,
+the fifty tools and the apps; a hero over a canvas-drawn volume with drifting slice planes (30 fps cap, still under
+prefers-reduced-motion, stopped when hidden); one card per piece (engine, apps, Edge, Studio, MCP, Scout, FidOpt);
+how it works in three steps; interactive at-a-glance bars; a terminal-style footer. No dependency, no build.
+The site's colours: a tinted ink ground, one hue per piece (engine sage, apps teal, Edge violet, Studio amber, MCP
+steel blue, Scout coral) carried by kickers, card rails, bars and each inner page's accent, a sage-to-violet glow
+behind the hero; the inner pages share the landing's pill bar, search, footer and dark ground. Contrast measured
+at AA or better on every text role.
+A shared identity kit, `design/` (tokens with one hue per piece, self-hosted Archivo and IBM Plex, components, the
+volume hero as a module, a README), consumed by the site and by Studio: Studio takes the kit's type and hues while
+keeping its density; the landing's title sits on three lines at 1280 px and two at 1440, cards rise on scroll,
+figures count up.
+`measure`-style payloads are unchanged; `next_actions` name the new tools.
+
 ## v1.8.8 (2026-11-02)
 
 ### 💥 Breaking changes

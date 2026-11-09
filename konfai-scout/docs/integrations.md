@@ -7,8 +7,8 @@ calls only KonfAI Eval.
 FidLab ──orchestrates──▶ FidOpt ──scores with──▶ KonfAI Eval ◀──measures regions with── Scout
                            │ optionally                                                   ▲
                            └──────────────── inspects a case with ────────────────────────┘
-konfai-mcp ── exposes ── Scout (run_scout_inspection, read_scout_report, list_scout_reports)
-           ── exposes ── a FidOpt adapter (fidopt_list_datasets, fidopt_describe_dataset, fidopt_list_methods,
+konfai-mcp ── exposes ── Scout (run_scout_inspection, read_scout_report)
+           ── exposes ── a FidOpt adapter (fidopt_catalog,
                                             fidopt_table, fidopt_run)
 konfai-studio ── drives konfai-mcp ── Scout panel: launch, follow the job, read the report, go to a region
 ```
@@ -39,8 +39,8 @@ Three Scout tools and five FidOpt tools, in `konfai_mcp/server_scout.py`:
 
 - `run_scout_inspection(task, inputs, ...)`: a tracked job running `konfai-scout inspect` on a case JSON written
   under the session (`Scout/<name>/`); `allow_cloud_images` must be passed to use a cloud provider.
-- `read_scout_report(name)`: the report's summary and observations (no image); `list_scout_reports()`.
-- `fidopt_list_datasets`, `fidopt_describe_dataset`, `fidopt_list_methods`, `fidopt_table`: read-only, through
+- `read_scout_report(name)`: the report's summary and observations (no image); `read_scout_report()`.
+- `fidopt_catalog`, `fidopt_table`: read-only, through
   FidOpt's own CLI and Python (`KONFAI_MCP_FIDOPT`, the `fidopt` executable; its sibling `python` runs the
   descriptor queries). `fidopt_run(method, dataset, cases, scout)`: `fidopt run` as a tracked job, allowed only for
   the operations listed in `KONFAI_MCP_FIDOPT_ALLOWED` (default: `check`); nothing of FidOpt is reimplemented.

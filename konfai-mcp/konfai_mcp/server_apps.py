@@ -43,6 +43,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from konfai_mcp.config_io import schema_mistakes, validate_yaml_content
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .server_support import WorkspaceLayout
 
@@ -334,7 +336,7 @@ class AppService:
         finetunable = info.is_finetunable()
 
         # Route by what the app can actually do instead of dead-ending on describe/design. run_app runs the
-        # app AS PUBLISHED; import_app is offered beside it for the case where the app has to be modified
+        # app AS PUBLISHED; fetch_app is offered beside it for the case where the app has to be modified
         # first. fine_tune_app is only offered when the app ships a train config to
         # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
         source = _source_of(info)
@@ -347,9 +349,9 @@ class AppService:
             next_actions.append("list_apps")
         elif info.get_task() == "registration":
             # Registered through impact-reg-konfai (see _registration_preset): scored through the transform.
-            next_actions.extend(["run_app", "list_app_parameters", "run_registration_evaluate"])
+            next_actions.extend(["run_app", "describe_app", "run_registration_evaluate"])
         else:
-            next_actions.extend(["run_app", "list_app_parameters", "import_app"])
+            next_actions.extend(["run_app", "describe_app", "fetch_app"])
             if finetunable:
                 next_actions.append("fine_tune_app")
 
@@ -410,6 +412,25 @@ class AppService:
                 }
                 for key, slots in evaluations.items()
             ]
+        if source == "local":
+            root = Path(info.get_name())
+            if root.is_dir():
+                # the bundle's configs against the installed KonfAI's schema: a key it no longer accepts fails
+                # the first job otherwise, and nothing before that says so
+                checks: dict[str, list[str]] = {}
+                for config_path in sorted(root.glob("*.yml")):
+                    try:
+                        data = validate_yaml_content(config_path.read_text(encoding="utf-8"), config_path.name)
+                        checks[config_path.name] = [f"{m.path}: {m.message}" for m in schema_mistakes(data)]
+                    except ValueError as exc:
+                        checks[config_path.name] = [str(exc)]
+                payload["config_checks"] = checks
+                payload["config_checks_note"] = (
+                    "KonfAI core's schema: a key or component it does not know fails the job unless an app package "
+                    "(konfai_apps transforms, the bundle's own model.py) provides it."
+                )
+                if any(checks.values()):
+                    payload["next_actions"] = list(dict.fromkeys(["fetch_app", *payload.get("next_actions", [])]))
         return payload
 
     def list_parameters(
@@ -439,7 +460,7 @@ class AppService:
             "source": payload.get("source", "local"),
             "values": payload.get("values", {}),
             "constraints": payload.get("constraints", {}),
-            "next_actions": ["run_app", "import_app", "export_app"],
+            "next_actions": ["run_app", "fetch_app"],
         }
 
     def export_app(
@@ -477,7 +498,7 @@ class AppService:
         return {
             "ref": ref,
             "exported_to": str(target),
-            "next_actions": ["describe_app", "run_app", "import_app", "register_app_source"],
+            "next_actions": ["describe_app", "run_app", "fetch_app", "app_sources"],
         }
 
     def import_app(
@@ -518,7 +539,7 @@ class AppService:
             "files": payload["files"],
             "checkpoints": payload["checkpoints"],
             "configs": payload["configs"],
-            "next_actions": ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"],
+            "next_actions": ["run_resume", "run_prediction", "run_evaluation", "check_config"],
         }
 
     #: app resolution helpers (mode + trust gate) ----------------------------------------------
@@ -901,12 +922,10 @@ class AppService:
         kwargs: dict[str, Any] = {
             name: self._normalize_input_groups([paths], name)[0] if paths else [] for name, paths in groups.items()
         }
-        if cpu is not None and gpu is None:
-            gpu = []
+        if gpu is None and (cpu is not None or not (fixed_images or moving_images)):
+            gpu = []  # Dice on label maps and TRE on landmarks need no GPU: do not reserve one
         label = self.workspace_layout.sanitize_name("eval_registration")
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppEvaluations", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppEvaluations", label)
         kwargs.update({"output": resolved_output, "gpu": gpu, "cpu": cpu})
         return {
             "kind": "evaluate",
@@ -1155,7 +1174,7 @@ class AppService:
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
-            "next_actions": ["describe_app", "run_app", "import_app"],
+            "next_actions": ["describe_app", "run_app", "fetch_app"],
         }
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [
@@ -1221,7 +1240,10 @@ class AppService:
             prediction = self.workspace_layout.config_path("prediction")
             train = self.workspace_layout.config_path("train")
             configs = [str(path) for path in (prediction, train) if path.exists()]
-        resolved = [str(Path(path).expanduser()) for path in configs]
+        resolved = [
+            str(p if (p := Path(path).expanduser()).is_absolute() else self.workspace_layout.workspace_dir() / p)
+            for path in configs
+        ]
         if not resolved:
             raise ValueError(
                 "No config to package: no Prediction.yml/Config.yml in the session and none provided. "

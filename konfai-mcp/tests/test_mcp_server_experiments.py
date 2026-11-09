@@ -20,7 +20,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import ClassVar
 
 import fastmcp
@@ -72,7 +72,7 @@ def test_a_ready_transform_is_offered_like_every_other_workflow(tmp_path: Path) 
 
     actions = service._next_actions_for_readiness(readiness)
 
-    assert actions.index("plan_transform") < actions.index("run_transform")
+    assert actions.count("run_transform") == 1
 
 
 def test_a_transform_that_is_not_ready_is_not_offered(tmp_path: Path) -> None:
@@ -85,7 +85,7 @@ def test_a_transform_that_is_not_ready_is_not_offered(tmp_path: Path) -> None:
 
     actions = service._next_actions_for_readiness(readiness)
 
-    assert "run_transform" not in actions and "plan_transform" not in actions
+    assert "run_transform" not in actions
 
 
 def test_default_prediction_checkpoint_is_scoped_to_the_run(tmp_path: Path) -> None:
@@ -195,6 +195,35 @@ def test_label_statistics_for_integer_groups(
             assert "labels" not in groups["CT"]
 
     asyncio.run(scenario())
+
+
+def test_a_single_valued_mask_is_called_empty_for_0_and_whole_volume_otherwise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    sitk = pytest.importorskip("SimpleITK")
+    dataset_dir = tmp_path / "dataset"
+    for case in range(2):
+        case_dir = dataset_dir / f"CASE_{case:03d}"
+        case_dir.mkdir(parents=True)
+        for group, value in (("EMPTY", 0), ("FULL", 1)):
+            mask = np.full((4, 8, 8), value, dtype=np.uint8)
+            sitk.WriteImage(sitk.GetImageFromArray(mask), str(case_dir / f"{group}.mha"))
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> list[str]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            inspected = await client.call_tool(
+                "inspect_dataset", {"dataset_dir": str(dataset_dir), "groups": ["EMPTY", "FULL"], "extension": "mha"}
+            )
+            return inspected.structured_content["warnings"]
+
+    warnings = asyncio.run(scenario())
+    assert any("'EMPTY'" in w and "is empty" in w for w in warnings)
+    assert any("'FULL'" in w and "restricts nothing" in w for w in warnings)
+    assert not any("'EMPTY'" in w and "restricts nothing" in w for w in warnings)
 
 
 def test_infer_dataset_structure_is_task_neutral(tmp_path: Path) -> None:
@@ -447,6 +476,33 @@ class _DirtyDataset:
         self.transform = lambda x: x  # lambdas cannot be pickled for spawn transfer
 
 
+def _validate_setup(tmp_path: Path, monkeypatch, config: str, dataloader: list[list[object]]) -> dict:
+    workspace_dir = tmp_path / "session"
+    workspace_dir.mkdir()
+    config_path = workspace_dir / "Config.yml"
+    config_path.write_text(config, encoding="utf-8")
+    monkeypatch.setenv("KONFAI_MCP_VALIDATE_ROOT", str(tmp_path / "validate"))
+    workflow = SimpleNamespace(name="DEMO", size=1, dataloader=dataloader, setup=lambda *_args: None)
+    monkeypatch.setattr("konfai.trainer.build_train", lambda **_kwargs: workflow)
+    return mcp_runner.validate_workflow_api(
+        workflow="train", level="setup", workspace_dir=str(workspace_dir), config=str(config_path)
+    )
+
+
+def test_validation_spawn_check_sees_the_configs_worker_request(tmp_path: Path, monkeypatch) -> None:
+    # the scratch copy asks for no worker; the check must still know the real run spawns two
+    config = "Trainer:\n  train_name: DEMO\n  Dataset:\n    num_workers: 2\n"
+    payload = _validate_setup(tmp_path, monkeypatch, config, [[_PickleLoader(_DirtyDataset())]])
+    assert payload["worker_spawn_check"]["requested_num_workers"] == 2
+    assert payload["worker_spawn_check"]["picklable"] is False
+
+
+def test_validation_counts_the_batches_of_each_rank_loader(tmp_path: Path, monkeypatch) -> None:
+    # Trainer.dataloader is one list per rank: [training, validation]
+    payload = _validate_setup(tmp_path, monkeypatch, "Trainer:\n  train_name: DEMO\n", [[[0] * 3, [0] * 2]])
+    assert payload["setup"]["iterations_per_epoch"] == [3, 2]
+
+
 def test_worker_spawn_picklability_check_catches_unpicklable_datasets() -> None:
     # Validation loads single-process, so an unpicklable dataset member passes validation and then
     # kills the real run's DataLoader workers at setup; the check reproduces the spawn pickling.
@@ -480,7 +536,7 @@ def test_import_experiment_links_artifacts(
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
             await client.call_tool("initialize_session", {"overwrite": True})
-            imported = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            imported = await client.call_tool("session", {"action": "import", "source_dir": str(source)})
             payload = imported.structured_content
             assert sorted(payload["copied"]) == ["Config.yml", "Model.py"]
             assert payload["linked"] == ["Checkpoints"]
@@ -489,10 +545,10 @@ def test_import_experiment_links_artifacts(
             assert (workspace / "Checkpoints").is_symlink()
             assert (workspace / "Checkpoints" / "OLD_RUN" / "best.pt").read_text(encoding="utf-8") == "ckpt"
 
-            read_back = await client.call_tool("read_session_file", {"path": "Config.yml"})
+            read_back = await client.call_tool("read_file", {"path": "Config.yml"})
             assert "OLD_RUN" in read_back.structured_content["content"]
 
-            again = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            again = await client.call_tool("session", {"action": "import", "source_dir": str(source)})
             assert "Config.yml" in again.structured_content["skipped"]
 
     asyncio.run(scenario())

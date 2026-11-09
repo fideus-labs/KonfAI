@@ -107,14 +107,12 @@ def test_mcp_server_session_loop(
             tool_names = {tool.name for tool in tools}
             assert {
                 "design_config_strategy",
-                "browse_dataset",
                 "inspect_dataset",
                 "inspect_object_signature",
                 "prepare_dataset_aliases",
                 "leaderboard",
-                "review_config_semantics",
+                "check_config",
                 "summarize_session",
-                "validate_config_semantics",
                 "initialize_session",
                 "write_session_file",
             }.issubset(tool_names)
@@ -137,7 +135,7 @@ def test_mcp_server_session_loop(
 
             tool_index = await client.read_resource("guide://tool-index")
             tool_index_payload = json.loads("\n".join(getattr(item, "text", str(item)) for item in tool_index))
-            assert "browse_dataset" in tool_index_payload["tools"]
+            assert "inspect_dataset" in tool_index_payload["tools"]
             assert "design_config_strategy" in tool_index_payload["tools"]
             assert "clarify_task_and_groups" in tool_index_payload["prompts"]
 
@@ -203,7 +201,7 @@ def test_mcp_server_session_loop(
             await client.call_tool("write_workflow_config", {"workflow": "evaluation", "content": MINIMAL_EVALUATION})
 
             validation = await client.call_tool(
-                "validate_config_semantics",
+                "check_config",
                 {"workflow": "all", "level": "instantiate"},
             )
             validation_data = validation.structured_content
@@ -215,7 +213,7 @@ def test_mcp_server_session_loop(
             )
             summary_data = summary.structured_content
             assert summary_data["readiness"]["train"] is False
-            assert "review_config_semantics" in summary_data["next_actions"]
+            assert "check_config" in summary_data["next_actions"]
             assert summary_data["validation"]["configs"]["Config.yml"]["yaml_valid"] is True
 
             summary_resource = await client.read_resource("session://current/summary")
@@ -234,7 +232,7 @@ def test_sessions_create_switch_and_cross_session_metrics(
         async with fastmcp.Client(mcp_server.mcp) as client:
             await client.call_tool("initialize_session", {"overwrite": True})
 
-            created = await client.call_tool("create_session", {"name": "exp-b"})
+            created = await client.call_tool("session", {"action": "create", "name": "exp-b"})
             payload = created.structured_content
             assert payload["session"] == "exp-b"
             assert payload["created"] is True
@@ -246,7 +244,7 @@ def test_sessions_create_switch_and_cross_session_metrics(
             metrics.parent.mkdir(parents=True, exist_ok=True)
             metrics.write_text(_metric_json("PRED:SEG:Dice", 0.9), encoding="utf-8")
 
-            switched = await client.call_tool("switch_session", {"name": "default"})
+            switched = await client.call_tool("session", {"action": "switch", "name": "default"})
             assert switched.structured_content["session"] == "default"
             assert mcp_server.WORKSPACE_LAYOUT.current_session == "default"
 
@@ -259,7 +257,7 @@ def test_sessions_create_switch_and_cross_session_metrics(
             assert run.structured_content["metrics"]["case"]["PRED:SEG:Dice"]["CASE_000"] == 0.9
 
             with pytest.raises(Exception, match="Unknown session"):
-                await client.call_tool("switch_session", {"name": "nope"})
+                await client.call_tool("session", {"action": "switch", "name": "nope"})
             with pytest.raises(Exception, match="Unknown session"):
                 await client.call_tool("leaderboard", {"session": "nope"})
 
@@ -283,9 +281,9 @@ def test_session_management_refused_when_host_pinned(
         async with fastmcp.Client(mcp_server.mcp) as client:
             assert mcp_server.WORKSPACE_LAYOUT.current_session == "pinned-exp"
             for tool, args in (
-                ("create_session", {"name": "elsewhere"}),
-                ("switch_session", {"name": "default"}),
-                ("delete_session", {}),
+                ("session", {"action": "create", "name": "elsewhere"}),
+                ("session", {"action": "switch", "name": "default"}),
+                ("session", {"action": "delete"}),
             ):
                 with pytest.raises(Exception, match="pinned"):
                     await client.call_tool(tool, args)
@@ -322,7 +320,7 @@ def test_run_train_accepts_single_gpu_int(
             "status": "queued",
             "session": "default",
             "kind": kind,
-            "next_actions": ["wait_for_job"],
+            "next_actions": ["get_job_status"],
         }
 
     monkeypatch.setattr(mcp_server, "_launch_job", fake_launch)
@@ -370,7 +368,7 @@ def test_run_train_config_file_and_cluster(
             payload = job.structured_content
             assert payload["run_name"] == "GAN_RUN"
             done = await client.call_tool(
-                "wait_for_job", {"job_id": payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status", {"wait": True, "job_id": payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
             )
             assert done.structured_content["status"] == "done"
 
@@ -390,7 +388,8 @@ def test_run_train_config_file_and_cluster(
             slurm_payload = slurm_job.structured_content
             assert slurm_payload["devices"] == ["slurm:gpu-queue"]
             await client.call_tool(
-                "wait_for_job", {"job_id": slurm_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status",
+                {"wait": True, "job_id": slurm_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1},
             )
             manifest = await client.read_resource(f"job://{slurm_payload['job_id']}/manifest")
             manifest_data = json.loads(manifest[0].text)

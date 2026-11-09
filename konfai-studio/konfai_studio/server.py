@@ -378,7 +378,7 @@ async def bundle_session(req: BundleRequest) -> dict[str, Any]:
     registered = False
     if ok:
         bundle = str(Path(req.output).expanduser() / slug)
-        registered, _ = await call_mcp_tool("apps", "register_app_source", {"ref": bundle})
+        registered, _ = await call_mcp_tool("apps", "app_sources", {"action": "add", "ref": bundle})
     return {"ok": ok, "result": text, "registered": registered}
 
 
@@ -473,9 +473,9 @@ async def remember_file(req: DatasetPath) -> dict[str, list[str]]:
 # Claude model choices for the subscription/API backends; the local backend takes any name.
 _CLAUDE_MODELS = [
     {"id": "", "label": "Default"},
-    {"id": "claude-opus-4-8", "label": "Opus 4.8"},
-    {"id": "claude-sonnet-5", "label": "Sonnet 5"},
-    {"id": "claude-haiku-4-5", "label": "Haiku 4.5"},
+    {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"},
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
 ]
 
 
@@ -1133,21 +1133,21 @@ def app_web_file(ref: str = Query(...), path: str = Query(...)) -> FileResponse:
     return FileResponse(_app_web_file(ref, path))
 
 
-async def _apps_after(session: str, source_tool: str, ref: str) -> dict[str, Any]:
-    """Register/unregister an app source, then return that outcome with the refreshed catalogue."""
-    ok, text = await call_mcp_tool(session, source_tool, {"ref": ref})
+async def _apps_after(session: str, action: str, ref: str) -> dict[str, Any]:
+    """Add or remove an app source (konfai-mcp's ``app_sources``), then return that outcome with the refreshed catalogue."""
+    ok, text = await call_mcp_tool(session, "app_sources", {"action": action, "ref": ref})
     _, _listed, data = await _mcp_json(session, "list_apps", {"include_summary": True})
     return {"ok": ok, "result": text, "apps": _parse_apps(data)}
 
 
 @app.post("/api/apps/register")
 async def register_app(req: AppRef) -> dict[str, Any]:
-    return await _apps_after(_sane_session(req.session), "register_app_source", req.ref)
+    return await _apps_after(_sane_session(req.session), "add", req.ref)
 
 
 @app.post("/api/apps/unregister")
 async def unregister_app(req: AppRef) -> dict[str, Any]:
-    return await _apps_after(_sane_session(req.session), "unregister_app_source", req.ref)
+    return await _apps_after(_sane_session(req.session), "remove", req.ref)
 
 
 @app.post("/api/job/cancel")
@@ -1178,18 +1178,18 @@ def _require_train_job(name: str) -> tuple[str | None, dict[str, Any] | None]:
 
 @app.post("/api/job/validate")
 async def request_validation(req: CancelJob) -> dict[str, Any]:
-    """Ask a running training job to run a validation pass now: ``request_validation`` signals the job
+    """Ask a running training job to run a validation pass now: ``control_training(validate_now=True)`` signals the job
     (SIGUSR1); the trainer validates at its next iteration boundary and the metrics stream into Live."""
     name = _sane_session(req.session)
     job_id, error = _require_train_job(name)
     if error is not None:
         return error
-    return await _mcp_detail(name, "request_validation", {"job_id": job_id})
+    return await _mcp_detail(name, "control_training", {"job_id": job_id, "validate_now": True})
 
 
 @app.post("/api/job/tunables")
 async def set_tunables(req: SetTunables) -> dict[str, Any]:
-    """Change a running training's lr / it_validation mid-run: proxies konfai-mcp's ``set_live_tunables``,
+    """Change a running training's lr / it_validation mid-run: proxies konfai-mcp's ``control_training``,
     which drops a jailed control file the trainer applies at its next poll boundary."""
     name = _sane_session(req.session)
     job_id, error = _require_train_job(name)
@@ -1200,7 +1200,7 @@ async def set_tunables(req: SetTunables) -> dict[str, Any]:
         args["lr"] = req.lr
     if req.it_validation is not None:
         args["it_validation"] = req.it_validation
-    return await _mcp_detail(name, "set_live_tunables", args)
+    return await _mcp_detail(name, "control_training", args)
 
 
 @app.get("/assets/{file_path:path}")
@@ -1336,11 +1336,20 @@ async def scout_report(session: str = Query("default"), name: str = Query(...)) 
         "observations": data.get("observations") or [],
         "measurements": data.get("measurements") or [],
         "views": len(data.get("views") or []),
+        # what each evidence image shows, so a caption can say it without the image: the picture itself is
+        # /api/scout/evidence
+        "views_meta": [
+            {key: view.get(key) for key in ("id", "kind", "plane", "index", "position_mm", "mode", "sent", "size_px")}
+            for view in data.get("views") or []
+        ],
         "usage": data.get("usage"),
         "budget": data.get("budget"),
         "error": data.get("error"),
         "provider": data.get("provider"),
         "mode": (data.get("config") or {}).get("mode"),
+        "created_at": data.get("created_at"),
+        "duration_s": data.get("duration_s"),
+        "second_reading": data.get("second_reading"),
         "report_md": str(folder / "report.md"),
     }
 

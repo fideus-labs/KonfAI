@@ -53,7 +53,8 @@ def test_run_records_diffs_comparison_and_curves(
             first = await client.call_tool("run_train", {})
             first_payload = first.structured_content
             done_first = await client.call_tool(
-                "wait_for_job", {"job_id": first_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status",
+                {"wait": True, "job_id": first_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1},
             )
             # The snapshots and the manifest exist whatever the outcome, so without this a run that
             # ended in error would still satisfy every assertion below.
@@ -65,7 +66,8 @@ def test_run_records_diffs_comparison_and_curves(
             second = await client.call_tool("run_train", {"overwrite": True})
             second_payload = second.structured_content
             done_second = await client.call_tool(
-                "wait_for_job", {"job_id": second_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status",
+                {"wait": True, "job_id": second_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1},
             )
             assert done_second.structured_content["status"] == "done", done_second.structured_content
 
@@ -142,3 +144,10 @@ def test_read_training_curves_from_tfevents(
                 await client.call_tool("read_training_curves", {"run_name": "MISSING"})
 
     asyncio.run(scenario())
+
+
+def test_a_recorded_input_keeps_the_dots_of_its_case_name() -> None:
+    from konfai_mcp.metrics_service import cases_by_recorded_input
+
+    recorded = {"P000": ["/flat/patient.2.nii.gz"], "P001": ["/flat/patient.nii.gz"]}
+    assert cases_by_recorded_input(recorded, ["patient", "patient.2"]) == {"P000": "patient.2", "P001": "patient"}

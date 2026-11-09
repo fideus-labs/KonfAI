@@ -299,6 +299,22 @@ class DatasetInspectionMixin:
             "layout": layout,
             **({"warnings": structure_warnings} if structure_warnings else {}),
             "total_cases": len(case_dirs),
+            # a flat folder (one file per case) is read as ONE case whose files are groups: say so first
+            "layout_hint": (
+                "inverted layout: the case folders hold the same file names, so they are more likely GROUPS "
+                "(scans/, masks/...) and the files the cases. KonfAI reads <root>/<case>/<group>.<ext>: build that "
+                "layout with one folder per case (symlinks are fine) before training on it."
+                if per_case
+                and len(case_file_names) >= 2
+                and len({frozenset(names) for names in case_file_names}) == 1
+                # ponytail: few folders, many shared names; a per-case dataset with fewer cases than groups still
+                # reads as inverted (hence "more likely")
+                and len(case_file_names[0]) > len(case_file_names)
+                else None
+                if per_case or single_store_extension is not None
+                else "flat layout: the root is read as one case and each file as a group. KonfAI reads "
+                "<root>/<case>/<group>.<ext>: give each case its own folder (symlinks are fine)."
+            ),
             "groups": groups,
             # Ten consecutive cases carry the same file names ten times over. What a reader needs is how
             # many distinct layouts exist and one case per layout to look at.
@@ -450,6 +466,7 @@ class DatasetInspectionMixin:
             "ok": True,
             "path": str(dataset_dir),
             "layout": scan["layout"],
+            "layout_hint": scan["layout_hint"],
             "total_cases": scan["total_cases"],
             "groups": scan["groups"],
             "case_layouts": scan["case_layouts"],
@@ -466,7 +483,7 @@ class DatasetInspectionMixin:
                 payload["warnings"] = [
                     *(payload.get("warnings") or []),
                     "No supported groups were found directly under the requested path. "
-                    "Inspect candidate_dataset_roots or call browse_dataset to locate the actual dataset root.",
+                    "Inspect candidate_dataset_roots or call inspect_dataset(browse=True) to locate the actual dataset root.",
                 ]
             # Once groups are found the real question is what to DO with the dataset: use a published app
             # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next
@@ -474,7 +491,7 @@ class DatasetInspectionMixin:
             payload["next_actions"] = (
                 ["list_apps", "run_app", "fine_tune_app", "run_train", "design_config_strategy"]
                 if payload["groups"]
-                else ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
+                else ["inspect_dataset", "design_config_strategy", "initialize_session"]
             )
         return payload
 

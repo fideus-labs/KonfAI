@@ -33,9 +33,11 @@ classifiers = [
 dependencies = [
   # 2.3 is the first torch with the unsigned dtypes: a uint16 store (what microscopy writes) reaches
   # torch.from_numpy on the read route, and torch.uint16 is named where a label map's sign is read.
-  "torch>=2.3",
+  # 2.5 is the first with torch.serialization.safe_globals, which konfai_apps.bundle loads a run's checkpoint under.
+  "torch>=2.5",
   "tqdm",
-  "numpy",
+  # 2.0: np._core and np.dtypes, the numpy types konfai_apps.bundle lets through for a checkpoint's numpy scalars.
+  "numpy>=2",
   "ruamel.yaml",
   "psutil",
   # Published weights (apps) are .safetensors: read and written without pickle.

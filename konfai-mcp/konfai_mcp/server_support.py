@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import inspect
 import math
 import re
@@ -28,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-from .catalog import COMPONENT_BASES, model_config_reference_to_inspect_classpath
+from .catalog import COMPONENT_BASES, builtin_inspect_classpath, model_config_reference_to_inspect_classpath
 from .classpaths import public_module
 from .config_io import YAML_DUMP as YAML_DUMP
 from .config_io import YAML_SAFE
@@ -336,7 +337,7 @@ def modeling_rules() -> dict[str, Any]:
             "how_to_check_an_authored_model": (
                 "inspect_object_signature reads a model's hyperparameters, loss-attachable outputs, and "
                 "(for YAML) full content WITHOUT building it: use it to understand any of the three forms. "
-                "To confirm the architecture actually BUILDS and wires correctly, validate_config_semantics"
+                "To confirm the architecture actually BUILDS and wires correctly, check_config(level='instantiate')"
                 "(level='instantiate') constructs the model inside its config (catching channel/shape/output "
                 "mismatches), and describe_model_outputs lists the real outputs_criterions paths of the built "
                 "model. Both build the model as part of the workflow, so the config must be complete (dataset "
@@ -541,6 +542,14 @@ def dataset_mapping_doc() -> dict[str, Any]:
     """Explain how to reason about dataset groups and group mapping."""
     return {
         "topic": "dataset_mapping",
+        "layout": [
+            "KonfAI reads <root>/<case>/<group>.<ext>: one folder per case, one file per group (CT.mha, SEG.mha).",
+            "A flat folder (one file per case) or an inverted one (<group>/<case>.ext, as Learn2Reg ships) is not a "
+            "dataset: build the layout with one folder per case, symlinks are fine; inspect_dataset names both "
+            "layouts in layout_hint.",
+            "dataset_filenames entries read <path>:<flags>:<ext> as the templates write them (./Dataset:a:mha); the "
+            "template summaries and docs://configuration explain the flags, copy the template's form.",
+        ],
         "principles": [
             "The user should specify the task; the agent should clarify ambiguous group roles.",
             "Inspect actual dataset groups before committing to a config.",
@@ -939,6 +948,42 @@ def summarize_yaml_model_signature(reference: str, path: Path) -> dict[str, Any]
     }
 
 
+def names_installed_package(classpath: str, workspace_dir: Path | None) -> bool:
+    """True for a single-token 'pkg:Class' no session file answers to and an installed package does.
+
+    summarize_classpath_signature imports it, so the server process must keep it out ('Model:UNet' with the file
+    missing stays a local matter). find_spec only locates a top-level module, it imports nothing.
+    """
+    parts = [part for part in classpath.strip().split(":") if part]
+    if len(parts) != 2 or "." in parts[0] or workspace_dir is None:
+        return False
+    return not (workspace_dir / f"{parts[0]}.py").is_file() and importlib.util.find_spec(parts[0]) is not None
+
+
+def classpath_requires_import(classpath: str, workspace_dir: Path | None) -> bool:
+    """True when summarize_classpath_signature would import the classpath's module in-process.
+
+    A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
+    (a single-token module before the colon, resolved as a workspace .py, no installed package of that name)
+    are parsed statically and never imported. Everything else (an installed 'package.module:Class' or
+    'package:Class', the colon form 'package:module:Class'
+    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name) triggers
+    importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
+    only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
+    """
+    normalized = classpath.strip()
+    if not normalized:
+        return False  # let summarize_classpath_signature raise its own ValueError in-process
+    if normalized.endswith(".yml") or normalized.startswith("default|"):
+        return False
+    # Local 'File:Class' == exactly one colon and a single-token module with no dot (mirrors
+    # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
+    colon_parts = [part for part in normalized.split(":") if part]
+    if len(colon_parts) == 2 and "." not in colon_parts[0]:
+        return names_installed_package(normalized, workspace_dir)
+    return True
+
+
 def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = None) -> dict[str, Any]:
     """Summarize one local or imported configurable object by classpath."""
     normalized = classpath.strip()
@@ -949,12 +994,22 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
     if yaml_path is not None:
         return summarize_yaml_model_signature(normalized, yaml_path)
 
+    if ":" not in normalized and "." not in normalized:
+        # a bare builtin name as a config writes it (Dice, CrossEntropyLoss): the catalog knows its classpath
+        builtin = builtin_inspect_classpath(normalized)
+        if builtin is not None:
+            resolved = summarize_classpath_signature(builtin, workspace_dir=workspace_dir)
+            resolved["classpath"] = normalized
+            resolved["resolved_classpath"] = builtin
+            return resolved
+
     module_name, object_name = _parse_classpath(normalized)
     local_candidate = (
         ":" in normalized
         and "." not in normalized.split(":", 1)[0]
         and workspace_dir is not None
         and len(module_name.split(".")) == 1
+        and not names_installed_package(normalized, workspace_dir)
     )
 
     if local_candidate:
@@ -985,7 +1040,7 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         # mapping list_components uses (catalog.model_config_reference_to_inspect_classpath) before
         # giving up; already-importable classpaths never reach here, so their behavior is unchanged.
         if ":" not in normalized:
-            builtin = model_config_reference_to_inspect_classpath(normalized)
+            builtin = model_config_reference_to_inspect_classpath(normalized) or builtin_inspect_classpath(normalized)
             if builtin is not None and builtin != normalized:
                 fallback = summarize_classpath_signature(builtin, workspace_dir=workspace_dir)
                 if fallback.get("ok"):

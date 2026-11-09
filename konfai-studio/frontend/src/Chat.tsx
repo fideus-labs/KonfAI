@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import FolderBrowser from "./FolderBrowser";
+import { SlidersIcon } from "./icons";
 import { failure, getJson, postJson } from "./api";
 import { readSSE } from "./sse";
 
@@ -256,6 +257,7 @@ export default function Chat({
   const [stage, setStage] = useState("");
   const [nextPrompts, setNextPrompts] = useState<Move[]>([]); // the workflow's next moves: button + full prompt
   const [attaching, setAttaching] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false); // phone: the brain, model and device in one popover
   const [attachText, setAttachText] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [listening, setListening] = useState(false);
@@ -591,14 +593,15 @@ export default function Chat({
                       ⚠ {p.text}
                     </div>
                   ) : (
-                    <div key={i} className={`tool ${p.status}`}>
-                      <div className="th">
+                    <details key={i} className={`tool ${p.status}`} open={p.status === "error" || undefined}>
+                      <summary className="th">
                         <span className="d" />
                         <span className="nm">{p.name}</span>
+                        <span className="gist">{JSON.stringify(p.input ?? {}).slice(1, -1)}</span>
                         <span className="st">{p.status === "running" ? "running…" : p.status}</span>
-                      </div>
+                      </summary>
                       <pre>{p.preview || JSON.stringify(p.input)}</pre>
-                    </div>
+                    </details>
                   ),
                 )
               )}
@@ -658,6 +661,7 @@ export default function Chat({
           >
             +
           </button>
+          <div className={settingsOpen ? "cbar-settings open" : "cbar-settings"}>
           {llm && (
             <div className="cbar-llm">
               <select
@@ -702,6 +706,17 @@ export default function Chat({
             </div>
           )}
           {onDevice && <DevicePicker device={device ?? "auto"} gpus={gpus ?? []} onDevice={onDevice} />}
+          </div>
+          {settingsOpen && <div className="cbar-settings-back" onClick={() => setSettingsOpen(false)} />}
+          <button
+            className={settingsOpen ? "cbtn cbar-gear on" : "cbtn cbar-gear"}
+            onClick={() => setSettingsOpen((o) => !o)}
+            aria-label="Assistant settings: model and device"
+            aria-expanded={settingsOpen}
+            title="Model and device"
+          >
+            <SlidersIcon />
+          </button>
           <span className="cbar-spacer" />
           {
             <button

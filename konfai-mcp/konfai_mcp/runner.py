@@ -153,7 +153,9 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
         # The child's own output is where a native crash or an OOM leaves its only trace: the traceback
         # says the process died, this says what it was saying when it did.
         error = str(result.get("error") or "Isolated subprocess failed.")
-        raise RuntimeError(f"{error}\n\nSubprocess output (tail):\n{printed}" if printed else error)
+        # the exception's own line first: a client reads the cause before the traceback
+        message = f"{error.strip().splitlines()[-1]}\n\n{error}" if "Traceback" in error else error
+        raise RuntimeError(f"{message}\n\nSubprocess output (tail):\n{printed}" if printed else message)
     return result["payload"]
 
 
@@ -792,6 +794,46 @@ def smoke_test_component(
         return payload
 
 
+def _force_single_process_in_config(config_path: Path) -> int:
+    """Set every ``num_workers`` of a (scratch) config to 0 and drop the worker-only loader knobs, in place.
+
+    Returns the largest ``num_workers`` the config asked for: the worker-spawn check still needs the request."""
+    from ruamel.yaml import YAML
+
+    yaml = YAML()
+    try:
+        data = yaml.load(config_path.read_text(encoding="utf-8"))
+    except Exception:  # not our YAML to judge here: the build reports it
+        return 0
+
+    changed = False
+    requested = 0
+
+    def walk(node: Any) -> None:
+        nonlocal changed, requested
+        if isinstance(node, dict):
+            if node.get("num_workers") not in (None, 0):
+                if isinstance(node["num_workers"], int):
+                    requested = max(requested, node["num_workers"])
+                node["num_workers"] = 0
+                changed = True
+            for key in ("prefetch_factor", "persistent_workers"):
+                if key in node:
+                    node.pop(key)
+                    changed = True
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(data)
+    if changed:  # a config asking for no worker is read as written, byte for byte
+        with config_path.open("w", encoding="utf-8") as handle:
+            yaml.dump(data, handle)
+    return requested
+
+
 def _force_single_process_loading(workflow_object: Any) -> int:
     """Force num_workers=0 on the dataset before setup builds the dataloader; return the requested value.
 
@@ -803,10 +845,20 @@ def _force_single_process_loading(workflow_object: Any) -> int:
     can run the worker-spawn picklability check only when the real run would actually spawn workers.
     """
     dataset = getattr(workflow_object, "dataset", None)
-    args = getattr(dataset, "dataLoader_args", None)
     requested = 0
+    # the source resolves its loader arguments again at setup from _num_workers: force the request itself, not
+    # only the dictionary it was last written to
+    for name in ("resolved_num_workers", "_num_workers"):
+        value = getattr(dataset, name, None)
+        if isinstance(value, int):
+            requested = max(requested, value)
+            setattr(dataset, name, 0)
+    for name, off in (("_prefetch_factor", None), ("_persistent_workers", None)):
+        if hasattr(dataset, name):
+            setattr(dataset, name, off)
+    args = getattr(dataset, "dataLoader_args", None)
     if isinstance(args, dict):
-        requested = int(args.get("num_workers", 0) or 0)
+        requested = max(requested, int(args.get("num_workers", 0) or 0))
         args["num_workers"] = 0
         args.pop("prefetch_factor", None)  # invalid when num_workers == 0
         args.pop("persistent_workers", None)
@@ -892,11 +944,11 @@ def plan_transform_api(
     *,
     workspace_dir: str,
     config: str,
-    cpu: int = 1,
+    ranks: int = 1,
     overwrite: bool = False,
     scratch_path: str | None = None,
 ) -> dict[str, Any]:
-    """Child entrypoint for the TRANSFORM dry-run: plan every case, write nothing.
+    """Child entrypoint for the TRANSFORM dry-run: plan every case for ``ranks`` processes, write nothing.
 
     The plan is the workflow's own verdict, not a prediction (it opens and removes a real
     region-write on each destination), so it is the one thing an agent should read before launching
@@ -920,7 +972,7 @@ def plan_transform_api(
                 transforms_dir=(workspace / "Transforms").resolve(),
             ),
         )
-        plan = workflow.compute_plan(max(1, int(cpu)), bool(overwrite))
+        plan = workflow.compute_plan(max(1, int(ranks)), bool(overwrite))
     counts: dict[str, int] = {}
     for entry in plan.entries:
         counts[entry.verdict] = counts.get(entry.verdict, 0) + 1
@@ -969,7 +1021,7 @@ def validate_workflow_api(
     ``workflow='transform'`` at ``level='setup'`` runs ``Transformer.setup``, whose plan opens and
     removes a real region-write probe on every destination the config's Write/Save stages name: those
     are the author's own stores, not the validate root. A directory store gets a probe case created
-    then removed; a single-file store (h5) is created if it was not already there. ``plan_transform``
+    then removed; a single-file store (h5) is created if it was not already there. ``run_transform(dry_run=True)``
     is the tool for a plan.
     """
     from konfai.evaluator import build_evaluate
@@ -1016,6 +1068,9 @@ def validate_workflow_api(
         # Runs in the spawn subprocess (never the server process): purge cached workspace imports so an
         # edited Model.py/Loss.py is re-imported fresh instead of silently validating stale code.
         _purge_workspace_modules(Path(workspace_dir))
+        # This daemonic child cannot spawn loader workers: the scratch copy asks for none, whatever the
+        # config says (the real run keeps its num_workers; worker_spawn_check pre-flights that path).
+        requested_in_config = _force_single_process_in_config(scratch)
         try:
             if single_process:
                 _apply_single_process_patches()
@@ -1060,11 +1115,18 @@ def validate_workflow_api(
             if collect_model_outputs:
                 payload["model_outputs"] = _collect_model_outputs(workflow_object, workflow)
             if level in ("setup", "train_step"):
-                requested_num_workers = _force_single_process_loading(workflow_object)
+                requested_num_workers = max(requested_in_config, _force_single_process_loading(workflow_object))
                 workflow_object.setup(1)
+                loaders = getattr(workflow_object, "dataloader", []) or []
                 payload["setup"] = {
-                    "dataloaders": len(getattr(workflow_object, "dataloader", [])),
-                    "size": getattr(workflow_object, "size", None),
+                    "dataloaders": len(loaders),
+                    "world_size": getattr(workflow_object, "size", None),  # processes the run would spawn
+                    # how long a run is, before it is launched: batches per epoch of each loader, AS BUILT HERE
+                    # one list per rank (setup(1): one rank), training's loader then validation's when there is one
+                    "iterations_per_epoch": [len(dl) for rank in loaders for dl in rank if hasattr(dl, "__len__")],
+                    "iterations_note": "training first, then validation when the split has one; "
+                    "counted on the data this check built (a reduced sample when the check "
+                    "subsamples): the run's own count is its cases times patches over the batch size",
                 }
                 payload["worker_spawn_check"] = _check_worker_spawn_picklability(workflow_object, requested_num_workers)
             if level == "train_step" and workflow == "train":

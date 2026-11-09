@@ -1,40 +1,128 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+@import "./design/fonts.css";
+@import "./design/tokens.css";
 
 /* KonfAI Studio. IDE shell in the VS Code / Claude Code desktop idiom:
    warm-neutral dark chrome, flat panels, one restrained accent = KonfAI sage. */
 :root {
-  --bg: #1b1b1a; /* editor ground, warm near-black */
-  --chrome: #232320; /* title bar / status bar / pane headers */
-  --panel: #1f1f1e; /* pane body */
-  --panel-2: #2a2a27; /* raised: composer, cards, buttons */
-  --inset: #161615; /* inputs, console, canvas letterbox */
-  --ink: #e7e6e1; /* primary text, warm off-white */
-  --ink-2: #c4c3bc;
-  /* Four readable steps, not two readable ones and two decorative. Measured against the raised surface
-     (--panel-2), the worst ground: ink 11.5, ink-2 8.1, muted 6.6, faint 4.6. The old muted sat at 4.4
-     and faint at 2.4, so labels, chart ticks and every timestamp were below the floor for their size. */
-  --muted: #b2b0a5; /* secondary text / labels */
-  --faint: #949288; /* quietest text, and the idle dots */
-  --line: #322f2b; /* hairline borders */
-  --line-2: #403d38;
-  --accent: #d6d5cf; /* near-white: buttons, focus (the green stays in the logo) */
-  --accent-ink: #e7e6e1; /* emphasized text on dark */
-  --accent-t: rgba(230, 229, 224, 0.08);
-  --accent-solid: #3a3a37; /* filled buttons: raised neutral */
-  --sage: #52b89b; /* KonfAI sage: micro-signals only (status dots) */
-  --working: #d6a24f; /* amber: a tool is running */
-  /* What you are looking at: the open tab, the selected split. Sage carried this and also carried
-     "done", so the same green meant two things; amber is the interface's live signal, and selection
-     is a live thing. Same value as --working today, named apart so they can part ways. */
-  --current: #d6a24f;
-  --good: #6bc38d; /* ready / done */
-  --err: #e07b62; /* soft red: errors only */
-  --fsans: system-ui, -apple-system, "Segoe UI", "Roboto", "Helvetica", "Arial", sans-serif;
-  --fmono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
-  /* One clock for the whole interface: state changes settle in 150ms with a hard ease-out.
-     Anything slower reads as choreography, anything linear reads as mechanical. */
-  --dur: 0.15s;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  /* KonfAI Studio: a reading-room console. The chrome is cool graphite so the volumes (grey-scale) and the
+     curves (colour) are what carries light; sage, KonfAI's green, marks what you are looking at; amber is the
+     interface's live signal (a tool running, a job writing); coral is kept for errors and confirmed defects. */
+  --bg: #14171b; /* editor ground */
+  --chrome: #1a1e23; /* title bar, status bar, pane headers, tab bars */
+  --panel: #181c21; /* pane body */
+  --panel-2: #22282f; /* raised: composer, cards, buttons */
+  --inset: #0f1215; /* inputs, console, canvas letterbox */
+  --ink: #e8ebee; /* primary text */
+  --ink-2: #c4cad1;
+  /* Four readable steps, measured against the raised surface (--panel-2): ink 12.6, ink-2 8.9, muted 6.3, faint 4.6. */
+  --muted: #9ba5af; /* secondary text, labels */
+  --faint: #7f8993; /* quietest text, idle dots */
+  --line: #2a3038; /* hairlines */
+  --line-2: #363e48;
+  --accent: #dfe3e7; /* neutral emphasis: buttons, focus rings */
+  --accent-ink: #eef1f4;
+  --accent-t: rgba(223, 227, 231, 0.08);
+  --accent-solid: #2f3741; /* filled buttons */
+  --sage: var(--k-sage); /* KonfAI sage (design/tokens.css): what is current, what is ready */
+  --working: var(--k-amber); /* amber: a tool is running, a job is writing */
+  --current: var(--k-sage); /* the open tab, the selected split, the focused experiment */
+  --good: #6cc39a;
+  --err: var(--k-coral);
+  /* Scout's three statements and three verdicts, named for what they mean, not for a colour. */
+  --kind-confirmed: var(--k-coral);
+  --kind-suspected: var(--k-amber);
+  --kind-measured: var(--k-steel);
+  --verdict-defective: var(--k-coral);
+  --verdict-acceptable: var(--k-sage);
+  --verdict-insufficient: var(--k-amber);
+  /* The family's faces, served by Studio itself (design/fonts.css): Plex Sans for the interface, Plex Mono for
+     data, Archivo for the verdict word and the welcome title. */
+  --fsans: var(--k-sans);
+  --fmono: var(--k-mono);
+  --fdisplay: var(--k-display);
+  /* One type scale, one spacing scale, three radii: every new rule reads from here. */
+  --fs-0: 10.5px; /* eyebrows, tab labels (mono, uppercase) */
+  --fs-1: 12px; /* captions, data */
+  --fs-2: 13.5px; /* body */
+  --fs-3: 15px; /* lead text */
+  --fs-4: 20px; /* section titles */
+  --fs-5: 28px; /* the verdict word */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --r-1: var(--k-r-1);
+  --r-2: var(--k-r-2);
+  --r-3: var(--k-r-3);
+  --ctl: 32px; /* the height of every bar control; 40px where a finger does the pointing */
+  /* One clock for the whole interface: state changes settle in 150ms with a hard ease-out. */
+  --dur: var(--k-dur);
+  --ease: var(--k-ease);
+  color-scheme: dark;
+}
+/* The light theme is cool paper, not cream: the same roles, the same hierarchy, the ink turned around. A page
+   can pin either with data-theme on <html>; otherwise the system decides. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #eef1f4;
+    --chrome: #e4e8ec;
+    --panel: #f6f8fa;
+    --panel-2: #ffffff;
+    --inset: #e3e7eb;
+    --ink: #171c22;
+    --ink-2: #2f3842;
+    --muted: #5a6671;
+    --faint: #78848f;
+    --line: #d4dae0;
+    --line-2: #c2cad2;
+    --accent: #2a3340;
+    --accent-ink: #121820;
+    --accent-t: rgba(23, 28, 34, 0.06);
+    --accent-solid: #e3e8ed;
+    --sage: var(--k-sage-deep);
+    --working: var(--k-amber-deep);
+    --current: var(--k-sage-deep);
+    --good: #2f9a62;
+    --err: var(--k-coral-deep);
+    --kind-confirmed: var(--k-coral-deep);
+    --kind-suspected: var(--k-amber-deep);
+    --kind-measured: var(--k-steel-deep);
+    --verdict-defective: var(--k-coral-deep);
+    --verdict-acceptable: var(--k-sage-deep);
+    --verdict-insufficient: var(--k-amber-deep);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #eef1f4;
+  --chrome: #e4e8ec;
+  --panel: #f6f8fa;
+  --panel-2: #ffffff;
+  --inset: #e3e7eb;
+  --ink: #171c22;
+  --ink-2: #2f3842;
+  --muted: #5a6671;
+  --faint: #78848f;
+  --line: #d4dae0;
+  --line-2: #c2cad2;
+  --accent: #2a3340;
+  --accent-ink: #121820;
+  --accent-t: rgba(23, 28, 34, 0.06);
+  --accent-solid: #e3e8ed;
+  --sage: var(--k-sage-deep);
+  --working: var(--k-amber-deep);
+  --current: var(--k-sage-deep);
+  --good: #2f9a62;
+  --err: var(--k-coral-deep);
+  --kind-confirmed: var(--k-coral-deep);
+  --kind-suspected: var(--k-amber-deep);
+  --kind-measured: var(--k-steel-deep);
+  --verdict-defective: var(--k-coral-deep);
+  --verdict-acceptable: var(--k-sage-deep);
+  --verdict-insufficient: var(--k-amber-deep);
+  color-scheme: light;
 }
 
 * {
@@ -158,6 +246,7 @@ body {
   height: 100%;
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr) 24px; /* title bar · body · status bar */
+  grid-template-columns: minmax(0, 1fr); /* the one column never grows past the viewport for a wide child */
 }
 .body {
   display: grid;
@@ -515,6 +604,7 @@ dialog.modal-back::backdrop {
   display: block;
 }
 .titlebar .studio {
+  font-family: var(--fdisplay);
   font-size: 13px;
   font-weight: 600;
   color: var(--muted);
@@ -573,12 +663,6 @@ dialog.modal-back::backdrop {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-}
-@media (max-width: 900px) {
-  .work {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
 }
 .pane {
   min-width: 0;
@@ -698,21 +782,29 @@ dialog.modal-back::backdrop {
   }
 }
 
-/* tool call: a small "terminal task" card */
+/* tool call: one line that says what ran and how it ended; the arguments and the result open on demand */
 .tool {
   font-family: var(--fmono);
-  font-size: 12px;
+  font-size: var(--fs-1);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--r-1);
   overflow: hidden;
   background: var(--inset);
 }
 .tool .th {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 11px;
+  gap: var(--s-2);
+  padding: 6px 10px;
   background: var(--panel-2);
+  list-style: none;
+  cursor: pointer;
+  min-width: 0;
+}
+.tool .th::-webkit-details-marker {
+  display: none;
+}
+.tool[open] .th {
   border-bottom: 1px solid var(--line);
 }
 .tool .th .d {
@@ -731,18 +823,27 @@ dialog.modal-back::backdrop {
 .tool .nm {
   color: var(--accent-ink);
   font-weight: 600;
+  flex: none;
+}
+.tool .th .gist {
+  color: var(--faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tool .st {
   margin-left: auto;
   color: var(--muted);
+  flex: none;
 }
 .tool pre {
   margin: 0;
   padding: 9px 11px;
-  color: #b9c4bd;
+  color: var(--ink-2);
   white-space: pre-wrap;
   overflow-wrap: break-word;
-  max-height: 168px;
+  max-height: 240px;
   overflow: auto;
 }
 .err {
@@ -946,6 +1047,7 @@ dialog.modal-back::backdrop {
 }
 .vbar input {
   flex: 1;
+  min-width: 0;
   background: var(--inset);
   color: var(--ink);
   border: 1px solid var(--line-2);
@@ -2262,7 +2364,14 @@ dialog.modal-back::backdrop {
 .cfg {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
+}
+/* whatever sits beside the fixed-width tree shrinks with the pane instead of pushing past it (the viewer header
+   and its path field overflowed the column at laptop widths) */
+.cfg > :not(.tree):not(.cfg-files) {
+  flex: 1;
+  min-width: 0;
 }
 .cfg-files {
   width: 200px;
@@ -2637,9 +2746,10 @@ dialog.modal-back::backdrop {
   margin-bottom: 6px;
 }
 .welcome-title {
+  font-family: var(--fdisplay);
   font-size: 23px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 680;
+  letter-spacing: -0.02em;
   color: var(--ink);
   text-wrap: balance;
 }
@@ -3371,7 +3481,6 @@ dialog.modal-back::backdrop {
   height: 100%;
   background: var(--accent);
   border-radius: 4px;
-  transition: width 0.3s ease;
 }
 .feed-prog-meta {
   display: flex;
@@ -3603,6 +3712,7 @@ dialog.modal-back::backdrop {
   min-width: 0;
 }
 .cbar-sel {
+  white-space: nowrap; /* 'GPU 0' stays on one line in a narrow composer */
   appearance: none;
   background: var(--inset);
   color: var(--muted);
@@ -4026,28 +4136,919 @@ dialog.modal-back::backdrop {
 }
 
 
-/* ---- Scout: the visual inspection reports ---- */
-.scout { display: flex; flex-direction: column; gap: 8px; padding: 6px 8px; }
-.scout-list { display: flex; flex-direction: column; gap: 2px; }
-.scout-row { display: flex; gap: 8px; align-items: baseline; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 6px; color: inherit; cursor: pointer; }
-.scout-row.on, .scout-row:hover { border-color: rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.05); }
-.scout-name { font-weight: 600; }
-.scout-verdict { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.12); }
-.scout-verdict.defective { background: rgba(220, 60, 60, 0.35); }
-.scout-verdict.acceptable { background: rgba(60, 170, 90, 0.35); }
-.scout-verdict.insufficient_evidence { background: rgba(200, 160, 40, 0.35); }
-.scout-report { display: flex; flex-direction: column; gap: 10px; }
-.scout-conclusion { padding: 6px 8px; border-left: 3px solid rgba(255, 255, 255, 0.3); }
-.scout-obs { padding: 6px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border-left: 3px solid #888; }
-.scout-obs.sev-minor { border-left-color: #6b8; }
-.scout-obs.sev-moderate { border-left-color: #cb5; }
-.scout-obs.sev-major { border-left-color: #e74; }
-.scout-obs.sev-critical { border-left-color: #e33; }
-.scout-obs-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.scout-kind { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.12); }
-.scout-kind.confirmed_error { background: rgba(220, 60, 60, 0.35); }
-.scout-kind.suspected_error { background: rgba(200, 160, 40, 0.35); }
-.scout-evidence { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-.scout-evidence img { height: 96px; border-radius: 4px; cursor: zoom-in; border: 1px solid rgba(255, 255, 255, 0.15); }
-.scout-zoom { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); display: flex; align-items: center; justify-content: center; z-index: 50; cursor: zoom-out; }
-.scout-zoom img { max-width: 92vw; max-height: 92vh; }
+/* ---- Scout: the visual inspection reports, read like a radiologist's sheet ---- */
+.scout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3) var(--s-5);
+  max-width: 920px;
+}
+.scout-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.scout-eyebrow {
+  font-family: var(--fmono);
+  font-size: var(--fs-0);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.scout-tabs {
+  display: flex;
+  gap: var(--s-1);
+  flex-wrap: wrap;
+}
+.scout-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--inset);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  padding: 3px 10px;
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  cursor: pointer;
+}
+.scout-tab.on {
+  border-color: var(--current);
+  color: var(--ink);
+}
+.scout-reload {
+  margin-left: auto;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: var(--r-1);
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.scout-reload:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+.scout-empty {
+  color: var(--muted);
+  font-size: var(--fs-2);
+  line-height: 1.55;
+  padding: var(--s-3);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-2);
+}
+.scout-empty code {
+  font-family: var(--fmono);
+  color: var(--ink-2);
+}
+.verdict-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.verdict-dot.defective {
+  background: var(--verdict-defective);
+}
+.verdict-dot.acceptable {
+  background: var(--verdict-acceptable);
+}
+.verdict-dot.insufficient_evidence {
+  background: var(--verdict-insufficient);
+}
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+/* the verdict band: the word first, in the verdict's colour, the confidence as a thin rule under it */
+.verdict-band {
+  --verdict: var(--faint);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-4);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+}
+.verdict-band.defective {
+  --verdict: var(--verdict-defective);
+}
+.verdict-band.acceptable {
+  --verdict: var(--verdict-acceptable);
+}
+.verdict-band.insufficient_evidence {
+  --verdict: var(--verdict-insufficient);
+}
+.verdict-band.error {
+  --verdict: var(--err);
+}
+.verdict-word {
+  font-family: var(--fdisplay);
+  font-size: var(--fs-5);
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--verdict);
+}
+.verdict-meter {
+  position: relative;
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  max-width: 320px;
+}
+.verdict-meter i {
+  display: block;
+  height: 100%;
+  background: var(--verdict);
+  border-radius: 2px;
+}
+.verdict-meter span {
+  position: absolute;
+  left: calc(100% + var(--s-2));
+  top: -8px;
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.verdict-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px var(--s-3);
+  font-size: var(--fs-1);
+  font-family: var(--fmono);
+}
+.verdict-facts dt {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--fs-0);
+  padding-top: 1px;
+}
+.verdict-facts dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.dim {
+  color: var(--muted);
+}
+.warn {
+  color: var(--working);
+}
+.lead {
+  font-size: var(--fs-3);
+  line-height: 1.6;
+  color: var(--ink);
+  max-width: 68ch;
+}
+.lead p {
+  margin: 0 0 var(--s-3);
+}
+.lead p:last-child {
+  margin-bottom: 0;
+}
+.sheet-note {
+  font-size: var(--fs-2);
+  color: var(--muted);
+  padding: var(--s-2) var(--s-3);
+  background: var(--inset);
+  border-radius: var(--r-1);
+}
+.sheet-note.err {
+  color: var(--err);
+}
+/* the observations: the kind is the colour of its badge, the id is the handle the conclusion cites */
+.obs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.obs {
+  --kind: var(--faint);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: var(--s-3) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.obs.confirmed_error {
+  --kind: var(--kind-confirmed);
+}
+.obs.suspected_error {
+  --kind: var(--kind-suspected);
+}
+.obs.measured_property {
+  --kind: var(--kind-measured);
+}
+.obs.sev-minor {
+  border-left-style: dotted;
+}
+.obs.sev-moderate {
+  border-left-style: dashed;
+}
+.obs-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.obs-id {
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  color: var(--muted);
+}
+.kind-badge {
+  font-family: var(--fmono);
+  font-size: var(--fs-0);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--kind);
+  border: 1px solid color-mix(in srgb, var(--kind) 55%, transparent);
+  border-radius: var(--r-3);
+  padding: 1px 8px;
+}
+.obs-defect {
+  font-size: var(--fs-2);
+  color: var(--ink);
+}
+.obs-sev {
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  color: var(--muted);
+}
+.obs-goto {
+  margin-left: auto;
+  background: transparent;
+  color: var(--ink-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-1);
+  padding: 2px 10px;
+  font-size: var(--fs-1);
+  cursor: pointer;
+}
+.obs-goto:hover {
+  border-color: var(--current);
+  color: var(--ink);
+}
+.obs-text {
+  margin: 0;
+  font-size: var(--fs-2);
+  line-height: 1.55;
+  color: var(--ink-2);
+  max-width: 72ch;
+}
+.obs-where {
+  display: flex;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  color: var(--muted);
+}
+.obs-note {
+  font-size: var(--fs-1);
+  color: var(--muted);
+  border-left: 2px solid var(--line-2);
+  padding-left: var(--s-2);
+}
+.second-reading {
+  font-size: var(--fs-1);
+  color: var(--ink-2);
+  padding: var(--s-2) var(--s-3);
+  background: var(--inset);
+  border-radius: var(--r-1);
+}
+.second-reading.not_visible {
+  box-shadow: inset 3px 0 0 var(--kind-suspected);
+}
+.second-reading.visible {
+  box-shadow: inset 3px 0 0 var(--good);
+}
+.obs-measures {
+  border-collapse: collapse;
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  width: 100%;
+  max-width: 560px;
+}
+.obs-measures th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--fs-0);
+  padding: 2px 10px 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+.obs-measures td {
+  padding: 3px 10px 3px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+  vertical-align: top;
+}
+.obs-measures tr:last-child td {
+  border-bottom: none;
+}
+.obs-measures .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.obs-measures .m-id {
+  color: var(--faint);
+  margin-right: 4px;
+}
+/* the evidence: a filmstrip of what the model saw, each frame kept whole, never stretched */
+.filmstrip {
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  padding-bottom: var(--s-1);
+  scroll-snap-type: x proximity;
+}
+.filmstrip figure {
+  margin: 0;
+  flex: none;
+  width: 180px;
+  scroll-snap-align: start;
+}
+.filmstrip img {
+  display: block;
+  width: 180px;
+  height: 150px;
+  object-fit: contain;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  cursor: zoom-in;
+}
+.filmstrip img:hover {
+  border-color: var(--current);
+}
+.filmstrip figcaption {
+  font-family: var(--fmono);
+  font-size: var(--fs-0);
+  color: var(--muted);
+  padding-top: 3px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.uncited > summary,
+.sheet-foot summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-1);
+  font-family: var(--fmono);
+  list-style: none;
+}
+.uncited > summary::before,
+.sheet-foot summary::before {
+  content: "▸ ";
+  color: var(--faint);
+}
+.uncited[open] > summary::before,
+.sheet-foot details[open] summary::before {
+  content: "▾ ";
+}
+.uncited .filmstrip {
+  margin-top: var(--s-2);
+}
+.sheet-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  font-size: var(--fs-1);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-3);
+}
+.sheet-md {
+  margin: var(--s-2) 0;
+  padding: var(--s-3);
+  background: var(--inset);
+  border-radius: var(--r-1);
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
+  color: var(--ink-2);
+}
+.scout-zoom {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  z-index: 50;
+  cursor: zoom-out;
+}
+.scout-zoom img {
+  max-width: 92vw;
+  max-height: 86vh;
+  object-fit: contain;
+}
+.scout-zoom-cap {
+  font-family: var(--fmono);
+  font-size: var(--fs-1);
+  color: #e8ebee;
+}
+
+/* ---- redesign: the same components, read from the token scales ---- */
+.a .text {
+  max-width: 72ch;
+  line-height: 1.6;
+}
+.u {
+  background: color-mix(in srgb, var(--current) 10%, var(--panel-2));
+  border-color: color-mix(in srgb, var(--current) 35%, var(--line-2));
+  border-radius: var(--r-2) var(--r-2) var(--r-1) var(--r-2);
+}
+.chip-prompt {
+  border-radius: var(--r-3);
+  padding: 4px 12px;
+}
+.chip-prompt:hover {
+  border-color: var(--current);
+  background: color-mix(in srgb, var(--current) 10%, var(--inset));
+}
+.composer {
+  border-radius: var(--r-3);
+}
+.composer:focus-within {
+  border-color: var(--current);
+}
+.rtab.on {
+  color: var(--ink);
+  border-bottom-color: var(--current);
+}
+.zoo-tile {
+  border-radius: var(--r-2);
+}
+.zoo-tile:hover {
+  border-color: var(--current);
+}
+@media (max-width: 900px) {
+  .scout {
+    padding: var(--s-2);
+  }
+  .verdict-word {
+    font-size: var(--fs-4);
+  }
+  .filmstrip figure,
+  .filmstrip img {
+    width: 140px;
+  }
+  .filmstrip img {
+    height: 118px;
+  }
+}
+
+/* ================================================================================================
+   Shell at three widths, and the finish: one control height, a visible focus ring, drawn icons.
+   ================================================================================================ */
+:focus-visible {
+  outline: 2px solid var(--current);
+  outline-offset: 2px;
+}
+::selection {
+  background: color-mix(in srgb, var(--current) 35%, transparent);
+}
+.cbar-sel,
+.composer-bar .cbtn,
+.csend,
+.rail-new-btn,
+.v-btn,
+.vbar button,
+.zoo-addbtn,
+.menu-btn,
+.apps-btn {
+  min-height: var(--ctl);
+}
+.chip-prompt {
+  min-height: 28px;
+}
+.titlebar .menu-btn {
+  display: grid;
+  place-items: center;
+  width: var(--ctl);
+  height: var(--ctl);
+  margin-left: -6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.titlebar .menu-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--line-2);
+}
+/* tablet: the titlebar keeps one line, the meters and the Apps button never wrap */
+@media (max-width: 1199px) {
+  .titlebar {
+    gap: 8px;
+  }
+  .titlebar .chip,
+  .titlebar .apps-btn {
+    white-space: nowrap;
+  }
+  /* a run's phase chips and its actions share one wrapping row in a narrow panel */
+  .feed-job-head {
+    flex-wrap: wrap;
+  }
+  .feed-job-actions {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+  }
+  /* a table wider than the conversation scrolls inside its own box */
+  .chat-col table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+@media (max-width: 1023px) {
+  .titlebar .studio {
+    display: none;
+  }
+}
+.title-now {
+  display: none;
+}
+.cbar-settings {
+  display: contents; /* a desktop keeps the selectors inline; a phone folds them (below) */
+}
+.composer-bar .cbar-gear,
+.cbar-settings-back {
+  display: none;
+}
+/* the selectors give way before the buttons do: a narrow desktop pane shows "Default", not "Defaul" */
+.composer-bar .cbar-llm {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.composer-bar .cbar-sel {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.console .toggle svg {
+  display: block;
+}
+.v-btn svg {
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+
+/* A long path in a message must never widen the shell: every column breaks the chain of intrinsic widths. */
+.body,
+.pane.chat,
+.log {
+  min-width: 0;
+}
+/* ---- 768–1199: the experiments rail is a drawer behind the menu; the two panes keep their split ---- */
+.body.compact {
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
+}
+.body.compact .rail {
+  position: fixed;
+  top: 40px;
+  bottom: 24px;
+  left: 0;
+  z-index: 40;
+  width: min(320px, 85vw);
+  border-right: 1px solid var(--line-2);
+  box-shadow: 12px 0 40px rgba(0, 0, 0, 0.35);
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition:
+    transform var(--dur) var(--ease),
+    visibility 0s linear var(--dur);
+}
+.body.compact.drawer-open .rail {
+  transform: none;
+  visibility: visible;
+  transition: transform var(--dur) var(--ease);
+}
+.drawer-back {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* ---- < 768: one column ---- */
+.panebar,
+.term-sheet,
+.term-sheet-back {
+  display: none;
+}
+@media (max-width: 767px) {
+  :root {
+    --fs-1: 12.5px;
+    --fs-2: 14px; /* body text a phone can read */
+    --ctl: 40px;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  .app {
+    grid-template-rows: 48px minmax(0, 1fr); /* app bar · body; the status bar folds into the pane bar */
+  }
+  .statusbar {
+    display: none;
+  }
+  .titlebar {
+    gap: 8px;
+    padding: 0 8px;
+  }
+  .titlebar .studio,
+  .titlebar .chip.meter,
+  .titlebar .power-btn,
+  .apps-btn .apps-label {
+    display: none;
+  }
+  .titlebar .wordmark {
+    height: 18px;
+  }
+  .title-now {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-2);
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .apps-btn {
+    width: var(--ctl);
+    padding: 0;
+    justify-content: center;
+  }
+  .titlebar .spacer {
+    display: none;
+  }
+  .body.phone .rail {
+    top: 48px;
+    bottom: 0;
+  }
+  .main {
+    grid-template-rows: minmax(0, 1fr) auto; /* work · pane bar */
+  }
+  .work.phone {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .work.phone.pane-chat .rpanel,
+  .work.phone.pane-right .chat-col {
+    display: none;
+  }
+  .chat-col {
+    border-right: none;
+  }
+  /* the pane bar: where the right panel's tabs and the terminal live on a phone */
+  .panebar {
+    display: flex;
+    align-items: stretch;
+    position: relative;
+    z-index: 46; /* above the terminal sheet and its backdrop: the bar still switches panes and closes the sheet */
+    height: calc(52px + env(safe-area-inset-bottom));
+    padding: 0 4px env(safe-area-inset-bottom);
+    background: var(--chrome);
+    border-top: 1px solid var(--line);
+  }
+  .pane-btn {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    place-items: center;
+    background: none;
+    border: none;
+    border-top: 2px solid transparent;
+    color: var(--muted);
+    font-family: var(--fsans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .pane-btn.icon {
+    flex: 0 0 var(--ctl);
+  }
+  .pane-btn.on {
+    color: var(--ink);
+    border-top-color: var(--current);
+  }
+  /* the terminal as a sheet over the work, under the pane bar */
+  .term-sheet-back {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    background: rgba(0, 0, 0, 0.4);
+  }
+  .term-sheet {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(52px + env(safe-area-inset-bottom));
+    height: 55vh;
+    z-index: 45;
+    background: var(--inset);
+    border-top: 1px solid var(--line-2);
+    border-radius: var(--r-3) var(--r-3) 0 0;
+    overflow: hidden;
+  }
+  .term-sheet .console {
+    flex: 1;
+    min-height: 0;
+    border-top: none;
+  }
+  .term-sheet .term-host {
+    flex: 1;
+    min-height: 0;
+  }
+  /* the conversation */
+  .suggest {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .suggest::-webkit-scrollbar {
+    display: none;
+  }
+  .chip-prompt {
+    flex: none;
+    white-space: nowrap;
+  }
+  .chat-col pre,
+  .chat-col details pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .log {
+    overflow-wrap: anywhere; /* a path or a run name longer than the screen wraps instead of scrolling it */
+  }
+  .composer {
+    margin: 6px 8px 8px;
+    padding: 8px 10px 8px;
+  }
+  .composer textarea {
+    font-size: 16px; /* under 16px iOS zooms the page on focus */
+  }
+  .cbar-settings {
+    display: none;
+  }
+  .cbar-settings.open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: calc(100% + 6px);
+    z-index: 12;
+    padding: 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-2);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+  .cbar-settings.open .cbar-llm,
+  .cbar-settings.open .cbar-dev {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .cbar-settings.open .cbar-sel {
+    max-width: none;
+    width: 100%;
+  }
+  .composer-bar .cbar-gear {
+    display: grid;
+  }
+  .cbar-gear.on {
+    color: var(--current);
+    border-color: var(--current);
+  }
+  .cbar-settings-back {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 11;
+  }
+  .composer-bar .cbtn,
+  .csend {
+    width: var(--ctl);
+    height: var(--ctl);
+  }
+  /* the right panel */
+  .rtabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+    height: 40px;
+  }
+  .rtab {
+    height: 40px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  .cfg {
+    flex-direction: column;
+  }
+  .cfg .tree {
+    width: auto;
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .vbar,
+  .pane-head {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 36px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  .pane-head .v-tools {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .v-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 1fr 1fr;
+  }
+  .filmstrip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .scout {
+    padding: var(--s-2);
+  }
+  /* modals take the whole screen; the gallery header keeps one line and its close button */
+  .zoo-head {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+  .zoo-title,
+  .zoo-addbtn {
+    white-space: nowrap;
+  }
+  .zoo-search {
+    min-width: 0;
+    flex: 1 1 80px;
+  }
+  .zoo-close {
+    display: grid;
+    place-items: center;
+    width: var(--ctl);
+    height: var(--ctl);
+    padding: 0;
+  }
+  .modal-back > .zoo,
+  .modal-back > .modal {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border: none;
+  }
+}
+@media (pointer: coarse) {
+  :root {
+    --ctl: 40px;
+  }
+}

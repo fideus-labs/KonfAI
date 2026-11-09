@@ -1,0 +1,106 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b12">
+<title>Configuration · KonfAI docs</title>
+<meta name="description" content="One YAML per workflow: roots, dataset, groups, transforms, patches, models.">
+<link rel="stylesheet" href="../design/fonts.css">
+<link rel="stylesheet" href="../design/tokens.css">
+<link rel="stylesheet" href="../design/components.css">
+<link rel="stylesheet" href="../landing.css">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body class="landing inner hue-engine">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../index.html"><img src="../assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="../docs/get-started.html">Engine</a><a href="../apps.html">Apps</a><a href="../docs/edge.html">Edge</a><a href="../studio.html">Studio</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../docs/index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" aria-expanded="false" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html" aria-current="page">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Configuration</h1>
+<p class="lead">One YAML per workflow: roots, dataset, groups, transforms, patches, models.</p>
+
+<section>
+<h2>Four files, four roots</h2>
+<p>A KonfAI config is YAML that says which Python objects to build and how they connect. Each workflow has one file with one root key; the model workflows share a workspace named by <code>train_name</code>, so use the same <code>train_name</code> in the files of one experiment.</p>
+<table>
+<thead><tr><th>Command</th><th>File</th><th>Root</th><th>Writes</th></tr></thead>
+<tbody>
+<tr><td><code>konfai TRAIN</code> / <code>RESUME</code></td><td><code>Config.yml</code></td><td><code>Trainer:</code></td><td><code>Checkpoints/&lt;train_name&gt;/</code>, <code>Statistics/&lt;train_name&gt;/</code></td></tr>
+<tr><td><code>konfai PREDICTION</code></td><td><code>Prediction.yml</code></td><td><code>Predictor:</code></td><td><code>Predictions/&lt;train_name&gt;/</code></td></tr>
+<tr><td><code>konfai EVALUATION</code></td><td><code>Evaluation.yml</code></td><td><code>Evaluator:</code></td><td><code>Evaluations/&lt;train_name&gt;/Metric_*.json</code></td></tr>
+<tr><td><code>konfai TRANSFORM</code></td><td><code>Transform.yml</code></td><td><code>Transformer:</code></td><td>wherever each <code>Write:</code> points; logs in <code>Transforms/&lt;name&gt;/</code></td></tr>
+</tbody>
+</table>
+</section>
+<section>
+<h2>How YAML becomes objects</h2>
+<p>Each key is a constructor argument: KonfAI reads the class's signature, takes each argument from the key of the same name (<code>snake_case</code>) and builds nested objects the same way. A missing key takes its default (<code>konfai &lt;COMMAND&gt; --init</code> writes every default into the file); <code>null</code> means <code>None</code> and turns a feature off; a required key must be written and the error names it; a value of the wrong shape is refused with its path; a key nothing reads is reported with the closest valid name. Running a config rewrites it with its resolved defaults.</p>
+</section>
+<section>
+<h2>The dataset</h2>
+<p>Every workflow reads its data through a <code>Dataset:</code> block. <code>dataset_filenames</code> is a list of <code>path</code>, <code>path:format</code> or <code>path:flag:format</code> entries, as the templates write them:</p>
+<ul>
+<li><code>./Dataset:mha</code>, <code>./DicomDataset:dicom</code>, <code>./OmeDataset:omezarr</code>;</li>
+<li>the flag <code>a</code> adds a dataset's cases to the others (union), <code>i</code> keeps only the cases present in all (intersection): <code>./Predictions/TRAIN_01/Dataset:i:mha</code>;</li>
+<li>a manifest of explicit entries, <code>./cases.yml:omezarr</code>, when the cases do not sit in the standard layout.</li>
+</ul>
+<p><code>groups_src</code> names the groups read from disk; each gives one or more tensors in <code>groups_dest</code>, each with its own <code>transforms</code>; <code>is_input: true</code> marks the model's inputs, the others are targets. <code>transforms</code> is case preprocessing, replayed on regions when streaming; <code>patch_transforms</code> runs on each patch. No <code>transforms</code> means the group reaches the model as stored.</p>
+<pre><code>Trainer:
+  Dataset:
+    dataset_filenames: [./Dataset:mha]
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize: {mean: None, std: None}
+            is_input: true
+      SEG:
+        groups_dest:
+          SEG: {}
+    Patch:
+      patch_size: [128, 128, 128]</code></pre>
+<p><code>subset</code> and <code>validation</code> take the same selectors: a share of the cases, a list of names, a case-list file, or a <code>start:end</code> slice.</p>
+</section>
+<section>
+<h2>Patches</h2>
+<p><code>Patch.patch_size</code> is the patch the model sees (default <code>[128, 128, 128]</code>); a <code>0</code> lets KonfAI size that axis, starting from the whole axis and, on a GPU out-of-memory at the first step, restarting with the fewest equal patches that fit. <code>overlap</code> defaults to 20 %. <code>extend_slice</code> adds neighbouring slices as channels for 2.5-D models (with <code>patch_size[0] == 1</code>). <code>memory_budget</code> decides whether the dataset stays in RAM or streams.</p>
+</section>
+<section>
+<h2>Models by classpath</h2>
+<p>A KonfAI model is a graph of named modules, either a Python class or the same graph written as a <code>.yml</code>. Pick it with <code>classpath</code>: <code>segmentation.UNet.UNet</code> for a Python class of the catalogue, <code>default|UNet.yml</code> for the YAML catalogue, <code>UNet.yml</code> for a file next to the config; its arguments go in a section named after the class. A module's path joins the names of its parents with <code>:</code>, and the config attaches losses and metrics to those paths under <code>outputs_criterions</code> (the segmentation example puts cross entropy on <code>UNetBlock_0:Head:Conv</code>, the logits, and Dice on <code>UNetBlock_0:Head:Softmax</code>, the probabilities). A model with no loss is refused. KonfAI also instantiates regular PyTorch and MONAI components named by classpath (<code>monai.networks.nets:UNet</code>, with the <code>monai</code> extra).</p>
+<p>The exhaustive field tables: <a href="https://konfai.readthedocs.io/en/latest/config_guide/training.html">training</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/prediction.html">prediction</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/evaluation.html">evaluation</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/transform.html">transform</a>.</p>
+</section>
+
+</article>
+</main>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="../llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="../assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="../docs/get-started.html">Get started</a><a href="../docs/configuration.html">Configuration</a><a href="../docs/workflows.html">Workflows</a><a href="../docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="../apps.html">Published apps</a><a href="../docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
+</footer>
+<script src="../landing.js" data-root="../" defer></script>
+</body>
+</html>

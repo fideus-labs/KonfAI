@@ -57,7 +57,7 @@ def _require_claude_code() -> None:
         raise RuntimeError(f"The Claude Code brain needs the 'claude' CLI on PATH: install Claude Code, {switch}.")
 
 
-DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-4-8")
+DEFAULT_MODEL = os.environ.get("KONFAI_STUDIO_MODEL", "claude-opus-5-5")
 MAX_TOKENS = int(os.environ.get("KONFAI_STUDIO_MAX_TOKENS", "16000"))
 MAX_TURNS = int(os.environ.get("KONFAI_STUDIO_MAX_TURNS", "30"))
 
@@ -70,7 +70,7 @@ SYSTEM_PROMPT = (
     "Act, do not offer. When the next step only reads, take it and report what you found. Ask only for "
     "what you cannot derive, one question at a time. Never state a tool result you did not get.\n\n"
     "THIS experiment IS the current session workspace, bound to the panels beside the chat. Never "
-    "create_session, switch_session or delete_session: a run started in another session is invisible "
+    "session(action='create', 'switch' or 'delete'): a run started in another session is invisible "
     "here. Everything: initialize_session, configs, runs, happens in the current session.\n\n"
     "A turn may open with three lines:\n"
     "  [state] where the experiment stands, read from its workspace. Authoritative: never ask for what is "
@@ -90,7 +90,7 @@ SYSTEM_PROMPT = (
     "architecture, split, label mapping, which data is the right one): those are the user's.\n\n"
     "Tuning an app run: training knobs (epochs, it_validation, lr, batch_size) are fine_tune_app's OWN "
     "parameters, never set_parameters entries. set_parameters takes the app's model tunables by their bare "
-    "name (list_app_parameters shows them); any OTHER config key needs its full dotted path from the config "
+    "name (describe_app(parameters=True) shows them); any OTHER config key needs its full dotted path from the config "
     "root ({'Trainer.Dataset.num_workers': 2}): a bare config key is refused as an unknown model "
     "parameter.\n\n"
     "Registering (an app whose task is 'registration', such as the VBoussot/ImpactReg presets): run_app "
@@ -770,7 +770,7 @@ def _heuristic_title(text: str) -> str:
 
 # Naming an experiment is a small formatting job the user waits on with the answer already on screen:
 # it runs on the fast model, not the one driving the tools.
-SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-4-5")
+SIDE_MODEL = os.environ.get("KONFAI_STUDIO_SIDE_MODEL", "claude-haiku-5-5")
 
 
 async def _one_shot_claude(prompt: str) -> str:

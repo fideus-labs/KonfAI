@@ -47,7 +47,7 @@ silently, so verify with a clean **non-editable** install, not an editable one.
 
 Each run writes a **workspace** keyed by `train_name` (`name` for TRANSFORM): `Checkpoints/`, `Statistics/` (TensorBoard + the resolved-config snapshot), `Predictions/`, `Evaluations/` (metric JSON), `Transforms/` (per-rank logs opening with the plan, the config copy, `outputs.json`, but **not the transformed data**, which lands wherever each `Write:` points, in the user's own tree). `Dataset/` is the *input* data directory, not a run output.
 
-**Python API.** The workflows are also callables: `konfai.transform` / `plan_transform` / `evaluate` / `predict` / `train` (`api.py`, lazily re-exported from `konfai`). Same engine, two spellings: a chain is a list of live stage objects or the equivalent dict tree. The contract: a designed refusal raises `KonfAIError` (only the `konfai` and `konfai-apps` CLIs catch it and exit), results come back structured (`TransformResult`/`EvaluationResult`), the `KONFAI_*` environment and the published per-rank memory budget are restored around every call, one workflow per process (lock), and **a caller's config FILE is copied to scratch, so the write-back never lands on it** (a model YAML named by a relative path is made absolute against the caller's file first, or the working directory for a tree; the scratch is released when the call returns).
+**Python API.** The workflows are also callables: `konfai.transform` / `run_transform(dry_run=True)` / `evaluate` / `predict` / `train` (`api.py`, lazily re-exported from `konfai`). Same engine, two spellings: a chain is a list of live stage objects or the equivalent dict tree. The contract: a designed refusal raises `KonfAIError` (only the `konfai` and `konfai-apps` CLIs catch it and exit), results come back structured (`TransformResult`/`EvaluationResult`), the `KONFAI_*` environment and the published per-rank memory budget are restored around every call, one workflow per process (lock), and **a caller's config FILE is copied to scratch, so the write-back never lands on it** (a model YAML named by a relative path is made absolute against the caller's file first, or the working directory for a tree; the scratch is released when the call returns).
 
 **Conventions.** Arrays are **channel-first** `[C,(Z),Y,X]`; geometry/spacing is **`(x,y,z)`** (SimpleITK). A chain (`transforms:`, `patch_transforms:`, criteria) is a mapping keyed by class name (a repeated class is spelled module-qualified the second time) or a YAML list of one-entry mappings, which binds in order under occurrence keys (`Clip`, `Clip#2`, `Clip#3`); `get_module` drops the suffix when it resolves the class. `Attribute` geometry keys are `Origin`/`Spacing`/`Direction`. In `Resample`, a `spacing`/`shape` value **≤ 0 is the keep-this-axis sentinel** (that axis keeps the source's own density/extent). The words with two meanings (`group`, fold, worker, workspace, bundle, `Metric_TRAIN`) are defined in `docs/source/reference/glossary.md`.
 
@@ -82,7 +82,7 @@ A separate package layered on KonfAI's **public** API (core never imports it). A
 
 ## 5b. MCP server (`konfai-mcp`)
 
-A third package exposing a **FastMCP** server. It depends on KonfAI's public API and, for validation, on two core internals: `konfai_mcp.runner` imports `konfai.trainer`/`konfai.network.network` builders and patches the single-process runtime (`_apply_single_process_patches`), which is why the sibling pins are exact at a release tag (a range only from a working tree). It exposes the server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. On `main` since v1.6.0 and published to PyPI by the release workflow. Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (the child reads a **scratch copy placed beside the config**, so the original is never written, an edit made meanwhile survives, and the parent sweeps a copy a killed child left), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
+A third package exposing a **FastMCP** server. It depends on KonfAI's public API and, for validation, on two core internals: `konfai_mcp.runner` imports `konfai.trainer`/`konfai.network.network` builders and patches the single-process runtime (`_apply_single_process_patches`), which is why the sibling pins are exact at a release tag (a range only from a working tree). It exposes the server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. On `main` since v1.6.0 and published to PyPI by the release workflow. Jobs run in a **`spawn`** subprocess (training may init CUDA); `check_config(level='instantiate')` and `check_component` run in a **spawn subprocess** (never in the server process), are side-effect-free (the child reads a **scratch copy placed beside the config**, so the original is never written, an edit made meanwhile survives, and the parent sweeps a copy a killed child left), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_component`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
 
 **Working on the MCP server, how to validate a change:**
 
@@ -93,10 +93,10 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
 - **Drive it black-box first, not by tool name.** Formulate a real objective ("segment these CT volumes"),
   then exercise the loop through a `fastmcp.Client` exactly as `test_mcp_server_segmentation_pipeline.py`
   does. A new tool is not "done" because it returns without an exception.
-- **Verify outputs, not return codes.** After `run_*` + `wait_for_job`, assert the job `status=="done"`
+- **Verify outputs, not return codes.** After `run_*` + `get_job_status(wait=True)`, assert the job `status=="done"`
   (never trust a green `validate_*` alone: its default level `instantiate` runs no train step; only
   `level='train_step'` runs one forward+backward), then open the
-  produced files: `read_session_file` the config, check `Predictions/<name>/Dataset` exists, and read the
+  produced files: `read_file` the config, check `Predictions/<name>/Dataset` exists, and read the
   `Metric_*.json` via `get_run_metrics`. Confirm the numbers correspond to the requested task.
 - **Validating a new tool:** (1) its `next_actions` must be registered tool names; the anti-drift test in
   `test_mcp_server_tool_index.py` enforces this for job payloads only, so if the tool emits `next_actions`
@@ -111,8 +111,8 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
   `tests/test_workflow_registry.py` pins the derivations to it.
 - **Safety invariants to preserve:** validation/smoke-tests never execute in the server process;
   `read/write_session_file` and the `output` of `run_app` and `fine_tune_app` are path-jailed to the
-  session; `export_app` (`path`) and `package_app_from_session` (`output`) write to a host folder the
-  caller names, by design, and `export_app` refuses to replace a file already there unless `overwrite=True`
+  session; `fetch_app(path=...)` (`path`) and `package_app_from_session` (`output`) write to a host folder the
+  caller names, by design, and `fetch_app(path=...)` refuses to replace a file already there unless `overwrite=True`
   (dataset tools read arbitrary host paths by design, so keep it that way only for the trusted-local
   deployment, and never widen writes). `cancel_job` now reaps the whole process group: the job runs
   `os.setsid()` and cancel sends the signal via `os.killpg`, so `mp.spawn` DDP grandchildren are killed
@@ -120,7 +120,7 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
 - **Regenerate derived docs:** after changing a tool's description run
   `python konfai-mcp/scripts/generate_tool_reference.py` (the committed skill reference is generated).
 - **KonfAI Scout and FidOpt (`konfai_mcp/server_scout.py`):** `run_scout_inspection` runs a visual inspection
-  (the separate `konfai-scout` package) as a tracked job and `read_scout_report`/`list_scout_reports` read it
+  (the separate `konfai-scout` package) as a tracked job and `read_scout_report` read it
   back without images; images reach a cloud model only with `allow_cloud_images`. The `fidopt_*` tools reach
   FidOpt through its own CLI and Python (`KONFAI_MCP_FIDOPT`), launch only `KONFAI_MCP_FIDOPT_ALLOWED`
   operations, and reimplement nothing of it. Studio's *Scout* tab reads the same reports (`/api/scout/*`).
@@ -164,7 +164,7 @@ The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency lis
 
 Versions are **tag-derived** (`setuptools_scm`, `^v(?P<version>.*)$`) for every package, so never hand-edit
 a version. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core + apps + mcp + studio) → build
-the 10-package matrix (konfai, konfai-apps, konfai-mcp, konfai-studio, konfai-scout, and the 5 `apps/*` bundles) → publish to
+the 10-package matrix (konfai-apps, konfai-mcp, konfai-studio, konfai-scout, and the 5 `apps/*` bundles) → publish to
 PyPI via OIDC → build the Docker image once `konfai` is visible on PyPI. `apps/*` bundles pin `konfai==` and
 `konfai-apps==`, and `konfai-studio` pins `konfai-mcp==` (via its `setup.py`), all the same version, so the
 whole matrix releases in lockstep. `konfai-studio` is the one exception to the pure-Python build: the build
@@ -250,7 +250,7 @@ Three, and only three, places decide trust. Keep them honest:
    `read/write_session_file` and the `output` of `run_app` and `fine_tune_app` are path-jailed; dataset
    tools may *read* arbitrary host paths by design, but **writes must never widen** (any tool that composes
    a write target must reject path separators). Two tools take a free host destination, by design:
-   `export_app` (`path`, which refuses to replace an existing file without `overwrite=True`) and
+   `fetch_app(path=...)` (`path`, which refuses to replace an existing file without `overwrite=True`) and
    `package_app_from_session` (`output`). `cancel_job` reaps the whole process group. Over SSE/HTTP
    with no bearer token, the CLI refuses a non-loopback bind (`--i-know-this-is-insecure` overrides) and
    the server answers only loopback `Host` names (DNS rebinding).

@@ -34,3 +34,19 @@ for (const scenario of cases) {
     expect(requests).toBe(2);
   });
 }
+
+test("a Scout observation shows the blind second reader's own words", async ({ page }) => {
+  await studioRoutes(page);
+  await page.route("**/api/scout/reports?**", (route) => route.fulfill({ json: { reports: [{ name: "demo" }] } }));
+  const observation = { id: "o1", kind: "suspected_error", defect: "leak", severity: "minor", confidence: 0.5,
+    description: "A leak past the boundary.", box_mm: null, plane: null, views: [], measurements: [], notes: [],
+    second_reading: { answer: "not_visible", text: "In v005 the boundary is continuous.", views: ["v005"] } };
+  await page.route("**/api/scout/report?**", (route) => route.fulfill({ json: { name: "demo", task: "segmentation",
+    case: "c", image: null, truth_available: false, conclusion: null, observations: [observation], measurements: [],
+    views: 0, views_meta: [], usage: null, budget: null, error: null, provider: null, mode: null, report_md: "" } }));
+  await page.goto("/tests/harness.html");
+  await page.evaluate((stream) => (window as any).__mount("PanelProbe", { stream }), idleStream());
+  await page.getByRole("button", { name: "Scout", exact: true }).click();
+
+  await expect(page.locator(".second-reading")).toContainText("In v005 the boundary is continuous.");
+});

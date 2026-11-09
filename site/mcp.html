@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b12">
+<title>KonfAI MCP</title>
+<meta name="description" content="The MCP server that lets an agent drive KonfAI: fifty tools, one per object.">
+<link rel="stylesheet" href="design/fonts.css">
+<link rel="stylesheet" href="design/tokens.css">
+<link rel="stylesheet" href="design/components.css">
+<link rel="stylesheet" href="landing.css">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/konfai-logo.png">
+</head>
+<body class="landing inner hue-mcp">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="index.html"><img src="assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="docs/get-started.html">Engine</a><a href="apps.html">Apps</a><a href="docs/edge.html">Edge</a><a href="studio.html">Studio</a><a href="mcp.html" aria-current="page">MCP</a><a href="scout.html">Scout</a><a href="docs/index.html">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" aria-expanded="false" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</header>
+<main>
+
+<section class="hero small">
+  <h1>KonfAI MCP</h1>
+  <p><code>konfai-mcp</code> turns KonfAI into a backend an MCP client can drive. Give it a dataset and a goal in plain language and it inspects the data, picks the cheapest path that fits (reuse a published model, fine-tune one, or train from scratch), writes and validates the config, runs training, prediction and evaluation, monitors the jobs, and returns metrics with a record you can reproduce. Same framework, same YAML, exposed as structured, deterministic tools instead of hand-edited files; the core never depends on it.</p>
+  <pre><code>pip install konfai-mcp        # beside a KonfAI able to read your data: pip install "konfai[imaging]"
+konfai-mcp                    # the stdio server an MCP client launches</code></pre>
+</section>
+
+<section>
+  <h2 id="fifty-tools-one-per-object">Fifty tools, one per object</h2>
+  <p>A variant of an operation is an argument of its tool (<code>session(action=...)</code>, <code>check_config(level=...)</code>, <code>get_job_status(wait=True)</code>), never a sibling tool. Each tool is described in one short paragraph whose first sentence is what a client's tool search matches; the server's instructions say what KonfAI does and when to search its tools; six entry tools stay loaded under Claude Code's tool search. The whole list weighs about 15k tokens for a client that loads it upfront. Every call appends one line (tool, session, outcome, duration; no argument) to <code>tool_calls.jsonl</code> in the workspaces root: the usage data the next consolidation rests on.</p>
+  <p>Principles: structured tool contracts, explicit experiment workspaces, reproducible job manifests and config snapshots, staged validation before expensive runs, a clear separation between the KonfAI runtime and the MCP layer. Hardware is a resource, not a tool: <code>server://capabilities</code> reports per-GPU free VRAM and a recommended device, and every launch payload carries a VRAM pre-flight for the GPUs it will use.</p>
+  <p>The table below is the registry's own text, the first sentence of each tool; the full contracts live in the <code>guide://tool-index</code> resource and in <a href="https://github.com/fideus-labs/KonfAI/blob/main/.claude/skills/konfai-experiments/references/tool-reference.md">the generated reference</a>. Guide: <a href="https://konfai.readthedocs.io/en/latest/usage/mcp.html">Automate with MCP</a>. Source: <a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-mcp"><code>konfai-mcp/</code></a>.</p>
+</section>
+
+<section>
+  <h2 id="discovery">Discovery</h2>
+  <p>What KonfAI can do and what a component is.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>describe_konfai_capabilities</code></td><td>What KonfAI can do and which tool to reach for: the four workflows, the component kinds, the extension model, which actions are safe and which destroy data.</td></tr>
+      <tr><td><code>list_components</code></td><td>Built-in KonfAI components of one kind (model, loss, metric, transform, augmentation, scheduler, ...): name, where it goes in the YAML, the classpath to inspect.</td></tr>
+      <tr><td><code>inspect_object_signature</code></td><td>Signature, defaults, doc and contract hints of any configurable classpath: built-in, local File:Class, external package.module:Class, or a declarative .yml model (its hyperparameters, loss-attachable leaves and how to adapt it, with the file&#x27;s content: no read_file needed).</td></tr>
+      <tr><td><code>describe_config_schema</code></td><td>Top-level schema of a workflow config (train, prediction, evaluation, transform), generated from KonfAI&#x27;s own classes: each field&#x27;s literal yaml_key, type, default, whether required, and the classpath to drill into with inspect_object_signature.</td></tr>
+      <tr><td><code>describe_extension_points</code></td><td>How to add a component of a kind (loss, metric, model, transform, augmentation, scheduler, pretrained model): the base class, the required methods, the YAML reference syntaxes (builtin, File:Class, package.module:Class) and the gotcha.</td></tr>
+      <tr><td><code>check_component</code></td><td>Pre-flight a component before wiring it into a config.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="dataset-onboarding">Dataset onboarding</h2>
+  <p>What a dataset holds, before a config names it.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>inspect_dataset</code></td><td>Groups, entry hints, ambiguities and sampled statistics (shapes channel-first) of one dataset root (include_stats=False for a fast structure scan, groups=[one] for focused statistics).</td></tr>
+      <tr><td><code>read_file</code></td><td>Read a bounded text range of one file.</td></tr>
+      <tr><td><code>preview_volume</code></td><td>One slice of a volume as a PNG (any SimpleITK-readable file), windowed between the 1st and 99th percentile and downsampled, for a visual check of a case or a prediction; the plane&#x27;s min, max, mean and unique values come with it (a black image is a constant plane).</td></tr>
+      <tr><td><code>prepare_dataset_aliases</code></td><td>Copy, symlink or move dataset files under new group names when the content is right but the filenames do not match the intended config.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="config-authoring">Config authoring</h2>
+  <p>A session and its YAML.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>design_config_strategy</code></td><td>A config-writing plan from the task, the dataset root(s), the group roles and the modeling intent: dataset summary, config plan, customisation options, unresolved questions, compatible example templates.</td></tr>
+      <tr><td><code>initialize_session</code></td><td>Create or reset the current session workspace, optionally seeded from an example template (read_file(&#x27;templates://list&#x27;) lists them; include_support_files=True copies its local .py).</td></tr>
+      <tr><td><code>write_workflow_config</code></td><td>Write one workflow YAML (train, prediction, evaluation, transform) into the session and check it against KonfAI&#x27;s schema: schema_errors lists every mistake with the nearest valid key; the file is written either way.</td></tr>
+      <tr><td><code>write_session_file</code></td><td>Write one support file into the current session (Model.py, Loss.py, a transform, a manifest).</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="validation-and-iteration">Validation and iteration</h2>
+  <p>Checks before GPU time, comparisons after.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>check_config</code></td><td>Check the session&#x27;s workflow config.</td></tr>
+      <tr><td><code>summarize_session</code></td><td>One compact snapshot of the current session: readiness, jobs, metric summaries, and on request the leaderboard, a log tail and a config validation.</td></tr>
+      <tr><td><code>leaderboard</code></td><td>Ranked metrics across the session&#x27;s completed runs, one metric and split, direction-aware, with the available metrics and splits.</td></tr>
+      <tr><td><code>get_run_metrics</code></td><td>Full evaluation metrics (per-case values and aggregates) of one run or app trial, from Evaluations/&lt;run&gt;/Metric_&lt;split&gt;.json.</td></tr>
+      <tr><td><code>compare_runs</code></td><td>Two runs metric by metric on aligned cases: means, per-case deltas, a direction-aware winner (loss-like metrics count lower as better).</td></tr>
+      <tr><td><code>diff_run_configs</code></td><td>Unified diff of the exact configs two jobs ran with, from their immutable launch-time snapshots.</td></tr>
+      <tr><td><code>describe_model_outputs</code></td><td>The addressable module paths of the session config&#x27;s networks: the exact keys outputs_criterions and outputs_dataset accept (terminal=true marks output heads).</td></tr>
+      <tr><td><code>read_training_curves</code></td><td>A run&#x27;s training curves (scalars over iterations) from its TensorBoard event files, downsampled to max_points.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="execution-and-monitoring">Execution and monitoring</h2>
+  <p>Jobs: launch, follow, steer, stop.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>run_train</code></td><td>Launch a training job from the session Config.yml (after check_config).</td></tr>
+      <tr><td><code>run_resume</code></td><td>Resume a training from a checkpoint (model, optimizer, scheduler and counters restored), or warm-start a fine-tune with weights_only=True (weights only; prefer fine_tune_app for an app used as published).</td></tr>
+      <tr><td><code>run_prediction</code></td><td>Launch a prediction job from the session Prediction.yml with a checkpoint of the session (models picks which).</td></tr>
+      <tr><td><code>run_evaluation</code></td><td>Launch an evaluation job from the session Evaluation.yml on existing predictions.</td></tr>
+      <tr><td><code>run_transform</code></td><td>Batch-process a dataset with the session Transform.yml chain: read, transform, write.</td></tr>
+      <tr><td><code>run_batch</code></td><td>Run several training configs sequentially server-side (a sweep, fold training), blocking until the batch ends, with per-run outcomes.</td></tr>
+      <tr><td><code>generate_folds</code></td><td>Split a dataset into K cross-validation folds: one case-list file per fold in the session, plus the subset stanzas to paste into each config (&#x27;folds/fold_0.txt&#x27; keeps those cases, &#x27;~file&#x27; the others).</td></tr>
+      <tr><td><code>get_job_status</code></td><td>The state of one job (job_id) or of every job of the session (no job_id).</td></tr>
+      <tr><td><code>cancel_job</code></td><td>Stop a running job: requests cancellation and waits briefly for a clean shutdown.</td></tr>
+      <tr><td><code>control_training</code></td><td>Steer a RUNNING training without restarting it: lr and it_validation are applied at its next poll boundary and recorded in the run&#x27;s config snapshot; validate_now=True runs a validation pass at the next iteration.</td></tr>
+      <tr><td><code>read_live_metrics</code></td><td>Parsed runtime metrics of a running or finished training (latest snapshot, recent entries, per-stage summaries) instead of raw log lines.</td></tr>
+      <tr><td><code>read_job_log</code></td><td>A job&#x27;s console or runtime log: the last max_lines, or the lines matching a regex, to find the traceback.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="apps">Apps</h2>
+  <p>Published models, used as they are, fine-tuned, or produced.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>list_apps</code></td><td>Published KonfAI apps from the catalogue (shipped, workspace file, KONFAI_MCP_APP_CATALOG), HuggingFace repos expanded.</td></tr>
+      <tr><td><code>describe_app</code></td><td>One app&#x27;s manifest: description, input and output modalities, inference, evaluation and uncertainty capabilities, checkpoints, terminology.</td></tr>
+      <tr><td><code>run_app</code></td><td>Run a published app as published on the user&#x27;s data: action infer, evaluate (the app&#x27;s own Evaluation.yml against gt), uncertainty, or pipeline (all three).</td></tr>
+      <tr><td><code>fine_tune_app</code></td><td>Fine-tune a published app&#x27;s checkpoint on the user&#x27;s dataset without authoring a config (epochs, it_validation, lr, batch_size as parameters; set_parameters for the model&#x27;s tunables), as a tracked job that writes a runnable app bundle to output.</td></tr>
+      <tr><td><code>fetch_app</code></td><td>Bring a published app into the session.</td></tr>
+      <tr><td><code>package_app_from_session</code></td><td>Package a model trained in this session into a runnable app bundle (app.json, config, checkpoint, optional Model.py, requirements, support_files, ONNX export) that describe_app and run_app consume.</td></tr>
+      <tr><td><code>app_sources</code></td><td>Edit the workspace app catalogue that list_apps merges: action &#x27;add&#x27; persists an app path or HuggingFace repo across sessions, &#x27;remove&#x27; drops it.</td></tr>
+      <tr><td><code>run_registration_evaluate</code></td><td>Score a registration against what the pair has: labels (Dice), landmarks (TRE in mm, fixed points pushed through the transform), same-modality images (MAE), and a field&#x27;s folded-voxel fraction.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="visual-inspection">Visual inspection</h2>
+  <p>KonfAI Scout as a tracked job.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>run_scout_inspection</code></td><td>Have KonfAI Scout inspect one result visually (segmentation, registration or synthesis): a vision model looks at slices, zooms and overlays, measures regions with KonfAI Eval and reports localised defects with evidence, as a tracked job under Scout/&lt;name&gt;.</td></tr>
+      <tr><td><code>read_scout_report</code></td><td>A finished Scout inspection by name: verdict, observations (kind, defect, severity, confidence, box in mm, cited views and measurements), measurements, views, usage, budget; no image bytes.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="fidopt">FidOpt</h2>
+  <p>The benchmark through its own code.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>fidopt_catalog</code></td><td>FidOpt&#x27;s benchmark catalogue through its own code: one line per dataset (task, anatomy, modalities, cases; task= and anatomy= narrow it) and the methods of the task; with dataset=&lt;name&gt;, that dataset&#x27;s descriptor (cases, truth, labels, licence) and the methods of its task.</td></tr>
+      <tr><td><code>fidopt_table</code></td><td>A FidOpt dataset&#x27;s board (fidopt table --json): one line per method and machine, published scores and local rows.</td></tr>
+      <tr><td><code>fidopt_run</code></td><td>Launch one FidOpt operation as a tracked job: check, run or tune a method on a dataset&#x27;s cases (only the operations KONFAI_MCP_FIDOPT_ALLOWED permits); scout=&#x27;PROVIDER[:MODEL]&#x27; adds Scout&#x27;s inspection of the scored outputs.</td></tr>
+    </tbody>
+  </table>
+</section>
+<section>
+  <h2 id="session-lifecycle">Session lifecycle</h2>
+  <p>Workspaces, records, deletions.</p>
+  <table class="tools">
+    <tbody>
+      <tr><td><code>session</code></td><td>Manage session workspaces: action &#x27;list&#x27; (says whether a host pinned the session); &#x27;create&#x27; (name; switches to it; from_example seeds it in the same call, else the workspace is empty until initialize_session); &#x27;switch&#x27; (name); &#x27;delete&#x27; (the current one; force cancels its jobs); &#x27;import&#x27; (adopt an on-disk KonfAI experiment from source_dir: its configs and code, its artifacts linked, copied or left out).</td></tr>
+      <tr><td><code>export_run_record</code></td><td>The reproducibility record of one run in one payload: the job manifest (command, devices, environment with package versions), the launch-time config snapshots, the resolved config, every split&#x27;s metrics and a log tail.</td></tr>
+      <tr><td><code>delete_run</code></td><td>Delete one run&#x27;s outputs of a kind (train: its Statistics and Checkpoints; prediction, evaluation, uncertainty: its folder; transform: its plan and log only), jailed to the session.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
+</footer>
+<script src="landing.js" data-root="" defer></script>
+</body>
+</html>

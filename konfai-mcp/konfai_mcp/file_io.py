@@ -59,6 +59,8 @@ def read_text_range(path: Path, max_chars: int = 20000, offset: int = 0) -> dict
 
 _BINARY_SNIFF_BYTES = 4096
 _DELIMITED_SUFFIXES = {".csv": ",", ".tsv": "\t"}
+#: The one binary format read_dataset_sidecar reads structurally (an ITK transform), wherever the file lives.
+HDF5_SUFFIXES = frozenset({".h5", ".hdf5"})
 # Linear ITK transforms carry at most 12 parameters (3x3 matrix + offset); anything larger is a
 # grid (BSpline coefficients / displacement field) and is summarised instead of dumped.
 _LINEAR_TRANSFORM_MAX_PARAMS = 16
@@ -161,7 +163,7 @@ def read_dataset_sidecar(path: Path, max_lines: int = 200, max_chars: int = 6553
     """
     if not path.is_file():
         raise ValueError(f"Not a readable file: {path}")
-    if path.suffix.lower() in {".h5", ".hdf5"}:
+    if path.suffix.lower() in HDF5_SUFFIXES:
         transform = _itk_transform_summary(path)
         if transform is not None:
             return transform

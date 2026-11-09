@@ -182,11 +182,11 @@ def test_validated_config_names_only_registered_tools(
     monkeypatch.setattr(mcp_server.SESSION, "validate_semantics", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(mcp_server.SESSION, "session_summary", lambda *a, **k: {"next_actions": []})
 
-    actions = mcp_server.validate_config_semantics(workflow=workflow)["next_actions"]
+    actions = mcp_server.check_config(workflow=workflow, level="instantiate")["next_actions"]
 
     assert not [action for action in actions if action not in tool_names], actions
     if workflow.lower() == "transform":
-        assert actions.index("plan_transform") < actions.index("run_transform")
+        assert actions.count("run_transform") == 1
 
 
 @pytest.mark.usefixtures("workspace_root")
@@ -208,3 +208,76 @@ def test_the_resources_the_skill_names_are_listed_by_the_client(
     listed = asyncio.run(scenario())
     assert named, skill
     assert named <= listed, sorted(named - listed)
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_the_listed_schemas_are_lean(load_mcp_server: Callable[[], ModuleType]) -> None:
+    """An optional parameter lists as its type (no anyOf-null, no default null), a free-form output schema is not
+    listed, and a call still accepts an explicit null."""
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            for tool in await client.list_tools():
+                assert tool.output_schema is None or tool.output_schema.get("properties"), tool.name
+                for name, prop in tool.input_schema.get("properties", {}).items():
+                    assert {"type": "null"} not in prop.get("anyOf", []), (tool.name, name)
+                    assert not ("default" in prop and prop["default"] is None), (tool.name, name)
+            result = await client.call_tool("check_component", {"classpath": "json", "kind": None})
+            assert result.structured_content is not None
+
+    asyncio.run(scenario())
+
+
+def test_every_tool_call_leaves_a_line_in_the_usage_log(
+    workspace_root: Path, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> bool:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("describe_konfai_capabilities", {})
+            failed = await client.call_tool("get_job_status", {"job_id": "no-such-job"}, raise_on_error=False)
+            return bool(failed.is_error)
+
+    failed = asyncio.run(scenario())
+    lines = [json.loads(line) for line in (workspace_root / "tool_calls.jsonl").read_text().splitlines()]
+    assert [line["tool"] for line in lines[-2:]] == ["describe_konfai_capabilities", "get_job_status"]
+    assert lines[-2]["ok"] is True and lines[-1]["ok"] is (not failed)
+    assert "arguments" not in lines[-1] and set(lines[-1]) == {"ts", "tool", "session", "ok", "ms"}
+
+
+_RETIRED_TOOLS = (
+    "browse_dataset read_dataset_file read_session_file read_template_file check_external_dependency "
+    "run_component_smoke_test review_config_semantics validate_config_semantics create_session switch_session "
+    "delete_session import_experiment list_jobs wait_for_job request_validation set_live_tunables "
+    "list_app_parameters export_app import_app register_app_source unregister_app_source list_scout_reports "
+    "fidopt_list_datasets fidopt_describe_dataset fidopt_list_methods plan_transform"
+).split()
+
+
+def test_no_string_in_the_package_names_a_retired_tool() -> None:
+    """Descriptions, messages, hints and docstrings name the tools a client can call, not the ones they replaced."""
+    import ast
+
+    pattern = re.compile(r"\b(" + "|".join(_RETIRED_TOOLS) + r")\b")
+    offenders = []
+    for source in sorted((_PACKAGE_ROOT / "konfai_mcp").glob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and pattern.search(node.value):
+                offenders.append(f"{source.name}:{node.lineno}: {pattern.search(node.value).group(0)}")
+    assert offenders == []
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_read_file_reads_a_resource_uri(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> dict:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            result = await client.call_tool("read_file", {"path": "guide://tool-index", "max_chars": 500})
+            return result.structured_content
+
+    payload = asyncio.run(scenario())
+    assert payload["uri"] == "guide://tool-index" and payload["truncated"] is True
+    assert len(payload["content"]) == 500 and "tools" in payload["content"]

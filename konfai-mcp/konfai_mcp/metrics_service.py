@@ -22,8 +22,12 @@ this mixin."""
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from konfai.utils.utils import storage_form
 
 from .live_parse import parse_live_metric_line
 from .server_jobs import Job
@@ -83,6 +87,41 @@ def metric_run_name(metrics_path: Path, workspace: Path) -> str:
         except ValueError:
             continue
     return metrics_path.parent.name
+
+
+def recorded_cases(metrics_path: Path, layout: WorkspaceLayout) -> dict[str, list[str | None]] | None:
+    """An app run's ``P000`` -> its input files (konfai_apps names cases by input position), from the manifest of
+    the one finished job whose output holds ``metrics_path`` and which wrote it: the file's time falls between the
+    job's start and its end. None when no job answers, or several (two runs into one output, not told apart)."""
+    written = metrics_path.stat().st_mtime
+    found = []
+    for manifest_path in layout.jobs_dir().glob("*/manifest.json"):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not (manifest.get("cases") and manifest.get("output")):
+            continue
+        if Path(manifest["output"]).resolve() not in metrics_path.resolve().parents:
+            continue
+        state_path = layout.job_state_path(str(manifest.get("job_id")))
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        start, end = state.get("started_at"), state.get("finished_at")
+        if state.get("status") == "done" and start is not None and end is not None and start <= written <= end:
+            found.append(manifest["cases"])
+    return found[0] if len(found) == 1 else None
+
+
+def cases_by_recorded_input(recorded: dict[str, list[str | None]], names: Iterable[str]) -> dict[str, str]:
+    """``P000`` -> the one case of ``names`` its recorded input files sit in: their case folder, or their file name
+    without the extension KonfAI reads them under (``patient.2.nii.gz`` is case ``patient.2``)."""
+    wanted = set(names)
+    pairs: dict[str, str] = {}
+    for case, files in recorded.items():
+        paths = [Path(file) for file in files if file]
+        found = wanted & {
+            part for path in paths for part in (path.parent.name, path.name.removesuffix(storage_form(path)))
+        }
+        if len(found) == 1:
+            pairs[case] = found.pop()
+    return pairs
 
 
 class MetricsServiceMixin:
@@ -157,7 +196,11 @@ class MetricsServiceMixin:
             "metrics_source": metrics_source,
             "metrics_sources_checked": checked_sources,
             "latest": parsed_entries[-1] if parsed_entries else None,
-            "recent": parsed_entries[-max(max_entries, 1) :] if parsed_entries else [],
+            # consecutive entries with the same metrics (progress lines) count once
+            "recent": [
+                next(run)
+                for _, run in groupby(parsed_entries, key=lambda e: {k: v for k, v in e.items() if k != "raw"})
+            ][-max(max_entries, 1) :],
             "by_stage": latest_by_stage,
         }
 
@@ -346,7 +389,9 @@ class MetricsServiceMixin:
         result: dict[str, Any] = {
             "session": layout.current_session,
             "split": split.upper(),
-            "available_metrics": sorted(available_metrics),
+            # whole metrics only: a 117-label Dice is one row, its labels are get_run_metrics' detail
+            "available_metrics": sorted(top_level_metrics(dict.fromkeys(available_metrics))),
+            "per_label_metrics": len(available_metrics) - len(top_level_metrics(dict.fromkeys(available_metrics))),
             "available_splits": self._available_metric_splits(layout),
             "warnings": sorted(set(warnings)),
             "next_actions": ["summarize_session", "get_run_metrics", "run_train", "run_prediction", "run_evaluation"],
@@ -358,9 +403,8 @@ class MetricsServiceMixin:
             result["leaderboard"] = by_metric[selected_metric]
             result["best"] = by_metric[selected_metric][0] if by_metric[selected_metric] else None
         else:
-            result["leaderboard"] = []
             result["common_metric_prefix"] = self._common_metric_prefix(sorted(available_metrics))
-            result["leaderboards"] = by_metric
+            result["leaderboards"] = top_level_metrics(by_metric)
         return result
 
     def read_metrics_payload(self) -> dict[str, Any]:
@@ -428,7 +472,7 @@ class MetricsServiceMixin:
                 full_tag = tag if prefix == "." else f"{prefix}/{tag}"
                 if tags and not any(wanted in full_tag for wanted in tags):
                     continue
-                events = accumulator.Scalars(tag)
+                events = sorted({e.step: e for e in accumulator.Scalars(tag)}.values(), key=lambda e: e.step)
                 stride = max(1, len(events) // max(max_points, 1))
                 sampled = events[::stride]
                 if events and sampled[-1].step != events[-1].step:
@@ -453,29 +497,38 @@ class MetricsServiceMixin:
         """Per-case aligned comparison of two runs' evaluation metrics, direction-aware."""
         payload_a = self.run_metrics_payload(run_a, split=split, session=session)
         payload_b = self.run_metrics_payload(run_b, split=split, session=session)
+        layout = self._resolve_session_layout(session)
+        recorded_a, recorded_b = (recorded_cases(Path(p["path"]), layout) for p in (payload_a, payload_b))
         cases_a = payload_a["metrics"].get("case", {})
         cases_b = payload_b["metrics"].get("case", {})
-        common_metrics = sorted(set(cases_a) & set(cases_b))
+        pairs = [(name, name) for name in sorted(set(cases_a) & set(cases_b))]
         if metric is not None:
-            common_metrics = [name for name in common_metrics if name.lower().endswith(metric.lower())]
-            if not common_metrics:
+            wanted = metric.lower()
+            pairs = [(a, b) for a, b in pairs if a.lower().endswith(wanted)]
+            if not pairs:
+                # the same metric under two names: one match on each side pairs them
+                in_a = [n for n in cases_a if n.lower() == wanted or n.lower().endswith(":" + wanted)]
+                in_b = [n for n in cases_b if n.lower() == wanted or n.lower().endswith(":" + wanted)]
+                if len(in_a) == 1 and len(in_b) == 1:
+                    pairs = [(in_a[0], in_b[0])]
+            if not pairs:
                 raise ValueError(
-                    f"Metric '{metric}' not found in both runs. Common metrics: {sorted(set(cases_a) & set(cases_b))}"
+                    f"Metric '{metric}' not found in both runs. Run a: {sorted(cases_a)}; run b: {sorted(cases_b)}."
                 )
+        common_metrics = [a for a, _ in pairs]
+        name_b_of = dict(pairs)
         declared_a = self._declared_directions(payload_a["metrics"])
         declared_b = self._declared_directions(payload_b["metrics"])
         # Newest declaration first, the leaderboard's own rule: an old file that still says "min" for a
         # metric re-evaluated as "max" must not make the winner depend on which run is passed first.
-        newest_first = (
-            (declared_a, declared_b)
-            if (payload_a.get("updated_at") or "") >= (payload_b.get("updated_at") or "")
-            else (declared_b, declared_a)
-        )
+        a_is_newest = (payload_a.get("updated_at") or "") >= (payload_b.get("updated_at") or "")
         comparison: dict[str, Any] = {}
         warnings: list[str] = []
         for name in common_metrics:
+            name_b = name_b_of[name]
+            own_a, own_b = declared_a.get(name), declared_b.get(name_b)  # each run under its own name
             direction, direction_source = self._metric_direction(
-                name, newest_first[0].get(name) or newest_first[1].get(name)
+                name, (own_a or own_b) if a_is_newest else (own_b or own_a)
             )
             if direction_source == "default:min":
                 warnings.append(
@@ -483,17 +536,41 @@ class MetricsServiceMixin:
                     "higher-is-better metric, the winner is inverted: re-evaluate so the metric declares "
                     "its direction, or read per-case deltas directly."
                 )
-            common_cases = sorted(set(cases_a[name]) & set(cases_b[name]))
-            deltas = {case: float(cases_b[name][case]) - float(cases_a[name][case]) for case in common_cases}
+            common_cases = sorted(set(cases_a[name]) & set(cases_b[name_b]))
+            case_b_of = {case: case for case in common_cases}
+            alignment = "by name"
+            if not common_cases:
+                # An app run names its cases P000.. by input position, and its job manifest records each one's
+                # input files, whose case folder or file name is the other run's case. Without it, no pairing.
+                if recorded_b is not None:
+                    case_b_of = {a: b for b, a in cases_by_recorded_input(recorded_b, cases_a[name]).items()}
+                elif recorded_a is not None:
+                    case_b_of = cases_by_recorded_input(recorded_a, cases_b[name_b])
+                case_b_of = {a: b for a, b in case_b_of.items() if a in cases_a[name] and b in cases_b[name_b]}
+                if not case_b_of:
+                    raise ValueError(
+                        f"'{run_a}' and '{run_b}' share no case name, and no one finished app job that wrote these "
+                        "metrics records which input each P000 case came from: their cases cannot be paired (equal "
+                        "counts are not one cohort)."
+                    )
+                common_cases = sorted(case_b_of)
+                alignment = "by recorded input"
+            deltas = {
+                case: float(cases_b[name_b][case_b_of[case]]) - float(cases_a[name][case]) for case in common_cases
+            }
             better_b = sum(1 for delta in deltas.values() if (delta > 0) == (direction == "max") and delta != 0)
             better_a = sum(1 for delta in deltas.values() if (delta < 0) == (direction == "max") and delta != 0)
             mean_a = (
                 sum(float(cases_a[name][case]) for case in common_cases) / len(common_cases) if common_cases else None
             )
             mean_b = (
-                sum(float(cases_b[name][case]) for case in common_cases) / len(common_cases) if common_cases else None
+                sum(float(cases_b[name_b][case_b_of[case]]) for case in common_cases) / len(common_cases)
+                if common_cases
+                else None
             )
             comparison[name] = {
+                "metric_b": name_b,
+                "case_alignment": alignment,
                 "direction": direction,
                 "direction_source": direction_source,
                 "cases": len(common_cases),

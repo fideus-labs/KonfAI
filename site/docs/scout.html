@@ -1,0 +1,66 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b12">
+<title>Scout · KonfAI docs</title>
+<meta name="description" content="A visual inspector of results.">
+<link rel="stylesheet" href="../design/fonts.css">
+<link rel="stylesheet" href="../design/tokens.css">
+<link rel="stylesheet" href="../design/components.css">
+<link rel="stylesheet" href="../landing.css">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body class="landing inner hue-scout">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../index.html"><img src="../assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="../docs/get-started.html">Engine</a><a href="../apps.html">Apps</a><a href="../docs/edge.html">Edge</a><a href="../studio.html">Studio</a><a href="../mcp.html">MCP</a><a href="../scout.html" aria-current="page">Scout</a><a href="../docs/index.html">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" aria-expanded="false" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html" aria-current="page">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Scout</h1>
+<p class="lead">A visual inspector of results.</p>
+
+<section>
+<h2>What it does</h2>
+<p>Scout inspects one result of a segmentation, a registration or a synthesis the way a person would at a viewer: it looks at slices, zooms, switches overlays, asks KonfAI Eval for measurements on a region, and writes a report of localised defects with the views that show them. It is not a scorer: KonfAI Eval scores, Scout reads those scores and asks for more on a region. Every location is in millimetres. The report keeps three kinds of statement apart, a measured property, a suspected error and a confirmed error, and a confirmation must cite a measurement with a reference: something seen but not measured stays a suspicion.</p>
+</section>
+<section>
+<h2>Install and run</h2>
+<pre><code>pip install konfai-scout[claude-code]      # Claude under your Claude Code login, no API key
+pip install konfai-scout[codex]            # GPT under your ChatGPT login (the Codex CLI), no API key
+pip install konfai-scout[anthropic]        # Claude through the Anthropic API
+pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)</code></pre>
+<p>Images leave the machine only when you allow it (<code>allow_cloud_images</code>); a local server is local. The MCP server runs Scout through <code>run_scout_inspection</code> and Studio shows the report in its SCOUT tab: verdict, observations, measurements and the cited views. Details: <a href="../scout.html">Scout</a> on this site and the <a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-scout">konfai-scout</a> folder (its <code>docs/</code> hold the report schema and the study protocol).</p>
+</section>
+
+</article>
+</main>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="../llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="../assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="../docs/get-started.html">Get started</a><a href="../docs/configuration.html">Configuration</a><a href="../docs/workflows.html">Workflows</a><a href="../docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="../apps.html">Published apps</a><a href="../docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
+</footer>
+<script src="../landing.js" data-root="../" defer></script>
+</body>
+</html>

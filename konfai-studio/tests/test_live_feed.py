@@ -337,6 +337,9 @@ def test_on_windows_a_job_whose_process_is_gone_reads_as_error(monkeypatch: pyte
     gone.wait()
     live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
+        jobs._DEAD_SINCE.clear()
+        assert jobs._live_status({"status": "running", "pid": gone.pid}) == "running"  # the grace period
+        jobs._DEAD_SINCE[str(gone.pid)] -= jobs._DEAD_GRACE_S + 1
         assert jobs._live_status({"status": "running", "pid": gone.pid}) == "error"
         assert jobs._live_status({"status": "running", "pid": live.pid}) == "running"
     finally:
@@ -836,3 +839,15 @@ def test_many_runtime_logs_share_a_budget_and_all_eventually_advance(tmp_path, m
     asyncio.run(drain())
     assert len(tick_reads) == 4 and max(tick_reads) <= jobs._TICK_BYTES
     assert seen == {run[0] for run in runs}
+
+
+def test_a_just_exited_process_is_not_painted_failed_at_once(monkeypatch) -> None:
+    """The MCP monitor flips a finished job to 'done' moments after its process exits: the feed waits."""
+    from konfai_studio import jobs
+
+    monkeypatch.setattr(jobs, "_pid_alive", lambda pid: False)
+    jobs._DEAD_SINCE.clear()
+    job = {"job_id": "j-scout", "status": "running", "pid": 424242}
+    assert jobs._live_status(job) == "running"  # first sighting: grace
+    jobs._DEAD_SINCE["j-scout"] -= jobs._DEAD_GRACE_S + 1
+    assert jobs._live_status(job) == "error"  # still gone after the grace: a dead run

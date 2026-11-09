@@ -168,10 +168,51 @@ def test_plan_transform_is_covered_by_that_guard(
     monkeypatch.setattr(server, "_run_api_in_subprocess", killed_child)
 
     with pytest.raises(RuntimeError):
-        server.plan_transform(cpu=1)
+        server.run_transform(dry_run=True, cpu=1)
 
     assert config_path.read_text(encoding="utf-8") == authored
     assert leftovers and not leftovers[0].exists()
+
+
+def test_run_transform_checks_the_inputs_of_the_config_file_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """An alternate chain is checked for its own inputs, not Transform.yml's, by the plan and by the launch."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    workspace = Path(server.SESSION.config_path("transform")).parent
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "Transform.yml").write_text("Transformer:\n  name: DEFAULT\n", encoding="utf-8")
+    alternate = "Transformer:\n  name: MASKS\n  Dataset:\n    dataset_filenames:\n    - ./Missing/\n"
+    (workspace / "Transform_masks.yml").write_text(alternate, encoding="utf-8")
+    monkeypatch.setattr(server, "_run_api_in_subprocess", lambda *_: pytest.fail("planned past the blocker"))
+    monkeypatch.setattr(server, "_launch_job", lambda *_, **__: pytest.fail("launched past the blocker"))
+
+    for dry_run in (True, False):
+        blocked = server.run_transform(dry_run=dry_run, config_file="Transform_masks.yml")
+        assert blocked["error_type"] == "MissingArtifact"
+        assert blocked["config_path"].endswith("Transform_masks.yml")
+
+
+def test_run_transform_plans_for_the_ranks_it_would_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType]
+) -> None:
+    """A dry run sizes the plan for the launch's rank count, two GPUs being two ranks, and refuses the device
+    arguments the launch refuses."""
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    server = load_mcp_server()
+    config_path = Path(server.SESSION.config_path("transform"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("Transformer:\n  name: TEST\n", encoding="utf-8")
+    ranks: list[int] = []
+    monkeypatch.setattr(server, "_run_api_in_subprocess", lambda _target, kwargs: ranks.append(kwargs["ranks"]) or {})
+
+    server.run_transform(dry_run=True, gpu=[0, 1])
+    server.run_transform(dry_run=True, cpu=3)
+    server.run_transform(dry_run=True)
+    assert ranks == [2, 3, 1]
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        server.run_transform(dry_run=True, gpu=0, cpu=2)
 
 
 def test_concurrent_validations_only_remove_their_own_scratch(tmp_path: Path) -> None:

@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import copy
 import difflib
+import itertools
 import json
 import os
 import random
@@ -27,6 +29,8 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
@@ -38,7 +42,11 @@ try:
     from fastmcp import FastMCP
     from fastmcp import settings as fastmcp_settings
     from fastmcp.server.auth import StaticTokenVerifier
+    from fastmcp.server.middleware import Middleware as McpMiddleware
+    from fastmcp.tools import Tool
+    from fastmcp.tools.base import ToolResult
     from fastmcp.utilities.types import Image as FastMCPImage
+    from mcp.types import ToolAnnotations  # mcp 1.x and 2.x: built by wire name, the one spelling both accept
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
 except ImportError as exc:  # pragma: no cover - depends on optional install
@@ -53,10 +61,12 @@ from .catalog import COMPONENT_KINDS
 from .catalog import list_components as _catalog_list_components
 from .extensions import check_external_dependency as _check_external_dependency
 from .extensions import describe_extension_points as _describe_extension_points
+from .file_io import HDF5_SUFFIXES
 from .guide import (
     CLARIFY_TASK_AND_GROUPS_PROMPT,
     DEBUG_CONFIG_WARNING_PROMPT,
     PLAN_CONFIG_STRATEGY_PROMPT,
+    SERVER_INSTRUCTIONS,
     SOLVE_TASK_PROMPT,
     TOOL_DESCRIPTIONS,
 )
@@ -73,6 +83,7 @@ from .server_support import (
     WorkspaceLayout,
     available_templates,
     case_directories,
+    classpath_requires_import,
     compute_rules,
     config_design_summary,
     configuration_rules,
@@ -97,7 +108,125 @@ from .server_support import (
 )
 from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind, workflow_choice_description
 
-mcp = FastMCP("KonfAI")
+mcp = FastMCP("KonfAI", instructions=SERVER_INSTRUCTIONS)
+#: Claude Code loads a tool carrying this upfront even when it defers the rest to its tool search.
+ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
+
+
+def _lean(schema: dict[str, Any]) -> dict[str, Any]:
+    """An optional parameter listed as its type: pydantic's ``anyOf [T, null]`` and ``default: null`` say nothing a
+    client needs, and cost a fifth of the schema."""
+    schema = copy.deepcopy(schema)
+    required = set(schema.get("required", ()))
+    for name, prop in schema.get("properties", {}).items():
+        if name in required:
+            continue
+        if "default" in prop and prop["default"] is None:
+            del prop["default"]
+        alternatives = [a for a in prop.get("anyOf", ()) if a != {"type": "null"}]
+        if len(alternatives) == 1:
+            del prop["anyOf"]
+            prop.update(alternatives[0])
+        elif len(alternatives) < len(prop.get("anyOf", ())):
+            prop["anyOf"] = alternatives
+    return schema
+
+
+#: Tools that change nothing a later call could not see anyway: a client that gates every other call behind an
+#: approval (Codex in a non-interactive run) lets these through on the hint alone.
+READ_ONLY_TOOLS = frozenset(
+    {
+        "describe_konfai_capabilities",
+        "list_apps",
+        "inspect_dataset",
+        "read_file",
+        "describe_config_schema",
+        "list_components",
+        "describe_extension_points",
+        "design_config_strategy",
+        "get_job_status",
+        "read_live_metrics",
+        "read_job_log",
+        "read_training_curves",
+        "get_run_metrics",
+        "leaderboard",
+        "compare_runs",
+        "diff_run_configs",
+        "preview_volume",
+        "read_scout_report",
+        "fidopt_catalog",
+        "fidopt_table",
+    }
+)
+DESTRUCTIVE_TOOLS = frozenset({"cancel_job", "delete_run"})
+
+
+def _annotations(name: str) -> ToolAnnotations | None:
+    if name in READ_ONLY_TOOLS:
+        return ToolAnnotations.model_validate({"readOnlyHint": True})
+    if name in DESTRUCTIVE_TOOLS:
+        return ToolAnnotations.model_validate({"destructiveHint": True})
+    return None
+
+
+class _LeanSchemas(McpMiddleware):
+    """What a client lists: lean input schemas, no output schema when it is a free-form object (every tool
+    returns a dict), and the read-only / destructive hints. Calls are untouched: an explicit null is still accepted."""
+
+    async def on_list_tools(self, context: Any, call_next: Any) -> Sequence[Tool]:
+        tools = await call_next(context)
+        return [
+            tool.model_copy(
+                update={
+                    "parameters": _lean(tool.parameters),
+                    "output_schema": tool.output_schema if (tool.output_schema or {}).get("properties") else None,
+                    "annotations": _annotations(tool.name) or tool.annotations,
+                }
+            )
+            for tool in tools
+        ]
+
+
+class _ToolUsage(McpMiddleware):
+    """One JSON line per call in ``<workspaces root>/tool_calls.jsonl`` (tool, session, ok, ms): which tools agents
+    actually call and which ones they get wrong, the data the next consolidation of the surface rests on.
+    No argument is written. ``sort | uniq -c`` on the tool field is the tally."""
+
+    async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+        started = time.monotonic()
+        ok = True
+        try:
+            return await call_next(context)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            line = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "tool": context.message.name,
+                "session": WORKSPACE_LAYOUT.current_session,
+                "ok": ok,
+                "ms": round(1000 * (time.monotonic() - started)),
+            }
+            with suppress(OSError), (WORKSPACES_ROOT / "tool_calls.jsonl").open("a", encoding="utf-8") as log:
+                log.write(json.dumps(line) + "\n")
+
+
+mcp.add_middleware(_LeanSchemas())
+mcp.add_middleware(_ToolUsage())
+
+_WAIT_DESC = (
+    "Block until the job ends (or timeout_s expires) and return its final status instead of the launch payload."
+)
+_WAIT_TIMEOUT_DESC = "wait: seconds before returning the current status with timed_out=true."
+
+
+def _launched(payload: dict[str, Any], wait: bool, timeout_s: float | None) -> dict[str, Any]:
+    """A launch payload, or the job's final status when the caller asked to wait: one call instead of two."""
+    if wait and payload.get("job_id"):
+        return _tool_wait_for_job(str(payload["job_id"]), timeout_s)
+    return payload
+
 
 KONFAI_VERSION = konfai_pkg.__version__
 konfai_get_available_devices = konfai_pkg.get_available_devices
@@ -153,7 +282,7 @@ def _activate_session(name: str) -> None:
 
 
 def _activate_session_locked(name: str) -> None:
-    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, JOB_REGISTRY, _JOBS_LOCK, _JOBS
+    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, SCOUT_SERVICE, FIDOPT, JOB_REGISTRY, _JOBS_LOCK, _JOBS
     # Build the full replacement state locally, then swap every global in one consecutive block:
     # a concurrent tool (SSE/HTTP transports) must never observe a half-built mix (new layout
     # with the old session) during construction, which includes disk IO for persisted jobs. Readers
@@ -170,12 +299,16 @@ def _activate_session_locked(name: str) -> None:
         workflows=WORKFLOWS,
     )
     app_service = AppService(workspace_layout=workspace_layout)
+    scout_service = ScoutService(workspace_layout)
+    fidopt = FidoptAdapter(workspace_layout)
     WORKSPACE_LAYOUT = workspace_layout
     JOB_REGISTRY = job_registry
     _JOBS_LOCK = job_registry.lock
     _JOBS = job_registry.jobs
     SESSION = session
     APP_SERVICE = app_service
+    SCOUT_SERVICE = scout_service
+    FIDOPT = fidopt
 
 
 def _read_text_tail(path: Path, max_lines: int = MAX_LOG_TAIL_LINES) -> str:
@@ -202,11 +335,12 @@ def _write_workflow_config(
     return {
         "written": filename,
         **result,
+        "schema_errors": result.get("schema_errors", []),
         # Written either way; a config with schema_errors is fixed and rewritten before anything runs it.
         "next_actions": (
             ["write_workflow_config", "describe_config_schema"]
             if "schema_errors" in result
-            else ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"]
+            else ["check_config", f"run_{workflow}"]
         ),
     }
 
@@ -332,14 +466,14 @@ def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
     return _job_devices(gpu, cpu)
 
 
-def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None = None) -> list[str]:
+def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None, cpu: int | None) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
     KonfAI defaults to CPU when no gpu is given, so on a GPU host it silently trains on CPU. A SLURM job
     runs off-host, so the server's own CUDA visibility is irrelevant and no notice is emitted. The torch
     import is guarded so a torch-less / CPU-only host never raises.
     """
-    if gpu or cluster is not None:
+    if gpu or cpu or cluster is not None:  # cpu given: CPU was asked for, not fallen back to
         return []
     try:
         import torch
@@ -370,6 +504,22 @@ def _resolve_train_config(config_file: str | None) -> Path:
     if not config_path.exists():
         raise ValueError(f"{config_file} not found in the session workspace.")
     validate_yaml_content(config_path.read_text(encoding="utf-8"), config_file, expected_root="Trainer")
+    return config_path
+
+
+def _resolve_transform_config(config_file: str | None) -> Path:
+    """The session Transform.yml, or an alternate sibling (e.g. Transform_masks.yml): two chains need two files."""
+    if config_file is None:
+        config_path = SESSION.config_path("transform")
+        if not config_path.exists():
+            raise ValueError("Transform.yml not found. Write a transform config first.")
+        return config_path
+    if Path(config_file).name != config_file or config_file in {".", ".."}:
+        raise ValueError("config_file must be a direct child of the session workspace.")
+    config_path = SESSION.workspace_dir() / config_file
+    if not config_path.exists():
+        raise ValueError(f"{config_file} not found in the session workspace.")
+    validate_yaml_content(config_path.read_text(encoding="utf-8"), config_file, expected_root="Transformer")
     return config_path
 
 
@@ -501,6 +651,18 @@ def _config_overrides(set_parameters: dict[str, Any] | None) -> list[str] | None
     return [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()]
 
 
+def _case_names(kwargs: dict[str, Any]) -> dict[str, list[str | None]] | None:
+    """``P000`` -> the idx-th file of every input group: konfai_apps stages cases positionally, the names of
+    the source files would otherwise survive only in the log."""
+    groups = kwargs.get("inputs") or (kwargs.get("extra") or {}).get("inputs")
+    if groups is None and "fixed" in kwargs and "moving" in kwargs:  # a registration app: one pair per case
+        groups = [kwargs["fixed"], kwargs["moving"]]
+    if not isinstance(groups, list) or not groups or not all(isinstance(group, list) for group in groups):
+        return None
+    count = max(len(group) for group in groups)
+    return {f"P{idx:03d}": [str(group[idx]) if idx < len(group) else None for group in groups] for idx in range(count)}
+
+
 def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
     """Launch an app job (inference, evaluation, uncertainty, pipeline, fine-tune) from an AppService
     spec via the shared job registry.
@@ -525,13 +687,18 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
         run_name=spec["run_name"],
         devices=spec.get("devices")
         or _app_job_devices(
-            kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
+            spec["gpu"]
+            if "gpu" in spec  # the spec says (a FidOpt job): its runner takes no gpu argument
+            else kwargs.get("gpu")
+            if kwargs.get("gpu") is not None
+            else (kwargs.get("extra") or {}).get("gpu"),
             kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
         ),
         runtime_log_path=None,
         extra_manifest={
             "app_ref": kwargs.get("ref"),
             "output": spec["output"],
+            "cases": _case_names(kwargs),
             "set_parameters": set_parameters,
             "environment": _environment_snapshot(),
         },
@@ -945,36 +1112,6 @@ def read_job_manifest(job_id: str) -> dict[str, Any]:
     return {"path": str(job.manifest_path), "manifest": manifest}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["browse_dataset"]))
-def browse_dataset(
-    dataset_dir: Annotated[str, Field(description="Host path of the dataset directory (or parent of roots) to scan.")],
-    depth: Annotated[int, Field(description="Maximum directory depth to walk (default 2).")] = 2,
-    max_entries: Annotated[
-        int, Field(description="Maximum tree entries returned before truncation (default 200).")
-    ] = 200,
-) -> dict[str, Any]:
-    """Browse a dataset tree with bounded output and candidate dataset-root hints."""
-    return SESSION.browse_dataset_payload(
-        Path(dataset_dir).expanduser().resolve(),
-        depth=depth,
-        max_entries=max_entries,
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_dataset_file"]))
-def read_dataset_file(
-    path: Annotated[str, Field(description="Host path of the text file to preview (CSV/TSV/JSON/YAML/txt/header).")],
-    max_lines: Annotated[int, Field(description="Maximum lines returned (default 200).")] = 200,
-    max_chars: Annotated[int, Field(description="Streaming read cap in characters (default 65536).")] = 65536,
-) -> dict[str, Any]:
-    """Bounded read-only preview of a dataset sidecar/text file, with a structured CSV/TSV preview."""
-    return read_dataset_sidecar(
-        Path(path).expanduser().resolve(),
-        max_lines=max_lines,
-        max_chars=max_chars,
-    )
-
-
 def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> str:
     """Explain why a scanned group produced no statistics, so the agent is never left with a silent gap."""
     detail = str(exc).strip()
@@ -998,27 +1135,13 @@ def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> st
     return f"Statistics for group '{group}' could not be computed ({type(exc).__name__}): {detail or 'read failed'}."
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_dataset"]))
-def inspect_dataset(
-    dataset_dir: Annotated[
-        str, Field(description="Host path of the chosen dataset root (browse_dataset first when ambiguous).")
-    ],
-    groups: Annotated[
-        list[str] | None, Field(description="Restrict statistics to these group names (default: every detected group).")
-    ] = None,
-    extension: Annotated[
-        str | None,
-        Field(
-            description="Format token for the statistics reader (default: first detected extension; h5/omezarr/dicom select their backend BY this token)."
-        ),
-    ] = None,
-    max_cases_per_group: Annotated[
-        int, Field(description="Maximum cases sampled per group for statistics; <= 0 samples every case (default 10).")
-    ] = 10,
-    seed: Annotated[int, Field(description="Random seed for the per-group case sampling (default 0).")] = 0,
-    include_stats: Annotated[
-        bool, Field(description="False runs a fast structure-only scan without sampled statistics (default True).")
-    ] = True,
+def _tool_inspect_dataset(
+    dataset_dir: str,
+    groups: list[str] | None = None,
+    extension: str | None = None,
+    max_cases_per_group: int = 10,
+    seed: int = 0,
+    include_stats: bool = True,
 ) -> dict[str, Any]:
     """Inspect one chosen dataset root and return the structure an agent needs before designing configs."""
     dataset_path = Path(dataset_dir).expanduser().resolve()
@@ -1070,8 +1193,49 @@ def inspect_dataset(
     # name four times.
     for group, group_statistics in statistics.items():
         payload["groups"].setdefault(group, {}).update(group_statistics)
+    # what a reader notices at once and a config would silently build on: a mask of ones, twice the same volumes,
+    # two grids
+    for group, group_statistics in statistics.items():
+        labels = group_statistics.get("labels") or {}
+        if labels.get("count") == 1:
+            value = labels["unique"][0]
+            warnings.append(
+                f"group '{group}' holds only 0 in every sampled case: as a mask it is empty (a metric or a validation "
+                "'inside' it covers no voxel)"
+                if value == 0
+                else f"group '{group}' holds the single value {value} in every sampled case: as a mask it restricts "
+                "nothing (a metric or a validation 'inside' it is whole-volume)"
+            )
+    fingerprints = {
+        group: json.dumps(group_statistics.get("statistics"), sort_keys=True, default=str)
+        for group, group_statistics in statistics.items()
+        if group_statistics.get("statistics")
+    }
+    for (group_a, print_a), (group_b, print_b) in itertools.combinations(fingerprints.items(), 2):
+        if print_a == print_b:
+            warnings.append(
+                f"groups '{group_a}' and '{group_b}' have identical statistics on the sample: the same volumes?"
+            )
+    grids = {}
+    for group, group_statistics in statistics.items():
+        spacing = (group_statistics.get("statistics") or {}).get("spacing")
+        mean = spacing.get("mean") if isinstance(spacing, dict) else spacing
+        if mean is not None:
+            grids[group] = json.dumps([round(float(v), 3) for v in mean]) if isinstance(mean, list) else str(mean)
+    if len(set(grids.values())) > 1:
+        warnings.append(
+            "the groups do not share one grid (spacing differs): "
+            + "; ".join(f"{g}: {v}" for g, v in grids.items())
+            + ". A transform or Resample is needed before they are used together."
+        )
     payload["statistics_missing_groups"] = missing_groups
     if missing_reasons:
+        # one paragraph per distinct reason: a flat folder of forty files is forty groups with the same reason
+        first_group_by_reason: dict[str, str] = {}
+        for group, reason in missing_reasons.items():
+            first = first_group_by_reason.setdefault(reason, group)
+            if first != group:
+                missing_reasons[group] = f"same reason as group '{first}'"
         payload["statistics_missing_reasons"] = missing_reasons
     payload["statistics_extension"] = selected_extension
     payload["statistics_extension_note"] = (
@@ -1082,7 +1246,7 @@ def inspect_dataset(
     if warnings:
         payload["warnings"] = [*(payload.get("warnings") or []), *warnings]
     payload["next_actions"] = [
-        "browse_dataset",
+        "inspect_dataset",
         "prepare_dataset_aliases",
         "design_config_strategy",
         "initialize_session",
@@ -1139,29 +1303,6 @@ def design_config_strategy(
     return payload
 
 
-def _classpath_requires_import(classpath: str) -> bool:
-    """True when summarize_classpath_signature would import the classpath's module in-process.
-
-    A shipped/local YAML model ('default|<Name>.yml' or '<Name>.yml') and a local workspace 'File:Class'
-    (a single-token module before the colon, resolved as a workspace .py) are parsed statically and never
-    imported. Everything else (an installed 'package.module:Class', the colon form 'package:module:Class'
-    (which _parse_classpath joins into a dotted module), or a bare/dotted builtin name) triggers
-    importlib.import_module, so it must run isolated. The check errs toward isolation: it stays in-process
-    only for the two forms proven not to import, matching summarize_classpath_signature's own branching.
-    """
-    normalized = classpath.strip()
-    if not normalized:
-        return False  # let summarize_classpath_signature raise its own ValueError in-process
-    if normalized.endswith(".yml") or normalized.startswith("default|"):
-        return False
-    # Local 'File:Class' == exactly one colon and a single-token module with no dot (mirrors
-    # _parse_classpath + local_candidate). 'torch:nn:L1Loss' has two colons -> module 'torch.nn' -> imports.
-    colon_parts = [part for part in normalized.split(":") if part]
-    if len(colon_parts) == 2 and "." not in colon_parts[0]:
-        return False
-    return True
-
-
 @mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_object_signature"]))
 def inspect_object_signature(
     classpath: Annotated[
@@ -1173,7 +1314,7 @@ def inspect_object_signature(
 ) -> dict[str, Any]:
     """Inspect one configurable object classpath and return signature details when possible."""
     workspace_dir = WORKSPACE_LAYOUT.workspace_dir()
-    if _classpath_requires_import(classpath):
+    if classpath_requires_import(classpath, workspace_dir):
         # Reading an installed-library signature imports its module; run that in a spawn subprocess so a
         # heavy/slow/crashing/OOM import cannot take down the long-lived server (AGENTS.md: code that
         # imports/executes runs isolated). Static YAML-model and local File:Class classpaths never import,
@@ -1188,7 +1329,7 @@ def inspect_object_signature(
         **summary,
         "session": WORKSPACE_LAYOUT.current_session,
         "next_actions": (
-            ["review_config_semantics", "validate_config_semantics"]
+            ["check_config"]
             if summary.get("ok")
             else ["write_session_file", "write_workflow_config", "summarize_session"]
         ),
@@ -1208,7 +1349,7 @@ def list_components(
     return {**_catalog_list_components(kind), "session": WORKSPACE_LAYOUT.current_session}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_konfai_capabilities"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_konfai_capabilities"]), meta=ALWAYS_LOAD)
 def describe_konfai_capabilities() -> dict[str, Any]:
     """Overview of what KonfAI can do and which MCP primitive to use for each capability."""
     return _describe_konfai_capabilities()
@@ -1244,25 +1385,6 @@ def describe_extension_points(
     return _describe_extension_points(kind)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["check_external_dependency"]))
-def check_external_dependency(
-    module: Annotated[
-        str,
-        Field(
-            description="Module or dotted path to check (e.g. 'monai' or 'monai.losses'); only the top-level package is inspected."
-        ),
-    ],
-    object_name: Annotated[
-        str | None,
-        Field(
-            description="Object name inside the module, echoed into the returned inspect_classpath (existence is not verified)."
-        ),
-    ] = None,
-) -> dict[str, Any]:
-    """Check importability/version/license of an external library before integrating a brick from it."""
-    return _check_external_dependency(module, object_name)
-
-
 @mcp.resource("apps://catalog")
 def apps_catalog_resource() -> dict[str, Any]:
     """Return the resolved app-source catalogue (shipped default + workspace file + env override)."""
@@ -1270,7 +1392,7 @@ def apps_catalog_resource() -> dict[str, Any]:
     return {"apps": refs, "count": len(refs), "sources": provenance}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_apps"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["list_apps"]), meta=ALWAYS_LOAD)
 def list_apps(
     repos: Annotated[
         list[str] | None,
@@ -1292,67 +1414,13 @@ def list_apps(
     return {**APP_SERVICE.list_apps(repos=repos, include_summary=include_summary, force_update=force_update)}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_app"]))
-def describe_app(
-    ref: Annotated[
-        str,
-        Field(
-            description="App id 'repo_id:app_name', local app folder path, or remote 'host:port:name[|token]' (bare HuggingFace repo ids are not accepted; expand with list_apps)."
-        ),
-    ],
-    force_update: Annotated[
-        bool, Field(description="Re-download the app manifest instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Read one app's app.json manifest (modality, capabilities, checkpoints) so the agent can pick it."""
-    return APP_SERVICE.describe_app(ref, force_update=force_update)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_app_parameters"]))
-def list_app_parameters(
-    ref: Annotated[
-        str,
-        Field(
-            description="App id 'repo_id:app_name' or local app folder path (remote servers do not expose parameters)."
-        ),
-    ],
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Must be True: deriving constraints imports the app's model code (in an isolated spawn subprocess)."
-        ),
-    ] = False,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-) -> dict[str, Any]:
-    """Read an app's tunable parameters and constraints so set_parameters can be used with intent."""
-    return APP_SERVICE.list_parameters(ref, allow_untrusted_code=allow_untrusted_code, force_update=force_update)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["export_app"]))
-def export_app(
-    ref: Annotated[
-        str,
-        Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be exported)."),
-    ],
-    path: Annotated[str, Field(description="Destination folder for the exported app bundle.")],
-    display_name: Annotated[
-        str | None, Field(description="Override the display name written into the exported app.json.")
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None, Field(description="Model parameter NAME->VALUE overrides baked into the copied config.")
-    ] = None,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
-    overwrite: Annotated[
-        bool,
-        Field(
-            description="Replace files of the same name already in the destination folder (default False: the "
-            "export is refused and names them)."
-        ),
-    ] = False,
+def _tool_export_app(
+    ref: str,
+    path: str,
+    display_name: str | None = None,
+    set_parameters: dict[str, Any] | None = None,
+    force_update: bool = False,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Save a resolved app (optionally with tuned parameters) as a local, editable bundle."""
     return APP_SERVICE.export_app(
@@ -1365,28 +1433,12 @@ def export_app(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["import_app"]))
-def import_app(
-    ref: Annotated[
-        str,
-        Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be imported)."),
-    ],
-    allow_untrusted_code: Annotated[
-        bool,
-        Field(
-            description="Confirm you trust this app: importing copies+runs its Python code and pip-installs its requirements."
-        ),
-    ] = False,
-    display_name: Annotated[
-        str | None, Field(description="Override the display name written into the copied app.json.")
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None,
-        Field(description="Model parameter NAME->VALUE overrides baked into the copied Prediction.yml."),
-    ] = None,
-    force_update: Annotated[
-        bool, Field(description="Re-download the app files instead of reusing the local cache.")
-    ] = False,
+def _tool_import_app(
+    ref: str,
+    allow_untrusted_code: bool = False,
+    display_name: str | None = None,
+    set_parameters: dict[str, Any] | None = None,
+    force_update: bool = False,
 ) -> dict[str, Any]:
     """Import a resolved app into the session as a normal KonfAI experiment (config + code + checkpoints)."""
     return APP_SERVICE.import_app(
@@ -1405,7 +1457,10 @@ _APP_REF_DESC = (
 )
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
-_APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."
+_APP_CPU_DESC = "Worker processes on CPU (KonfAI --cpu; 1 is one plain process); set without gpu, the run stays on CPU."
+_RUN_CPU_DESC = (
+    "Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+)
 _APP_FORCE_UPDATE_DESC = "Re-download the app files instead of reusing the local cache."
 _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's maximum_tta)."
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
@@ -1418,7 +1473,11 @@ _APP_MAX_VOXELS_DESC = (
 _APP_BATCH_SIZE_DESC = (
     "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
 )
-_APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see list_app_parameters."
+_APP_SET_PARAMETERS_DESC = (
+    "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see describe_app(parameters=True). A dotted "
+    "config path works too (e.g. {'Predictor.Dataset.groups_src.Volume_0.groups_dest.Volume.transforms.Standardize.mean': "
+    "1024} to insert or set a transform parameter)."
+)
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
 
@@ -1450,7 +1509,7 @@ _APP_ACTION_PARAMETERS: dict[str, set[str]] = {
 }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]), meta=ALWAYS_LOAD)
 def run_app(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],
     action: Annotated[
@@ -1479,7 +1538,14 @@ def run_app(
         list[list[str]] | None,
         Field(description="evaluate, pipeline: ground-truth volumes as GROUPS, paired with inputs by order."),
     ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description="evaluate, pipeline: " + _APP_MASK_DESC)] = None,
+    mask: Annotated[
+        list[list[str]] | None,
+        Field(
+            description="evaluate, pipeline: "
+            + _APP_MASK_DESC
+            + " Registration infer: two groups, [fixed masks, moving masks], paired with inputs."
+        ),
+    ] = None,
     tta: Annotated[int | None, Field(description="infer, pipeline: " + _APP_TTA_DESC)] = None,
     ensemble: Annotated[int | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_DESC)] = None,
     ensemble_models: Annotated[
@@ -1509,6 +1575,8 @@ def run_app(
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Run a published KonfAI app on the user's data, as published, as a tracked job (local / HuggingFace)."""
     given = {
@@ -1561,10 +1629,7 @@ def run_app(
             spec = APP_SERVICE.prepare_pipeline(
                 **common, **model, gt=gt, mask=mask, uncertainty=uncertainty is not False
             )
-    return _launch_app_job(spec)
-
-
-_REG_CASES = " One path per case, paired by order with the other lists (or one used for every case)."
+    return _launched(_launch_app_job(spec), wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_registration_evaluate"]))
@@ -1573,47 +1638,50 @@ def run_registration_evaluate(
         list[str] | None,
         Field(
             description="The registration's Transform.h5 (from run_app's infer output, <case>/Transform.h5)."
-            + _REG_CASES
-            + " Omit it to score the pair as it is: the misalignment before registration."
+            " Omit it to score the pair as it is: the misalignment before registration."
         ),
     ] = None,
-    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE." + _REG_CASES)] = None,
+    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE.")] = None,
     moving_images: Annotated[
-        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only)." + _REG_CASES)
+        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only).")
     ] = None,
-    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice." + _REG_CASES)] = None,
-    moving_seg: Annotated[
-        list[str] | None, Field(description="ORIGINAL moving label maps, for Dice." + _REG_CASES)
-    ] = None,
+    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice.")] = None,
+    moving_seg: Annotated[list[str] | None, Field(description="ORIGINAL moving label maps, for Dice.")] = None,
     fixed_landmarks: Annotated[
-        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE." + _REG_CASES)
+        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE.")
     ] = None,
     moving_landmarks: Annotated[
-        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE." + _REG_CASES)
+        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE.")
     ] = None,
-    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE." + _REG_CASES)] = None,
+    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE.")] = None,
     output: Annotated[
         str | None,
         Field(description="Output directory (default: a unique dir under the session workspace AppEvaluations/)."),
     ] = None,
     gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Score a registration through its transform (impact-reg-konfai eval), as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_registration_evaluate(
-            transforms=transforms,
-            fixed_images=fixed_images,
-            moving_images=moving_images,
-            fixed_seg=fixed_seg,
-            moving_seg=moving_seg,
-            fixed_landmarks=fixed_landmarks,
-            moving_landmarks=moving_landmarks,
-            mask=mask,
-            output=output,
-            gpu=gpu,
-            cpu=cpu,
-        )
+    return _launched(
+        _launch_app_job(
+            APP_SERVICE.prepare_registration_evaluate(
+                transforms=transforms,
+                fixed_images=fixed_images,
+                moving_images=moving_images,
+                fixed_seg=fixed_seg,
+                moving_seg=moving_seg,
+                fixed_landmarks=fixed_landmarks,
+                moving_landmarks=moving_landmarks,
+                mask=mask,
+                output=output,
+                gpu=gpu,
+                cpu=cpu,
+            )
+        ),
+        wait,
+        timeout_s,
     )
 
 
@@ -1641,8 +1709,11 @@ def run_scout_inspection(
         str, Field(description="What the model should know: modality, dataset, the method inspected.")
     ] = "",
     provider: Annotated[
-        Literal["anthropic", "openai", "mock"],
-        Field(description="anthropic (Claude), openai (GPT or an OpenAI-compatible local server), mock (no API)."),
+        Literal["anthropic", "openai", "claude-code", "codex", "mock"],
+        Field(
+            description="anthropic (Claude, API key), openai (GPT or an OpenAI-compatible local server), claude-code "
+            "(Claude under this machine's Claude Code login), codex (GPT under its Codex login), mock (no model)."
+        ),
     ] = "anthropic",
     model: Annotated[str | None, Field(description="The model id; the provider's default when omitted.")] = None,
     base_url: Annotated[
@@ -1684,46 +1755,8 @@ def run_scout_inspection(
         local_provider=local_provider,
     )
     payload = _launch_app_job(spec)
-    payload["next_actions"] = ["wait_for_job", "read_scout_report"]
+    payload["next_actions"] = ["get_job_status", "read_scout_report"]
     return payload
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_scout_report"]))
-def read_scout_report(
-    name: Annotated[str, Field(description="The inspection's name (list_scout_reports lists them).")],
-) -> dict[str, Any]:
-    """Read a Scout report: verdict, observations, measurements, views; no image bytes."""
-    return SCOUT_SERVICE.read_report(name)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_scout_reports"]))
-def list_scout_reports() -> dict[str, Any]:
-    """List the session's Scout inspections."""
-    return {"reports": SCOUT_SERVICE.list_reports(), "next_actions": ["read_scout_report", "run_scout_inspection"]}
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_datasets"]))
-def fidopt_list_datasets(
-    task: Annotated[
-        Literal["registration", "segmentation", "synthesis"] | None, Field(description="One task only.")
-    ] = None,
-) -> dict[str, Any]:
-    """List FidOpt's datasets through FidOpt's own code."""
-    return {"datasets": FIDOPT.list_datasets(task), "next_actions": ["fidopt_describe_dataset", "fidopt_table"]}
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_describe_dataset"]))
-def fidopt_describe_dataset(
-    dataset: Annotated[str, Field(description="A FidOpt dataset name.")],
-) -> dict[str, Any]:
-    """One FidOpt dataset's descriptor."""
-    return {"dataset": FIDOPT.describe_dataset(dataset), "next_actions": ["fidopt_table", "fidopt_run"]}
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_methods"]))
-def fidopt_list_methods() -> dict[str, Any]:
-    """List the methods FidOpt runs."""
-    return {"methods": FIDOPT.list_methods(), "next_actions": ["fidopt_table", "fidopt_run"]}
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_table"]))
@@ -1754,6 +1787,8 @@ def fidopt_run(
     extra: Annotated[
         list[str] | None, Field(description="Further fidopt flags (e.g. --family NAME, --try LABEL=SETTINGS).")
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch one allowed FidOpt operation as a tracked job."""
     if operation != "check" and not dataset:
@@ -1768,8 +1803,8 @@ def fidopt_run(
         extra,
     )
     payload = _launch_app_job(spec)
-    payload["next_actions"] = ["wait_for_job", "read_job_log", "fidopt_table"]
-    return payload
+    payload["next_actions"] = ["get_job_status", "read_job_log", "fidopt_table"]
+    return _launched(payload, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
@@ -1805,7 +1840,7 @@ def fine_tune_app(
         dict[str, Any] | None,
         Field(
             description="NAME->VALUE overrides baked into the training config before fine-tuning. A bare NAME "
-            "is a model parameter (see list_app_parameters, e.g. {'iterations': 300}); any other config key "
+            "is a model parameter (see describe_app(parameters=True), e.g. {'iterations': 300}); any other config key "
             "needs its full dotted path from the config root (e.g. {'Trainer.Dataset.num_workers': 2}). "
             "For batch size, prefer the batch_size parameter."
         ),
@@ -1817,48 +1852,33 @@ def fine_tune_app(
     ] = "Config.yml",
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_finetune(
-            ref=ref,
-            dataset=dataset,
-            output=output,
-            name=name,
-            epochs=epochs,
-            it_validation=it_validation,
-            models=models,
-            lr=lr,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            gpu=gpu,
-            cpu=cpu,
-            config_file=config_file,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["register_app_source"]))
-def register_app_source(
-    ref: Annotated[
-        str,
-        Field(
-            description="App reference to persist: an app id 'repo_id:app_name' or a bare HuggingFace repo_id (not validated here)."
+    return _launched(
+        _launch_app_job(
+            APP_SERVICE.prepare_finetune(
+                ref=ref,
+                dataset=dataset,
+                output=output,
+                name=name,
+                epochs=epochs,
+                it_validation=it_validation,
+                models=models,
+                lr=lr,
+                batch_size=batch_size,
+                config_overrides=_config_overrides(set_parameters),
+                gpu=gpu,
+                cpu=cpu,
+                config_file=config_file,
+                allow_untrusted_code=allow_untrusted_code,
+                force_update=force_update,
+            )
         ),
-    ],
-) -> dict[str, Any]:
-    """Add an app reference to the editable workspace app catalogue so it persists across sessions."""
-    return APP_SERVICE.register_app_source(ref)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["unregister_app_source"]))
-def unregister_app_source(
-    ref: Annotated[str, Field(description="App reference to remove from the editable workspace catalogue file.")],
-) -> dict[str, Any]:
-    """Remove an app reference from the editable workspace app catalogue."""
-    return APP_SERVICE.unregister_app_source(ref)
+        wait,
+        timeout_s,
+    )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["package_app_from_session"]))
@@ -2029,7 +2049,7 @@ def prepare_dataset_aliases(
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["initialize_session"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["initialize_session"]), meta=ALWAYS_LOAD)
 def initialize_session(
     overwrite: Annotated[
         bool,
@@ -2057,16 +2077,28 @@ def initialize_session(
         ),
     ] = False,
 ) -> dict[str, Any]:
+    return _tool_initialize_session(
+        overwrite=overwrite, from_example=from_example, workflows=workflows, include_support_files=include_support_files
+    )
+
+
+def _tool_initialize_session(
+    overwrite: bool = False,
+    from_example: str | None = None,
+    workflows: str | list[str] | None = None,
+    include_support_files: bool = False,
+) -> dict[str, Any]:
     """Create or reset the current session workspace, optionally seeded from one example template."""
     template = template_dir(EXAMPLES_ROOT, from_example) if from_example is not None else None
     selected_workflows = SESSION.seeded_workflows(template, workflows) if template is not None else []
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
-    if workspace.exists() and any(workspace.iterdir()):
+    # directories alone (a session just created, or initialised without a template) are not worth protecting
+    if workspace.exists() and any(path.is_file() for path in workspace.rglob("*")):
         if not overwrite:
             raise ValueError(
                 f"Session workspace already exists for '{WORKSPACE_LAYOUT.current_session}'. "
                 "overwrite=True DELETES its entire contents (Checkpoints/Predictions included); "
-                "use switch_session to start a new session and keep this one."
+                "use session(action='create') to start another session and keep this one."
             )
         SESSION.ensure_no_active_job()
         shutil.rmtree(workspace)
@@ -2102,14 +2134,14 @@ def initialize_session(
                 "summary": "session://current/summary",
             }
         ),
-        "next_actions": ["write_workflow_config", "review_config_semantics", "summarize_session"],
+        "next_actions": ["write_workflow_config", "check_config", "summarize_session"],
     }
     if skipped_python:
         payload["warnings"] = [
             f"The example's configs reference local Python file(s) {skipped_python} that were NOT copied "
             "(include_support_files=False), so those classpaths will not resolve. Re-run with "
             "include_support_files=True (and check their external dependencies with "
-            "check_external_dependency), or replace them with your own components."
+            "check_component), or replace them with your own components."
         ]
     return payload
 
@@ -2127,15 +2159,12 @@ def _refuse_if_session_pinned(action: str) -> None:
         )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["create_session"]))
-def create_session(
-    name: Annotated[str, Field(description="Session name (sanitized to a filesystem-safe form).")],
-    switch: Annotated[
-        bool, Field(description="Also make the new session current (refused while a job is active; default True).")
-    ] = True,
+def _tool_create_session(
+    name: str,
+    switch: bool = True,
 ) -> dict[str, Any]:
     """Create a named session workspace and (by default) switch the server onto it."""
-    _refuse_if_session_pinned("create_session")
+    _refuse_if_session_pinned("session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     session_dir = WORKSPACE_LAYOUT.session_dir(safe)
     created = not session_dir.exists()
@@ -2149,24 +2178,20 @@ def create_session(
         "created": created,
         "switched": switch,
         "sessions": WORKSPACE_LAYOUT.available_sessions(),
-        "next_actions": ["initialize_session", "import_experiment", "summarize_session"],
+        "next_actions": ["initialize_session", "session", "summarize_session"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["switch_session"]))
-def switch_session(
-    name: Annotated[
-        str,
-        Field(description="Existing session name to switch onto (see sessions://list; create_session makes new ones)."),
-    ],
+def _tool_switch_session(
+    name: str,
 ) -> dict[str, Any]:
     """Switch the current session workspace (job history reloads from that session's disk state)."""
-    _refuse_if_session_pinned("switch_session")
+    _refuse_if_session_pinned("session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     if safe not in WORKSPACE_LAYOUT.available_sessions():
         raise ValueError(
             f"Unknown session '{safe}'. Available sessions: {WORKSPACE_LAYOUT.available_sessions()}. "
-            "Use create_session to create one."
+            "Use session(action='create') to create one."
         )
     if safe != WORKSPACE_LAYOUT.current_session:
         SESSION.ensure_no_active_job()
@@ -2180,23 +2205,10 @@ def switch_session(
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["import_experiment"]))
-def import_experiment(
-    source_dir: Annotated[
-        str,
-        Field(
-            description="Host path of the KonfAI experiment directory to import (must be outside the session workspace)."
-        ),
-    ],
-    include_artifacts: Annotated[
-        Literal["link", "copy", "none"],
-        Field(
-            description="How artifact dirs (Checkpoints/Predictions/...) are imported: 'link' symlinks (default; copies where the link is refused), 'copy' copies, 'none' imports configs/code only."
-        ),
-    ] = "link",
-    overwrite: Annotated[
-        bool, Field(description="Replace existing session files of the same name (default False: they are skipped).")
-    ] = False,
+def _tool_import_experiment(
+    source_dir: str,
+    include_artifacts: Literal["link", "copy", "none"] = "link",
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Import an existing KonfAI experiment directory into the current session workspace."""
     source = Path(source_dir).expanduser().resolve()
@@ -2243,9 +2255,8 @@ def import_experiment(
         "copied_instead_of_linked": copied_instead_of_linked,
         "skipped": skipped,
         "next_actions": [
-            "read_session_file",
-            "review_config_semantics",
-            "validate_config_semantics",
+            "read_file",
+            "check_config",
             "summarize_session",
         ],
     }
@@ -2273,17 +2284,14 @@ def write_session_file(
         "written": path.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "path": str(path),
         "bytes": path.stat().st_size,
-        "next_actions": ["inspect_object_signature", "review_config_semantics", "validate_config_semantics"],
+        "next_actions": ["inspect_object_signature", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_session_file"]))
-def read_session_file(
-    path: Annotated[
-        str, Field(description="Workspace-relative path, or an absolute path resolving inside the session workspace.")
-    ],
-    max_chars: Annotated[int, Field(description="Maximum characters returned (default 20000).")] = 20000,
-    offset: Annotated[int, Field(description="Character offset to start reading from, for paging (default 0).")] = 0,
+def _tool_read_session_file(
+    path: str,
+    max_chars: int = 20000,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Read one file inside the current session workspace (the read mirror of write_session_file)."""
     resolved = WORKSPACE_LAYOUT.resolve_workspace_relative_path(path)
@@ -2292,16 +2300,15 @@ def read_session_file(
         **payload,
         "relative_path": resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "session": WORKSPACE_LAYOUT.current_session,
-        "next_actions": ["write_session_file", "write_workflow_config", "review_config_semantics"],
+        "next_actions": ["write_session_file", "write_workflow_config", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_template_file"]))
-def read_template_file(
-    name: Annotated[str, Field(description="Example template name (see templates://list).")],
-    filename: Annotated[str, Field(description="File to read; must be a direct child of the template directory.")],
-    max_chars: Annotated[int, Field(description="Maximum characters returned (default 20000).")] = 20000,
-    offset: Annotated[int, Field(description="Character offset to start reading from, for paging (default 0).")] = 0,
+def _tool_read_template_file(
+    name: str,
+    filename: str,
+    max_chars: int = 20000,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Read one file from an example template directory (reference code/config source)."""
     template = template_dir(EXAMPLES_ROOT, name)
@@ -2351,7 +2358,10 @@ def compare_runs(
     ],
     run_b: Annotated[str, Field(description="train_name or app-trial label of the run compared against run_a.")],
     split: Annotated[
-        str, Field(description="Metric split, uppercased to Metric_<SPLIT>.json (default 'TRAIN').")
+        str,
+        Field(
+            description="The Metric_<SPLIT>.json to read; an evaluation run writes TRAIN whatever cases it scored (default 'TRAIN')."
+        ),
     ] = "TRAIN",
     metric: Annotated[
         str | None,
@@ -2538,27 +2548,15 @@ def describe_model_outputs(
             "equivalent). Attach the main loss to a terminal path; deep-supervision or perceptual losses may "
             "target intermediate paths."
         ),
-        "next_actions": ["write_workflow_config", "validate_config_semantics"],
+        "next_actions": ["write_workflow_config", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_component_smoke_test"]))
-def run_component_smoke_test(
-    classpath: Annotated[
-        str, Field(description="Component to test: local 'File:Class', builtin name, or 'package.module:Class'.")
-    ],
-    kind: Annotated[
-        Literal["transform", "criterion", "loss", "metric"],
-        Field(
-            description="Contract to exercise: 'transform' checks the shape contract; 'criterion'/'loss'/'metric' check the return convention and backward()."
-        ),
-    ],
-    shape: Annotated[
-        list[int] | None, Field(description="Dummy tensor shape, channel-first (default [1, 8, 8, 8]).")
-    ] = None,
-    init_kwargs: Annotated[
-        dict[str, Any] | None, Field(description="Constructor keyword arguments for the component.")
-    ] = None,
+def _tool_run_component_smoke_test(
+    classpath: str,
+    kind: Literal["transform", "criterion", "loss", "metric"],
+    shape: list[int] | None = None,
+    init_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one component's runtime contract on dummy tensors (shape contract / return convention)."""
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace_exists()
@@ -2573,24 +2571,18 @@ def run_component_smoke_test(
         },
     )
     result["next_actions"] = (
-        ["write_workflow_config", "validate_config_semantics"]
+        ["write_workflow_config", "check_config"]
         if result.get("ok")
         else ["write_session_file", "inspect_object_signature"]
     )
     return result
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["delete_session"]))
-def delete_session(
-    force: Annotated[
-        bool,
-        Field(
-            description="True also cancels the session's active jobs first; otherwise deletion is refused while jobs run."
-        ),
-    ] = False,
+def _tool_delete_session(
+    force: bool = False,
 ) -> dict[str, Any]:
     """Delete the current session workspace and optionally cancel active jobs first."""
-    _refuse_if_session_pinned("delete_session")
+    _refuse_if_session_pinned("session")
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace_exists()
     active_jobs = SESSION.active_jobs()
     if active_jobs and not force:
@@ -2649,31 +2641,11 @@ def delete_run(
     return {"run_name": cleaned, "kind": kind, "deleted": removed}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["validate_config_semantics"]))
-def validate_config_semantics(
-    workflow: Annotated[
-        str,
-        Field(
-            description="'train', 'prediction', 'evaluation', 'transform', or 'all' to validate every"
-            " present config (case-insensitive; default 'train')."
-        ),
-    ] = "train",
-    level: Annotated[
-        Literal["instantiate", "setup", "train_step"],
-        Field(
-            description="'instantiate' builds the objects, 'setup' also builds the dataloader, 'train_step' also runs ONE forward+backward (train workflow only)."
-        ),
-    ] = "instantiate",
-    models: Annotated[
-        str | list[str] | None,
-        Field(
-            description="Checkpoint path(s) for prediction validation (string or list; default: the newest discovered checkpoint)."
-        ),
-    ] = None,
-    config_file: Annotated[
-        str | None,
-        Field(description="Alternate train config filename in the session workspace (workflow='train' only)."),
-    ] = None,
+def _tool_validate_config_semantics(
+    workflow: str = "train",
+    level: Literal["instantiate", "setup", "train_step"] = "instantiate",
+    models: str | list[str] | None = None,
+    config_file: str | None = None,
 ) -> dict[str, Any]:
     """Instantiate KonfAI workflows in an isolated subprocess to catch config errors before launching jobs."""
     resolved_models = _normalize_string_list(models, field_name="models")
@@ -2703,33 +2675,17 @@ def validate_config_semantics(
         resolved_models,
         config_path=_resolve_train_config(config_file) if config_file is not None else None,
     )
-    summary_actions = [
-        action for action in SESSION.session_summary()["next_actions"] if action != "validate_config_semantics"
-    ]
+    summary_actions = [action for action in SESSION.session_summary()["next_actions"] if action != "check_config"]
     if result.get("ok", False):
-        # Named from the normalized value: the parameter is case-insensitive and 'run_Transform' is not
-        # a tool. And a transform writes a dataset, so its plan comes first: the order every other
-        # next_actions builder in this session already keeps.
-        normalized = workflow.strip().lower()
-        launchers = ["plan_transform", "run_transform"] if normalized == "transform" else [f"run_{normalized}"]
-        result["next_actions"] = list(dict.fromkeys([*launchers, "summarize_session", *summary_actions]))
+        # Named from the normalized value: the parameter is case-insensitive and 'run_Transform' is not a tool.
+        launcher = f"run_{workflow.strip().lower()}"
+        result["next_actions"] = list(dict.fromkeys([launcher, "summarize_session", *summary_actions]))
     else:
         result["next_actions"] = list(dict.fromkeys([*(result.get("next_actions", [])), "summarize_session"]))
     return result
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["review_config_semantics"]))
-def review_config_semantics(
-    workflow: Annotated[
-        WorkflowKind,
-        Field(description="Which session config to review (default 'train')."),
-    ] = "train",
-) -> dict[str, Any]:
-    """Review one config statically and emit lightweight semantic warnings before runtime validation."""
-    return SESSION.review_config_semantics(workflow)
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["summarize_session"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["summarize_session"]), meta=ALWAYS_LOAD)
 def summarize_session(
     include_leaderboard: Annotated[
         bool, Field(description="Include a top-5 leaderboard for the chosen split/metric (default True).")
@@ -2738,7 +2694,10 @@ def summarize_session(
         str | None, Field(description="Metric filter for the embedded leaderboard (default: every available metric).")
     ] = None,
     leaderboard_split: Annotated[
-        str, Field(description="Metric split for the embedded leaderboard (default 'TRAIN').")
+        str,
+        Field(
+            description="The Metric_<SPLIT>.json the leaderboard reads; an evaluation run writes TRAIN whatever cases it scored (default 'TRAIN')."
+        ),
     ] = "TRAIN",
     include_log_tail: Annotated[
         bool, Field(description="Include the latest session log tail (default False).")
@@ -2749,6 +2708,19 @@ def summarize_session(
     log_lines: Annotated[int, Field(description="Number of log lines when include_log_tail=True (default 50).")] = 50,
 ) -> dict[str, Any]:
     """Return one compact session snapshot for iterative agent loops."""
+    if not WORKSPACE_LAYOUT.session_workspace_exists():
+        # a session created and not yet initialised is a normal state, not an error: say so and point at the next step
+        return {
+            "session": WORKSPACE_LAYOUT.current_session,
+            "exists": False,
+            "readiness": {},
+            "configs": {},
+            "active_jobs": [],
+            "latest_job": None,
+            "metrics_summary": None,
+            "missing_configs": list(WORKFLOW_CONFIG_FILES),
+            "next_actions": ["initialize_session", "session"],
+        }
     summary = SESSION.session_summary()
     metrics_payload = SESSION.read_metrics_payload()
     payload: dict[str, Any] = {
@@ -2757,7 +2729,7 @@ def summarize_session(
         "readiness": summary["readiness"],
         "configs": summary["configs"],
         "resources": summary["resources"],
-        # Compact ref only (the full job payload is one get_job_status / list_jobs call away).
+        # Compact ref only (the full job payload is one get_job_status call away).
         "latest_job": (
             {
                 key: summary["latest_job"].get(key)
@@ -2770,8 +2742,22 @@ def summarize_session(
         # Whole metrics only: the per-label rows behind them are what get_run_metrics is for.
         "metrics_summary": top_level_metrics(metrics_payload["summary"] or {}) or None,
         "metrics_path": metrics_payload["path"],
+        "missing_configs": [workflow for workflow, path in summary["configs"].items() if path is None],
         "next_actions": summary["next_actions"],
     }
+    latest = summary["latest_job"]
+    if latest is not None and (job := JOB_REGISTRY.get(latest.get("job_id"))) is not None:
+        # the last parsed metric line of the job's log: a training's final losses without another call
+        latest_entry = SESSION.read_live_metrics_payload(job, 1)["latest"]
+        payload["latest_job"]["latest_metrics"] = (
+            {
+                "stage": latest_entry.get("stage"),
+                "metrics": top_level_metrics(latest_entry.get("flat_metrics") or {}),
+                "progress": latest_entry.get("progress"),
+            }
+            if latest_entry
+            else None
+        )
     if include_validation:
         validation = SESSION.validate_session_payload()
         # readiness/active_jobs/next_actions already sit at the top level of this payload.
@@ -2796,7 +2782,7 @@ def summarize_session(
     return round_floats(payload)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["write_workflow_config"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["write_workflow_config"]), meta=ALWAYS_LOAD)
 def write_workflow_config(
     workflow: Annotated[
         WorkflowKind,
@@ -2814,8 +2800,7 @@ def write_workflow_config(
     return _write_workflow_config(workflow, content, overwrite)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_jobs"]))
-def list_jobs() -> list[dict[str, Any]]:
+def _tool_list_jobs() -> list[dict[str, Any]]:
     """List known jobs for the current session workspace."""
     with _JOBS_LOCK:
         jobs = list(_JOBS.values())
@@ -2857,7 +2842,7 @@ def run_train(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -2879,6 +2864,8 @@ def run_train(
             description="SLURM submission via submitit: exactly the keys {name, memory, num_nodes, time_limit}; omit to run locally."
         ),
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch a training job from the session train config (Config.yml or an alternate config_file)."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -2907,10 +2894,10 @@ def run_train(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu, cluster),
     )
-    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster)
+    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster, cpu)
     if cpu_fallback:
         payload["warnings"] = cpu_fallback
-    return payload
+    return _launched(payload, wait, timeout_s)
 
 
 def _strip_to_weights_only(checkpoint: Path) -> Path:
@@ -2949,7 +2936,7 @@ def run_resume(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -2965,6 +2952,8 @@ def run_resume(
             description="Alternate train config filename in the session workspace (e.g. 'Config_GAN.yml'; default Config.yml)."
         ),
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Resume training from a checkpoint (optimizer/scheduler/epoch restored) via KonfAI's RESUME command."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -3010,7 +2999,7 @@ def run_resume(
         resume_model=resolved_model,
         lr=lr,
     )
-    return _launch_job(
+    launched = _launch_job(
         "train",
         job_spec["command"],
         config_path,
@@ -3023,6 +3012,7 @@ def run_resume(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_batch"]))
@@ -3037,7 +3027,7 @@ def run_batch(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool,
         Field(description="Overwrite existing run outputs without prompting (KonfAI --overwrite)."),
@@ -3171,8 +3161,8 @@ def preview_volume(
     max_size: Annotated[
         int, Field(description="Maximum output edge in pixels; larger planes are strided down (default 512).")
     ] = 512,
-) -> FastMCPImage:
-    """Render one slice of a volume as a PNG for visual QC."""
+) -> ToolResult:
+    """Render one slice of a volume as a PNG for visual QC, with the plane's own figures beside it."""
     try:
         import SimpleITK as sitk
     except ImportError as exc:
@@ -3214,6 +3204,23 @@ def preview_volume(
         else:
             plane = array
     plane = plane.astype(np.float32)
+    # the plane's figures beside the picture: a black image is a constant plane or a squashed window
+    unique = np.unique(plane)
+    figures = {
+        # the whole volume's geometry, from the header alone
+        "volume": {
+            "size_xyz": size_xyz,
+            "spacing_xyz": [round(v, 6) for v in reader.GetSpacing()],
+            "origin_xyz": [round(v, 4) for v in reader.GetOrigin()],
+            "direction": [round(v, 6) for v in reader.GetDirection()],
+        },
+        "shape": list(plane.shape),
+        "min": float(plane.min()),
+        "max": float(plane.max()),
+        "mean": float(plane.mean()),
+        "unique_count": int(unique.size),
+        "unique_values": unique.tolist() if unique.size <= 16 else None,
+    }
     low, high = np.percentile(plane, (1.0, 99.0))
     if high <= low:
         high = low + 1.0
@@ -3227,7 +3234,10 @@ def preview_volume(
         data = png_path.read_bytes()
     finally:
         png_path.unlink(missing_ok=True)
-    return FastMCPImage(data=data, format="png")
+    return ToolResult(
+        content=[FastMCPImage(data=data, format="png").to_image_content(), json.dumps(figures)],
+        structured_content=figures,
+    )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_prediction"]))
@@ -3242,12 +3252,14 @@ def run_prediction(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing prediction outputs without prompting (KonfAI --overwrite).")
     ] = False,
     quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch a prediction job from the current session `Prediction.yml`."""
     normalized_models = _normalize_string_list(models, field_name="models")
@@ -3281,7 +3293,7 @@ def run_prediction(
         quiet=quiet,
         single_process=single_process,
     )
-    return _launch_job(
+    launched = _launch_job(
         "prediction",
         job_spec["command"],
         config_path,
@@ -3293,6 +3305,7 @@ def run_prediction(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_evaluation"]))
@@ -3301,12 +3314,14 @@ def run_evaluation(
         int | list[int] | None,
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
-    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing evaluation outputs without prompting (KonfAI --overwrite).")
     ] = False,
     quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch an evaluation job from the current session `Evaluation.yml`."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -3325,7 +3340,7 @@ def run_evaluation(
         quiet=quiet,
         single_process=single_process,
     )
-    return _launch_job(
+    launched = _launch_job(
         "evaluation",
         job_spec["command"],
         config_path,
@@ -3334,26 +3349,21 @@ def run_evaluation(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
-def run_transform(
-    gpu: Annotated[
-        int | list[int] | None,
-        Field(description="GPU index or indices to run the chain on; omit for CPU (excludes cpu)."),
-    ] = None,
-    cpu: Annotated[int | None, Field(description="Shard the cases over N worker processes (default 1).")] = None,
-    overwrite: Annotated[
-        bool, Field(description="Recompute cases whose output already exists (KonfAI --overwrite).")
-    ] = False,
-    quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
-    single_process: Annotated[bool, Field(description="Inline, one process (no spawn).")] = False,
+def _tool_run_transform(
+    gpu: int | list[int] | None = None,
+    cpu: int | None = None,
+    overwrite: bool = False,
+    quiet: bool = False,
+    single_process: bool = False,
+    config_file: str | None = None,
 ) -> dict[str, Any]:
     """Launch a dataset transform job from the current session `Transform.yml`."""
-    config_path = SESSION.config_path("transform")
-    if not config_path.exists():
-        raise ValueError("Transform.yml not found. Write a transform config first.")
-    blocked = SESSION.workflow_blocker("transform")
+    config_path = _resolve_transform_config(config_file)
+    normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
+    blocked = SESSION.workflow_blocker("transform", config_path=config_path)
     if blocked is not None:
         return blocked
     job_spec = _runtime_job_spec(
@@ -3369,25 +3379,25 @@ def run_transform(
         "transform",
         job_spec["command"],
         config_path,
-        extra_manifest={"devices": {"gpu": [], "cpu": cpu}},
+        extra_manifest={"devices": {"gpu": normalized_gpu or [], "cpu": cpu}},
         target=job_spec["target"],
         kwargs=job_spec["kwargs"],
-        devices=_job_devices(None, cpu),
+        devices=_job_devices(normalized_gpu, cpu),
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["plan_transform"]))
-def plan_transform(
-    cpu: Annotated[int | None, Field(description="Rank count the plan is sized for (default 1).")] = None,
-    overwrite: Annotated[
-        bool, Field(description="Plan as if --overwrite: cases whose output exists are not counted as SKIP.")
-    ] = False,
+def _tool_plan_transform(
+    gpu: int | list[int] | None = None,
+    cpu: int | None = None,
+    overwrite: bool = False,
+    config_file: str | None = None,
 ) -> dict[str, Any]:
-    """Plan the transform without running it: per-case verdicts, budget, and what needs attention."""
-    config_path = SESSION.config_path("transform")
-    if not config_path.exists():
-        raise ValueError("Transform.yml not found. Write a transform config first.")
-    blocked = SESSION.workflow_blocker("transform")
+    """Plan the transform without running it: per-case verdicts, budget, and what needs attention, for the ranks the
+    same devices would launch (the plan divides the shared budget by them)."""
+    _device_args(gpu, cpu)  # the launch's own check: gpu and cpu exclusive, cpu > 0
+    ranks = len(_normalize_int_list(gpu, field_name="gpu") or []) or max(1, int(cpu or 1))
+    config_path = _resolve_transform_config(config_file)
+    blocked = SESSION.workflow_blocker("transform", config_path=config_path)
     if blocked is not None:
         return blocked
     with discard_scratch_configs(config_path) as scratch:
@@ -3397,7 +3407,7 @@ def plan_transform(
                 "workspace_dir": str(SESSION.workspace_dir()),
                 "config": str(config_path),
                 "scratch_path": str(scratch),
-                "cpu": max(1, int(cpu or 1)),
+                "ranks": ranks,
                 "overwrite": bool(overwrite),
             },
         )
@@ -3405,7 +3415,7 @@ def plan_transform(
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["cancel_job"]))
 def cancel_job(
-    job_id: Annotated[str, Field(description="Job to cancel (as returned by a run_* launch or list_jobs).")],
+    job_id: Annotated[str, Field(description="Job to cancel (as returned by a run_* launch or get_job_status).")],
     wait_s: Annotated[
         float, Field(description="Seconds to wait for a clean shutdown before the process group is killed (default 5).")
     ] = 5.0,
@@ -3414,20 +3424,9 @@ def cancel_job(
     return _cancel_job_payload(job_id, wait_s=wait_s)
 
 
-@mcp.tool(
-    description=(
-        "Request an on-demand validation pass on a running training job. Sends SIGUSR1 to the job's process "
-        "group; the trainer runs validation at its next iteration boundary and logs the metrics (no "
-        "checkpoint or early-stopping side effect). POSIX only; a no-op when no training job is running."
-    )
-)
-def request_validation(
-    kind: Annotated[
-        WorkflowKind, Field(description="Job kind to target when job_id is omitted (default 'train').")
-    ] = "train",
-    job_id: Annotated[
-        str | None, Field(description="Exact job to validate (default: the latest job of the given kind).")
-    ] = None,
+def _tool_request_validation(
+    kind: WorkflowKind = "train",
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Ask a running training job to run a validation pass now, via SIGUSR1."""
     job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
@@ -3446,34 +3445,10 @@ def request_validation(
     }
 
 
-@mcp.tool(
-    description=(
-        "Change tunables of a RUNNING training job in place, without restarting it. Writes a jailed "
-        "control.json into the run's Statistics/<run>/ dir; the trainer re-reads it at its next poll boundary "
-        "(~20 iterations) and records each change into the run's config snapshot. 'it_validation' takes effect "
-        "for all following iterations; 'lr' sets the optimizer learning rate now, rebased so a running "
-        "scheduler keeps it (the schedule restarts from the new value). POSIX/local; a no-op when no training "
-        "job is running."
-    )
-)
-def set_live_tunables(
-    lr: Annotated[
-        float | None,
-        Field(
-            gt=0,
-            description="New optimizer learning rate, applied at the next poll boundary. Omit to leave it unchanged.",
-        ),
-    ] = None,
-    it_validation: Annotated[
-        int | None,
-        Field(
-            gt=0,
-            description="New validation interval in iterations, effective for the following iterations. Omit to leave it unchanged.",
-        ),
-    ] = None,
-    job_id: Annotated[
-        str | None, Field(description="Exact training job to steer (default: the latest 'train' job of this session).")
-    ] = None,
+def _tool_set_live_tunables(
+    lr: float | None = None,
+    it_validation: int | None = None,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Steer a running training job's lr / it_validation by writing a jailed, revisioned control file."""
     if lr is None and it_validation is None:
@@ -3508,16 +3483,8 @@ def set_live_tunables(
         "revision": revision,
         "applied": {key: payload[key] for key in ("lr", "it_validation") if key in payload},
         "detail": "Applied at the trainer's next poll boundary (~20 iterations).",
-        "next_actions": ["read_live_metrics", "request_validation", "get_job_status"],
+        "next_actions": ["read_live_metrics", "control_training", "get_job_status"],
     }
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["get_job_status"]))
-def get_job_status(
-    job_id: Annotated[str, Field(description="Job identifier returned by a run_* launch or list_jobs.")],
-) -> dict[str, Any]:
-    """Return the current job status together with suggested next actions."""
-    return _job_payload(JOB_REGISTRY.get(job_id))
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["read_job_log"]))
@@ -3566,7 +3533,7 @@ def read_job_log(
         "grep": grep,
         "lines_returned": len(selected),
         "content": "\n".join(selected),
-        "next_actions": ["get_job_status", "validate_config_semantics", "summarize_session"],
+        "next_actions": ["get_job_status", "check_config", "summarize_session"],
     }
 
 
@@ -3579,7 +3546,9 @@ def read_live_metrics(
     job_id: Annotated[
         str | None, Field(description="Exact job to read (default: the latest job of the given kind).")
     ] = None,
-    max_entries: Annotated[int, Field(description="Maximum recent metric entries returned (default 20).")] = 20,
+    max_entries: Annotated[
+        int, Field(description="Recent metric entries returned (default 6; by_stage holds the latest per stage).")
+    ] = 6,
 ) -> dict[str, Any]:
     """Read parsed live metrics from the current runtime log of a job."""
     job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
@@ -3588,17 +3557,10 @@ def read_live_metrics(
     return SESSION.read_live_metrics_payload(job, max_entries)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["wait_for_job"]))
-def wait_for_job(
-    job_id: Annotated[str, Field(description="Job to wait for.")],
-    timeout_s: Annotated[
-        float | None,
-        Field(
-            description="Maximum seconds to wait; on expiry the job's CURRENT status is returned with timed_out=true "
-            "(a long training outliving one wait is normal, not an error). Omit/None to wait until the job finishes."
-        ),
-    ] = None,
-    poll_interval_s: Annotated[float, Field(description="Seconds between status polls (min 0.05; default 0.5).")] = 0.5,
+def _tool_wait_for_job(
+    job_id: str,
+    timeout_s: float | None = None,
+    poll_interval_s: float = 0.5,
 ) -> dict[str, Any]:
     """Block until a job becomes terminal, then return its final status payload (timeout semantics: see description)."""
     deadline = None if timeout_s is None else time.time() + max(timeout_s, 0.0)
@@ -3614,11 +3576,386 @@ def wait_for_job(
             payload["waited_s"] = round(float(timeout_s or 0.0), 1)
             payload["note"] = (
                 f"Job still {payload['status']} after {timeout_s:.1f}s of waiting: not a failure. "
-                "Call wait_for_job again, or read_live_metrics to watch progress."
+                "Call get_job_status(wait=True) again, or read_live_metrics to watch progress."
             )
-            payload["next_actions"] = ["wait_for_job", "read_live_metrics", "read_job_log"]
+            payload["next_actions"] = ["get_job_status", "read_live_metrics", "read_job_log"]
             return payload
         time.sleep(interval)
+
+
+# ------------------------------------------------------------------ one tool per object: the variants are its arguments
+
+
+def _required(value: str | None, field: str, action: str) -> str:
+    if not value:
+        raise ValueError(f"{field} is required for action '{action}'.")
+    return value
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_dataset"]))
+def inspect_dataset(
+    dataset_dir: Annotated[str, Field(description="The dataset root; with browse=True, any folder to explore.")],
+    browse: Annotated[
+        bool,
+        Field(description="Return a bounded file tree with candidate dataset roots instead of the group analysis."),
+    ] = False,
+    groups: Annotated[list[str] | None, Field(description="Restrict the statistics to these groups.")] = None,
+    extension: Annotated[str | None, Field(description="File extension to read; detected when omitted.")] = None,
+    max_cases_per_group: Annotated[int, Field(description="Cases sampled per group for the statistics.")] = 10,
+    seed: Annotated[int, Field(description="Sampling seed.")] = 0,
+    include_stats: Annotated[bool, Field(description="Sampled statistics (False: structure only, fast).")] = True,
+    depth: Annotated[int, Field(description="browse: folder depth of the tree.")] = 2,
+    max_entries: Annotated[int, Field(description="browse: entries listed at most.")] = 200,
+) -> dict[str, Any]:
+    if browse:
+        return SESSION.browse_dataset_payload(
+            Path(dataset_dir).expanduser().resolve(), depth=depth, max_entries=max_entries
+        )
+    return _tool_inspect_dataset(
+        dataset_dir,
+        groups=groups,
+        extension=extension,
+        max_cases_per_group=max_cases_per_group,
+        seed=seed,
+        include_stats=include_stats,
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["read_file"]))
+async def read_file(
+    path: Annotated[
+        str,
+        Field(
+            description="Relative to the session, or absolute for a dataset file; with template, the file name "
+            "inside that template; a resource URI (docs://..., guide://..., template://...) reads that resource."
+        ),
+    ],
+    template: Annotated[str | None, Field(description="An example template name: read one of its files.")] = None,
+    max_chars: Annotated[int, Field(description="Characters returned at most.")] = 20000,
+    offset: Annotated[int, Field(description="Character offset to start from.")] = 0,
+    max_lines: Annotated[int, Field(description="Lines returned at most from a dataset file.")] = 200,
+) -> dict[str, Any]:
+    if "://" in path:
+        # the resources, for a client that cannot read them itself
+        try:
+            parts = (await mcp.read_resource(path)).contents
+        except Exception as exc:
+            uris = sorted(str(r.uri) for r in await mcp.list_resources())
+            templates = sorted(str(t.uri_template) for t in await mcp.list_resource_templates())
+            raise ValueError(f"{exc}. Resources: {', '.join(uris)}. Templates: {', '.join(templates)}.") from None
+        text = "\n".join(
+            part.content if isinstance(part.content, str) else f"<{len(part.content)} bytes, {part.mime_type}>"
+            for part in parts
+        )
+        return {
+            "uri": path,
+            "content": text[offset : offset + max_chars],
+            "total_chars": len(text),
+            "truncated": offset + max_chars < len(text),
+        }
+    if template is not None:
+        return _tool_read_template_file(template, path, max_chars=max_chars, offset=offset)
+    candidate = Path(path).expanduser()
+    try:
+        resolved = WORKSPACE_LAYOUT.resolve_workspace_relative_path(path)
+    except ValueError:
+        if not candidate.is_absolute():
+            raise
+        if offset:
+            # paging: the raw text from offset, whatever max_lines says (the summary is the first page's), streamed
+            return read_text_range(candidate.resolve(), max_chars=max_chars, offset=offset)
+        return read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=max_chars)
+    if resolved.suffix.lower() in HDF5_SUFFIXES:
+        # run_app writes a registration's Transform.h5 into the session: its summary, not a text dump.
+        return read_dataset_sidecar(resolved, max_lines=max_lines, max_chars=max_chars)
+    return _tool_read_session_file(path, max_chars=max_chars, offset=offset)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["check_component"]))
+def check_component(
+    classpath: Annotated[
+        str,
+        Field(
+            description="`package.module:Class`, a session `File:Class`, or a bare package name; without kind "
+            "only its top-level package is checked."
+        ),
+    ],
+    kind: Annotated[
+        Literal["transform", "criterion", "loss", "metric"] | None,
+        Field(description="Contract to exercise in a smoke test; omit for the import pre-flight."),
+    ] = None,
+    shape: Annotated[
+        list[int] | None, Field(description="Smoke test: dummy tensor shape, channel-first (default [1, 8, 8, 8]).")
+    ] = None,
+    init_kwargs: Annotated[
+        dict[str, Any] | None, Field(description="Smoke test: constructor keyword arguments.")
+    ] = None,
+) -> dict[str, Any]:
+    if kind is None:
+        return _check_external_dependency(classpath)
+    return _tool_run_component_smoke_test(classpath, kind, shape=shape, init_kwargs=init_kwargs)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["check_config"]))
+def check_config(
+    workflow: Annotated[
+        WorkflowKind | Literal["all"],
+        Field(
+            description="Which workflow config to check; 'all' checks every present config (instantiate and deeper)."
+        ),
+    ] = "train",
+    level: Annotated[
+        Literal["review", "instantiate", "setup", "train_step"],
+        Field(
+            description="review: schema and semantics, no runtime object; instantiate, setup, train_step: built "
+            "in an isolated subprocess, each deeper than the last."
+        ),
+    ] = "review",
+    models: Annotated[
+        list[str] | None, Field(description="instantiate and deeper: checkpoint paths for a prediction or evaluation.")
+    ] = None,
+    config_file: Annotated[
+        str | None, Field(description="instantiate and deeper: an alternate train config file of the session.")
+    ] = None,
+) -> dict[str, Any]:
+    if level == "review":
+        if workflow == "all":
+            raise ValueError("level 'review' checks one workflow: pass train, prediction, evaluation or transform.")
+        return SESSION.review_config_semantics(workflow)
+    return _tool_validate_config_semantics(workflow, level=level, models=models, config_file=config_file)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
+def run_transform(
+    dry_run: Annotated[
+        bool,
+        Field(description="Plan only: every case's verdict and the budget; nothing of the deliverable is written."),
+    ] = False,
+    gpu: Annotated[
+        int | list[int] | None, Field(description="GPU index or indices; omit for CPU (excludes cpu).")
+    ] = None,
+    cpu: Annotated[int | None, Field(description=_RUN_CPU_DESC)] = None,
+    overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
+    quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
+    single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,
+    config_file: Annotated[
+        str | None,
+        Field(
+            description="Alternate transform config in the session (e.g. Transform_masks.yml; default Transform.yml)."
+        ),
+    ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
+) -> dict[str, Any]:
+    if dry_run:
+        return _tool_plan_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, config_file=config_file)
+    return _launched(
+        _tool_run_transform(
+            gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process, config_file=config_file
+        ),
+        wait,
+        timeout_s,
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["session"]))
+def session(
+    action: Annotated[Literal["list", "create", "switch", "delete", "import"], Field(description="What to do.")],
+    name: Annotated[str | None, Field(description="create, switch: the session name.")] = None,
+    source_dir: Annotated[str | None, Field(description="import: the experiment directory to adopt.")] = None,
+    include_artifacts: Annotated[
+        Literal["link", "copy", "none"],
+        Field(description="import: how Checkpoints, Predictions, Evaluations, Statistics and Dataset come along."),
+    ] = "link",
+    overwrite: Annotated[bool, Field(description="import: replace files already in the session.")] = False,
+    switch: Annotated[bool, Field(description="create: make the new session current.")] = True,
+    force: Annotated[bool, Field(description="delete: cancel the active jobs first.")] = False,
+    from_example: Annotated[
+        str | None, Field(description="create: seed the new session from this example template in the same call.")
+    ] = None,
+    workflows: Annotated[
+        str | list[str] | None, Field(description="create with from_example: the workflow configs to seed.")
+    ] = None,
+) -> dict[str, Any]:
+    if action == "list":
+        return {
+            "session": WORKSPACE_LAYOUT.current_session,
+            "sessions": WORKSPACE_LAYOUT.available_sessions(),
+            # a host UI (Studio) owns the session binding: create, switch and delete are refused
+            "pinned_by_host": bool(os.environ.get("KONFAI_MCP_SESSION")),
+        }
+    if action == "create":
+        if from_example is not None and not switch:
+            raise ValueError("from_example seeds the new session, which needs switch=True")
+        created = _tool_create_session(_required(name, "name", action), switch=switch)
+        if from_example is not None:
+            # one intention, one call: created to be seeded
+            created["initialized"] = _tool_initialize_session(from_example=from_example, workflows=workflows)
+        return created
+    if action == "switch":
+        return _tool_switch_session(_required(name, "name", action))
+    if action == "delete":
+        return _tool_delete_session(force=force)
+    return _tool_import_experiment(
+        _required(source_dir, "source_dir", action), include_artifacts=include_artifacts, overwrite=overwrite
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["get_job_status"]))
+def get_job_status(
+    job_id: Annotated[str | None, Field(description="The job; omitted: every job of the session.")] = None,
+    wait: Annotated[bool, Field(description="Block until the job ends or timeout_s expires.")] = False,
+    timeout_s: Annotated[
+        float | None, Field(description="wait: seconds before returning the current status with timed_out=true.")
+    ] = None,
+    poll_interval_s: Annotated[float, Field(description="wait: polling interval in seconds.")] = 0.5,
+) -> dict[str, Any]:
+    if job_id is None:
+        return {"jobs": _tool_list_jobs(), "session": WORKSPACE_LAYOUT.current_session}
+    if wait:
+        return _tool_wait_for_job(job_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+    return _job_payload(JOB_REGISTRY.get(job_id))
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["control_training"]))
+def control_training(
+    job_id: Annotated[str | None, Field(description="The training job; omitted: the running one.")] = None,
+    lr: Annotated[
+        float | None, Field(gt=0, description="New learning rate, applied now and kept by a running scheduler.")
+    ] = None,
+    it_validation: Annotated[int | None, Field(gt=0, description="New validation interval, in iterations.")] = None,
+    validate_now: Annotated[bool, Field(description="Run a validation pass at the next iteration.")] = False,
+    kind: Annotated[WorkflowKind, Field(description="Job kind to target when job_id is omitted.")] = "train",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if lr is not None or it_validation is not None:
+        payload = _tool_set_live_tunables(lr=lr, it_validation=it_validation, job_id=job_id)
+    if validate_now:
+        validation = _tool_request_validation(kind=kind, job_id=job_id)
+        payload = {**payload, "validation": validation} if payload else validation
+    if not payload:
+        return _tool_set_live_tunables(lr=None, it_validation=None, job_id=job_id)
+    return payload
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_app"]))
+def describe_app(
+    ref: Annotated[str, Field(description="App reference: a local bundle path, a HuggingFace repo or repo/app.")],
+    parameters: Annotated[
+        bool, Field(description="Add the app's tunable model parameters and their constraints (imports its code).")
+    ] = False,
+    allow_untrusted_code: Annotated[
+        bool, Field(description="parameters: confirm the app's code may be imported, in an isolated subprocess.")
+    ] = False,
+    force_update: Annotated[bool, Field(description="Re-download a cached HuggingFace app.")] = False,
+) -> dict[str, Any]:
+    payload = APP_SERVICE.describe_app(ref, force_update=force_update)
+    if parameters:
+        tunables = APP_SERVICE.list_parameters(
+            ref, allow_untrusted_code=allow_untrusted_code, force_update=force_update
+        )
+        payload = {**payload, "parameters": tunables}
+    return payload
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fetch_app"]))
+def fetch_app(
+    ref: Annotated[str, Field(description="App reference: a local bundle path, a HuggingFace repo or repo/app.")],
+    path: Annotated[
+        str | None,
+        Field(description="Export the app as an editable bundle in this folder; omitted: import it into the session."),
+    ] = None,
+    display_name: Annotated[str | None, Field(description="Display name of the copy.")] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None, Field(description="Model parameter name->value overrides baked into the copied config.")
+    ] = None,
+    allow_untrusted_code: Annotated[
+        bool, Field(description="import: confirm the app's code may be copied and run and its requirements installed.")
+    ] = False,
+    overwrite: Annotated[bool, Field(description="export: replace files already in the destination.")] = False,
+    force_update: Annotated[bool, Field(description="Re-download a cached HuggingFace app.")] = False,
+) -> dict[str, Any]:
+    if path is not None:
+        return _tool_export_app(
+            ref,
+            path,
+            display_name=display_name,
+            set_parameters=set_parameters,
+            force_update=force_update,
+            overwrite=overwrite,
+        )
+    return _tool_import_app(
+        ref,
+        allow_untrusted_code=allow_untrusted_code,
+        display_name=display_name,
+        set_parameters=set_parameters,
+        force_update=force_update,
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["app_sources"]))
+def app_sources(
+    action: Annotated[Literal["add", "remove"], Field(description="add persists the reference; remove drops it.")],
+    ref: Annotated[str, Field(description="An app bundle path or a HuggingFace repo id.")],
+) -> dict[str, Any]:
+    return APP_SERVICE.register_app_source(ref) if action == "add" else APP_SERVICE.unregister_app_source(ref)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["read_scout_report"]))
+def read_scout_report(
+    name: Annotated[str | None, Field(description="The inspection's name; omitted: the session's inspections.")] = None,
+) -> dict[str, Any]:
+    if name:
+        return SCOUT_SERVICE.read_report(name)
+    return {"reports": SCOUT_SERVICE.list_reports(), "next_actions": ["read_scout_report", "run_scout_inspection"]}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_catalog"]))
+def fidopt_catalog(
+    dataset: Annotated[
+        str | None, Field(description="One dataset's name for its descriptor; omitted: every dataset.")
+    ] = None,
+    task: Annotated[
+        Literal["registration", "segmentation", "synthesis"] | None,
+        Field(description="Restrict the datasets (and the methods) to one task."),
+    ] = None,
+    anatomy: Annotated[str | None, Field(description="Keep the datasets whose anatomy mentions this word.")] = None,
+    methods: Annotated[bool, Field(description="Include the methods (of the task, or of the dataset's task).")] = True,
+) -> dict[str, Any]:
+    data_root = os.environ.get("FIDOPT_DATA")
+    corpus = {
+        "path": data_root,
+        # what fidopt_run can score here: the corpus is built by each user, a descriptor alone is not a dataset
+        "datasets_present": (
+            sorted(p.name for p in Path(data_root).expanduser().iterdir() if p.is_dir() and any(p.iterdir()))
+            if data_root and Path(data_root).expanduser().is_dir()
+            else []
+        ),
+    }
+    if dataset:
+        described = FIDOPT.describe_dataset(dataset)
+        wanted = described.get("task")
+        listed = [m for m in FIDOPT.list_methods() if not wanted or m.get("task") == wanted] if methods else []
+        return {
+            "dataset": described,
+            "methods": listed,
+            "corpus": corpus,
+            "next_actions": ["fidopt_table", "fidopt_run"],
+        }
+    datasets = FIDOPT.list_datasets(task)
+    if anatomy:
+        datasets = [d for d in datasets if anatomy.lower() in str(d.get("anatomy") or "").lower()]
+    # one line per dataset: the descriptor (fidopt_catalog(dataset=...)) holds the rest
+    compact = [
+        {key: d.get(key) for key in ("name", "task", "anatomy", "modalities", "cases", "development")} for d in datasets
+    ]
+    listed = [m for m in FIDOPT.list_methods() if not task or m.get("task") == task] if methods else []
+    return {
+        "datasets": compact,
+        "methods": listed,
+        "corpus": corpus,
+        "next_actions": ["fidopt_catalog", "fidopt_table", "fidopt_run"],
+    }
 
 
 def main(

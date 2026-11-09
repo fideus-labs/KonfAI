@@ -543,9 +543,7 @@ class JobRegistry:
         next_resources = [f"job://{job.job_id}/log"]
         if job.status in self.active_states:
             # App jobs have no parsed runtime metrics (runtime_log_path is None), so skip read_live_metrics.
-            next_actions.extend(
-                ["wait_for_job", "cancel_job"] if app_kind else ["wait_for_job", "read_live_metrics", "cancel_job"]
-            )
+            next_actions.extend(["cancel_job"] if app_kind else ["read_live_metrics", "cancel_job"])
         elif job.status == "done":
             # An app job writes its outputs to a directory recorded in the manifest, so point at it.
             if app_kind:
@@ -555,7 +553,7 @@ class JobRegistry:
                 # gets no evaluate/refine push: the loop never starts spontaneously.
                 if job.kind in ("evaluate", "pipeline"):
                     # There is a score: rank the trials, re-tune, keep the best.
-                    next_actions.extend(["leaderboard", "compare_runs", "run_app", "export_app"])
+                    next_actions.extend(["leaderboard", "compare_runs", "run_app", "fetch_app"])
                 elif job.kind == "infer" and job.set_parameters:
                     # Already tuning inference parameters: help close the loop toward a score.
                     next_actions.extend(["run_app", "compare_runs"])
@@ -571,7 +569,7 @@ class JobRegistry:
                 next_actions.extend(WORKFLOW_DONE_NEXT.get(job.kind, ["summarize_session", "leaderboard"]))
         else:
             next_actions.append("read_job_log")
-            next_actions.extend([retry_tool] if app_kind else ["validate_config_semantics", retry_tool])
+            next_actions.extend([retry_tool] if app_kind else ["check_config", retry_tool])
         payload: dict[str, Any] = {
             "job_id": job.job_id,
             "session": job.session,
@@ -611,6 +609,42 @@ class JobRegistry:
             },
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
         }
+        if (
+            job.status in {"done", "killed", "error"}
+            and not app_kind
+            and job.run_name
+            and self.workspace_layout is not None
+        ):
+            # what the run produced (a cancelled training left its checkpoints too), so the next step needs no
+            # guess at a path
+            run_dirs = {
+                "train": self.workspace_layout.checkpoints_dir,
+                "prediction": self.workspace_layout.predictions_dir,
+                "evaluation": self.workspace_layout.evaluations_dir,
+            }
+            out_dir = run_dirs[job.kind]() / job.run_name if job.kind in run_dirs else None
+            if out_dir is not None and out_dir.is_dir():
+                # ponytail: a full walk per status call; cache it if a big run makes this slow
+                files = sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+                payload["outputs"] = {"dir": str(out_dir), "file_count": len(files), "files": files[:20]}
+                checkpoints = [p for p in out_dir.glob("*.pt") if p.name != "resume_latest.pt"]
+                if checkpoints:
+                    # the one run_resume takes by default; resume_latest.pt is KonfAI's rolling copy
+                    newest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+                    payload["outputs"]["newest_checkpoint"] = str(newest)
+        if job.status == "done" and app_kind and job.output_path is not None and job.output_path.is_dir():
+            # an app job's output directory, and the aggregates an evaluation wrote there
+            files = sorted(str(p.relative_to(job.output_path)) for p in job.output_path.rglob("*") if p.is_file())
+            app_outputs: dict[str, Any] = {"dir": str(job.output_path), "file_count": len(files), "files": files[:20]}
+            summary_path = job.output_path / "Evaluation_summary.json"
+            if summary_path.is_file():
+                with suppress(Exception):
+                    app_outputs["evaluation_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+            if job.manifest_path is not None and job.manifest_path.is_file():
+                # P000... -> the source files, recorded at launch
+                with suppress(Exception):
+                    app_outputs["cases"] = json.loads(job.manifest_path.read_text(encoding="utf-8")).get("cases")
+            payload["outputs"] = app_outputs
         # Only a finished job's manifest is its own: the run directory is reused across runs of one
         # name, so while the job is queued or running the file there is a previous run's.
         outputs = self._recorded_outputs(job) if job.status == "done" else None
@@ -729,7 +763,7 @@ class JobRegistry:
                 )
                 raise RuntimeError(
                     f"Session '{session}' already has active job(s) on conflicting device(s): {active}. "
-                    "Pick disjoint gpu ids, or wait_for_job / cancel_job first."
+                    "Pick disjoint gpu ids (gpu=[] for a CPU-only job), or get_job_status(wait=True) / cancel_job first."
                 )
             self.jobs[job.job_id] = job
             self._persist_job(job)

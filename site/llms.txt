@@ -1,0 +1,35 @@
+# KonfAI
+
+> KonfAI is a declarative medical-imaging execution engine: one YAML connects storage, transforms, model graphs, losses, training, prediction, evaluation and output geometry. The same engine ships published applications (KonfAI Apps), an MCP server that lets an agent drive it (KonfAI MCP), a visual inspector of results (KonfAI Scout) and a chat web UI (KonfAI Studio). Code: https://github.com/fideus-labs/KonfAI (Apache-2.0). Docs: https://konfai.readthedocs.io/en/latest/
+
+## Pages
+
+- [KonfAI](index.html): the engine, its four workflows (TRAIN, PREDICTION, EVALUATION, TRANSFORM), how to install it
+- [KonfAI Apps](apps.html): the five published bundles with their measured figures, the konfai-apps runtime, Slicer
+- [KonfAI MCP](mcp.html): the fifty tools of the MCP server, grouped by stage, one sentence each
+- [KonfAI Scout](scout.html): what the inspector does, how it measures, how it keeps its statements apart, how to install it
+- [KonfAI Studio](studio.html): the chat UI over the MCP server, its three ways in, the sessions it keeps
+
+## Documentation (short pages for a newcomer; the exhaustive reference is https://konfai.readthedocs.io/en/latest/)
+
+- [Documentation](docs/index.html): what the docs cover and which page to read first
+- [Get started](docs/get-started.html): install, the Segmentation quickstart (TRAIN, PREDICTION, EVALUATION), what appears on disk
+- [Configuration](docs/configuration.html): the four roots, dataset_filenames and the path:flag:format token, groups_src and groups_dest, transforms, patches, models by classpath
+- [Workflows](docs/workflows.html): TRAIN and RESUME, PREDICTION with test-time augmentation and ensembles, EVALUATION, TRANSFORM, the options --gpu, --cpu, --overwrite, --quiet
+- [Datasets](docs/datasets.html): the one-folder-per-case layout, the formats (ITK, HDF5, DICOM, OME-Zarr, ITK transforms), regional reads
+- [Apps](docs/apps.html): what an app is, how to run one, the published catalogue, 3D Slicer
+- [Agents and MCP](docs/agents-mcp.html): what the MCP server lets an agent do, the tools by stage, the entry tools
+- [Scout](docs/scout.html): the visual inspector, its three kinds of statement, how to install it
+- [Studio](docs/studio.html): the chat web UI, how to install it, the model brains
+- [Edge](docs/edge.html): KonfAI Edge, the Rust runtime that runs the apps in a browser tab, and where its demo will live
+
+## Source documents
+
+- [KonfAI README](https://github.com/fideus-labs/KonfAI/blob/main/README.md)
+- [konfai-apps README](https://github.com/fideus-labs/KonfAI/blob/main/konfai-apps/README.md) and the bundles under [apps/](https://github.com/fideus-labs/KonfAI/tree/main/apps)
+- [konfai-mcp README](https://github.com/fideus-labs/KonfAI/blob/main/konfai-mcp/README.md) and the [generated tool reference](https://github.com/fideus-labs/KonfAI/blob/main/.claude/skills/konfai-experiments/references/tool-reference.md)
+- [konfai-scout README](https://github.com/fideus-labs/KonfAI/blob/main/konfai-scout/README.md)
+- [konfai-studio README](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/README.md) and its [specification](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/docs/STUDIO_SPEC.md)
+- [AGENTS.md](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md): the contributor's guide
+- [Documentation](https://konfai.readthedocs.io/en/latest/)
+- [FidOpt](https://fidopt.io/): the benchmark KonfAI MCP reads through FidOpt's own code

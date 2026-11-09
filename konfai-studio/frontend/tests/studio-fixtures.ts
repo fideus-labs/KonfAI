@@ -20,8 +20,15 @@ export async function studioRoutes(page: Page) {
     if (path === "/api/live") return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     const bodies: Record<string, unknown> = {
       "/api/auth": { required: false, authenticated: true },
-      "/api/health": { agent: "ready" },
-      "/api/sessions": { sessions: ["S"] },
+      "/api/health": { agent: "ready", tools: 50 },
+      "/api/sessions": { sessions: ["S"], titles: { S: "Lung study" }, datasets: {} },
+      "/api/sessions/status": { statuses: {} },
+      "/api/system": { gpus: [], ram: null, cpu: null },
+      "/api/llm": { current: "claude-code", model: "", options: [{ id: "claude-code", label: "Claude Code", detail: "", available: true, models: [] }] },
+      "/api/apps": { apps: [] },
+      "/api/device": { devices: {}, default: "auto" },
+      "/api/datasets": { datasets: [] },
+      "/api/chat/history": { messages: [] },
       "/api/experiment": { checkpoints: [], predictions: [], jobs: [] },
       "/api/experiment/ls": { root: "/workspace", dirs: [], files: [{ name: "Config.yml" }, { name: "ct.nii.gz" }] },
       "/api/experiment/file": { name: "Config.yml", content: "Trainer: {}", editable: true },

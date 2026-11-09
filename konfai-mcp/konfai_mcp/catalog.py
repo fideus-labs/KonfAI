@@ -73,6 +73,23 @@ def normalize_kind(kind: str) -> str:
         ) from None
 
 
+def builtin_inspect_classpath(name: str) -> str | None:
+    """The importable classpath of the builtin component named ``name`` alone (``Dice`` ->
+    ``konfai.metric.measure:Dice``), the first kind that lists it; None when no kind does."""
+    for kind in COMPONENT_KINDS:
+        if kind == "block":
+            continue
+        components = catalog.list_models()[0] if kind == "model" else catalog.list_components(kind)
+        for component in components:
+            if component.name != name or component.module is None:
+                continue
+            if kind == "model":
+                return model_config_reference_to_inspect_classpath(component.config_reference)
+            module = public_module(getattr(importlib.import_module(component.module), component.name))
+            return f"{module}:{component.name}"
+    return None
+
+
 def model_config_reference_to_inspect_classpath(config_reference: str) -> str | None:
     """Map a builtin-model ``config_reference`` to its importable ``inspect_classpath``.
 

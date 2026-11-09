@@ -210,12 +210,23 @@ def _status_for(job: dict[str, Any], log: Path | None) -> str:
     return claim.status
 
 
+_DEAD_SINCE: dict[str, float] = {}
+_DEAD_GRACE_S = 3.0
+
+
 def _live_status(job: dict[str, Any]) -> str:
     """The job's status, but a still-'running' record whose process is gone reads as 'failed': the MCP
-    monitor that would flip it may have died (e.g. a server restart), leaving the status stale."""
+    monitor that would flip it may have died (e.g. a server restart), leaving the status stale.
+
+    A process that just exited is given a few seconds: the monitor flips the record to 'done' moments after
+    the exit, and a feed that reads in between painted a finished Scout inspection red."""
     status = str(job.get("status") or "")
     if status in {"running", "waiting", "queued"} and not _pid_alive(job.get("pid")):
-        return "error"  # a terminal status the UI renders red; the log tail shows the traceback
+        key = str(job.get("job_id") or job.get("pid") or "")
+        first_seen = _DEAD_SINCE.setdefault(key, time.time())
+        if time.time() - first_seen >= _DEAD_GRACE_S:
+            return "error"  # a terminal status the UI renders red; the log tail shows the traceback
+        return status
     return status
 
 

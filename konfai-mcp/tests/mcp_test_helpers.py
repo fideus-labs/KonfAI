@@ -120,8 +120,8 @@ async def run_job(
     job = await client.call_tool(tool_name, payload)
     job_payload = job.structured_content
     done = await client.call_tool(
-        "wait_for_job",
-        {"job_id": job_payload["job_id"], "timeout_s": timeout_s, "poll_interval_s": 0.2},
+        "get_job_status",
+        {"wait": True, "job_id": job_payload["job_id"], "timeout_s": timeout_s, "poll_interval_s": 0.2},
     )
     done_payload = done.structured_content
     if done_payload["status"] != "done":

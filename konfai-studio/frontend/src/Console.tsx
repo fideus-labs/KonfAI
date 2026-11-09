@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { ChevronIcon } from "./icons";
 
 // The bottom drawer is a real login shell rooted at the workspace: run nvidia-smi, activate an env,
 // inspect files. The job log lives in the Live tab now, so this is a general-purpose terminal.
@@ -86,7 +87,7 @@ export default function Console({ initialOpen = false }: { initialOpen?: boolean
         {open && <span className={connected ? "cst running" : "cst"}>{connected ? "connected" : "…"}</span>}
         <span className="cbar-spacer" />
         <button className="toggle" aria-label={open ? "Collapse terminal" : "Open terminal"} aria-expanded={open}>
-          {open ? "▾" : "▸"}
+          <ChevronIcon open={open} />
         </button>
       </div>
       <div className="term-host" ref={hostRef} style={{ display: open ? "block" : "none" }} />

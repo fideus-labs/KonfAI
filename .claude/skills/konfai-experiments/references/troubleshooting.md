@@ -8,10 +8,10 @@ This file is the map from a symptom to the tool that diagnoses or fixes it.
 - **Never launch a run to "see if it works".** `run_train` / `run_prediction` /
   `run_evaluation` actually execute and write `Checkpoints/`, `Statistics/`,
   `Predictions/`, `Evaluations/` under the session workspace, they are destructive, not
-  dry runs. Catch errors with `review_config_semantics` → `validate_config_semantics`
+  dry runs. Catch errors with `check_config` → `check_config(level='instantiate')`
   first (both are side-effect-free on your authored config).
 - **One active job per session.** Launching a second run while one is queued/running
-  raises `Session '<name>' already has active job(s)`. Either `wait_for_job` on the
+  raises `Session '<name>' already has active job(s)`. Either `get_job_status(wait=True)` on the
   active one or `cancel_job`, or work in a different session.
 - **A server restart orphans running jobs.** The server does **not** kill the child on
   restart; it loses the in-memory process handle and marks every previously-active job
@@ -24,18 +24,18 @@ This file is the map from a symptom to the tool that diagnoses or fixes it.
 
 | Symptom | Diagnose / fix with |
 |---|---|
-| Config written but unsure it's valid | `review_config_semantics` → `validate_config_semantics` |
-| `review_config_semantics` returns `blocking_issues` | Fix the YAML, re-write with `write_workflow_config`, review again. Do **not** proceed to validate. |
-| `validate_config_semantics` returns `ok=false` | Read `error_type` / `error`; a KonfAI refusal says what to change in its message. A `traceback` comes only with a crash (also one a refusal wraps): fix the offending object, using `inspect_object_signature` on the classpath it names to get its real parameters. |
+| Config written but unsure it's valid | `check_config` → `check_config(level='instantiate')` |
+| `check_config` returns `blocking_issues` | Fix the YAML, re-write with `write_workflow_config`, review again. Do **not** proceed to validate. |
+| `check_config(level='instantiate')` returns `ok=false` | Read `error_type` / `error`; a KonfAI refusal says what to change in its message. A `traceback` comes only with a crash (also one a refusal wraps): fix the offending object, using `inspect_object_signature` on the classpath it names to get its real parameters. |
 | Unknown/ambiguous object name in YAML | `list_components` for that kind, then `inspect_object_signature` on the chosen classpath. |
 | "How is X even configured?" | `describe_config_schema` for the workflow; `inspect_object_signature` for one object. |
-| Optional dependency error (`itk`, `h5py`, `lpips`, …) | `check_external_dependency` to confirm what's installed and get the install hint. |
+| Optional dependency error (`itk`, `h5py`, `lpips`, …) | `check_component` to confirm what's installed and get the install hint. |
 | Prediction can't find a checkpoint | Confirm training finished (`get_job_status` → `done`) and that a checkpoint exists in the session workspace. `run_prediction` does **not** search outside the session for a missing checkpoint. |
 | Evaluation reports missing predictions | Run/confirm `run_prediction` first; the evaluator does **not** infer missing predictions. |
 | Dataset mapping looks wrong (`IMG` vs `CT`) | `inspect_dataset` → `prepare_dataset_aliases`, then re-`design_config_strategy`. |
 | Job stuck / need to stop it | `cancel_job` (SIGTERM, waits ~5s, then SIGKILL). |
-| Job failed: what next? | The job payload's `next_actions` say `validate_config_semantics` then `retry:<kind>`. Validate first to catch the cause, fix, relaunch. |
-| Long training seems to "hang" | It probably isn't: `wait_for_job` **with no `timeout_s`** waits until the job truly finishes. Use `read_live_metrics` / the `job://<id>/log` resource to watch progress. Only pass `timeout_s` when you deliberately want to bound the wait (on expiry it returns the current status with `timed_out=true`). |
+| Job failed: what next? | The job payload's `next_actions` say `check_config(level='instantiate')` then `retry:<kind>`. Validate first to catch the cause, fix, relaunch. |
+| Long training seems to "hang" | It probably isn't: `get_job_status(wait=True)` **with no `timeout_s`** waits until the job truly finishes. Use `read_live_metrics` / the `job://<id>/log` resource to watch progress. Only pass `timeout_s` when you deliberately want to bound the wait (on expiry it returns the current status with `timed_out=true`). |
 
 ## Job status lifecycle
 
@@ -45,7 +45,7 @@ job payload:
 
 - **queued / running** → `get_job_status`, `read_live_metrics`, read `job://<id>/log`, `cancel_job`
 - **done** → `summarize_session`, then `leaderboard` to compare against other runs
-- **error / killed** → `validate_config_semantics`, then retry the same `kind`
+- **error / killed** → `check_config(level='instantiate')`, then retry the same `kind`
 
 ## Where the artifacts and state live
 

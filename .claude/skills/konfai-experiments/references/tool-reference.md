@@ -2,281 +2,209 @@
 
 > GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.
 
-68 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
+50 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
 ## Tools
 
-### `browse_dataset`
+### `app_sources`
 
-Use first when a dataset path may contain nested roots, cohorts, or ambiguous structure. This returns a bounded file tree and candidate dataset roots. It does not infer the task or write configs. Outputs: tree, candidate_dataset_roots, common_groups, incomplete_groups, and next_actions. Next: inspect_dataset on one chosen root.
+Edit the workspace app catalogue that list_apps merges: action 'add' persists an app path or HuggingFace repo across sessions, 'remove' drops it. Does not validate the reference: describe_app does.
 
 ### `cancel_job`
 
-Use when a running job should stop. This requests cancellation and waits briefly for a clean shutdown. It does not delete any session artifacts. Outputs: final job payload after cancellation. Next: summarize_session.
+Stop a running job: requests cancellation and waits briefly for a clean shutdown. Artifacts are kept.
 
-### `check_external_dependency`
+### `check_component`
 
-Use to PRE-FLIGHT an external library before integrating a brick from it (e.g. before referencing `monai.losses:DiceLoss` or wrapping `segmentation_models_pytorch`). This reports whether the library is importable, its version and license, whether it is already a KonfAI dependency, and an install hint, WITHOUT importing the library into the server process (no import side effects run here). Only the TOP-LEVEL package is checked ('monai.losses' checks 'monai'): it answers 'not installed' vs 'installed', not whether the submodule or class exists: use inspect_object_signature to verify the full classpath. Outputs: installed, version, license, distribution, is_konfai_dependency, install_hint, caution, next_actions. Next: inspect_object_signature on the chosen classpath, or describe_extension_points to write a wrapper.
+Pre-flight a component before wiring it into a config. Without kind: whether the classpath's top-level package is importable (version, licence, install hint), checked without importing it here. With kind: smoke-test the classpath on dummy tensors in an isolated subprocess (a transform's shape contract, a criterion's return and backward). The smoke test runs the code: only on code you or the user wrote.
+
+### `check_config`
+
+Check the session's workflow config. level 'review': schema and semantic checks only (blocking_issues, warnings; no runtime object built). 'instantiate' builds the KonfAI objects, 'setup' also the dataloader, 'train_step' runs one forward and backward on one batch (train only): each in an isolated subprocess, nothing launched; every level includes the review's findings, one call is enough. Next: run_train, run_prediction, run_evaluation, or fix the config.
 
 ### `compare_runs`
 
-Use to COMPARE two runs metric-by-metric on aligned cases: means, per-case deltas, and a direction-aware winner per metric (loss-like metrics count lower as better). This reads both runs' Metric_<SPLIT>.json; it does not rerun evaluation. Outputs: metrics {direction, cases, mean_a/mean_b, mean_delta_b_minus_a, cases_better_a/b, winner, per_case_delta_b_minus_a}, next_actions. Next: get_run_metrics on the winner, or leaderboard.
+Two runs metric by metric on aligned cases: means, per-case deltas, a direction-aware winner (loss-like metrics count lower as better). Reads their Metric_<split>.json.
 
-### `create_session`
+### `control_training`
 
-Use to CREATE a named session workspace (and switch to it by default), so different experiments or config families live in isolated workspaces instead of overwriting one another. This creates sessions/<name> under the workspace root and makes it the current session. It does not seed configs (initialize_session does) and refuses to switch while a job is active. Outputs: session, created, switched, sessions, next_actions. Next: initialize_session or import_experiment in the new session. Refused when a host UI pinned the session (KONFAI_MCP_SESSION): work in the current session instead.
+Steer a RUNNING training without restarting it: lr and it_validation are applied at its next poll boundary and recorded in the run's config snapshot; validate_now=True runs a validation pass at the next iteration. POSIX, local jobs; a no-op when nothing runs.
 
 ### `delete_run`
 
-Use to remove ONE run's outputs from the current session, leaving the rest of the workspace intact. This deletes the run's directory under the kind's output root (train removes Statistics/<run_name> and Checkpoints/<run_name>; prediction, evaluation, uncertainty remove their <run_name> folder; transform removes Transforms/<run_name>, its log and plan only, never the transformed data), jailed to the session workspace. It refuses a run_name containing a path separator, and never touches configs or the dataset. Outputs: the deleted paths (relative to the workspace). Next: summarize_session, or leaderboard to compare the remaining runs.
-
-### `delete_session`
-
-Use when you want to remove the current session workspace. This deletes the workspace and can cancel active jobs when forced. It does not preserve artifacts. Outputs: deleted session name and path. Next: none unless you want to reinitialize the session. Refused when a host UI pinned the session (KONFAI_MCP_SESSION): deletion belongs to the host UI.
+Delete one run's outputs of a kind (train: its Statistics and Checkpoints; prediction, evaluation, uncertainty: its folder; transform: its plan and log only), jailed to the session. Never a config or the dataset.
 
 ### `describe_app`
 
-Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text description is the primary signal, with the input/output modality confirming the fit. This resolves a single app and returns its app.json: display name, description, input and output modality (with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation terminology. It is metadata-only and SAFE: it does not import the app's model code and does not pip-install its requirements (those happen only later, behind an explicit trust gate). Outputs: display_name, description, inputs, outputs, capabilities, checkpoints, terminology, next_actions. Next: run_app / list_app_parameters / import_app / fine_tune_app when it fits (next_actions reflect the app's capabilities), or design_config_strategy if no app fits the task.
+One app's manifest: description, input and output modalities, inference, evaluation and uncertainty capabilities, checkpoints, terminology. parameters=True adds its tunable model parameters with their constraints (imports the app's code in an isolated subprocess: needs allow_untrusted_code=True). Next: run_app, fine_tune_app, fetch_app.
 
 ### `describe_config_schema`
 
-Use before authoring a config to learn the top-level schema of a workflow. This is GENERATED from the Trainer/Predictor/Evaluator/Transformer constructor via KonfAI's reflection engine, so it never drifts: it returns each top-level field with its type, default, whether it is required, and, for nested config objects: a classpath to drill into with inspect_object_signature. It does not return a full ready-to-run config; combine it with the example templates. Outputs: root_key, yaml_path, fields[{name,yaml_key,type,default,default_hidden,required,nested_config_classpath}], next_actions. Each field's yaml_key is the LITERAL key to write in the YAML (no casing guesses); default_hidden=true means the default exists but is not JSON-serializable here. Next: describe_config_schema with a deeper path, inspect_object_signature, then write_workflow_config.
+Top-level schema of a workflow config (train, prediction, evaluation, transform), generated from KonfAI's own classes: each field's literal yaml_key, type, default, whether required, and the classpath to drill into with inspect_object_signature. Next: write_workflow_config.
 
 ### `describe_extension_points`
 
-Use when you want to ADD or EXTEND a component (a new loss, metric, model/network, augmentation, transform, scheduler, or pretrained model) and need to know exactly where/how to plug it into KonfAI. This returns the extension contract per kind: the base class to subclass, the required methods and return/forward contract, where it is referenced in the YAML, and the THREE classpath syntaxes: builtin name, local `File:Class`, and external `package.module:Class` (e.g. `monai.losses:DiceLoss`): plus the load-bearing gotcha for that kind. It does not write code or fetch anything. Outputs: extension_point(s), yaml_reference_syntax, principle, next_actions. Next: check_external_dependency, list_components, inspect_object_signature, then write_session_file.
+How to add a component of a kind (loss, metric, model, transform, augmentation, scheduler, pretrained model): the base class, the required methods, the YAML reference syntaxes (builtin, File:Class, package.module:Class) and the gotcha. Next: check_component, write_session_file.
 
 ### `describe_konfai_capabilities`
 
-Use at the start, or whenever you need to orient, to learn what KonfAI can do and which tool to reach for. This returns a capability overview: the four workflows, the component kinds (+ list_components), the extension model (+ describe_extension_points, including external-library classpaths), modeling modes, advanced capabilities, and which actions are safe vs should prefer human confirmation. It is a router to other tools and to AGENTS.md (the canonical reference), not a workflow to execute. Next: inspect_dataset, describe_config_schema, list_components, describe_extension_points.
+What KonfAI can do and which tool to reach for: the four workflows, the component kinds, the extension model, which actions are safe and which destroy data. Start here when orienting. Next: list_apps to reuse a model, inspect_dataset to train one.
 
 ### `describe_model_outputs`
 
-Use to ENUMERATE a model's addressable module paths: the exact keys outputs_criterions and outputs_dataset accept: instead of guessing dotted paths and reading MeasureError lists from failed runs. This builds the workflow from the session config (side-effect-free, like validation) and walks every Network's module graph; terminal=true marks output heads (deep-supervision losses attach to non-terminal paths). Outputs: networks {attr: [{path, terminal, module}]}, reference_hint, next_actions. Next: write_workflow_config, then validate_config_semantics.
+The addressable module paths of the session config's networks: the exact keys outputs_criterions and outputs_dataset accept (terminal=true marks output heads). Built side-effect-free. Next: write_workflow_config, check_config.
 
 ### `design_config_strategy`
 
-Use once the user task is known and the dataset root is understood. This builds a config-writing plan from task, one or more dataset roots, group roles, workflows, and modeling intent. A group's role is is_input in the model graph: input = fed to the network, target = held out of the input as supervision. It cannot be read off the group name (CT is the input for segmentation and the target for MR->CT synthesis), so inspect_dataset leaves it null and it is settled here, with the user. It does not write YAML or launch runs. Outputs: dataset_summary, config_plan, customization_options, unresolved_questions, compatible_examples, guidance_resources, next_actions, and optional next_resources. Next: initialize_session, optionally write_session_file, then write_workflow_config.
+A config-writing plan from the task, the dataset root(s), the group roles and the modeling intent: dataset summary, config plan, customisation options, unresolved questions, compatible example templates. A group's role (input or target) cannot be read off its name: settle it here with the user. Writes nothing. Next: initialize_session, then write_workflow_config.
 
 ### `diff_run_configs`
 
-Use to DIFF the exact configs two jobs ran with, from their immutable launch-time snapshots: 'what changed between run A and run B' without trusting memory. It does not diff live session files (they may have been rewritten since). Outputs: identical flag, unified diff text, next_actions. Next: compare_runs on the two runs' metrics.
-
-### `export_app`
-
-Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, which packages a model YOU trained this session. It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. It refuses to replace a file already in the destination folder, naming it, unless overwrite=True. Outputs: exported_to, next_actions. Next: describe_app / run_app / import_app / register_app_source.
+Unified diff of the exact configs two jobs ran with, from their immutable launch-time snapshots.
 
 ### `export_run_record`
 
-Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. resolved_config is the snapshot the job took when it completed, not the live session config, which may have been rewritten since; config_snapshots are the launch-time ones. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
+The reproducibility record of one run in one payload: the job manifest (command, devices, environment with package versions), the launch-time config snapshots, the resolved config, every split's metrics and a log tail.
 
-### `fidopt_describe_dataset`
+### `fetch_app`
 
-Use to read one FidOpt dataset's descriptor: what a case is, its truth, its labels, its cases and development cases, its licence and notes. Next: fidopt_table, fidopt_run.
+Bring a published app into the session. Without path: import it as a normal experiment (configs, code and checkpoints copied, requirements installed) for config surgery, custom losses or run_resume(weights_only=True); TRUST GATE allow_untrusted_code=True. With path: export it as a local editable bundle there, set_parameters baked in, no code import; refuses to replace a file unless overwrite=True. Local and HuggingFace apps only.
 
-### `fidopt_list_datasets`
+### `fidopt_catalog`
 
-Use to list the FidOpt benchmark datasets (optionally one task: registration, segmentation, synthesis) through FidOpt's own code (KONFAI_MCP_FIDOPT names its executable): name, task, modalities, anatomy, test and development case counts, licence. Nothing is downloaded. Next: fidopt_describe_dataset, fidopt_table.
-
-### `fidopt_list_methods`
-
-Use to list the methods FidOpt runs (methods/<name>/method.json): title, task, summary, app, licence, version, variants. Next: fidopt_table to see their scores, fidopt_run to run one.
+FidOpt's benchmark catalogue through its own code: one line per dataset (task, anatomy, modalities, cases; task= and anatomy= narrow it) and the methods of the task; with dataset=<name>, that dataset's descriptor (cases, truth, labels, licence) and the methods of its task. corpus lists the dataset folders built here (FIDOPT_DATA); a derived dataset reads its source's. Downloads nothing. Next: fidopt_table, fidopt_run.
 
 ### `fidopt_run`
 
-Use to launch one FidOpt operation as a tracked job, through FidOpt's CLI: check (a method's licence and convention, or its result on one case with dataset + cases), run (a method on a dataset's cases, scored into the local rows), tune (settings on development pairs). Only the operations the server allows (KONFAI_MCP_FIDOPT_ALLOWED, default check) are accepted. scout='PROVIDER[:MODEL]' adds Scout's inspection of the scored outputs (fidopt --scout), with scout_allow_cloud for a cloud model. Outputs: job payload. Next: wait_for_job, read_job_log, fidopt_table.
+Launch one FidOpt operation as a tracked job: check, run or tune a method on a dataset's cases (only the operations KONFAI_MCP_FIDOPT_ALLOWED permits); scout='PROVIDER[:MODEL]' adds Scout's inspection of the scored outputs. Next: get_job_status(wait=True), fidopt_table.
 
 ### `fidopt_table`
 
-Use to read a dataset's board as FidOpt prints it (fidopt table --json): one line per method and machine, with the published scores and the local rows. Next: fidopt_run, run_scout_inspection.
+A FidOpt dataset's board (fidopt table --json): one line per method and machine, published scores and local rows.
 
 ### `fine_tune_app`
 
-Use to TRAIN by starting from a published app instead of a blank slate: fine-tune an existing app's checkpoint(s) on the user's dataset, WITHOUT authoring or editing a config. This is the middle option between run_app (use as-is, no training) and design_config_strategy (author a config and train from scratch). The produced training runs like any app fine-tune; for full control (custom losses, config surgery) use import_app + run_resume(weights_only=True) instead. It launches a tracked training job and writes a resolvable app bundle (config + code + fine-tuned checkpoint) to the output directory, which you can then run with run_app. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. It does not author a config or adapt the dataset layout for you. Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for the app's MODEL tunables (bare names) or any config key by its full dotted path. Outputs: a job payload (status, resources, next_actions) plus the bundle output path. Next: wait_for_job, then run_app on the produced bundle (action infer, then evaluate to score and rank this fine-tune against other training trials via leaderboard / compare_runs).
+Fine-tune a published app's checkpoint on the user's dataset without authoring a config (epochs, it_validation, lr, batch_size as parameters; set_parameters for the model's tunables), as a tracked job that writes a runnable app bundle to output. TRUST GATE: allow_untrusted_code=True. Next: get_job_status(wait=True), then run_app on the bundle.
 
 ### `generate_folds`
 
-Use to SPLIT a dataset into K cross-validation folds: writes one case-list file per fold into the session workspace and returns the exact subset stanzas to paste into the configs. KonfAI's Dataset.subset accepts a case-list file ('folds/fold_0.txt' keeps those cases) and its '~file' negation (trains on every OTHER fold). Outputs: folds {fold_i: {cases, file, train_subset, eval_subset}}, how_to_use, next_actions. Next: write per-fold configs (distinct train_name each), then run_batch.
+Split a dataset into K cross-validation folds: one case-list file per fold in the session, plus the subset stanzas to paste into each config ('folds/fold_0.txt' keeps those cases, '~file' the others). Next: write per-fold configs with distinct train_name, then run_batch.
 
 ### `get_job_status`
 
-Use when you need the latest state for one job without waiting. This returns the current job payload and suggested next actions. It does not parse runtime metrics. Outputs: status payload with resources and next_actions. Next: wait_for_job or read_live_metrics.
+The state of one job (job_id) or of every job of the session (no job_id). wait=True blocks until the job ends or timeout_s expires (timed_out=true then, not an error). The payload names next_actions and the job's log resource.
 
 ### `get_run_metrics`
 
-Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE named run, instead of the newest-file-only view of session://current/metrics: essential when comparing specific past runs. This reads Evaluations/<run_name>/Metric_<SPLIT>.json in the current session: or an app trial's metrics when run_name is a trial label as returned by leaderboard (an AppEvaluations/AppPipelines directory such as 'eval_app__iterations_300-1a2b3c4d'). It does not rerun evaluation. Outputs: run_name, split, path, updated_at, metrics (full JSON), summary, next_actions. Next: leaderboard or summarize_session.
-
-### `import_app`
-
-Use to RUN a published KonfAI app as a NORMAL experiment in this session. Prefer run_app when the app is used exactly as published; import_app is the full-control tier: editing the config, fine-tuning with custom losses or config surgery (run_resume with weights_only=True; fine_tune_app is the one-call path when the app trains as published), or wiring the app into a larger experiment. It copies the app's config(s), custom code, and .pt checkpoints into the session root and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) warm-starts a fine-tune from them. TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). Outputs: imported_to, files, checkpoints, configs, next_actions. Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation.
-
-### `import_experiment`
-
-Use to ADOPT an existing on-disk KonfAI experiment (its Config/Prediction/Evaluation.yml, custom .py and .yml files, and optionally its Checkpoints/Predictions/Evaluations/Statistics/Dataset artifacts) into the current session workspace, so the server can read, validate, rerun, resume, and compare it. Artifacts are symlinked by default (no copy of large checkpoints); pass include_artifacts='copy' to copy or 'none' to import configs/code only. Where the system refuses the link (Windows without developer mode), the artifact is copied and listed in copied_instead_of_linked. Existing session files are kept unless overwrite=True. Outputs: source, copied, linked, copied_instead_of_linked, skipped, next_actions. Next: read_session_file / review_config_semantics, then validate_config_semantics.
+Full evaluation metrics (per-case values and aggregates) of one run or app trial, from Evaluations/<run>/Metric_<split>.json. Does not rerun evaluation.
 
 ### `initialize_session`
 
-Use when moving from strategy to the concrete current session workspace. This creates or resets the current session workspace and can seed selected workflow files from one example template. DESTRUCTIVE with overwrite=True: it DELETES everything in the existing workspace, trained Checkpoints/ and Predictions/ included, to keep those, switch_session to a new name instead. It does not adapt example YAML to your dataset automatically. Referenced .yml models are always seeded; an example whose model/loss lives in a local .py (e.g. Synthesis) needs include_support_files=True to be runnable: the result carries a warning otherwise. Outputs: created workspace paths, copied files, resources, and next_actions. Next: write_workflow_config or inspect copied template files.
+Create or reset the current session workspace, optionally seeded from an example template (read_file('templates://list') lists them; include_support_files=True copies its local .py). DESTRUCTIVE with overwrite=True: deletes Checkpoints/ and Predictions/ too; use session(action='create') for a fresh name instead. Next: write_workflow_config.
 
 ### `inspect_dataset`
 
-Use after the dataset root is chosen (browse_dataset first when the root is ambiguous). This returns group structure, dataset entry hints, ambiguities, and (by default) sampled statistics for one dataset root; pass include_stats=False for a fast structure-only scan, or groups=[one group] for focused statistics. It does not infer the task or choose a final model. Outputs: groups, statistics, dataset_entry hints, warnings, and next_actions. Next: design_config_strategy.
+Groups, entry hints, ambiguities and sampled statistics (shapes channel-first) of one dataset root (include_stats=False for a fast structure scan, groups=[one] for focused statistics). browse=True returns instead a bounded file tree with candidate roots, for a path with nested cohorts or an unclear layout. Next: design_config_strategy.
 
 ### `inspect_object_signature`
 
-Use when choosing, customizing, or debugging any configurable object classpath such as a model, loss, transform, or helper module: including a declarative YAML model ('default|<Name>.yml' from the shipped catalog, or a session-local .yml). This returns local or imported signature details, defaults, doc summary, and detected contract hints; for a YAML model it returns its hyperparameters (all overridable from the run config), the loss-attachable terminal_leaves paths for outputs_criterions, the full yaml_content, and how_to_adapt guidance (override hyperparameters vs copy-and-edit the structure): parsed statically, never built. It does not validate the full workflow config or decide which object to use. Outputs: source type, signature, parameters, defaults, detected_contract, limitations, and next_actions. Next: write_session_file, write_workflow_config, or review_config_semantics.
+Signature, defaults, doc and contract hints of any configurable classpath: built-in, local File:Class, external package.module:Class, or a declarative .yml model (its hyperparameters, loss-attachable leaves and how to adapt it, with the file's content: no read_file needed). Parsed statically, never built. Next: write_workflow_config, check_config.
 
 ### `leaderboard`
 
-Use after evaluation when you want ranked metrics across completed runs. This reads Metric_<split>.json files and builds a leaderboard. It does not rerun evaluation. Outputs: available_metrics, available_splits, selected_metric when resolved, leaderboard rows, best row, warnings, and next_actions. Next: get_run_metrics on a chosen run, summarize_session, or launch another run.
-
-### `list_app_parameters`
-
-Use to DISCOVER an app's tunable model parameters (and their allowed values) before tuning a run with set_parameters. Returns {values, constraints}: current values plus Literal/Range/Choices constraints derived from the model's typed signature. TRUST GATE: deriving constraints imports the app's model code, so pass allow_untrusted_code=True; the import runs in an isolated spawn subprocess, never in the server process. Local/HuggingFace apps only (a remote server does not expose this). Outputs: values, constraints, next_actions. Next: run_app (infer or pipeline) / import_app with set_parameters.
+Ranked metrics across the session's completed runs, one metric and split, direction-aware, with the available metrics and splits. Next: get_run_metrics, compare_runs.
 
 ### `list_apps`
 
-Use FIRST when the user wants a result from an existing model and has NOT asked to train one: check whether a published KonfAI app already does what they want, before authoring and training a config from scratch. An app can do any task, so judge whether one fits from its own description (read it with describe_app) and its declared inputs/outputs, not from any preset list of tasks. This enumerates apps from a referenced catalogue (shipped default + the editable workspace file + the KONFAI_MCP_APP_CATALOG env file), expanding bare HuggingFace repo ids into their contained apps. It does not run inference or import any app code; without include_summary it does not even resolve manifests. Outputs: apps [{ref, source, repo, app_name}], catalog provenance, errors, next_actions. Next: describe_app on a candidate to read its manifest, else design_config_strategy to train one.
+Published KonfAI apps from the catalogue (shipped, workspace file, KONFAI_MCP_APP_CATALOG), HuggingFace repos expanded. Use first when the user wants a result from an existing model: an app can do any task, judge the fit from its description. Imports nothing. Next: describe_app, else design_config_strategy.
 
 ### `list_components`
 
-Use to DISCOVER which KonfAI components exist before authoring a config from scratch, when you do not already know the class name/path to put in the YAML. This enumerates the built-in component zoo for one kind. It does not return full constructor signatures: chain to inspect_object_signature for that. Outputs: components [{name, config_reference, inspect_classpath, module, doc}], a reference_hint explaining where the name goes in the config, and next_actions. Next: inspect_object_signature on a chosen component, then design_config_strategy or write_workflow_config.
-
-### `list_jobs`
-
-Use when you need the current job registry state. This lists jobs for the current session workspace. It does not wait for jobs or parse live metrics. Outputs: job payloads sorted by creation time. Next: get_job_status, wait_for_job, or read_live_metrics.
-
-### `list_scout_reports`
-
-Use to list the Scout inspections of the current session: name, task, case, verdict, observation count, when and with which model. Outputs: reports. Next: read_scout_report.
+Built-in KonfAI components of one kind (model, loss, metric, transform, augmentation, scheduler, ...): name, where it goes in the YAML, the classpath to inspect. Next: inspect_object_signature.
 
 ### `package_app_from_session`
 
-Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app / import_app can consume. Declare local helper packages and assets with support_files (bundle-relative destination -> workspace-relative source); folders copy recursively, with no recursive import discovery. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app on the produced bundle.
-
-### `plan_transform`
-
-Use BEFORE run_transform, always: it is the dry run, and it produces none of the deliverable. This plans every (case, chain) from the session Transform.yml. The plan is a measurement, not an estimate, it opens and removes a real region-write on each destination, so its verdict is the one the run will act on: STREAM (bounded memory), LOAD (the case fits the budget and streaming would reread the source past its worth: a cost choice, not a fallback), WHOLE-VOLUME (the case is assembled whole, with the stage that refused it named), SKIP (already written), REDUCE, REFUSED. That probe TOUCHES the output locations, which are the user's own stores: an entry is created and removed, and a single-file store (h5) is created if it did not exist. Outputs: {ok, config_path, world_size, report, verdict_counts, budget, budget_bytes, needs_attention[], over_budget[]}. A non-empty over_budget means run_transform would refuse before writing anything; needs_attention lists at most 50 entries, so trust verdict_counts for the totals. Next: fix what needs_attention names, or run_transform.
+Package a model trained in this session into a runnable app bundle (app.json, config, checkpoint, optional Model.py, requirements, support_files, ONNX export) that describe_app and run_app consume. Does not upload.
 
 ### `prepare_dataset_aliases`
 
-Use when the dataset has the right content but the group filenames do not match your intended config. This creates copied, symlinked, or moved aliases for dataset files. It does not change YAML configs for you. Outputs: created paths, missing_by_case, and next_actions. Next: inspect_dataset or design_config_strategy.
+Copy, symlink or move dataset files under new group names when the content is right but the filenames do not match the intended config. Reports the created paths and missing_by_case. Next: inspect_dataset.
 
 ### `preview_volume`
 
-Use to SEE a volume: returns one slice as a PNG image (rendered in image-capable MCP clients) for qualitative QC of a dataset case or a produced prediction: orientation, field of view, obvious artefacts: instead of judging from numbers alone. This reads any SimpleITK-readable file (mha/nii.gz/...), windows it between the 1st and 99th percentile, and downsamples to max_size. It does not modify the file. Outputs: a PNG image content block. Next: inspect_dataset for numbers, or preview_volume on other slices/axes.
+One slice of a volume as a PNG (any SimpleITK-readable file), windowed between the 1st and 99th percentile and downsampled, for a visual check of a case or a prediction; the plane's min, max, mean and unique values come with it (a black image is a constant plane). Reads only.
 
-### `read_dataset_file`
+### `read_file`
 
-Use to READ a dataset's small non-image text file: a labels/metadata CSV or TSV, a JSON/YAML sidecar, a case-list txt, or a text header (.mhd/.nhdr). SAFE: bounded read-only preview (it streams at most max_chars characters); binary files are refused with a pointer to inspect_dataset/preview_volume. Exception: an ITK transform .h5 (a registration's Transform.h5) returns a structured summary instead: transform type + full parameters when linear, per-axis mean/std and displacement magnitudes when a dense field. It does not parse image volumes and does not modify anything. Outputs: content (bounded), total_bytes, truncated; CSV/TSV additionally get columns + rows. Next: inspect_dataset or design_config_strategy.
+Read a bounded text range of one file. A relative path reads the current session (configs, support code, config snapshots, evaluation JSON). An absolute path reads a dataset's small text file: CSV or TSV (with columns and rows), JSON or YAML sidecar, case list, .mhd/.nhdr header, or a Transform.h5 summarised (type, parameters or displacement statistics). template=<example name> reads a file shipped with that template. A resource URI (docs://patching, guide://tool-index, template://Segmentation/summary...) reads that resource, for a client that cannot read resources itself. Binary files are refused. Never writes.
 
 ### `read_job_log`
 
-Use to READ a job's log as a tool: the crash-triage primitive: tail more than the fixed resource tail, page through it, or filter it with a regex to find the traceback. This reads the job console log (or the KonfAI runtime log when present) and returns the selected lines. It does not parse metrics; use read_live_metrics for parsed metrics. Outputs: job_id, status, path, content, lines_returned, next_actions. Next: validate_config_semantics then the matching run_* tool to retry, or cancel_job.
+A job's console or runtime log: the last max_lines, or the lines matching a regex, to find the traceback. Next: check_config then the matching run_* tool, or cancel_job.
 
 ### `read_live_metrics`
 
-Use while a job is running and you want parsed runtime metrics instead of raw logs. This reads the runtime log and returns recent metric snapshots. It does not block until the job completes. Outputs: latest metric snapshot, recent entries, by_stage summaries, and job metadata. Next: wait_for_job or summarize_session.
+Parsed runtime metrics of a running or finished training (latest snapshot, recent entries, per-stage summaries) instead of raw log lines. Does not block.
 
 ### `read_scout_report`
 
-Use to read a finished Scout inspection by name: verdict, observations (kind, defect, severity, confidence, box in mm, cited views and measurements), measurements, views (ids, positions, modes), usage and budget; no image bytes (the PNGs are under the report's evidence/). Outputs: report fields and the report.md path. Next: preview_volume on a cited position, run_scout_inspection.
-
-### `read_session_file`
-
-Use to READ BACK a file from the current session workspace: a config, a support file you wrote (Model.py, Loss.py), a copied template file (UNet.yml, Config_GAN.yml), a job config snapshot (the manifest's config_snapshots paths), or an evaluation JSON. This returns a bounded character range of one workspace file; absolute paths are accepted when they resolve inside the workspace. It does not read files outside the session workspace. Outputs: path, relative_path, content, offset, returned_chars, total_bytes, truncated, next_actions. Next: write_session_file or write_workflow_config to edit, then review_config_semantics.
-
-### `read_template_file`
-
-Use to READ a file shipped with an example template: a reference implementation such as a local model (Model.py), a custom transform (UnNormalize.py), a declarative model (UNet.yml), or an alternate config (Config_GAN.yml): so you can understand or adapt it instead of guessing what it contains. This returns a bounded character range of one template file. It does not modify templates. Outputs: template, filename, content, truncated, next_actions. Next: write_session_file to adapt it into the session, or initialize_session to copy files wholesale.
+A finished Scout inspection by name: verdict, observations (kind, defect, severity, confidence, box in mm, cited views and measurements), measurements, views, usage, budget; no image bytes. Without name: the session's inspections listed.
 
 ### `read_training_curves`
 
-Use to read a run's TRAINING CURVES (loss/metric scalars over iterations) from the TensorBoard event files KonfAI writes under Statistics/<run_name>/: the full history, not just the live log tail. This parses tfevents into downsampled scalar series. It requires the 'tensorboard' package. Outputs: tags, curves {tag: [{step, value}]}, next_actions. Next: compare_runs or leaderboard.
-
-### `register_app_source`
-
-Use when the user points at their own app or HuggingFace repo and wants it to persist across sessions. This appends an app reference to the editable workspace catalogue file (the same one list_apps merges). It does not validate that the reference resolves: call describe_app to check. Outputs: ref, added flag, catalog_path, the updated apps list, next_actions. Next: list_apps or describe_app.
-
-### `request_validation`
-
-Request an on-demand validation pass on a running training job. Sends SIGUSR1 to the job's process group; the trainer runs validation at its next iteration boundary and logs the metrics (no checkpoint or early-stopping side effect). POSIX only; a no-op when no training job is running.
-
-### `review_config_semantics`
-
-Use immediately after writing or editing a workflow config. This checks the config against KonfAI's schema (every misspelled key, wrong type, unknown component name and missing argument, each at its key with the nearest valid name) and performs lightweight semantic checks. A mistake KonfAI would refuse is a blocking issue (code config_schema); a key it does not read is a warning (code config_key_unread), blocking for a transform. It does not instantiate KonfAI runtime objects. Outputs: summary, warnings, blocking_issues, next_checks, and next_actions. Next: validate_config_semantics if there are no blocking issues.
+A run's training curves (scalars over iterations) from its TensorBoard event files, downsampled to max_points. Needs the tensorboard package.
 
 ### `run_app`
 
-Use to RUN a published KonfAI app on the user's data (the 'use an existing model instead of training' path), after describe_app confirmed the app fits. It runs the app AS PUBLISHED, its own configs with only the bounded parameters below: prefer it over import_app + run_prediction, which requires hand-editing the copied config. action picks what runs: infer (predictions; uncertainty=True keeps the inference stacks), evaluate (score predictions against gt with the app's OWN Evaluation.yml when describe_app reported capabilities.evaluation; distinct from run_evaluation, which needs a hand-authored session config), uncertainty (maps from kept inference stacks when capabilities.uncertainty), or pipeline (infer, then evaluate when gt is given, then uncertainty, in one job). A parameter the action does not read is refused. evaluate refuses a registration app, whose configs read the images without the transform: use run_registration_evaluate. It writes inside the session workspace. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only: a remote 'host:port:name' app server is not driven from the MCP (run it with konfai-apps directly). It does not choose the app or prepare the data for you. A REGISTRATION app (describe_app task 'registration', e.g. the VBoussot/ImpactReg presets) runs through impact-reg-konfai, as its CLI and Slicer module run it: inputs are [[fixed...], [moving...]] plus, optionally, [fixed masks] and [moving masks]; each case gets <output>/P000/Transform.h5 (an ITK displacement field on the fixed grid mapping a fixed point to its moving partner, in mm) and P000/Moved (the moving image on the fixed grid), and register.json records the run. Open the fixed image and Moved side by side to judge it; score it with run_registration_evaluate. A pair too large for the memory is registered whole on a grid coarse enough, then refined on native tiles by the presets that declare a tile pass; the outputs are on the fixed grid. set_parameters takes the app's tunables by name (list_app_parameters) or by their full dotted config path, e.g. {'Predictor.Model.RegistrationNet.models.0.layers_mask': '0000001'}. Outputs: a job payload (status, resources, next_actions) plus the output directory. Next: wait_for_job, then inspect the output directory.
+Run a published app as published on the user's data: action infer, evaluate (the app's own Evaluation.yml against gt), uncertainty, or pipeline (all three). A registration app runs through impact-reg-konfai: inputs [[fixed...], [moving...]] plus optional masks; outputs <output>/P000/Transform.h5 (fixed point to moving point, mm) and P000/Moved on the fixed grid; score it with run_registration_evaluate. set_parameters takes tunables by name or by full dotted config path. TRUST GATE: allow_untrusted_code=True required (imports the app's code, installs its requirements). Local and HuggingFace apps only. Next: get_job_status(wait=True).
 
 ### `run_batch`
 
-Use to RUN A SWEEP: launch several training configs SEQUENTIALLY server-side (each waits for the previous to finish), collecting per-run outcomes: fold training or hyperparameter variants in one call instead of hand-chaining run_train/wait_for_job. This blocks until the batch ends, like wait_for_job; each config needs a distinct train_name. Outputs: requested, completed, results [{config_file, job_id, run_name, status, error}], next_actions. Next: leaderboard or compare_runs.
-
-### `run_component_smoke_test`
-
-Use to SMOKE-TEST a component you wrote or referenced BEFORE wiring it into a config: it executes the component's runtime contract on dummy tensors. For a transform it asserts transform_shape(shape) == __call__(tensor).shape: the contract whose silent violation corrupts patch reassembly; for a criterion it reports Tensor-vs-tuple return (loss vs metric convention) and whether backward() works. TRUST: this imports and EXECUTES the component's code, in an isolated spawn subprocess, never in the server process, but still only run it on code you or the user wrote. Outputs: ok, stage, contract details (predicted vs actual shape, returns, backward_ok) or the full traceback. Next: write_workflow_config when ok, or write_session_file to fix the component.
+Run several training configs sequentially server-side (a sweep, fold training), blocking until the batch ends, with per-run outcomes. Each config needs a distinct train_name. Next: leaderboard, compare_runs.
 
 ### `run_evaluation`
 
-Use after evaluation config review/validation and when required artifacts exist. This launches an evaluation job and returns structured job resources. It does not infer missing predictions. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job then summarize_session.
+Launch an evaluation job from the session Evaluation.yml on existing predictions. Returns a job payload or a blocker. Next: get_job_status(wait=True), leaderboard.
 
 ### `run_prediction`
 
-Use after prediction config review/validation and when a checkpoint exists. This launches a prediction job and returns structured job resources. It does not search outside the current session workspace for missing checkpoints. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job.
+Launch a prediction job from the session Prediction.yml with a checkpoint of the session (models picks which). Returns a job payload or a blocker. Next: get_job_status(wait=True).
 
 ### `run_registration_evaluate`
 
-Use to SCORE a registration (a registration app's run_app infer output) against what is known about the pair: label maps (Dice), landmarks (TRE, mm), and for a same-modality pair the images (MAE). Pass the ORIGINAL moving data: the transform warps it onto the fixed grid itself. Run it twice to report a gain: without transforms (the misalignment the registration started from) and with the Transform.h5. A displacement field also gets its Jacobian determinant (the fraction of folded voxels: a sound field folds none). Landmarks: the fixed points are pushed through the transform onto the moving ones, so list the same points in the same order in both files. Runs impact-reg-konfai eval as a tracked job; no app reference and no trust gate. Outputs: a job payload plus the output directory, whose Evaluation_summary.json 'aggregates' holds each metric's mean over the cases. Next: wait_for_job, then read Evaluation_summary.json.
+Score a registration against what the pair has: labels (Dice), landmarks (TRE in mm, fixed points pushed through the transform), same-modality images (MAE), and a field's folded-voxel fraction. Pass the ORIGINAL moving data: the transform warps it. Every list holds one path per case, paired by order (or a single path reused for every case). Run with and without transforms to report the gain. A tracked impact-reg-konfai job, no trust gate; Evaluation_summary.json holds the aggregates.
 
 ### `run_resume`
 
-Use to RESUME an interrupted or crashed training run from a checkpoint: model, optimizer, scheduler, and epoch/iteration counters are restored (KonfAI's RESUME command). Set weights_only=True instead to WARM-START a fine-tune from an imported app: load only the checkpoint's model weights and restart epoch/optimizer from scratch; prefer fine_tune_app when the app is used as published, since it needs no config editing. This launches a resumed training job from the current session Config.yml. It does not pick between runs: by default it resumes from the newest checkpoint of the configured run (falling back to the newest in the session), avoiding cross-run contamination. It trains up to the LIVE config's epochs: if the run already completed them, raise epochs in Config.yml first or the resume finishes immediately without adding checkpoints. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job or read_live_metrics.
+Resume a training from a checkpoint (model, optimizer, scheduler and counters restored), or warm-start a fine-tune with weights_only=True (weights only; prefer fine_tune_app for an app used as published). Resumes the newest checkpoint of the configured run and trains up to the live config's epochs. Returns a job payload or a blocker.
 
 ### `run_scout_inspection`
 
-Use to have KonfAI Scout inspect ONE result visually: a segmentation (image, prediction, optional truth), a registration (fixed, moving, field or transform, optional labels/landmarks) or a synthesis (source, synthetic, optional target). A vision model looks at slices, zooms, overlays and measures regions with KonfAI Eval, then reports localised defects with evidence. This launches a tracked job; the report lands under the session's Scout/<name>/. Images reach a cloud model ONLY with allow_cloud_images=True; a local OpenAI-compatible server (openai provider, loopback base_url) needs no flag. Outputs: job payload with output. Next: wait_for_job, then read_scout_report.
+Have KonfAI Scout inspect one result visually (segmentation, registration or synthesis): a vision model looks at slices, zooms and overlays, measures regions with KonfAI Eval and reports localised defects with evidence, as a tracked job under Scout/<name>. Images reach a cloud model only with allow_cloud_images=True. Next: get_job_status(wait=True), read_scout_report.
 
 ### `run_train`
 
-Use after train config review and validation succeed. This launches a training job and returns structured job resources. It does not choose the device or repair config issues automatically: omitting gpu trains on CPU, so pass gpu explicitly for GPU training. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: read_live_metrics or wait_for_job.
+Launch a training job from the session Config.yml (after check_config). Omitting gpu trains on CPU. Returns a job payload, or a blocker payload naming what is missing. Next: read_live_metrics, get_job_status(wait=True).
 
 ### `run_transform`
 
-Use to batch-process a dataset with a transform chain: read, transform, write. Read plan_transform first: this writes a dataset, and the plan is what says how much and how. This launches a transform job from the session Transform.yml and returns structured job resources. Pass gpu to run the chain on a GPU (the resample and intensity stages move with it; every write still lands on the host). The run replans, stores the plan, and refuses outright when a case can neither stream nor fit memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass overwrite to recompute. Outputs: job payload with resources and next_actions; or a blocker payload when a prerequisite is missing. Next: wait_for_job then inspect_dataset on what it wrote.
+Batch-process a dataset with the session Transform.yml chain: read, transform, write. dry_run=True plans it first, always: it measures STREAM, LOAD, WHOLE-VOLUME, SKIP or REFUSED per case (touching the output stores) and over_budget says what the run would refuse. The run replans, skips what exists (overwrite recomputes) and refuses a case that fits neither streaming nor memory_budget. Returns a job payload. Next: get_job_status(wait=True), inspect_dataset on the output.
 
-### `set_live_tunables`
+### `session`
 
-Change tunables of a RUNNING training job in place, without restarting it. Writes a jailed control.json into the run's Statistics/<run>/ dir; the trainer re-reads it at its next poll boundary (~20 iterations) and records each change into the run's config snapshot. 'it_validation' takes effect for all following iterations; 'lr' sets the optimizer learning rate now, rebased so a running scheduler keeps it (the schedule restarts from the new value). POSIX/local; a no-op when no training job is running.
+Manage session workspaces: action 'list' (says whether a host pinned the session); 'create' (name; switches to it; from_example seeds it in the same call, else the workspace is empty until initialize_session); 'switch' (name); 'delete' (the current one; force cancels its jobs); 'import' (adopt an on-disk KonfAI experiment from source_dir: its configs and code, its artifacts linked, copied or left out). create, switch and delete are refused while a job runs or when a host UI pinned the session. Next: initialize_session, summarize_session.
 
 ### `summarize_session`
 
-Use when you want one compact session snapshot for planning the next action. This returns readiness, job state, metric summaries, and an optional leaderboard, log tail, or config validation (include_validation=True; off by default to keep the payload lean). It does not launch or repair workflows. Outputs: readiness, metrics_summary, validation, leaderboard, and next_actions. Next: review_config_semantics, validate_config_semantics, or run a workflow.
-
-### `switch_session`
-
-Use to SWITCH the server onto another existing session workspace (create_session makes new ones). All session-scoped tools and resources then operate on that workspace; its persisted job history is reloaded. It refuses to switch while a job is active in the current session. Outputs: session, sessions, summary, next_actions. Next: summarize_session, or leaderboard(session=...) to compare without switching. Refused when a host UI pinned the session (KONFAI_MCP_SESSION): work in the current session instead.
-
-### `unregister_app_source`
-
-Use to drop an app reference previously added to the workspace catalogue. This removes a reference from the editable workspace catalogue file. It does not touch the shipped default catalogue or the KONFAI_MCP_APP_CATALOG env file. Outputs: ref, removed flag, catalog_path, the updated apps list, next_actions. Next: list_apps.
-
-### `validate_config_semantics`
-
-Use after semantic review when the config looks coherent enough to instantiate. This instantiates or sets up KonfAI workflow objects in an ISOLATED spawn subprocess to catch runtime-facing errors: edited workspace code is always re-imported fresh, and nothing executes in the server process. It does not launch jobs. Levels: 'instantiate' builds the objects, 'setup' also builds the dataloader, 'train_step' additionally runs ONE forward+backward on ONE batch (train workflow only, single-process CPU, no checkpoint, config restored) to catch runtime-only errors: target dtype/shape mismatches, an outputs_criterions key that does not resolve, a detached loss. Outputs: ok flag, runtime details, semantic review, and next_actions. Next: run_train, run_prediction, run_evaluation, or fix the config.
-
-### `wait_for_job`
-
-Use after launching a job when you want to block until it finishes. This polls job state until the job reaches a terminal status. It does not stream logs. A timeout_s expiry is NOT an error: the job's current status comes back with timed_out=true; wait again or read_live_metrics between waits on a long training. Outputs: final job payload (or the current one with timed_out=true). Next: summarize_session or leaderboard.
+One compact snapshot of the current session: readiness, jobs, metric summaries, and on request the leaderboard, a log tail and a config validation. Next: check_config or a run_* tool.
 
 ### `write_session_file`
 
-Use for session-side support files such as local model code, custom losses, transforms, helper modules, or manifests. This writes one file inside the current session workspace. It does not validate Python semantics. Outputs: written path, byte count, and next_actions. Next: inspect_object_signature, review_config_semantics, or validate_config_semantics.
+Write one support file into the current session (Model.py, Loss.py, a transform, a manifest). Not validated. Next: inspect_object_signature, check_config.
 
 ### `write_workflow_config`
 
-Use to author or replace one workflow YAML file. This validates the top-level KonfAI root key, writes the config into the current session workspace, and checks it against KonfAI's schema: schema_errors lists every mistake at once, one 'path: message' line each ("Trainer: unknown key 'epoch' (did you mean 'epochs'?)"). The file is written either way. It does not patch YAML structurally for you. Outputs: written path, byte count, schema_errors when there are any, and next_actions. Next: fix every schema_errors line and write again; then review_config_semantics.
+Write one workflow YAML (train, prediction, evaluation, transform) into the session and check it against KonfAI's schema: schema_errors lists every mistake with the nearest valid key; the file is written either way. Next: fix every error and write again, then check_config.
 
 ## Prompts
 

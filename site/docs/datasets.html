@@ -1,0 +1,85 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#080b12">
+<title>Datasets · KonfAI docs</title>
+<meta name="description" content="The layout KonfAI reads and the formats it reads regionally.">
+<link rel="stylesheet" href="../design/fonts.css">
+<link rel="stylesheet" href="../design/tokens.css">
+<link rel="stylesheet" href="../design/components.css">
+<link rel="stylesheet" href="../landing.css">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body class="landing inner hue-engine">
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="../index.html"><img src="../assets/konfai-logo.png" alt="KonfAI" width="170" height="51"></a>
+    <nav aria-label="Sections">
+      <a href="../docs/get-started.html">Engine</a><a href="../apps.html">Apps</a><a href="../docs/edge.html">Edge</a><a href="../studio.html">Studio</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../docs/index.html" aria-current="page">Docs</a>
+    </nav>
+    <div class="search" role="search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" aria-expanded="false" placeholder="Search a page, a tool, an app" aria-label="Search a page, a docs page, an MCP tool or an app" autocomplete="off" aria-controls="results">
+      <div id="results" class="results" role="listbox" aria-label="Results"></div>
+    </div>
+    <a class="gh" href="https://github.com/fideus-labs/KonfAI"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+    <button id="menu" class="menu" type="button" aria-label="Sections" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  </div>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html" aria-current="page">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Datasets</h1>
+<p class="lead">The layout KonfAI reads and the formats it reads regionally.</p>
+
+<section>
+<h2>The layout</h2>
+<p>One folder per case, one file per group, under a root named in <code>dataset_filenames</code>:</p>
+<pre><code>Dataset/
+├── CASE_001/
+│   ├── CT.mha
+│   └── SEG.mha
+└── CASE_002/
+    ├── CT.mha
+    └── SEG.mha</code></pre>
+<p>A DICOM series is a folder (<code>CASE_001/CT/*.dcm</code>), an OME-Zarr store a folder too (<code>CASE_001/CT.ome.zarr/</code>). A folder of files named by case (<code>scans/case_001.nii.gz</code>) is not a dataset: give each case its own folder, symlinks are fine. Cases that do not follow the layout are named by a manifest (<code>./cases.yml:omezarr</code>).</p>
+</section>
+<section>
+<h2>Formats</h2>
+<p>The format token of <code>dataset_filenames</code> picks the backend that reads and writes the data:</p>
+<table>
+<thead><tr><th>Backend</th><th>Formats</th><th>Layout</th><th>Region reads</th><th>Extra</th></tr></thead>
+<tbody>
+<tr><td><code>SitkFile</code></td><td><code>mha</code>, <code>mhd</code>, <code>nii</code>, <code>nrrd</code>, <code>gipl</code>, <code>tif</code> (each also <code>.gz</code>), <code>hdr</code>, <code>dcm</code>, <code>png</code>, <code>npy</code>, … </td><td>one file per case and group (the default)</td><td>MetaImage, NIfTI and NRRD</td><td><code>konfai[itk]</code></td></tr>
+<tr><td><code>H5File</code></td><td><code>h5</code></td><td>one HDF5 file for the whole dataset</td><td>yes</td><td><code>konfai[hdf5]</code></td></tr>
+<tr><td><code>OmeZarrFile</code></td><td><code>omezarr</code> (<code>zarr</code>), <code>omezarr@&lt;level&gt;</code></td><td>one store per case and group</td><td>yes, pyramids included</td><td><code>konfai[omezarr]</code></td></tr>
+<tr><td><code>DicomFile</code></td><td><code>dicom</code></td><td>one series folder per case and group</td><td>slice by slice</td><td><code>konfai[dicom]</code></td></tr>
+<tr><td><code>ItkTransformFile</code></td><td><code>itktransform</code></td><td>one ITK transform file per case</td><td>for displacement fields</td><td><code>konfai[itk]</code>, <code>konfai[hdf5]</code></td></tr>
+</tbody>
+</table>
+<p><code>konfai[imaging]</code> installs all four storage backends at once. A dataset root in object storage (<code>s3://</code>) is read with <code>konfai[s3]</code>; only a store is read in place, a whole-file format there is copied first.</p>
+</section>
+<section>
+<h2>Regional reads and large images</h2>
+<p>Dataset patches are read regionally from the stores above when the preprocessing is stream-compatible; a bounded buffer preserves correctness when it is not. That is what lets a training read its patches, a prediction reassemble its outputs and a TRANSFORM process a cohort slab by slab without holding whole volumes in RAM. The guide to images larger than RAM: <a href="https://konfai.readthedocs.io/en/latest/usage/large-images.html">Working out of core</a>; every format and its flags: <a href="https://konfai.readthedocs.io/en/latest/reference/components/storage-backends.html">Storage formats</a>.</p>
+</section>
+
+</article>
+</main>
+<footer class="foot">
+  <div class="term"><i></i><i></i><i></i> konfai · site/ · written from the repository's own READMEs and docs · <a href="https://github.com/fideus-labs/KonfAI/blob/main/LICENSE">Apache-2.0</a> · <a href="../llms.txt">llms.txt</a></div>
+  <div class="cols">
+    <div><img src="../assets/konfai-logo.png" alt="KonfAI"><p>A declarative medical-imaging execution engine, its apps, its agents and its browser runtime.</p></div>
+    <div><h4>Engine</h4><a href="../docs/get-started.html">Get started</a><a href="../docs/configuration.html">Configuration</a><a href="../docs/workflows.html">Workflows</a><a href="../docs/datasets.html">Datasets</a></div>
+    <div><h4>Apps</h4><a href="../apps.html">Published apps</a><a href="../docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
+    <div><h4>Agents</h4><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
+  </div>
+</footer>
+<script src="../landing.js" data-root="../" defer></script>
+</body>
+</html>

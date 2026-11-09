@@ -69,7 +69,7 @@ STAGE_FOCUS: dict[str, str] = {
     # known the stage has already moved on, so the shape lives in the system prompt where it applies
     # whenever a dataset is described.
     "dataset_inspection": (
-        "Inspect the dataset: inspect_dataset; browse_dataset only if the root is still unknown, and "
+        "Inspect the dataset: inspect_dataset; inspect_dataset(browse=True) only if the root is still unknown, and "
         "report what it holds."
     ),
     "action_selection": (
@@ -103,12 +103,12 @@ STAGE_FOCUS: dict[str, str] = {
 # The tools that carry each stage forward, best first. A caller keeps the ones its readiness allows: # these
 # are candidates, not a script.
 STAGE_ACTIONS: dict[str, list[str]] = {
-    "dataset_inspection": ["inspect_dataset", "browse_dataset", "design_config_strategy", "initialize_session"],
+    "dataset_inspection": ["inspect_dataset", "design_config_strategy", "initialize_session"],
     "action_selection": ["list_apps", "fine_tune_app", "design_config_strategy", "run_train"],
-    "app_selection": ["describe_app", "run_app", "fine_tune_app", "list_app_parameters"],
-    "configuration": ["validate_config_semantics", "review_config_semantics", "run_train", "write_workflow_config"],
-    "running": ["wait_for_job", "read_live_metrics", "get_job_status", "cancel_job"],
-    "failed": ["read_job_log", "validate_config_semantics", "get_job_status"],
+    "app_selection": ["describe_app", "run_app", "fine_tune_app"],
+    "configuration": ["check_config", "run_train", "write_workflow_config"],
+    "running": ["get_job_status", "read_live_metrics", "cancel_job"],
+    "failed": ["read_job_log", "check_config", "get_job_status"],
     "checkpoint_selection": ["run_prediction", "read_training_curves", "package_app_from_session"],
     "prediction": ["run_evaluation", "preview_volume", "package_app_from_session"],
     "evaluation": ["get_run_metrics", "leaderboard", "compare_runs"],
@@ -120,10 +120,6 @@ STAGE_ACTIONS: dict[str, list[str]] = {
 # not written. Without the gate, a session holding only a Transform.yml is told to "run train": an
 # action naming a file that is not there, while the workflow it could run is offered by nothing.
 _LAUNCHER_CONFIG: dict[str, str] = {spec.retry_tool: spec.config_file for spec in WORKFLOW_SPECS.values()}
-
-# The dry run that must precede a launcher, where one exists. A transform writes a dataset, so its plan
-# comes first: it is what says how much, how, and whether the run would refuse before writing a byte.
-_LAUNCHER_DRY_RUN: dict[str, str] = {"run_transform": "plan_transform"}
 
 # Where offering a workflow's launcher makes sense: the stages at which a config is the thing in hand.
 _LAUNCH_STAGES = frozenset({"configuration", "action_selection"})
@@ -179,7 +175,7 @@ DIAGNOSES: tuple[tuple[Diagnosis, tuple[str, ...]], ...] = (
         Diagnosis(
             "unsupported_format",
             "an input format is not readable",
-            "convert the inputs, or install the matching KonfAI extra (check_external_dependency)",
+            "convert the inputs, or install the matching KonfAI extra (check_component)",
             False,
         ),
         ("unsupported", "unknown extension", "no backend", "supported_extensions"),
@@ -353,7 +349,7 @@ def stage_actions(stage: str, facts: Facts) -> list[str]:
         # Every workflow this session HAS written is a move, not just the one the stage table names.
         for action, config in _LAUNCHER_CONFIG.items():
             if config in present and action not in kept:
-                kept.extend([step for step in (_LAUNCHER_DRY_RUN.get(action), action) if step])
+                kept.append(action)  # a transform plans itself first: run_transform(dry_run=True)
     return kept or ["summarize_session"]
 
 

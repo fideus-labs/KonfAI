@@ -91,7 +91,7 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     # An inference-capable app routes forward to the run/tune tools instead of dead-ending.
     assert payload["next_actions"][0] == "run_app"
     assert "fine_tune_app" in payload["next_actions"]
-    assert "import_app" in payload["next_actions"]  # the modify-then-run path stays offered
+    assert "fetch_app" in payload["next_actions"]  # the modify-then-run path stays offered
 
 
 def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
     payload = _service(tmp_path).describe_app(str(app_dir))
     assert payload["capabilities"]["inference"] is False
     assert "run_app" not in payload["next_actions"]
-    assert "import_app" not in payload["next_actions"]
+    assert "fetch_app" not in payload["next_actions"]
     assert "design_config_strategy" in payload["next_actions"]
 
 
@@ -270,7 +270,7 @@ def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: 
     # The target is the session root (in-jail), never a per-app sub-folder.
     assert Path(calls[0][1]["target"]) == service.workspace_layout.ensure_session_workspace()
     assert result["checkpoints"] == ["tiny.safetensors"]
-    assert result["next_actions"] == ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"]
+    assert result["next_actions"] == ["run_resume", "run_prediction", "run_evaluation", "check_config"]
 
 
 def test_import_app_api_copies_weightless_registration_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,15 +362,15 @@ def test_export_app_refuses_to_overwrite_a_file_at_the_destination(
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
             with pytest.raises(Exception, match=r"would overwrite Prediction\.yml\..*overwrite=True"):
-                await client.call_tool("export_app", {"ref": str(app_dir), "path": str(project)})
+                await client.call_tool("fetch_app", {"ref": str(app_dir), "path": str(project)})
             assert (project / "Prediction.yml").read_text(encoding="utf-8") == "# the user's own config\n"
             assert not (project / "app.json").exists()
 
             # A folder that shares no file name with the app is not an overwrite.
-            await client.call_tool("export_app", {"ref": str(app_dir), "path": str(unrelated)})
+            await client.call_tool("fetch_app", {"ref": str(app_dir), "path": str(unrelated)})
             assert (unrelated / "app.json").is_file()
 
-            await client.call_tool("export_app", {"ref": str(app_dir), "path": str(project), "overwrite": True})
+            await client.call_tool("fetch_app", {"ref": str(app_dir), "path": str(project), "overwrite": True})
             assert (project / "Prediction.yml").read_text(encoding="utf-8") == "Predictor: {}\n"
             assert (project / "notes.txt").read_text(encoding="utf-8") == "kept\n"
 
@@ -400,7 +400,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) ->
     assert (bundle / "model.safetensors").exists()
     assert not (bundle / "resume_latest.pt").exists()
     assert result["checkpoints"] == ["model.safetensors"]
-    assert result["next_actions"] == ["describe_app", "run_app", "import_app"]
+    assert result["next_actions"] == ["describe_app", "run_app", "fetch_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
     assert meta["display_name"] == "My App"
     assert meta["short_description"] == "My App"
@@ -532,11 +532,8 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         tool_names = (
             "list_apps",
             "describe_app",
-            "list_app_parameters",
-            "export_app",
-            "import_app",
-            "register_app_source",
-            "unregister_app_source",
+            "fetch_app",
+            "app_sources",
             "run_app",
             "fine_tune_app",
             "package_app_from_session",
@@ -557,7 +554,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert "solve_task" in index["prompts"]
         solve = server.prompt_solve_task("segment the liver", "one CT group")
         content = solve[0]["content"]
-        for tool in ("run_app", "fine_tune_app", "import_app", "design_config_strategy"):
+        for tool in ("run_app", "fine_tune_app", "fetch_app", "design_config_strategy"):
             assert tool in content
 
         app_dir = _write_local_app(tmp_path)
@@ -595,7 +592,7 @@ def test_set_parameters_preserve_value_types(
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
             await client.call_tool(
-                "export_app",
+                "fetch_app",
                 {"ref": "org/App", "path": str(tmp_path / "out"), "set_parameters": set_parameters},
             )
 

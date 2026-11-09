@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - FidOpt's own executable, argv lists, no shell
 import sys
+import uuid
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -153,7 +154,7 @@ class ScoutService:
         folder = self.report_dir(name)
         path = folder / "report.json"
         if not path.is_file():
-            raise ValueError(f"No report named {name!r} in this session (list_scout_reports lists them).")
+            raise ValueError(f"No report named {name!r} in this session (read_scout_report without a name lists them).")
         data = json.loads(path.read_text(encoding="utf-8"))
         views = [{k: v for k, v in view.items() if k not in ("px_to_mm", "sha256")} for view in data.get("views") or []]
         return {
@@ -173,6 +174,22 @@ class ScoutService:
             "mode": (data.get("config") or {}).get("mode"),
             "next_actions": ["read_scout_report", "run_scout_inspection", "preview_volume"],
         }
+
+
+def _gpu_of(args: list[str], default: list[int]) -> list[int]:
+    """The GPU ids a fidopt argv names (``--gpu 0,1`` or ``--gpu=0``; none for ``cpu``), ``default`` when it names
+    none."""
+    for index, item in enumerate(args):
+        value = (
+            item.split("=", 1)[1]
+            if item.startswith("--gpu=")
+            else args[index + 1]
+            if item == "--gpu" and index + 1 < len(args)
+            else None
+        )
+        if value is not None:
+            return [int(v) for v in value.split(",") if v.strip().isdigit()]
+    return default
 
 
 class FidoptAdapter:
@@ -282,6 +299,8 @@ class FidoptAdapter:
                 f"fidopt {operation!r} is not allowed on this server (KONFAI_MCP_FIDOPT_ALLOWED={','.join(self.allowed)})."
             )
         self.available()
+        # where a dataset's cases live is FidOpt's to resolve (a derived dataset reads its source's folder, tune its
+        # development corpus): a missing corpus is FidOpt's own error in the job log
         args = [operation, self._check_name(method, "method")]
         if operation == "check":
             if dataset:
@@ -305,7 +324,10 @@ class FidoptAdapter:
             if ".." in item or not re.fullmatch(r"[A-Za-z0-9._:=,-]+", item):
                 raise ValueError(f"extra argument {item!r}: flags and plain values only, no paths outside the corpus.")
             args.append(item)
-        label = self.workspace_layout.sanitize_name(f"fidopt_{operation}_{method}_{dataset or 'none'}")
+        # one folder per launch: two checks of one method must not share an output
+        label = self.workspace_layout.sanitize_name(
+            f"fidopt_{operation}_{method}_{dataset or 'none'}_{uuid.uuid4().hex[:6]}"
+        )
         output = self.workspace_layout.ensure_session_workspace() / "FidOpt" / label
         output.mkdir(parents=True, exist_ok=True)
         # FidOpt writes its rows where its own configuration says, so the job's folder only records what was asked
@@ -320,4 +342,7 @@ class FidoptAdapter:
             "command": [self.executable, *args],
             "kwargs": {"executable": self.executable, "args": args},
             "output": str(output),
+            # a FidOpt job holds the GPU its --gpu names, else FidOpt's own default (fidopt/cli.py): none for check,
+            # GPU 0 for run and tune, the CPU when CUDA_VISIBLE_DEVICES is set and empty
+            "gpu": _gpu_of(args, [] if operation == "check" or os.environ.get("CUDA_VISIBLE_DEVICES") == "" else [0]),
         }

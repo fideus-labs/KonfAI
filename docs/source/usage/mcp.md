@@ -45,7 +45,7 @@ Ask the connected client to inspect a dataset before running a job:
 The client can run a published app, fine-tune it or train from a configuration.
 Check the completed job status and written outputs before interpreting its metrics;
 validation at its default level only builds the objects. Request
-`validate_config_semantics(level="train_step")` for a forward and backward pass.
+`check_config(level='instantiate')` for a forward and backward pass.
 
 Tools that load a local or Hugging Face app's Python code require
 `allow_untrusted_code=True`; app resolution can also install its requirements.
@@ -71,16 +71,16 @@ folder and send a job's monitoring calls to the process that runs it.
 | Stage | Tools |
 |---|---|
 | Orient | `describe_konfai_capabilities`, `describe_config_schema`, `describe_extension_points` |
-| Dataset | `browse_dataset`, `inspect_dataset`, `read_dataset_file`, `preview_volume`, `prepare_dataset_aliases` |
+| Dataset | `inspect_dataset(browse=True)`, `inspect_dataset`, `read_file`, `preview_volume`, `prepare_dataset_aliases` |
 | Author | `design_config_strategy`, `initialize_session`, `write_workflow_config`, `write_session_file` |
-| Validate | `review_config_semantics`, `validate_config_semantics` |
-| Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `plan_transform` → `run_transform`, `wait_for_job`, `read_live_metrics`, `leaderboard` |
-| Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `run_app` (`infer`, `evaluate`, `uncertainty`, `pipeline`), `import_app` (modify-then-run) |
-| Adapt & package | `fine_tune_app`, `import_app` → `run_resume` (`weights_only=True`), `package_app_from_session`, `export_app`, `register_app_source` |
+| Validate | `check_config`, `check_config(level='instantiate')` |
+| Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `run_transform(dry_run=True)` → `run_transform`, `get_job_status(wait=True)`, `read_live_metrics`, `leaderboard` |
+| Use an app | `list_apps`, `describe_app`, `describe_app(parameters=True)`, `run_app` (`infer`, `evaluate`, `uncertainty`, `pipeline`), `fetch_app` (modify-then-run) |
+| Adapt & package | `fine_tune_app`, `fetch_app` → `run_resume` (`weights_only=True`), `package_app_from_session`, `fetch_app(path=...)`, `app_sources(action='add')` |
 
 Most answers include `next_actions`, the valid next calls. The full reference of each tool is generated from
 the server (`guide://tool-index`).
 
-`import_experiment` brings in an experiment made outside the server: configs and code are copied, and
+`session(action='import')` brings in an experiment made outside the server: configs and code are copied, and
 `Checkpoints/`, `Predictions/` and the other outputs are linked (copied where links are not allowed).
 `include_artifacts='copy'` always copies, `'none'` imports configs and code only.

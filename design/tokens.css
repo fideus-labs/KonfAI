@@ -1,0 +1,57 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* KonfAI identity: the tokens every surface of the family reads (the site, Studio, the sister sites).
+   A consumer maps its own semantic names onto these (README.md shows how) and never redefines a value. */
+:root {
+  /* ---- Hues. One per piece of the family. The solid is for fills, rails, marks and meters; the ink is the
+     same hue as text on a dark ground (every ink reads at 10:1 or better on --k-night). ---- */
+  --k-sage: #52b89b;   --k-sage-ink: #8fe0c6;   /* the engine; KonfAI's green: what is current, what is ready */
+  --k-teal: #38b3cc;   --k-teal-ink: #8fe2f2;   /* the apps */
+  --k-violet: #8b7cf6; --k-violet-ink: #c4bbff; /* Edge */
+  --k-amber: #e0a64a;  --k-amber-ink: #f5cf8c;  /* Studio; also the live signal: a tool running, a job writing */
+  --k-steel: #5d9bf0;  --k-steel-ink: #aacbff;  /* MCP; also a measured fact */
+  --k-coral: #ee7f72;  --k-coral-ink: #ffb4aa;  /* Scout; also an error, a confirmed defect */
+  /* The same six on paper (a light theme): deeper, so that text set in them still reads. */
+  --k-sage-deep: #2f9a7e; --k-teal-deep: #1f8ea6; --k-violet-deep: #6a5ae0;
+  --k-amber-deep: #b07d1c; --k-steel-deep: #3a7ca8; --k-coral-deep: #c7523b;
+
+  /* ---- Grounds. Three ladders of three: the night of the site (cold blue; nothing on it is a neutral grey),
+     the graphite of a tool's chrome (Studio: the volumes and the curves carry the light), and paper. ---- */
+  --k-night: #080b12;    --k-night-2: #0f141d;    --k-night-3: #141b26;
+  --k-graphite: #14171b; --k-graphite-2: #181c21; --k-graphite-3: #22282f;
+  --k-paper: #eef1f4;    --k-paper-2: #f6f8fa;    --k-paper-3: #ffffff;
+
+  /* ---- Ink on the night, four steps, and its hairlines. A tool keeps its own steps, measured on its panels. ---- */
+  --k-ink: #eef1f7; --k-ink-2: #c8d0de; --k-muted: #a3aec2; --k-dim: #7a869b;
+  --k-line: #1c2434; --k-line-2: rgba(176, 198, 232, 0.11);
+
+  /* ---- Type. Archivo carries the titles, IBM Plex Sans the text, IBM Plex Mono the data (fonts.css serves them). ---- */
+  --k-display: Archivo, "IBM Plex Sans", system-ui, sans-serif;
+  --k-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --k-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --k-display-weight: 680;        /* Archivo's variable axis: one weight for every title */
+  --k-display-tracking: -0.03em;
+  /* the scale: six fixed steps for an interface, two fluid steps for a page */
+  --k-fs-0: 10.5px; /* eyebrows, kickers, tab labels (mono, uppercase) */
+  --k-fs-1: 12px;   /* captions, data */
+  --k-fs-2: 13.5px; /* an interface's body */
+  --k-fs-3: 15px;   /* a page's body, an interface's lead */
+  --k-fs-4: 20px;   /* card and section titles */
+  --k-fs-5: 28px;   /* a verdict word, a page's h2 */
+  --k-fs-6: clamp(1.5rem, 2.6vw, 2rem); /* a page's section title */
+  --k-fs-7: clamp(2.4rem, 6.6vw, 5rem); /* a hero headline */
+
+  /* ---- Space, radii, controls ---- */
+  --k-s-1: 4px; --k-s-2: 8px; --k-s-3: 12px; --k-s-4: 16px; --k-s-5: 24px; --k-s-6: 32px; --k-s-7: 48px;
+  --k-r-1: 6px; --k-r-2: 10px; --k-r-3: 14px; --k-r-pill: 999px;
+  --k-ctl: 32px;       /* the height of a bar control */
+  --k-ctl-touch: 40px; /* where a finger does the pointing */
+  --k-max: 1232px;     /* a page's measure */
+
+  /* ---- Motion. One clock: a state settles in 150 ms with a hard ease-out; a reveal takes 400 ms. ---- */
+  --k-dur: 0.15s;
+  --k-dur-2: 0.4s;
+  --k-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --k-dur: 0s; --k-dur-2: 0s; }
+}

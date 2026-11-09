@@ -48,7 +48,7 @@ def test_set_live_tunables_writes_a_revisioned_control_file(
             session_dir = Path(created.structured_content["path"])
 
             # No running training job yet -> the tool refuses without writing anything.
-            none_yet = await client.call_tool("set_live_tunables", {"it_validation": 5})
+            none_yet = await client.call_tool("control_training", {"it_validation": 5})
             assert none_yet.structured_content["ok"] is False
 
             run_dir = session_dir / "Statistics" / "RUN"
@@ -67,7 +67,13 @@ def test_set_live_tunables_writes_a_revisioned_control_file(
             job.proc = cast(Any, _Running())
             mcp_server.JOB_REGISTRY.jobs[job.job_id] = job
 
-            result = await client.call_tool("set_live_tunables", {"lr": 1e-4, "it_validation": 5})
+            # A rate or an interval that is not positive is refused before any control file is written.
+            for bad in ({"lr": -0.01}, {"lr": 0.0}, {"it_validation": 0}):
+                with pytest.raises(fastmcp.exceptions.ToolError):
+                    await client.call_tool("control_training", bad)
+            assert not (run_dir / "control.json").exists()
+
+            result = await client.call_tool("control_training", {"lr": 1e-4, "it_validation": 5})
             payload = result.structured_content
             assert payload["ok"] is True
             assert payload["revision"] == 1
@@ -79,7 +85,7 @@ def test_set_live_tunables_writes_a_revisioned_control_file(
             }
 
             # A second call bumps the revision so the trainer applies it once more.
-            again = await client.call_tool("set_live_tunables", {"lr": 5e-5})
+            again = await client.call_tool("control_training", {"lr": 5e-5})
             assert again.structured_content["revision"] == 2
 
             # next_actions must be real, registered tool names (anti-drift for this tool's own payload).
@@ -98,7 +104,7 @@ def test_set_live_tunables_needs_at_least_one_field(
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
             await client.call_tool("initialize_session", {"overwrite": True})
-            empty = await client.call_tool("set_live_tunables", {})
+            empty = await client.call_tool("control_training", {})
             assert empty.structured_content["ok"] is False
 
     asyncio.run(scenario())

@@ -183,6 +183,19 @@ needs to recover state, inspect artifacts, or decide the next step.
 
 ## MCP Tools
 
+Fifty tools, one per object: a variant of an operation is an argument of its tool
+(`session(action=...)`, `check_config(level=...)`, `get_job_status(wait=True)`,
+`read_file` for a session, dataset or template file), never a sibling tool. Each is
+described in one short paragraph whose first sentence is what a client's tool search
+matches; the server's `instructions` say what KonfAI does and when to search its
+tools, and six entry tools (`describe_konfai_capabilities`, `list_apps`, `run_app`,
+`initialize_session`, `write_workflow_config`, `summarize_session`) carry
+`_meta["anthropic/alwaysLoad"]` so Claude Code keeps them loaded while it defers the
+rest. Listed schemas are lean (an optional parameter is its type, no output schema for a free-form
+result); the whole tool list weighs about 15k tokens for a client that loads it upfront.
+Every call appends one line (tool, session, ok, ms; no argument) to `tool_calls.jsonl` in the
+workspaces root: the usage data the next consolidation of the surface rests on.
+
 Tools are grouped by stage below. To avoid drift and wasted tokens, each tool's
 **contract (inputs, outputs, `next_actions`) is not duplicated here**; it lives
 once, generated from the registry:
@@ -196,33 +209,30 @@ At a glance, by stage:
 
 - **Discovery**: `list_components`, `inspect_object_signature`,
   `describe_konfai_capabilities`, `describe_config_schema`,
-  `describe_extension_points`, `check_external_dependency`
-- **Dataset onboarding**: `browse_dataset`, `inspect_dataset`, `read_dataset_file`,
+  `describe_extension_points`, `check_component`
+- **Dataset onboarding**: `inspect_dataset(browse=True)`, `inspect_dataset`, `read_file`,
   `preview_volume`, `prepare_dataset_aliases`
 - **Config authoring**: `design_config_strategy`, `initialize_session`,
-  `write_workflow_config`, `write_session_file` / `read_session_file`,
-  `read_template_file`
-- **Validation & iteration**: `review_config_semantics`,
-  `validate_config_semantics`, `summarize_session`, `leaderboard`,
+  `write_workflow_config`, `write_session_file` / `read_file`
+- **Validation & iteration**: `check_config`,
+  `check_config(level='instantiate')`, `summarize_session`, `leaderboard`,
   `get_run_metrics`, `compare_runs`, `diff_run_configs`, `describe_model_outputs`,
-  `run_component_smoke_test`
+  `check_component`
 - **Execution & monitoring**: `run_train` / `run_resume` / `run_prediction` /
-  `run_evaluation`, `run_batch`, `generate_folds`, `list_jobs` /
-  `get_job_status` / `cancel_job`, `wait_for_job`, `read_live_metrics`,
+  `run_evaluation`, `run_batch`, `generate_folds`, `get_job_status` / `cancel_job`, `get_job_status(wait=True)`, `read_live_metrics`,
   `read_job_log`
 - **Apps**: see [Use a published app](#use-a-published-app-instead-of-training)
 - **Visual inspection (KonfAI Scout)**: `run_scout_inspection` (a tracked job: a vision
   model looks at slices, zooms, overlays and measures regions with KonfAI Eval, then
-  reports localised defects with evidence), `read_scout_report`, `list_scout_reports`.
+  reports localised defects with evidence), `read_scout_report`.
   Needs `pip install konfai-scout`; images reach a cloud model only with
   `allow_cloud_images=True`.
-- **FidOpt (the benchmark)**: `fidopt_list_datasets`, `fidopt_describe_dataset`,
-  `fidopt_list_methods`, `fidopt_table` read it through FidOpt's own code
+- **FidOpt (the benchmark)**: `fidopt_catalog`, `fidopt_table` read it through FidOpt's own code
   (`KONFAI_MCP_FIDOPT` names the `fidopt` executable of a checkout); `fidopt_run` launches
   the operations `KONFAI_MCP_FIDOPT_ALLOWED` lists (default `check`) as tracked jobs,
   with `scout=` to inspect the scored outputs. Nothing of FidOpt is reimplemented here.
-- **Session lifecycle**: `create_session` / `switch_session` / `delete_session`,
-  `import_experiment`, `export_run_record`
+- **Session lifecycle**: `session(action='create')` / `session(action='switch')` / `session(action='delete')`,
+  `session(action='import')`, `export_run_record`
 
 Hardware for device selection is a **resource, not a tool**: `server://capabilities`
 reports per-GPU total / used / **free** VRAM and a recommended device, and every
@@ -248,20 +258,20 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
    - `evaluate`: score predictions with the app's own metrics
    - `uncertainty`: uncertainty maps
    - `pipeline`: infer → evaluate → uncertainty in one job
-   - `list_app_parameters` / `set_parameters`: read tunable parameters (with
+   - `describe_app(parameters=True)` / `set_parameters`: read tunable parameters (with
      their constraints) and override them per run
-   - `import_app`: only when the app must be **modified** first. It copies the
+   - `fetch_app`: only when the app must be **modified** first. It copies the
      app (config + code + checkpoints) into the session so it runs as a normal
      experiment through `run_prediction` / `run_resume` / `run_evaluation`
 2. **Fine-tune an app**: start training from a published model rather than a
    blank slate: `fine_tune_app` adapts it to the user's dataset in one call and
-   writes a resolvable app bundle; `import_app` + `run_resume(weights_only=True)`
+   writes a resolvable app bundle; `fetch_app` + `run_resume(weights_only=True)`
    is the full-control tier (custom losses, config surgery).
 3. **Train from scratch**: author a config (the loop above) and, when done,
    `package_app_from_session` turns the trained model into a bundle too.
 
 Both training paths therefore **end at the same reusable artifact, a bundle**,
-which `describe_app` / `run_app` can then consume, and `export_app` can
+which `describe_app` / `run_app` can then consume, and `fetch_app(path=...)` can
 snapshot (with tuned parameters baked in) as the reproducibility record a
 challenge submission wants. (A remote `host:port:name` app keeps its code on the
 user's own server; it is not runnable from the MCP server. Drive it with
@@ -270,7 +280,7 @@ user's own server; it is not runnable from the MCP server. Drive it with
 **App catalogue.** `list_apps` reads a layered catalogue of app sources: a
 shipped default, an editable per-workspace file, and the `KONFAI_MCP_APP_CATALOG`
 env file (same `{"apps": [...]}` shape as the `konfai-apps` server's `--apps`),
-plus an ad-hoc `repos=[...]` override. `register_app_source` / `unregister_app_source`
+plus an ad-hoc `repos=[...]` override. `app_sources(action='add')` / `app_sources(action='remove')`
 let a user pin their own HuggingFace repo or local app. A bare HuggingFace
 `repo_id` or a `host:port` remote server entry is expanded into its apps.
 
@@ -289,12 +299,12 @@ For a dataset-driven task, the intended loop is:
 2. `design_config_strategy`
 3. `initialize_session`
 4. `write_workflow_config` (and `write_session_file` for custom components)
-5. `review_config_semantics`
-6. `validate_config_semantics`
+5. `check_config`
+6. `check_config(level='instantiate')`
 7. `run_train`
-8. `wait_for_job` (or `read_live_metrics`; `run_resume` after an interruption)
+8. `get_job_status(wait=True)` (or `read_live_metrics`; `run_resume` after an interruption)
 9. `run_prediction`
-10. `wait_for_job`
+10. `get_job_status(wait=True)`
 11. `run_evaluation`
 12. `summarize_session`
 13. `leaderboard` / `get_run_metrics`
@@ -313,7 +323,7 @@ guessing the next valid step.
 
 The server supports semantic validation before full execution.
 
-`validate_config_semantics` can check whether a workflow can actually be built,
+`check_config(level='instantiate')` can check whether a workflow can actually be built,
 and optionally set it up, using the current experiment state and available
 artifacts.
 
@@ -347,6 +357,18 @@ KONFAI_MCP_LOG_TAIL_LINES = "400"
 
 The exact client configuration depends on the MCP host, but the intended
 entrypoint is the package command, not an ad hoc wrapper script.
+
+What Codex does with these tools, measured with codex-cli 0.167: the tools hinted read-only
+(`describe_*` but `describe_app` and `describe_model_outputs`, `inspect_dataset`, `read_*`, `get_*`, `list_*`,
+`leaderboard`, `compare_runs`, `diff_run_configs`, `design_config_strategy`, `preview_volume`, `fidopt_catalog`,
+`fidopt_table`) run without approval; every other tool asks for one, including the ones that can run code:
+`check_component`, `check_config`, `describe_model_outputs` and `describe_app` (session or app code),
+`inspect_object_signature` and `summarize_session` (an installed module a classpath names), which
+an interactive session grants and `codex exec` (non-interactive) refuses whatever `approval_policy` or
+`default_tools_approval_mode` says. Drive a session, a config or a job from Codex
+interactively, or from Claude Code. Two Codex defaults to raise: `tool_timeout_sec` (60 s; a
+`get_job_status(wait=True)` or a `run_*(wait=True)` outlives it) and `tool_input_schema_max_bytes` (5,000;
+every schema here fits, the largest is `run_app`).
 
 ## Testing
 

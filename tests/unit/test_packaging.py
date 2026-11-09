@@ -165,15 +165,17 @@ def _packages_find_config() -> dict:
     return pyproject["tool"]["setuptools"]["packages"]["find"]
 
 
-def test_the_declared_torch_floor_covers_the_dtypes_the_pipeline_reads() -> None:
-    """A uint16 store reaches ``torch.from_numpy``, and ``torch.uint16`` is named where a label
-    map's sign is read: both are torch 2.3. Without a floor, pip is free to resolve an older torch
-    and the run fails on a dtype instead of at install time."""
+def test_the_declared_torch_and_numpy_floors_cover_what_the_code_reads() -> None:
+    """A uint16 store reaches ``torch.from_numpy`` and ``torch.uint16`` is named where a label map's sign
+    is read (torch 2.3); a run's checkpoint is packaged under ``torch.serialization.safe_globals`` (torch
+    2.5) with ``np._core`` and ``np.dtypes`` types (numpy 2.0). Without these floors pip is free to resolve
+    an older release and the run fails on a missing attribute instead of at install time."""
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    torch_requirement = next(dep for dep in pyproject["project"]["dependencies"] if dep.startswith("torch"))
-    floor = torch_requirement.removeprefix("torch>=")
-    assert floor != torch_requirement, f"no lower bound on torch: {torch_requirement!r}"
-    assert tuple(int(part) for part in floor.split(".")) >= (2, 3)
+    for name, needed in (("torch", (2, 5)), ("numpy", (2,))):
+        requirement = next(dep for dep in pyproject["project"]["dependencies"] if dep.startswith(name))
+        floor = requirement.removeprefix(f"{name}>=")
+        assert floor != requirement, f"no lower bound on {name}: {requirement!r}"
+        assert tuple(int(part) for part in floor.split(".")) >= needed
 
 
 def test_wheel_excludes_sibling_packages_but_keeps_namespace_subpackages() -> None:

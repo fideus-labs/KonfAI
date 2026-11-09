@@ -171,7 +171,7 @@ def test_a_launched_job_is_reported_as_open_not_as_a_result(
 
     state = of_type(events, "state")
     assert state["stage"] == "running"
-    assert of_type(events, "next_prompts")["prompts"][0]["label"] == "Wait for job"
+    assert of_type(events, "next_prompts")["prompts"][0]["label"] == "Get job status"
     turn(client, "and?")
     assert "[now] Job job-1 is still open" in agent.messages[1]
 
@@ -338,7 +338,7 @@ def test_the_state_and_the_moves_survive_a_reload(studio: tuple[TestClient, _Scr
     payload = client.get("/api/experiment?session=exp").json()
 
     assert payload["workflow"]["stage"] == "configuration"
-    assert payload["moves"][0]["label"] == "Validate config semantics"
+    assert payload["moves"][0]["label"] == "Check config"
 
 
 # --- the front the browser is given ------------------------------------------------------------------
@@ -420,7 +420,7 @@ def test_remembered_buttons_are_dropped_once_the_experiment_moves(
     moved = of_type(turn(client, "and now"), "next_prompts")["prompts"]
 
     assert "Inspect The Data" not in [move["label"] for move in moved]
-    assert moved[0]["label"] == "Wait for job"
+    assert moved[0]["label"] == "Get job status"
 
 
 def test_the_transcript_is_served_to_a_browser_that_missed_the_turns(

@@ -220,7 +220,7 @@ def test_a_session_is_offered_the_workflow_it_actually_wrote(tmp_path: Path) -> 
 
     assert "run_train" not in payload["next_actions"]
     actions = payload["next_actions"]
-    assert actions.index("plan_transform") < actions.index("run_transform")
+    assert actions.count("run_transform") == 1
 
 
 def test_choosing_among_configs_does_not_hide_the_step_that_comes_next(tmp_path: Path) -> None:
@@ -239,7 +239,7 @@ def test_an_open_job_is_running_and_says_what_to_wait_for(tmp_path: Path) -> Non
     payload = state(workspace(tmp_path, config=True), [job("running")])
     assert payload["stage"] == "running"
     assert "wait for it to reach a terminal state" in payload["focus"]
-    assert payload["next_actions"][0] == "wait_for_job"
+    assert payload["next_actions"][0] == "get_job_status"
 
 
 def test_a_finished_training_leads_to_the_checkpoint_not_to_done(tmp_path: Path) -> None:

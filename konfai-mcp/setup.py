@@ -81,11 +81,12 @@ setup(
     install_requires=[
         _sibling("konfai", _version),
         _sibling("konfai-apps", _version),
-        # >= 2.10.2 for stateless streamable HTTP (stateless_http/json_response run
-        # kwargs and the FASTMCP_STATELESS_HTTP setting) per MCP spec rev 2025-03-26.
-        "fastmcp>=2.10.2",
+        # 4: the tool fields the tests read (input_schema, read_only_hint); stateless
+        # streamable HTTP (MCP spec rev 2025-03-26) has been there since 2.10.2.
+        "fastmcp>=4",
         "ruamel.yaml",
-        "numpy",
+        # 2.0, as konfai declares it: konfai_apps.bundle reads np._core and np.dtypes.
+        "numpy>=2",
         # Checks a written config against KonfAI's schema (konfai.config_schema.config_errors).
         "jsonschema",
     ],

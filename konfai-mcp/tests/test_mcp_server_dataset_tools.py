@@ -19,6 +19,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -124,6 +125,38 @@ def test_directory_backed_dataset_entries_are_discovered(
             assert data["groups"]["CT"]["count"] == 2
 
     asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_layout_hint_tells_a_per_case_dataset_from_an_inverted_one(
+    tmp_path: Path,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    normal = tmp_path / "normal"  # three groups in four cases: the shared names are the groups
+    for case in range(4):
+        (normal / f"CASE_{case:03d}").mkdir(parents=True)
+        for group in ("CT", "SEG", "MASK"):
+            (normal / f"CASE_{case:03d}" / f"{group}.mha").write_bytes(b"\x00")
+    inverted = tmp_path / "inverted"  # two folders holding the same five files: the folders are the groups
+    for group in ("scans", "masks"):
+        (inverted / group).mkdir(parents=True)
+        for case in range(5):
+            (inverted / group / f"case_{case:03d}.mha").write_bytes(b"\x00")
+
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> list[str | None]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            return [
+                (
+                    await client.call_tool("inspect_dataset", {"dataset_dir": str(root), "include_stats": False})
+                ).structured_content["layout_hint"]
+                for root in (normal, inverted)
+            ]
+
+    normal_hint, inverted_hint = asyncio.run(scenario())
+    assert normal_hint is None
+    assert "inverted layout" in inverted_hint
 
 
 @pytest.mark.usefixtures("workspace_root")
@@ -362,7 +395,7 @@ Trainer:
             )
 
             review = await client.call_tool(
-                "review_config_semantics",
+                "check_config",
                 {
                     "workflow": "train",
                 },
@@ -373,7 +406,7 @@ Trainer:
             assert "input_channel_context_mismatch" in warning_codes
             assert "no_non_input_groups_declared" in warning_codes
             assert review_data["summary"]["model"]["local_metadata"]["detected_contract"]["in_channels"] == 5
-            assert "validate_config_semantics" in review_data["next_actions"]
+            assert "check_config" in review_data["next_actions"]
 
     asyncio.run(scenario())
 
@@ -423,6 +456,7 @@ class DiceFocalLoss:
 
 @pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_inspect_object_signature_isolates_library_import(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
@@ -472,6 +506,33 @@ def test_mcp_server_inspect_object_signature_isolates_library_import(
             assert colon_form.structured_content["source"] == "imported"
             assert len(subprocess_calls) == 2
             assert subprocess_calls[1][1]["classpath"] == "json:decoder:JSONDecoder"
+
+            # A single token naming an installed package is imported too: no session json.py answers to it.
+            package = await client.call_tool("inspect_object_signature", {"classpath": "json:JSONDecoder"})
+            assert package.structured_content["source"] == "imported"
+            assert len(subprocess_calls) == 3
+
+    # The review routes the same way: an import ('pkg:Class', a bare builtin) goes to the subprocess, a local
+    # File:Class stays in-process, and a failed subprocess leaves the review without the signature.
+    review_calls: list[str] = []
+
+    def spy_review(target: str, kwargs: dict[str, object], timeout_s: float | None = None) -> dict[str, object]:
+        review_calls.append(str(kwargs["classpath"]))
+        return real_summarize(**kwargs)
+
+    monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", spy_review)
+    review = mcp_server.SESSION._component_signature_for_classpath
+    (tmp_path / "Loss.py").write_text("class MyLoss:\n    def __init__(self, a: float = 1.0): ...\n")
+    assert review(tmp_path / "C.yml", "json:JSONDecoder")["source"] == "imported"
+    assert review(tmp_path / "C.yml", "Dice")["ok"]
+    assert review(tmp_path / "C.yml", "Loss:MyLoss")["source"] == "local"
+    assert review_calls == ["json:JSONDecoder", "Dice"]
+
+    def timed_out(*_: object, **__: object) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", timed_out)
+    assert review(tmp_path / "C.yml", "json:JSONDecoder") is None
 
     asyncio.run(scenario())
 
@@ -614,8 +675,9 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
     async def scenario() -> None:
         async with client_cls(mcp_server.mcp) as client:
             browsed = await client.call_tool(
-                "browse_dataset",
+                "inspect_dataset",
                 {
+                    "browse": True,
                     "dataset_dir": str(dataset_root),
                     "depth": 3,
                     "max_entries": 50,
@@ -634,7 +696,7 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
             )
             inferred_data = inferred.structured_content
             assert inferred_data["groups"] == {}
-            assert "browse_dataset" in inferred_data["next_actions"]
+            assert "inspect_dataset" in inferred_data["next_actions"]
             assert inferred_data["candidate_dataset_roots"][0]["relative_path"] == "AB"
 
     asyncio.run(scenario())
@@ -694,7 +756,7 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
             index = await mcp_server.read_tool_index()
             registered = set(index["tools"])
 
-            csv_read = await client.call_tool("read_dataset_file", {"path": str(labels)})
+            csv_read = await client.call_tool("read_file", {"path": str(labels)})
             data = csv_read.structured_content
             assert data["kind"] == "delimited"
             assert data["columns"] == ["case", "grade"]
@@ -703,17 +765,24 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
             # The tool's own next_actions must be registered tool names (AGENTS.md anti-drift rule).
             assert set(data["next_actions"]) <= registered
 
-            bounded = await client.call_tool("read_dataset_file", {"path": str(long_txt), "max_lines": 10})
+            bounded = await client.call_tool("read_file", {"path": str(long_txt), "max_lines": 10})
             bounded_data = bounded.structured_content
             assert bounded_data["returned_lines"] == 10
             assert bounded_data["truncated"] is True
 
+            # a later page streams the range: the whole file is never read into memory
+            with patch.object(Path, "read_text", side_effect=AssertionError("whole file read")):
+                paged = await client.call_tool("read_file", {"path": str(long_txt), "offset": 9, "max_chars": 8})
+            assert paged.structured_content["content"] == "CASE_001"
+            assert paged.structured_content["truncated"] is True
+
             with pytest.raises(Exception, match="binary"):
-                await client.call_tool("read_dataset_file", {"path": str(binary)})
+                await client.call_tool("read_file", {"path": str(binary)})
 
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("workspace_root")
 @pytest.mark.usefixtures("workspace_root")
 def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
     tmp_path: Path,
@@ -723,7 +792,7 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
     Seen live: an agent asked to verify a known 5-voxel shift had the number in Transform.h5 and no
     tool that could open it. Linear transforms expose their parameters; dense fields a displacement
-    summary."""
+    summary. The same summary inside the session, where run_app writes it: never a text dump."""
     h5py = pytest.importorskip("h5py")
     np = pytest.importorskip("numpy")
 
@@ -746,7 +815,7 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
-            read = await client.call_tool("read_dataset_file", {"path": str(transform)})
+            read = await client.call_tool("read_file", {"path": str(transform)})
             data = read.structured_content
             assert data["kind"] == "itk_transform"
             dense, linear = data["transforms"]
@@ -757,7 +826,16 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
             # An HDF5 that is NOT an ITK transform keeps the binary refusal.
             with pytest.raises(Exception, match="binary"):
-                await client.call_tool("read_dataset_file", {"path": str(plain)})
+                await client.call_tool("read_file", {"path": str(plain)})
+
+            await client.call_tool("initialize_session", {"overwrite": True})
+            in_session = Path(mcp_server.WORKSPACE_LAYOUT.workspace_dir()) / "Predictions" / "case" / "Transform.h5"
+            in_session.parent.mkdir(parents=True)
+            in_session.write_bytes(transform.read_bytes())
+            for path in ("Predictions/case/Transform.h5", str(in_session)):
+                read = await client.call_tool("read_file", {"path": path})
+                assert read.structured_content["kind"] == "itk_transform", path
+                assert read.structured_content["transforms"][1]["parameters"] == [0.0, 0.0, 0.0, 0.0, 5.0, 0.0]
 
     asyncio.run(scenario())
 
@@ -846,7 +924,7 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
             assert any("unknown 'Standardise' (did you mean 'Standardize'?)" in error for error in errors)
             assert written.structured_content["next_actions"][0] == "write_workflow_config"
 
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             blocking = [issue["message"] for issue in review["blocking_issues"] if issue["code"] == "config_schema"]
             unread = [warning["message"] for warning in review["warnings"] if warning["code"] == "config_key_unread"]
             assert len(blocking) == 1 and "Standardise" in blocking[0]
@@ -856,15 +934,15 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
             # A value of the wrong type is reported, not read by the semantic checks that follow.
             wrong_type = example.replace("extend_slice: 0", "extend_slice: [1, 2]", 1)
             await client.call_tool("write_workflow_config", {"workflow": "train", "content": wrong_type})
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             assert [issue["code"] for issue in review["blocking_issues"]] == ["config_schema"]
             assert "extend_slice" in review["blocking_issues"][0]["message"]
 
             await client.call_tool("write_workflow_config", {"workflow": "train", "content": "Trainer: []\n"})
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             assert [issue["message"] for issue in review["blocking_issues"]] == ["Trainer: [] is not a mapping"]
 
             fixed = await client.call_tool("write_workflow_config", {"workflow": "train", "content": example})
-            assert "schema_errors" not in fixed.structured_content
+            assert fixed.structured_content["schema_errors"] == []
 
     asyncio.run(scenario())

@@ -46,7 +46,7 @@ def _call(server: ModuleType, tool: str, **arguments: object) -> object:
 
 
 def _wait(server: ModuleType, job_id: str) -> dict:
-    payload = _call(server, "wait_for_job", job_id=job_id, timeout_s=180.0)
+    payload = _call(server, "get_job_status", job_id=job_id, wait=True, timeout_s=180.0)
     assert isinstance(payload, dict)
     return payload
 
@@ -72,11 +72,11 @@ def test_an_inspection_runs_as_a_job_and_its_report_reads_back(
         max_tool_calls=12,
     )
     assert isinstance(payload, dict) and payload["kind"] == "scout" and payload["output"].endswith("Scout/seg_demo")
-    assert payload["next_actions"] == ["wait_for_job", "read_scout_report"]
+    assert payload["next_actions"] == ["get_job_status", "read_scout_report"]
     assert payload["devices"] == ["cpu"] and "vram_preflight" not in payload  # the model holds no GPU of this host
     done = _wait(server, payload["job_id"])
     assert done["status"] == "done", done
-    listed = _call(server, "list_scout_reports")
+    listed = _call(server, "read_scout_report")
     assert isinstance(listed, dict) and [r["name"] for r in listed["reports"]] == ["seg_demo"]
     assert listed["reports"][0]["observations"] >= 1 and listed["reports"][0]["model"] == "heuristic"
     report = _call(server, "read_scout_report", name="seg_demo")
@@ -87,7 +87,7 @@ def test_an_inspection_runs_as_a_job_and_its_report_reads_back(
     )
     assert report["observations"][0]["views"] and report["views"] and "px_to_mm" not in report["views"][0]
     assert Path(report["report_md"]).exists() and report["case"]["labels"] == {"1": "sphere", "2": "cube"}
-    with pytest.raises(ToolError, match="list_scout_reports"):
+    with pytest.raises(ToolError, match="read_scout_report"):
         _call(server, "read_scout_report", name="nope")
     with pytest.raises(ToolError):
         _call(server, "read_scout_report", name="../etc")
@@ -134,7 +134,7 @@ REPOSITORY = Path(__file__).resolve().parent / "repo"
 def datasets():
     return ["AMOS_CTCT", "WAWTACE"]
 def descriptor(name):
-    return {"AMOS_CTCT": {"title": "Abdomen", "modalities": ["ct", "ct"], "anatomy": "abdomen", "cases": ["a", "b"],
+    return {"AMOS_CTCT": {"title": "Abdomen", "modalities": ["ct"], "anatomy": "abdomen", "cases": ["a", "b"],
                           "development": ["c"], "spdx": "CC-BY-4.0", "use": "open"},
             "WAWTACE": {"title": "Liver", "task": "segmentation", "modalities": ["ct"], "anatomy": "liver", "cases": ["x"],
                         "spdx": "CC-BY-4.0"}}[name]
@@ -161,6 +161,9 @@ def fake_fidopt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     executable.chmod(executable.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("KONFAI_MCP_FIDOPT", str(executable))
     monkeypatch.setenv("KONFAI_MCP_FIDOPT_PYTHON", sys.executable)
+    corpus = tmp_path / "corpus"  # what fidopt_catalog lists as built
+    (corpus / "AMOS_CTCT").mkdir(parents=True)
+    monkeypatch.setenv("FIDOPT_DATA", str(corpus))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "fakepkg"))
     return executable
 
@@ -171,18 +174,18 @@ def test_fidopt_is_read_through_its_own_code_and_run_only_when_allowed(
 ) -> None:
     monkeypatch.setenv("KONFAI_MCP_FIDOPT_ALLOWED", "check")
     server = load_mcp_server()
-    datasets = _call(server, "fidopt_list_datasets")
+    datasets = _call(server, "fidopt_catalog")
     assert isinstance(datasets, dict) and [d["name"] for d in datasets["datasets"]] == ["AMOS_CTCT", "WAWTACE"]
     assert datasets["datasets"][0]["cases"] == 2 and datasets["datasets"][1]["task"] == "segmentation"
-    only = _call(server, "fidopt_list_datasets", task="segmentation")
+    only = _call(server, "fidopt_catalog", task="segmentation")
     assert isinstance(only, dict) and [d["name"] for d in only["datasets"]] == ["WAWTACE"]
-    described = _call(server, "fidopt_describe_dataset", dataset="AMOS_CTCT")
+    described = _call(server, "fidopt_catalog", dataset="AMOS_CTCT")
     assert (
         isinstance(described, dict)
         and described["dataset"]["anatomy"] == "abdomen"
         and described["dataset"]["task"] == "registration"
     )
-    methods = _call(server, "fidopt_list_methods")
+    methods = _call(server, "fidopt_catalog")
     assert (
         isinstance(methods, dict)
         and methods["methods"][0]["name"] == "deeds"
@@ -193,7 +196,7 @@ def test_fidopt_is_read_through_its_own_code_and_run_only_when_allowed(
     with pytest.raises(ToolError, match="not allowed"):
         _call(server, "fidopt_run", operation="run", method="deeds", dataset="AMOS_CTCT")
     with pytest.raises(ToolError):
-        _call(server, "fidopt_describe_dataset", dataset="../x")
+        _call(server, "fidopt_catalog", dataset="../x")
     payload = _call(
         server, "fidopt_run", operation="check", method="deeds", dataset="AMOS_CTCT", cases=["a"], scout="mock"
     )

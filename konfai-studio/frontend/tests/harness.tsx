@@ -6,6 +6,7 @@
 import React, { Suspense, lazy, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Niivue } from "@niivue/niivue";
+import App from "../src/App";
 import FolderBrowser from "../src/FolderBrowser";
 import RightPanel from "../src/RightPanel";
 import { useJobStream, type JobStream } from "../src/useJobStream";
@@ -57,6 +58,7 @@ function StreamProbe({ session }: { session: string }) {
 
 const components: Record<string, (props: any) => React.ReactElement> = {
   PanelProbe: (props) => <PanelProbe {...props} />,
+  App: () => <App />,
   FolderPicker: () => <FolderPicker />,
   Viewer: (props) => <Suspense><Viewer path={props.path ?? null} focus={props.focus} onPathChange={() => undefined} /></Suspense>,
   FolderBrowser: (props) => (
