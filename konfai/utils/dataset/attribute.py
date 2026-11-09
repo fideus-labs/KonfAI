@@ -278,8 +278,7 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
     else:
         # Contiguous before the import: SimpleITK copies a strided view through `tobytes`, at half
         # the speed of numpy's own copy (a 134 MB volume writes in 0.16 s instead of 0.24 s).
-        data = np.ascontiguousarray(data.transpose(tuple([i + 1 for i in range(len(data.shape) - 1)] + [0])))
-        image = sitk.GetImageFromArray(data, isVector=True)
+        image = sitk.GetImageFromArray(np.ascontiguousarray(np.moveaxis(data, 0, -1)), isVector=True)
     for k, v in attributes.items():
         if v and len(v):
             image.SetMetaData(k, v)
@@ -324,6 +323,23 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
 # over carries the map (``D x (D+1)`` flat, row-major, world units, fixed -> moving points), and the
 # backends write that map in place of the field. The underscore keeps the key out of the stack renaming.
 AFFINE_ATTRIBUTE = "konfai_affine"
+
+# Set by a registration whose transform has no affine form and no grid of its own (elastix's rigid then B-spline): the
+# header of the field it hands over names a transform file holding it, in world units, which an ':itktransform' output
+# writes in place of the field; any other format writes the field.
+TRANSFORM_FILE_ATTRIBUTE = "konfai_transform_file"
+# Set by a caller that averages or composes the outputs of the runs it starts (an ensemble of apps, a tiled
+# registration): their predictions write the field, never a native form.
+DENSE_TRANSFORMS_ENV = "KONFAI_DENSE_TRANSFORMS"
+
+
+def drop_native_form(attributes: Attribute) -> None:
+    """Forget the native form a field's header declares (its affine, its transform file, which goes): the field
+    stands alone, as it must where several copies were averaged, or where its writer is no transform file."""
+    if AFFINE_ATTRIBUTE in attributes:
+        attributes.pop(AFFINE_ATTRIBUTE)
+    if TRANSFORM_FILE_ATTRIBUTE in attributes:
+        Path(str(attributes.pop(TRANSFORM_FILE_ATTRIBUTE))).unlink(missing_ok=True)
 
 
 def as_affine(transform: sitk.Transform) -> sitk.AffineTransform:

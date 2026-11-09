@@ -18,6 +18,8 @@
 read, the translation between two subjects' centres of mass, and whether a mask restricts an image."""
 
 import contextlib
+import os
+import tempfile
 
 import numpy as np
 import SimpleITK as sitk
@@ -27,13 +29,18 @@ from konfai.network.external import ExternalTool
 from konfai.utils.dataset import (
     AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     affine_to_attribute,
+    as_affine,
     image_to_data,
 )
+from konfai.utils.dataset.attribute import _flatten_transforms
 
-#: The forms a preset declares its transform written in: its displacement on the fixed grid, or the affine it is.
-TRANSFORM_TYPES = ("field", "affine")
+#: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
+#: elastix's rigid then B-spline as such, a field for what is dense), or its displacement on the fixed grid. A mean
+#: (TTA, an ensemble) or a tiled run writes the field whatever the form.
+TRANSFORM_TYPES = ("native", "field")
 
 
 def check_transform_type(transform_type: str) -> None:
@@ -47,6 +54,41 @@ def displacement_on(grid: sitk.Image, transform: sitk.Transform) -> np.ndarray:
         transform, sitk.sitkVectorFloat64, grid.GetSize(), grid.GetOrigin(), grid.GetSpacing(), grid.GetDirection()
     )
     return image_to_data(field)[0]
+
+
+def world_transform(transform: sitk.Transform, voxel: float) -> sitk.Transform:
+    """``transform``, found in voxel units, in millimetres: ``voxel * T(p / voxel)``. A linear leaf keeps its matrix
+    and scales its translation; a B-spline scales its control grid and its coefficients. Any other leaf raises."""
+    world: list[sitk.Transform] = []
+    for leaf in _flatten_transforms(transform.Downcast()):
+        if leaf.IsLinear():
+            affine = as_affine(leaf)
+            affine.SetTranslation([value * voxel for value in affine.GetTranslation()])
+            world.append(affine)
+        elif isinstance(leaf, sitk.BSplineTransform):
+            coefficients = []
+            for image in leaf.GetCoefficientImages():
+                scaled = image * voxel
+                scaled.SetOrigin([value * voxel for value in image.GetOrigin()])
+                scaled.SetSpacing([value * voxel for value in image.GetSpacing()])
+                coefficients.append(scaled)
+            world.append(sitk.BSplineTransform(coefficients, leaf.GetOrder()))
+        else:
+            raise ValueError(f"A {leaf.GetName()} has no native form here: it is written as its field.")
+    return world[0] if len(world) == 1 else sitk.CompositeTransform(world)
+
+
+def _native_file(transform: sitk.Transform, voxel: float) -> str | None:
+    """``transform`` in millimetres in a transform file the output writes in place of its field, or None when it has
+    no native form (its field is written)."""
+    try:
+        world = world_transform(transform, voxel)
+    except ValueError:
+        return None
+    handle, path = tempfile.mkstemp(prefix="konfai_native_", suffix=".h5")
+    os.close(handle)
+    sitk.WriteTransform(world, path)
+    return path
 
 
 def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -> np.ndarray:
@@ -68,7 +110,7 @@ class EngineRegistration(ExternalTool):
     length a preset sets (a step, a grid, a smoothing, a feature model's voxel) is a number of voxels, so a step of 1.2
     is 1.2 mm on 1 mm voxels and 1.2 um on 1 um voxels.
 
-    An engine whose preset declares ``transform_type: affine`` returns the linear transform itself. The field KonfAI
+    An engine that found a linear transform (``transform_type: native``) returns it itself. The field KonfAI
     carries is that transform sampled, and the output's header records the map (``AFFINE_ATTRIBUTE``), which the
     output dataset writes in place of the field."""
 
@@ -93,14 +135,16 @@ class EngineRegistration(ExternalTool):
         fixed, moving, fixed_mask, moving_mask = images
         with contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser():
             result = self._engine.register(fixed, moving, device_index, fixed_mask, moving_mask)
-        linear = result if isinstance(result, sitk.Transform) else None
-        field = (displacement_on(fixed, linear) if linear is not None else result) * voxel
+        transform = result if isinstance(result, sitk.Transform) else None
+        field = (displacement_on(fixed, transform) if transform is not None else result) * voxel
         if flat:  # the plane's (dx, dy), and along z from one plane to the other
             field = np.concatenate([field, np.full_like(field[:1], z_shift)])
         # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
         header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-        if linear is not None:
-            header[AFFINE_ATTRIBUTE] = _world_affine(linear, voxel, z_shift if flat else None)
+        if transform is not None and transform.IsLinear():
+            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
+        elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
+            header[TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
         return field
 
 

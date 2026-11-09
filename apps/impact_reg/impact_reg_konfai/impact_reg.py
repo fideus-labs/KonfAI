@@ -47,6 +47,7 @@ import numpy as np
 import SimpleITK as sitk
 from konfai import RemoteServer
 from konfai.utils.dataset import (
+    DENSE_TRANSFORMS_ENV,
     Attribute,
     Dataset,
     entry_files,
@@ -146,12 +147,17 @@ def _is_flat_field(path: Path) -> bool:
 
 def _is_field(path: Path) -> bool:
     """Whether a stored registration is a displacement field: an image, a field store or a field transform file. A
-    linear transform file or an RFC-5 affine store (a preset's ``transform_type: affine``) is not one."""
+    linear transform file, an RFC-5 affine store or a B-spline (a preset's native form) is not one."""
     if _is_transform_file(path):
         return _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
     from konfai.utils.ome_zarr import is_affine_store
 
     return not (_backend(path) == "omezarr" and is_affine_store(path))
+
+
+def _is_bspline(path: Path) -> bool:
+    """Whether a stored registration is a transform file holding a B-spline (elastix's native form)."""
+    return _is_transform_file(path) and any("BSpline" in kind for kind in _transform_kinds(path))
 
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
@@ -386,23 +392,6 @@ def _preset_overrides(
                     " for this preset alone.",
                 ) from None
     return passes
-
-
-def _declares_affine(preset: str, overrides: list[str]) -> bool:
-    """Whether the preset's global pass writes its transform as an affine: ``transform_type`` in its config, or the
-    ``--set`` of it. A config that cannot be read (offline, nothing cached) declares nothing here: the preset's own
-    process reads it."""
-    # Bare or dotted from the config root (Predictor.Model.RegistrationNet.transform_type), as konfai-apps resolves it.
-    declared = {
-        name.strip().rpartition(".")[2]: value.strip() for name, _, value in (o.partition("=") for o in overrides)
-    }.get("transform_type")
-    if declared is None:
-        try:
-            tiling = _manifest(preset).get("tiling") or {}
-            declared = _config_value(_preset_config(preset, tiling.get("global") or "Prediction.yml"), "transform_type")
-        except Exception:
-            return False
-    return declared == "affine"
 
 
 def _plan(
@@ -971,6 +960,8 @@ class ImpactRegKonfAIApp:
         # The run's own choices every preset pass takes as they are: --output-format, --seed. The moved image is
         # derived here, so its format (--output-format [Moved=]FORMAT) is this orchestrator's; None: the moving's.
         self._run_args: list[str] = []
+        # Whether every preset pass writes its field, never a native form: an ensemble or a TTA averages them.
+        self._dense = False
         self._moved_format: str | None = None
 
     # ------------------------------------------------------------------ register
@@ -1061,6 +1052,8 @@ class ImpactRegKonfAIApp:
         if self._force_update:
             command.append("--force_update")
         env = {**os.environ, "TMPDIR": str(work)}
+        if self._dense or label is not None:
+            env[DENSE_TRANSFORMS_ENV] = "1"
         if self._remote is not None:
             command += ["--host", self._remote.host, "--port", str(self._remote.port)]
             # Through the environment konfai-apps reads it from, not the argv any process listing shows; a
@@ -1173,15 +1166,9 @@ class ImpactRegKonfAIApp:
                 self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
             if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
                 self._run_args += ["--output-format", spec]
-        # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
-        affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
-        if affine_presets and (len(presets) > 1 or tta):
-            raise KonfAIError(
-                "ImpactReg",
-                f"the preset '{affine_presets[0]}' writes its transform as an affine, which "
-                f"{'an ensemble' if len(presets) > 1 else '--tta'} cannot average.",
-                "Run it alone and without --tta, or --set transform_type=field.",
-            )
+        # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
+        # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
+        self._dense = len(presets) > 1 or bool(tta)
         self._applied, self._plans, self._ran = {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
@@ -1214,12 +1201,6 @@ class ImpactRegKonfAIApp:
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
                 largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
-                if tiled and preset in affine_presets:
-                    raise KonfAIError(
-                        "ImpactReg",
-                        f"the pair outgrows the device, and the tile pass of '{preset}' refines a field, not an affine.",
-                        "--set transform_type=field, or --max-voxels to register the pair whole.",
-                    )
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
@@ -1291,6 +1272,7 @@ class ImpactRegKonfAIApp:
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
+                stack = None
                 if sources == members and len(presets) == 1:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
@@ -1301,8 +1283,8 @@ class ImpactRegKonfAIApp:
                     stack = case_out / stack_file(form) if uncertainty and not flat else None
                     combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
-                    if stack is not None:
-                        _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK))
+                # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
+                _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1332,7 +1314,15 @@ class ImpactRegKonfAIApp:
                         target = _the_output(output / case, group)
                         stack = output / case / stack_file(_form(members[0]))
                         combine(members, "Mean", target, member_token(members[0]), stack)
-                        _drop_other_forms(output / case, STACK, stack.name.removeprefix(STACK))
+            if uncertainty and not quiet:
+                unstacked = [case for case in cases if not any(_is_entry(p, STACK) for p in (output / case).iterdir())]
+                if unstacked:
+                    print(
+                        f"[ImpactReg] WARNING: --uncertainty kept no stack for {', '.join(unstacked)}: it needs two or"
+                        " more presets, or --tta on a 3-D pair registered whole.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1629,7 +1619,7 @@ class ImpactRegKonfAIApp:
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
-        slab's source window sized from the field values it reads. An affine (``transform_type: affine``) has no
+        slab's source window sized from the field values it reads. An affine (a linear preset's native form) has no
         grid of its own: the fixed image lends it, and the affine is the map KonfAI decodes (``transforms``).
 
         NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK
@@ -1704,7 +1694,8 @@ class ImpactRegKonfAIApp:
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
         measures without reference (Jacobian, bending energy, displacement lengths), and is evaluated alone when no
-        modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        modality is given; a B-spline (elastix's native form) gets them on the fixed grid, the fixed image's or
+        segmentation's. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
         Segmentation, Landmarks, NoReference), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
@@ -1744,7 +1735,8 @@ class ImpactRegKonfAIApp:
         # evaluation.
         n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
-        jacobians: dict[Path, Path] = {}  # one field given for every case is measured once: it reads the whole field
+        # One transform given for every case is measured once: it reads the whole field (on one grid, for a B-spline).
+        jacobians: dict[tuple[Path, Path | None], Path] = {}
         for index in range(n_cases):
             # One output folder AND one workspace per modality: the configs share one train_name and konfai-apps
             # evaluates with overwrite.
@@ -1796,25 +1788,42 @@ class ImpactRegKonfAIApp:
                         tmp_dir=work / modality,
                     )
                     scored.append((f"P{index:03d}", eval_out / modality))
-                # The transform alone, no reference: its Jacobian, bending energy and displacement lengths. Only a
-                # displacement field is measured: a linear transform's Jacobian is its matrix, the same everywhere,
-                # and a B-spline file is not converted to a field.
-                if transforms and _is_field(transform):
-                    if transform in jacobians:
-                        shutil.copytree(jacobians[transform], eval_out / "NoReference", dirs_exist_ok=True)
-                    else:
-                        app.evaluate(
-                            inputs=[[transform]],
-                            gt=None,
-                            output=eval_out / "NoReference",
-                            evaluation_file="Evaluation_no_reference.yml",
-                            gpu=gpu,
-                            cpu=cpu,
-                            quiet=quiet,
-                            tmp_dir=work / "NoReference",
+                # The transform alone, no reference: its Jacobian, bending energy and displacement lengths. A field is
+                # measured on its own grid; a B-spline (elastix's native form) has none and is sampled on the fixed
+                # one, the fixed image's or segmentation's; a linear transform's Jacobian is its matrix everywhere.
+                if transforms:
+                    field, grid = _is_field(transform), None
+                    if not field and _is_bspline(transform):
+                        grid = next((group[index] for group in (fixed_images, gt_fixed_seg) if group), None)
+                        if grid is None:
+                            print(
+                                f"[ImpactReg] P{index:03d}: a B-spline transform is measured without reference on"
+                                " the fixed grid; give the fixed image (-f/-m) or segmentation"
+                                " (--gt-fixed-seg/--gt-moving-seg).",
+                                flush=True,
+                            )
+                    if field or grid is not None:
+                        if (transform, grid) in jacobians:
+                            shutil.copytree(jacobians[(transform, grid)], eval_out / "NoReference", dirs_exist_ok=True)
+                        else:
+                            app.evaluate(
+                                inputs=[[transform]],
+                                gt=[[grid]] if grid is not None else None,
+                                output=eval_out / "NoReference",
+                                evaluation_file="Evaluation_no_reference.yml",
+                                gpu=gpu,
+                                cpu=cpu,
+                                quiet=quiet,
+                                tmp_dir=work / "NoReference",
+                            )
+                            jacobians[(transform, grid)] = eval_out / "NoReference"
+                        scored.append((f"P{index:03d}", eval_out / "NoReference"))
+                    elif not runs:
+                        raise EvaluatorError(
+                            f"P{index:03d}: nothing to measure on '{transform}'.",
+                            "An affine has no measures without reference and a B-spline needs the fixed grid: give a"
+                            " modality to score it on (image, segmentation or landmarks).",
                         )
-                        jacobians[transform] = eval_out / "NoReference"
-                    scored.append((f"P{index:03d}", eval_out / "NoReference"))
             except BaseException as error:
                 _leave(work, error)
                 raise

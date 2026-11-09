@@ -20,7 +20,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
 | EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
-| one model's manifest | `konfai_edge_manifest` | 4 | the same |
+| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`) | KonfAI Edge with `patch.stride` (unreleased) |
 
 A bump on one side is a line in this table and in the runtime's README.
 
@@ -44,8 +44,10 @@ route is named and priced against the memory budget (`STREAM`, `LOAD`,
 which stage requires it. A refused plan writes no output. `--memory-budget BYTES`
 overrides the budget the program carries.
 
-A prediction also needs the checkpoints to export. The compiler writes their
-ONNX files beside the JSON program. Keep them together when moving the program.
+A prediction also needs the checkpoints to export; a model with no parameters
+needs none. The compiler writes their ONNX files beside the JSON program. Keep
+them together when moving the program. A model whose module reads the case's
+attributes (`accepts_attributes`) runs Python on the case and is refused.
 
 ```python
 from konfai.portable import compile_prediction
@@ -108,7 +110,7 @@ criterion runs its network on the whole volume, as `IMPACTReg` does).
 | `PSNR` | `psnr` |
 | `SSIM` | `ssim` |
 | `SAM_Perceptual` | `sam_perceptual`: its network as ONNX, with `L1Loss` on an input of three channels |
-| `IMPACTReg` | `impact_reg`: konfai-impact's configuration of the criterion, an encoder layer of a TotalSegmentator model normalized by fixed CT statistics (`TS/M291.pt`) on the whole volume (`shape` of zeros), with an `MSELoss` or `L1Loss` mean, no `distance` and no `pca`; KonfAI Edge scores it under its `impact` feature |
+| `IMPACTReg` | `impact_reg`: konfai-impact's configuration of the criterion, an encoder layer of a TotalSegmentator model normalized by fixed CT statistics (`TS/M291.pt`) on the whole volume (`in_channels: 1` and `shape: [0, 0, 0]`), with an `MSELoss` or `L1Loss` mean, no `distance` and no `pca`; KonfAI Edge scores it under its `impact` feature |
 | Any other | Refused by name |
 
 Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per

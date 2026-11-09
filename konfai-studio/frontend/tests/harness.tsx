@@ -5,6 +5,7 @@
 // place, so a second call is a prop change and not a fresh mount.
 import React, { Suspense, lazy, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Niivue } from "@niivue/niivue";
 import App from "../src/App";
 import FolderBrowser from "../src/FolderBrowser";
 import RightPanel from "../src/RightPanel";
@@ -13,6 +14,12 @@ import { useJson } from "../src/useJson";
 import "../src/styles.css";
 
 const Viewer = lazy(() => import("../src/Viewer"));
+// The last NiiVue instance attached, for a test that reads its crosshair.
+const attach = Niivue.prototype.attachToCanvas;
+Niivue.prototype.attachToCanvas = function (...args) {
+  (window as any).__nv = this;
+  return attach.apply(this, args);
+};
 const Deploy = lazy(() => import("../src/Deploy"));
 
 function FolderPicker() {
@@ -53,7 +60,7 @@ const components: Record<string, (props: any) => React.ReactElement> = {
   PanelProbe: (props) => <PanelProbe {...props} />,
   App: () => <App />,
   FolderPicker: () => <FolderPicker />,
-  Viewer: (props) => <Suspense><Viewer path={props.path ?? null} onPathChange={() => undefined} /></Suspense>,
+  Viewer: (props) => <Suspense><Viewer path={props.path ?? null} focus={props.focus} onPathChange={() => undefined} /></Suspense>,
   FolderBrowser: (props) => (
     <FolderBrowser
       start={props.start ?? ""}

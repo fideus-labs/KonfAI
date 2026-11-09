@@ -25,7 +25,14 @@ import numpy as np
 import torch
 
 from konfai.data.transform.base import _RANK_CHANGE, LocalityKind, PatchLocality, Transform
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset, DataStream
+from konfai.utils.dataset import (
+    AFFINE_ATTRIBUTE,
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
+    Attribute,
+    Dataset,
+    DataStream,
+)
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
 
@@ -154,6 +161,9 @@ def _stack_attributes(cache_attribute: Attribute, members: int, dataset: Dataset
             "Write the stack where a header holds it: InferenceStack(dataset='<path>:mha'), or nrrd, or omezarr.",
         )
     attributes = Attribute(cache_attribute)
+    for key in (AFFINE_ATTRIBUTE, TRANSFORM_FILE_ATTRIBUTE):  # the output's native form: the members are fields
+        if key in attributes:
+            attributes.pop(key)
     attributes[MEMBERS_ATTRIBUTE] = members
     return attributes
 
@@ -336,11 +346,10 @@ class InferenceStack(Transform):
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
         dataset = self._destination()
+        stack = self._stack(tensors)
+        members = tensors.shape[0]
         dataset.write(
-            "InferenceStack",
-            name,
-            self._stack(tensors),
-            _stack_attributes(cache_attribute, tensors.shape[0], dataset, tensors.shape[1]),
+            "InferenceStack", name, stack, _stack_attributes(cache_attribute, members, dataset, len(stack) // members)
         )
         return self._reduce(tensors)
 
@@ -363,7 +372,8 @@ class InferenceStack(Transform):
             for members in copies:
                 stack = self._stack(members)
                 if written == 0:
-                    total, dtype, channels = members.sum(0, dtype=torch.float32), members.dtype, members.shape[1]
+                    total, dtype = members.sum(0, dtype=torch.float32), members.dtype
+                    channels = len(stack) // members.shape[0]
                     if count * members.shape[0] > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
                         header = _stack_attributes(cache_attribute, count * members.shape[0], dataset, channels)
@@ -407,7 +417,7 @@ class InferenceStack(Transform):
             return tensor.squeeze(0)
         stack = self._stack(tensor)
         dataset = self._destination()
-        header = _stack_attributes(cache_attribute, tensor.shape[0], dataset, tensor.shape[1])
+        header = _stack_attributes(cache_attribute, tensor.shape[0], dataset, len(stack) // tensor.shape[0])
         if name not in self._stack_sinks and name not in self._stack_buffers:
             sink = dataset.open_data_stream(
                 "InferenceStack", name, [stack.shape[0], *spatial_shape], stack.dtype, header

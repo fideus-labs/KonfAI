@@ -68,7 +68,13 @@ from konfai.data.transform.base import (
     sitk,
 )
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, as_member, stacked_groups
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import (
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    Attribute,
+    Dataset,
+    image_to_data,
+    is_displacement_entry,
+)
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.utils import split_path_spec
@@ -1064,11 +1070,14 @@ class Resample(TransformInverse):
         stored = self._maps.get(name)
         if stored is None:
             rank = self._source_grid(name).rank
-            # HEADERS ONLY, always: a cached region's stages are that region's, not the case's.
+            # A stack's members are maps of their own: the first stands for them (a member's view, inside one, finds
+            # no stack). HEADERS ONLY, always: a cached region's stages are that region's, not the case's.
             # What comes back is the affine part, exact, with any dense field standing as the
             # identity, which is the price the declared route puts on its field.
-            priced = self._decode_stored(name, headers_only=True)
-            has_field = self._stored_has_field(name)
+            stacked, members = stacked_groups(self, cast("dict[str, bool]", self.transforms), name)
+            with as_member(self, stacked, 0) if members else nullcontext():
+                priced = self._decode_stored(name, headers_only=True)
+                has_field = self._stored_has_field(name)
             # A BSpline decodes to an order-3 stage on its coefficients; a dense field read as a
             # transform to an order-1 one, whose windows are measured from its values at run time.
             displacements = [stage for stage in priced if isinstance(stage, DisplacementStage)]
@@ -1110,8 +1119,6 @@ class Resample(TransformInverse):
 
     def _stored_field_headers(self, name: str) -> list[tuple[list[int], Attribute]]:
         """The shape and header of every dense-field member of this case's stored map."""
-        from konfai.utils.dataset import is_displacement_entry
-
         fields = []
         for group in cast("dict[str, bool]", self.transforms or {}):
             for dataset in self.datasets:
@@ -1252,10 +1259,7 @@ class Resample(TransformInverse):
         if self.transforms is None:
             return
         try:
-            # Every member of a stack is a map of its own, read as the call reads it; the first stands for them.
-            stacked, members = stacked_groups(self, self.transforms, name)
-            with self._as_member(name, stacked, 0) if members else nullcontext():
-                self._stored_map(name)
+            self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
@@ -1941,7 +1945,6 @@ class TransformPoints(Transform):
         return torch.stack(moved)
 
     def _push(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        from konfai.utils.dataset import is_displacement_entry
         from konfai.utils.ITK import displace_points
 
         points = tensor.detach().cpu().numpy().astype(np.float64).reshape(-1, 3)
@@ -1969,6 +1972,81 @@ class TransformPoints(Transform):
             rank = transform.GetDimension()
             points[:, :rank] = [transform.TransformPoint(point[:rank].tolist()) for point in points]
         return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
+
+
+class TransformToField(Transform):
+    """A case's transform as a displacement field: a stored field as it is; any other transform (an affine, a
+    B-spline, their composite), which has no grid of its own, sampled on the grid of ``reference_group`` (the fixed
+    image), ``T(x) - x`` at each voxel centre, in world units, marked a field. The measures of a field (its Jacobian,
+    its bending energy, its displacement lengths) then read a native transform as they read a field.
+
+    Applied to the transform's own group, named ``group`` (``Volume_0``): what it reads there is the transform's
+    entry, which only a field holds as an image.
+    """
+
+    def __init__(self, group: str = "Volume_0", reference_group: str = "Reference_0") -> None:
+        super().__init__()
+        self.group = group
+        self.reference_group = reference_group
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        """A stored field its header marks one passes as it is, voxel by voxel. Anything else is sampled whole: a
+        transform with no grid of its own, and an image the header alone cannot tell from a field."""
+        if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute:
+            return PatchLocality(LocalityKind.POINTWISE)
+        # ponytail: sampled whole; by slab if a case outgrows memory
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="a transform with no grid of its own is sampled whole")
+
+    def _entry(self, name: str) -> Any:
+        """The dataset holding the case's transform, None when it is a field (measured as it is)."""
+        dataset = self.dataset_holding(self.group, name)
+        if dataset is None:
+            raise TransformError(
+                f"'TransformToField' found no transform for case '{name}' in group '{self.group}'.",
+                "Name the group the transform is read as: TransformToField: {group: Volume_0}.",
+            )
+        return None if is_displacement_entry(*dataset.get_infos(self.group, name)) else dataset
+
+    def _grid(self, name: str) -> tuple[list[int], Attribute]:
+        reference = self.dataset_holding(self.reference_group, name)
+        if reference is None:
+            raise TransformError(
+                f"The transform of case '{name}' has no grid of its own (an affine, a B-spline): it is measured where"
+                f" it applies, and '{self.reference_group}' holds no image for it.",
+                "Give the fixed image beside the transform (--gt FIXED).",
+            )
+        return reference.get_infos(self.reference_group, name)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        del group_src, cache_attribute
+        if not name or self._entry(name) is None:
+            return shape
+        return [int(extent) for extent in self._grid(name)[0][1:]]
+
+    def output_channels(self, channels: int) -> int:
+        del channels
+        return 3
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        dataset = self._entry(name)
+        if dataset is None:
+            return tensor  # a field already
+        transform = dataset.read_transform(self.group, name)
+        shape, header = self._grid(name)
+        grid = Grid.of([int(extent) for extent in shape[1:]], header, f"the fixed image of case '{name}'")
+        field = sitk.TransformToDisplacementField(
+            transform,
+            sitk.sitkVectorFloat32,
+            list(grid.size_zyx[::-1]),
+            grid.origin_xyz.tolist(),
+            grid.spacing_xyz.tolist(),
+            grid.direction_xyz.ravel().tolist(),
+        )
+        data, geometry = image_to_data(field)
+        for key in ("Origin", "Spacing", "Direction"):
+            cache_attribute[key] = geometry.get_np_array(key)
+        cache_attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        return torch.from_numpy(np.ascontiguousarray(data))
 
 
 class WorldCoordinates(Transform):

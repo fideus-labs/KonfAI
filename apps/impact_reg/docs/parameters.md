@@ -38,7 +38,7 @@ The names below are those of the shipped presets; `show NAME` gives each preset'
 | Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk`, `feature_overlap` (Static extraction) | the IMPACT loss (below) |
 | Regularisation | `final_grid_spacing` | `smooth_warp_sigma`, `smooth_grad_sigma` | `regularization_weight`, `control_grid_smoothing` |
 | Initialisation | the rigid map, `moments_init` (cof, com) | `moments_init` (cof, com, none) | `linear`, `linear_iterations`, `linear_sampling` |
-| Transform written | `transform_type` (field; affine, for linear maps alone) | `transform_type` (field; affine, with `deformable_method: none`) | a field |
+| Transform written | `transform_type` (native: the affine or rigid then B-spline the maps found; field) | `transform_type` (native: an affine with `deformable_method: none`, else a field; field) | a field |
 | Sampling | `spatial_samples` | | |
 | Random draws | `seed` | `seed` | `seed` |
 | Escape hatch | `parameter_overrides` (any elastix parameter) | | |

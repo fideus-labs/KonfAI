@@ -45,7 +45,7 @@ from konfai.predictor.output import OutputDatasetLoader
 from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import _load_tree, apply_config, config, snapshot, strict_config
+from konfai.utils.config import _record_tree, apply_config, config, snapshot, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
 from konfai.utils.errors import ConfigError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
@@ -244,10 +244,11 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         # over it, and the new cases are not computed with it.
         archived, weights = self.predict_path / "Prediction.yml", self.predict_path / "Weights.json"
         identity = [weights_identity(source) for source in checkpoint_sources(self.path_to_models)]
+        base = config_file().resolve().parent
         if self._done_case_indices and not (
             archived.exists()
             and weights.exists()
-            and _load_tree(archived) == _load_tree(config_file())
+            and _record_tree(archived, base)[0] == _record_tree(config_file(), base)[0]
             and json.loads(weights.read_text()) == identity
         ):
             raise PredictorError(

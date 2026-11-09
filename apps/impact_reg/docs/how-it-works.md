@@ -17,7 +17,7 @@ konfai-apps infer            one subprocess per preset: reads the pair, runs the
         │
         ▼
 the transform: a displacement field on the fixed grid (several presets: averaged voxel by voxel),
-               or the affine a linear preset declares (transform_type: affine)
+               or the form a single preset found (an affine, elastix's rigid then B-spline)
         │
         ▼
 Moved image · eval (MAE, Dice, TRE, Jacobian) · uncertainty (spread of an ensemble) · apply (more images)
@@ -38,7 +38,7 @@ version (TotalSegmentator), are refused.
 ## The transform and its conventions
 
 `Output/<case>/Transform.h5` is an ITK `DisplacementFieldTransform` stored as HDF5, readable by SimpleITK, ITK, 3D Slicer
-and ANTs. A linear preset that declares `transform_type: affine` (`Elastix#rigid`) writes the one `AffineTransform` its
+and ANTs. A linear preset (`Elastix#rigid`) writes the one `AffineTransform` its
 stages found instead, and as an OME-Zarr output (`Transform:omezarr`) an RFC-5 `affine` transformation on its own,
 twelve numbers where the same registration as a field weighs megabytes. Both forms map fixed points to moving points:
 

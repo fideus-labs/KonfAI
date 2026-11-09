@@ -114,6 +114,7 @@ class ScoutService:
             ],
             "kwargs": {"case": str(output / "case.json"), "config": str(output / "config.json"), "output": str(output)},
             "output": str(output),
+            "devices": ["cpu"],  # the model is an API or its own server, and KonfAI Eval measures with cpu=1
         }
 
     def list_reports(self) -> list[dict[str, Any]]:
@@ -319,7 +320,8 @@ class FidoptAdapter:
             if scout_allow_cloud:
                 args.append("--scout-allow-cloud")
         for item in extra or []:
-            if not re.fullmatch(r"--[a-z][a-z0-9-]*(=[A-Za-z0-9._:/-]+)?|[A-Za-z0-9._:/-]+", item):
+            # no '/' and no '..', so that no value steers FidOpt to a path; '=' and ',' are --try's LABEL=SETTINGS
+            if ".." in item or not re.fullmatch(r"[A-Za-z0-9._:=,-]+", item):
                 raise ValueError(f"extra argument {item!r}: flags and plain values only, no paths outside the corpus.")
             args.append(item)
         # one folder per launch: two checks of one method must not share an output

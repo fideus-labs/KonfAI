@@ -1522,7 +1522,7 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
 
 
 def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
-    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    """A linear transform as a linear preset writes it (its native form): an ITK AffineTransform file, or an
     RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
     affine = sitk.AffineTransform(3)
     affine.SetTranslation(translation)
@@ -1565,12 +1565,12 @@ def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name
     assert record["cases"]["P000"]["transform"].replace("\\", "/") == f"P000/{name}"  # Windows writes backslashes
 
 
-def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
-    """An ensemble and a test-time augmentation average fields: a preset declaring an affine runs alone, or is set back
-    to a field for the run."""
+def test_an_averaged_affine_preset_writes_its_field(tmp_path: Path) -> None:
+    """An ensemble and a test-time augmentation average fields: a preset declaring an affine (or elastix's native
+    B-spline) runs there and writes its field, its runs told so; alone, it keeps its native form."""
     (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
         "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
-        "    RegistrationNet:\n      transform_type: affine\n",
+        "    RegistrationNet:\n      transform_type: native\n",
         encoding="utf-8",
     )
     moving = tmp_path / "moving.mha"
@@ -1581,13 +1581,49 @@ def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
     _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
     out = tmp_path / "Output"
 
-    with pytest.raises(KonfAIError, match="an ensemble cannot average"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
-    with pytest.raises(KonfAIError, match="--tta cannot average"):
-        app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
-    # --set speaks for the run, bare or dotted from the config root: B declared an affine is refused in its turn.
-    overrides = ["A:transform_type=field", "B:Predictor.Model.RegistrationNet.transform_type=affine"]
-    with pytest.raises(KonfAIError, match="'B' writes its transform as an affine"):
-        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides)
-    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides[:1])
-    assert (out / "P000" / "Moved.mha").is_file()
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
+    assert app._dense and (out / "P000" / "Moved.mha").is_file()
+    app.register(["A"], [fixed], [moving], output=out, quiet=True)
+    assert not app._dense
+
+
+def test_uncertainty_says_when_it_kept_no_stack(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """One preset and no TTA has no members to stack: the run says so rather than leave ``uncertainty`` a missing file."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0)})
+
+    app.register(["A"], [fixed], [moving], output=tmp_path / "Output", uncertainty=True, fields_only=True)
+
+    assert not any((tmp_path / "Output" / "P000").glob("InferenceStack*"))
+    assert "kept no stack for P000" in capsys.readouterr().err
+
+
+def test_a_rerun_leaves_no_stack_of_an_earlier_transform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stack of the earlier run's members beside this run's transform would be measured as its uncertainty; a rerun
+    that fails to publish its transform leaves the earlier one and its stack standing."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0)})
+    case = tmp_path / "Output" / "P000"
+    case.mkdir(parents=True)
+    (case / "InferenceStack.mha").write_text("an earlier run", encoding="utf-8")
+
+    def full(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reg, "_copy_output", full)
+        with pytest.raises(OSError, match="disk full"):
+            app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
+    assert (case / "InferenceStack.mha").exists()
+
+    app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
+
+    assert not (case / "InferenceStack.mha").exists()

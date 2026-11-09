@@ -222,3 +222,27 @@ def test_the_privacy_gate():
     check_privacy(ScoutConfig(provider="mock"))
     assert make_provider(ScoutConfig(provider="mock")).name == "mock"
     assert ScoutConfig(provider="anthropic").model == "claude-opus-5-5"
+
+
+def test_a_retried_turn_is_sent_once():
+    import httpx
+    import openai
+
+    rate_limited = openai.RateLimitError(
+        "rl", response=httpx.Response(429, request=httpx.Request("POST", "http://api")), body=None
+    )
+    anthropic_ok = {"stop_reason": "end_turn", "content": [], "usage": {}}
+    openai_ok = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "x"}}], "usage": {}}
+    for make, fake in (
+        (AnthropicProvider, FakeAnthropic([anthropic_ok], error=anthropic_error(429))),
+        (OpenAIProvider, FakeOpenAI([openai_ok], error=rate_limited)),
+    ):
+        provider = make("m", client=fake)
+        provider.start("s", TOOLS)
+        kept = len(provider.messages)  # OpenAI's system message
+        with pytest.raises(ProviderError):
+            provider.user("hi")
+        assert len(provider.messages) == kept
+        fake.error = None
+        provider.user("hi")
+        assert len(fake.requests[-1]["messages"]) == kept + 1 and len(provider.messages) == kept + 2

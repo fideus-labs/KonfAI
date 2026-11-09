@@ -39,6 +39,7 @@ from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
     AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     _encode_transform_leaves,
     _is_field_shape,
@@ -309,7 +310,11 @@ class ItkTransformFile(AbstractFile):
         # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
-        if attributes is not None and AFFINE_ATTRIBUTE in attributes:
+        native = None
+        if attributes is not None and TRANSFORM_FILE_ATTRIBUTE in attributes:
+            native = Path(str(attributes[TRANSFORM_FILE_ATTRIBUTE]))
+            data = sitk.ReadTransform(str(native))  # the transform a field's header names, in place of the field
+        elif attributes is not None and AFFINE_ATTRIBUTE in attributes:
             data = affine_from_attributes(attributes)  # the map a field's header declares, in place of the field
         if sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, staging)
@@ -329,6 +334,8 @@ class ItkTransformFile(AbstractFile):
                 # One buffer, as in _ItkTransformDataStream.write_slice.
                 parameters[:] = np.ascontiguousarray(np.moveaxis(array, 0, -1), dtype=np.float64).ravel()
         os.replace(staging, final)
+        if native is not None:
+            native.unlink(missing_ok=True)
         try:  # one entry per name
             os.remove(os.path.join(self.filename, f"{name}.tfm"))
         except FileNotFoundError:

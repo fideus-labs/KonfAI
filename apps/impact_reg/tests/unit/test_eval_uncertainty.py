@@ -577,3 +577,13 @@ def test_a_round_trip_off_by_a_shift_reads_that_shift(tmp_path: Path, toy: dict[
     shift = float(np.hypot(0.3, 0.2))
     assert metrics["RoundTrip:Start:InverseConsistencyMean"] == pytest.approx(shift, abs=1e-4)
     assert metrics["RoundTrip:Start:InverseConsistencyP95"] == pytest.approx(shift, abs=1e-4)
+
+
+def test_a_transform_with_nothing_to_measure_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """An affine has no measures without reference: --transform alone would score nothing and exit 0."""
+    sitk.WriteTransform(sitk.AffineTransform(3), str(tmp_path / "affine.h5"))
+    argv = ["eval", "--transform", str(tmp_path / "affine.h5"), "-o", str(tmp_path / "Evaluation"), "-q"]
+    assert _main(monkeypatch, argv) != 0
+    assert "nothing to measure" in capsys.readouterr().err

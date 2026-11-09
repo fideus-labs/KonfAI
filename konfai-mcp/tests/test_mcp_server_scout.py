@@ -26,7 +26,7 @@ import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -53,12 +53,13 @@ def _wait(server: ModuleType, job_id: str) -> dict:
 
 @pytest.mark.usefixtures("workspace_root")
 def test_an_inspection_runs_as_a_job_and_its_report_reads_back(
-    tmp_path: Path, load_mcp_server: Callable[[], ModuleType]
+    tmp_path: Path, load_mcp_server: Callable[[], ModuleType], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from konfai_scout.synthetic import segmentation_case
 
     case, _ = segmentation_case(tmp_path / "seg")
     server = load_mcp_server()
+    monkeypatch.setattr(server.konfai_pkg, "cuda_visible_devices", lambda: [0, 1])
     payload = _call(
         server,
         "run_scout_inspection",
@@ -72,6 +73,7 @@ def test_an_inspection_runs_as_a_job_and_its_report_reads_back(
     )
     assert isinstance(payload, dict) and payload["kind"] == "scout" and payload["output"].endswith("Scout/seg_demo")
     assert payload["next_actions"] == ["get_job_status", "read_scout_report"]
+    assert payload["devices"] == ["cpu"] and "vram_preflight" not in payload  # the model holds no GPU of this host
     done = _wait(server, payload["job_id"])
     assert done["status"] == "done", done
     listed = _call(server, "read_scout_report")
@@ -205,6 +207,11 @@ def test_fidopt_is_read_through_its_own_code_and_run_only_when_allowed(
         (Path(os.environ["KONFAI_MCP_WORKSPACES_ROOT"]) / "sessions" / "default" / "fidopt_called.json").read_text()
     )
     assert called == ["check", "deeds", "--on", "AMOS_CTCT", "a", "--scout", "mock"]
+    for bad in (["--out=/tmp/x"], ["/etc/passwd"], ["../../x"], ["--machine", ".."]):
+        with pytest.raises(ValueError, match="no paths"):
+            server.FIDOPT.prepare_run("check", "deeds", "", None, None, False, bad)
+    spec = server.FIDOPT.prepare_run("check", "deeds", "", None, None, False, ["--try", "a=b,c=1", "--family=f"])
+    assert spec["kwargs"]["args"] == ["check", "deeds", "--try", "a=b,c=1", "--family=f"]
 
 
 def test_the_adapter_says_when_fidopt_is_not_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,3 +224,15 @@ def test_the_adapter_says_when_fidopt_is_not_there(tmp_path: Path, monkeypatch: 
     assert adapter.allowed == ("check",)
     with pytest.raises(ValueError, match="KONFAI_MCP_FIDOPT"):
         adapter.list_datasets()
+
+
+def test_a_failed_inspection_fails_its_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    from konfai_mcp.runner import run_scout_inspection_api
+
+    failed = SimpleNamespace(error="provider error: boom", summary=dict)
+    fake = SimpleNamespace(
+        InspectionCase=SimpleNamespace(load=str), ScoutConfig=SimpleNamespace(load=str), inspect=lambda *_: failed
+    )
+    monkeypatch.setitem(sys.modules, "konfai_scout", fake)
+    with pytest.raises(RuntimeError, match="provider error: boom"):
+        run_scout_inspection_api(case="c", config="k", output="o")

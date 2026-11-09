@@ -62,6 +62,19 @@ def _import_app_repository() -> Any:
     return app_repository
 
 
+def _manifest_info(ref: str, force_update: bool) -> Any:
+    """The app ``ref`` names, for a read in the server process: its preset checked for the paths a preset may not set
+    only, since resolving its overrides (``LocalAppRepository.use_preset``) imports the app's model code."""
+    app_repository = _import_app_repository()
+    base, preset = app_repository.split_preset(ref)
+    info = app_repository.get_app_repository_info(base, force_update)
+    if isinstance(info, app_repository.LocalAppRepository):
+        info.use_preset(preset, read_model=False)
+    else:
+        info.use_preset(preset)
+    return info
+
+
 def _source_of(info: Any) -> str:
     """Map a resolved repository object to a coarse source label."""
     name = type(info).__name__
@@ -318,8 +331,7 @@ class AppService:
         capabilities, checkpoints, terminology). It does not import the app's model code or install
         its requirements.
         """
-        app_repository = _import_app_repository()
-        info = app_repository.get_app_repository_info(ref, force_update)
+        info = _manifest_info(ref, force_update)
         inference, evaluation, uncertainty = info.has_capabilities()
         finetunable = info.is_finetunable()
 
@@ -464,13 +476,14 @@ class AppService:
 
         This is the inference-side reproducibility artifact: 'save this HuggingFace/remote-cached app,
         with my tuned parameters, as a local app'. It copies files and rewrites the config; it does not
-        import the app's model code. Local/HuggingFace apps only. ``path`` is any host folder: a file of
-        the app already there is only replaced with ``overwrite=True``.
+        import the app's model code, so an override (a preset's too) must name a key the config holds.
+        Local/HuggingFace apps only. ``path`` is any host folder: a file of the app already there is only
+        replaced with ``overwrite=True``.
         """
         if self._is_remote(ref):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         app_repository = _import_app_repository()
-        info = app_repository.get_app_repository_info(ref, force_update)
+        info = _manifest_info(ref, force_update)
         if not isinstance(info, app_repository.LocalAppRepository):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         target = Path(path).expanduser().resolve()
@@ -481,7 +494,7 @@ class AppService:
                     f"Exporting into {target} would overwrite {', '.join(existing)}. Choose another folder, "
                     "or pass overwrite=True to replace them."
                 )
-        info.export_app(target, display_name=display_name, config_overrides=config_overrides)
+        info.export_app(target, display_name=display_name, config_overrides=config_overrides, read_model=False)
         return {
             "ref": ref,
             "exported_to": str(target),
@@ -574,10 +587,9 @@ class AppService:
         """
         if self._is_remote(ref):
             return None
-        app_repository = _import_app_repository()
-        if app_repository.get_app_repository_info(ref, False).get_task() != "registration":
+        if _manifest_info(ref, False).get_task() != "registration":
             return None
-        base, chosen = app_repository.split_preset(ref)
+        base, chosen = _import_app_repository().split_preset(ref)
         suffix = f"#{chosen}" if chosen else ""  # impact-reg-konfai takes the app's preset as APP#PRESET
         path = Path(base).expanduser()
         if path.exists():

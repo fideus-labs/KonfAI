@@ -27,6 +27,7 @@ count, the members named in ``konfai-run.json`` in its order.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -38,7 +39,7 @@ import numpy as np
 import torch
 from konfai.data import reduction
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, holds_stack, member_count
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset
 from konfai.utils.utils import format_token, storage_form
 
 from .errors import AppRepositoryError
@@ -58,7 +59,7 @@ def stack_file(form: str) -> str:
     """The stack's file name beside an output of ``form`` (``.ome.zarr``, ``.nii.gz``): in that form where its header
     keeps the member count (:func:`~konfai.data.transform.ensemble.holds_stack`), as MetaImage otherwise. A case's
     ``.h5`` is a transform file."""
-    token = "itktransform" if form == ".h5" else format_token(form)
+    token = "itktransform" if form == ".h5" else format_token(form, directory=not form)
     return f"{STACK}{form if holds_stack(token) else '.mha'}"
 
 
@@ -122,22 +123,23 @@ def combine(
     sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None = None
 ) -> list[int]:
     """Reduce every member ``sources`` hold (an output, or a stack of several) into ``output``, written through
-    ``output_token``, slab by slab along the first spatial axis; and the stack of them all into ``stack`` when given,
-    in the form its name asks (:func:`stack_file`), whose header keeps the member count. Label maps (integer voxels)
-    are voted whatever ``operator`` says: a mean of labels is no label. The members must share a grid and a channel
-    count; the output and the stack take the first member's header. Returns each source's member count.
+    ``output_token``, slab by slab along the first spatial axis; and the stack of them all into ``stack`` (beside
+    ``output``) when given, in the form its name asks (:func:`stack_file`), whose header keeps the member count. Label
+    maps (integer voxels) are voted whatever ``operator`` says: a mean of labels is no label. The members must share a
+    grid and a channel count; the output and the stack take the first member's header. Returns each source's member
+    count.
 
-    Both are written in a folder of their own, then moved into place: written where they go, a folder that holds a
-    store (an earlier run's OME-Zarr) would read as a folder of stores and turn the output into one."""
+    Both are written in a folder of their own, then moved into place with every file their writers left (a ``.mhd``'s
+    ``.raw``): written where they go, a folder that holds a store (an earlier run's OME-Zarr) would read as a folder of
+    stores and turn the output into one."""
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".konfai_combine_", dir=output.parent) as staging:
-        staged_output = Path(staging) / output.parent.name / output.name
-        staged_stack = Path(staging) / output.parent.name / stack.name if stack is not None else None
-        result = _combine_into(sources, operator, staged_output, output_token, staged_stack)
-        for staged, final in ((staged_output, output), (staged_stack, stack)):
-            if staged is None or final is None:
-                continue
-            final.parent.mkdir(parents=True, exist_ok=True)
+        staged_case = Path(staging) / output.parent.name
+        result = _combine_into(
+            sources, operator, staged_case / output.name, output_token, staged_case / stack.name if stack else None
+        )
+        for staged in staged_case.iterdir():
+            final = output.parent / staged.name
             if final.is_dir():
                 shutil.rmtree(final)
             elif final.exists():
@@ -227,15 +229,16 @@ def infer_references(
     with the stack of them all beside it under ``uncertainty``, and ``konfai-run.json`` naming the members."""
     from .app import RUN_RECORD
 
-    own_members = bool(infer.get("ensemble") or infer.get("ensemble_models") or infer.get("tta"))
     work = Path(tempfile.mkdtemp(prefix="konfai_ensemble_", dir=output.parent if output.parent.exists() else None))
+    # Every member is averaged: none keeps a native form (a registration's affine or B-spline), each writes its field.
+    dense = os.environ.get(DENSE_TRANSFORMS_ENV)
+    os.environ[DENSE_TRANSFORMS_ENV] = "1"
     try:
         runs = []
         for index, reference in enumerate(references):
             run = work / f"member_{index:02d}"
-            make_app(reference).infer(
-                output=run, uncertainty=own_members, config_overrides=overrides_of(reference), **infer
-            )
+            # Its stack, always: checkpoints its app runs by default are members too (a run of one member writes none).
+            make_app(reference).infer(output=run, uncertainty=True, config_overrides=overrides_of(reference), **infer)
             runs.append((reference, run, members_of(run)))
         keys = set(runs[0][2])
         for reference, _, found in runs[1:]:
@@ -268,4 +271,8 @@ def infer_references(
             json.dumps({"ensemble": records, "combine": operator, "members": names}, indent=2) + "\n", encoding="utf-8"
         )
     finally:
+        if dense is None:
+            os.environ.pop(DENSE_TRANSFORMS_ENV, None)
+        else:
+            os.environ[DENSE_TRANSFORMS_ENV] = dense
         shutil.rmtree(work, ignore_errors=True)
