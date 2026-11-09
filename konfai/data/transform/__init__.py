@@ -53,12 +53,15 @@ from konfai.data.transform.io import Write as Write
 from konfai.data.transform.labels import Argmax as Argmax
 from konfai.data.transform.labels import Dilate as Dilate
 from konfai.data.transform.labels import FlatLabel as FlatLabel
+from konfai.data.transform.labels import KeepLabels as KeepLabels
 from konfai.data.transform.labels import Mask as Mask
 from konfai.data.transform.labels import MergeLabels as MergeLabels
 from konfai.data.transform.labels import OneHot as OneHot
+from konfai.data.transform.labels import Otsu as Otsu
 from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
+from konfai.data.transform.resample import Displace as Displace
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
 from konfai.data.transform.resample import TransformToField as TransformToField
@@ -78,6 +81,7 @@ __all__ = [
     "Clip",
     "Crop",
     "Dilate",
+    "Displace",
     "Expand",
     "Fill",
     "FlatLabel",
@@ -87,6 +91,7 @@ __all__ = [
     "Gradient",
     "HistogramMatching",
     "InferenceStack",
+    "KeepLabels",
     "LocalityKind",
     "Magnitude",
     "Mask",
@@ -94,6 +99,7 @@ __all__ = [
     "Norm",
     "Normalize",
     "OneHot",
+    "Otsu",
     "Padding",
     "PatchLocality",
     "Percentage",

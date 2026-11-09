@@ -42,6 +42,7 @@ loaded whole.
 | --- | --- | --- | --- | --- | --- |
 | `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0` (or `edge`), `inverse=True` | yes | yes (the grid change) | yes |
 | `TransformPoints` | Push landmarks (`[N, 3]`, LPS) through stored transforms: the map a `Resample` with the same `transforms` pulls an image back through, so fixed landmarks land in the moving image (a registration's TRE). | `transforms` | no | no | no |
+| `Displace` | Move landmarks by the case's displacement field: `TransformPoints` of that one group. | `field_group="DVF"` | no | no | no |
 | `TransformToField` | A case's transform as a displacement field: a stored field as it is; a transform with no grid of its own (an affine, a B-spline, their composite) sampled on the grid of `reference_group` (the fixed image), so the measures of a field read it. | `group="Volume_0", reference_group="Reference_0"` | grid, channels | no | a stored field |
 | `WorldCoordinates` | Replace the case by its voxels' world coordinates (one channel per axis): resampled through a map and its inverse, `PointDistance` reads the round trip's error. | | channels | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
@@ -70,6 +71,8 @@ A transform group holding a stack (an ensemble's members, `InferenceStack`) is a
 | `FlatLabel` | Set the chosen labels (or all non-zero) to 1. | `labels=None` | no | no | yes |
 | `SelectLabel` | Remap labels, given as `"(old,new)"`. | `labels` | no | no | yes |
 | `Mask` | Set voxels outside a mask to `value_outside`. The mask is a group or a file. | `path="./default.mha", value_outside=0` | no | no | yes |
+| `KeepLabels` | Keep the labels another group of the case also holds, set the others to 0: a label is then scored only when both maps hold it. | `group` | no | no | yes |
+| `Otsu` | A body mask: 1 above Otsu's threshold of the whole case (ITK's, 128 bins), one `uint8` channel; a multichannel image is the mean of its channels. | | no | no | no |
 | `Dilate` | Binary dilation. | `dilate=1` | no | no | yes |
 | `Sum` | Sum over `dim`. | `dim=0` | no † | no | yes over channels |
 | `MergeLabels` | Merge the label maps of a `combine: Concat` ensemble of disjoint tasks into one (TotalSegmentator's five tasks). | | no | no | yes |

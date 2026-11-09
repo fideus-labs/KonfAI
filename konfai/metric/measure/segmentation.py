@@ -302,8 +302,10 @@ class Dice(Criterion):
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """The pair with every voxel outside the mask sent to the background, when a mask is given.
-        The bool mask multiplies in each tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel
-        for the same product."""
+        The reference and the masks are put on the output's grid first (``on_grid``), or a mask on
+        either grid of a pair on two could not multiply both. The bool mask multiplies in each
+        tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel for the same product."""
+        targets = tuple(Dice.on_grid(output, target) for target in targets)
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return output, targets[0]
@@ -315,13 +317,13 @@ class Dice(Criterion):
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
         self._check_probabilities(output)
-        output, target = self._masked(output, targets)
-        if tuple(target.shape[2:]) != tuple(output.shape[2:]):
+        if any(tuple(target.shape[2:]) != tuple(output.shape[2:]) for target in targets):
             raise MeasureError(
                 "Dice can only stream patches when output and target share the spatial grid",
-                f"output {tuple(output.shape[2:])} vs target {tuple(target.shape[2:])}",
+                f"output {tuple(output.shape[2:])} vs targets {[tuple(target.shape[2:]) for target in targets]}",
                 "Evaluate this pair whole (unset the memory budget) or resample the prediction first.",
             )
+        output, target = self._masked(output, targets)
         if output.shape[1] > 1:
             return Dice._soft_sums(output, target, self._labels)
         return Dice._hard_sums(output, target, self._labels)
@@ -344,6 +346,35 @@ class Dice(Criterion):
         labels = self._labels if self._labels is not None else sorted(label for label in sums if sums[label][3])
         value, result = self._score(sums, labels)
         return torch.tensor(value), result
+
+
+class MissingLabels(Criterion):
+    """How many labels of the reference the output lacks: the structures a segmentation did not find, or those a
+    registration's warp lost. ``labels`` restricts the count to those labels, where the reference holds them;
+    without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. An output of one
+    channel per label, as ``Dice`` reads it, counts its argmax. Metric only."""
+
+    loss_capable = False
+    batch_mean = True  # the mean of one count per item
+    resamples_target = True  # a reference of another shape is put on the output's grid (Dice.on_grid)
+
+    def __init__(self, labels: list[int] | None = None) -> None:
+        super().__init__()
+        self._labels = labels
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        if output.shape[1] > 1:
+            output = output.argmax(1, keepdim=True)
+        # only a float map is rounded: torch has no round for a bool one
+        output, target = (map_.round() if map_.is_floating_point() else map_ for map_ in Dice._masked(output, targets))
+        missing = []
+        for item in range(output.shape[0]):
+            reference = torch.unique(target[item])
+            held = set(reference[reference.isfinite()].long().tolist()) - {0}  # NaN is no label, as for Dice
+            written = set(torch.unique(output[item]).long().tolist())
+            missing.append(len((held if self._labels is None else held & set(self._labels)) - written))
+        value = float(np.mean(missing))
+        return torch.tensor(value, dtype=torch.float32, device=output.device), value
 
 
 class DiceSaveMap(Dice):
@@ -395,7 +426,7 @@ class _LabelRatio(Dice):
         return (1 - mean if cls.maximize else mean), result
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
-        return self.combine_metric([self.partial_metric(output, Dice.on_grid(output, targets[0]), *targets[1:])])
+        return self.combine_metric([self.partial_metric(output, *(Dice.on_grid(output, target) for target in targets))])
 
 
 class Jaccard(_LabelRatio):

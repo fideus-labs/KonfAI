@@ -82,6 +82,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `Jaccard`, `VolumeDifference` | Per label, as Dice: intersection over union; relative volume difference `abs(V_out - V_ref) / V_ref`. Stream. | `labels=None` |
 | `HD95`, `ASSD` | Per label, in the reference's spacing (mm): the 95th percentile Hausdorff distance; the average symmetric surface distance. A label the output lacks scores the grid's diagonal. | `labels=None` |
 | `SurfaceDice` | Per label, the share of both surfaces within `tolerance` mm of the other (normalised surface distance). | `tolerance=1.0, labels=None` |
+| `MissingLabels` | How many labels of the reference the output lacks: the structures a segmentation did not find, or those a registration's warp lost. Metric only. | `labels=None` |
 
 ## Adversarial and perceptual
 
@@ -97,7 +98,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 
 | Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
-| `TRE` | Target registration error between landmarks. | |
+| `TRE` | Target registration error: the distance between paired landmarks, their mean and each landmark's own; with `percentile`, that percentile of a case's landmark errors as one value. | `percentile=None` |
 | `JacobianFolding`, `JacobianMin`, `JacobianLogStd` | How regular a displacement field (the output, read with its geometry) is: the fraction of voxels where its Jacobian determinant is at most 0, the minimum, the standard deviation of its log. The target is not read. | |
 | `BendingEnergy` | The mean squared second derivative of a displacement field (the output, read with its geometry), in 1/mm^2: 0 for an affine map. The target is not read. | |
 | `Displacement` | The length of a displacement field's vectors: their `mean`, `p95` or `max`. The target is not read. | `statistic="mean", name=None` |

@@ -228,9 +228,9 @@ def field_regularity_statistics(
 
 def displace_points(points: np.ndarray, dataset: Dataset, group: str, name: str) -> np.ndarray:
     """``points`` (``[N, 3]``, LPS) moved by a stored displacement field, read at the voxels around each point
-    alone: a 2x2x2 block that SimpleITK interpolates where it sits in the field, with the same voxels, weights and
-    outside-the-field rule as ``DisplacementFieldTransform`` on the whole field, so a few points never hold the
-    whole field in memory."""
+    alone when the store reads a region (whole otherwise): a 2x2x2 block that SimpleITK interpolates where it sits
+    in the field, with the same voxels, weights and outside-the-field rule as ``DisplacementFieldTransform`` on the
+    whole field."""
     _require_simpleitk()
     read, shape, origin, direction, spacing, to_index = open_field(dataset, group, name)
     size = np.array(shape[:0:-1])  # (x, y, z)

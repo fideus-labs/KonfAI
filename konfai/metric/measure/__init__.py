@@ -66,6 +66,7 @@ from konfai.metric.measure.segmentation import Dice as Dice
 from konfai.metric.measure.segmentation import DiceSaveMap as DiceSaveMap
 from konfai.metric.measure.segmentation import Jaccard as Jaccard
 from konfai.metric.measure.segmentation import LabelSums as LabelSums
+from konfai.metric.measure.segmentation import MissingLabels as MissingLabels
 from konfai.metric.measure.segmentation import SurfaceDice as SurfaceDice
 from konfai.metric.measure.segmentation import VolumeDifference as VolumeDifference
 
@@ -111,6 +112,7 @@ __all__ = [
     "MAESaveMap",
     "MaskedLoss",
     "Mean",
+    "MissingLabels",
     "PatchGanLoss",
     "PerceptualLoss",
     "PointDistance",
