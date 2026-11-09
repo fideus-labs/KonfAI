@@ -83,7 +83,7 @@ setup(
         _sibling("konfai-apps", _version),
         # >= 2.10.2 for stateless streamable HTTP (stateless_http/json_response run
         # kwargs and the FASTMCP_STATELESS_HTTP setting) per MCP spec rev 2025-03-26.
-        "fastmcp>=2.10.2",
+        "fastmcp>=4",
         "ruamel.yaml",
         "numpy",
         # Checks a written config against KonfAI's schema (konfai.config_schema.config_errors).
