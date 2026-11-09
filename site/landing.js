@@ -145,13 +145,17 @@
   // ---- copy: the hero's install line, and a button on every code block of the inner pages ----
   var status = document.createElement("span"); // what a screen reader hears after a copy
   status.className = "vh"; status.setAttribute("role", "status"); document.body.appendChild(status);
+  var said = 0, announce = function (text) { // emptied first, so the same words are heard again
+    clearTimeout(said); status.textContent = "";
+    said = setTimeout(function () { status.textContent = text; said = setTimeout(function () { status.textContent = ""; }, 1500); }, 50);
+  };
   var copy = function (button, text) {
     var label = button.querySelector(".copy") || button;
     if (!label.dataset.label) label.dataset.label = label.textContent;
     var done = function () {
-      button.classList.add("done"); label.textContent = "Copied"; status.textContent = "Copied to the clipboard";
+      button.classList.add("done"); label.textContent = "Copied"; announce("Copied to the clipboard");
       clearTimeout(button.reset);
-      button.reset = setTimeout(function () { label.textContent = label.dataset.label; button.classList.remove("done"); status.textContent = ""; }, 1500);
+      button.reset = setTimeout(function () { label.textContent = label.dataset.label; button.classList.remove("done"); }, 1500);
     };
     if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, function () {});
   };
