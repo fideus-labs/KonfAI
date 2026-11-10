@@ -265,3 +265,16 @@ def test_a_mask_restricts_the_statistics_and_a_ct_preset_follows_a_stored_offset
     assert 0 < region["mask_voxels"] < region["voxels"] and region["synthetic"]["voxels"] == region["mask_voxels"]
     assert renderer.resolve_window("ct_soft", "synthetic") == (864.0, 1264.0)  # stored as HU + 1024
     assert renderer.resolve_window("ct_soft", "target") == (-160.0, 240.0)  # stored in HU
+
+
+def test_scouts_check_of_a_box_never_costs_the_note(fixtures, tmp_path):
+    box = toolbox(fixtures, "segmentation", tmp_path)
+    view = run(box, "view", plane="axial", mode="prediction")["view"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the evaluation crashed")
+
+    box.evaluator.measure = broken
+    note = {"kind": "suspected_error", "defect": "leak", "severity": "minor", "confidence": 0.5, "description": "x"}
+    observation = run(box, "note", **note, box_mm=view["box_mm"], plane="axial", views=[view["id"]], measurements=[])
+    assert "Scout's check of the box: RuntimeError: the evaluation crashed" in observation["observation"]["notes"]

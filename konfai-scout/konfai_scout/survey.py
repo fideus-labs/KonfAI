@@ -49,6 +49,10 @@ def survey(renderer: Renderer) -> list[Lead]:
     ]
 
 
+class SurveySkipped(Exception):
+    """The survey did not run on this case: then no lead is no evidence."""
+
+
 def leads_text(leads: list[Lead], active: bool) -> str:
     if not leads:
         return "Leads: the survey found nothing that stands out."
@@ -110,7 +114,7 @@ def _offset(window: tuple[slice, ...], lo: tuple[int, ...]) -> tuple[slice, ...]
 def _segmentation(r: Renderer) -> list[Found]:
     case, grid = r.case, r.grid
     if max(grid.size_zyx) > 512:  # the same limit as the label summary: a big map is not read whole
-        return []
+        raise SurveySkipped("the label map is larger than 512 voxels along an axis")
     size = _zyx(grid.size_zyx)
     prediction = r.volume("prediction").region((0, 0, 0), size)[0]
     truth = r.volume("truth").region((0, 0, 0), size)[0] if "truth" in case.inputs else None
@@ -307,7 +311,7 @@ def _synthesis(r: Renderer) -> list[Found]:
     that noise does not count, and off the target's strongest edges where a slight shift or blur is expected."""
     case, grid = r.case, r.grid
     if "target" not in case.inputs:
-        return []
+        raise SurveySkipped("a synthesis without a target has nothing to compare with")
     synthetic, target = r.volume("synthetic"), r.volume("target")
     mask = r.volume("mask") if "mask" in case.inputs else None
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]

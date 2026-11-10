@@ -31,7 +31,7 @@ from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResu
 from .providers import Usage as TokenUsage
 from .providers.pricing import cost_usd, price_of
 from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
-from .survey import Lead, leads_text, survey
+from .survey import Lead, SurveySkipped, leads_text, survey
 from .tools import Toolbox
 from .views import DEFAULT_MODE, Renderer, ViewError
 
@@ -358,6 +358,8 @@ class Inspector:
         """The leads, and their text for the case card: a survey that fails costs the leads, not the inspection."""
         try:
             leads = survey(self.renderer)
+        except SurveySkipped as error:
+            return [], f"Leads: no survey was run ({error}); no lead says nothing about the result."
         except Exception as error:
             return [], f"Leads: the survey failed ({type(error).__name__}: {error})."
         return leads, leads_text(leads, active)

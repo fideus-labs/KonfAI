@@ -57,3 +57,20 @@ def test_conclude_waits_for_the_leads_and_follows_the_observations(fixtures, tmp
     box.closing = lambda: True  # once the budget is spent a conclusion is taken, the unseen leads named
     box.leads = [*box.leads, type(lead)("l99", "component", {"min": [0, 0, 0], "max": [1, 1, 1]}, "far away")]
     assert "l99" in run(box, "conclude", verdict="defective", **conclude)["conclusion"]["note"]
+
+
+def test_a_survey_that_cannot_run_says_so_rather_than_finding_nothing(tmp_path):
+    import json
+
+    from konfai_scout import ScoutConfig, inspect
+    from konfai_scout.survey import SurveySkipped
+    from konfai_scout.synthetic import synthesis_case
+    from konfai_scout.views import Renderer
+
+    case, _ = synthesis_case(tmp_path / "s", with_target=False)
+    case.stage(tmp_path / "work" / "stage")
+    with pytest.raises(SurveySkipped, match="without a target"):
+        survey(Renderer(case, tmp_path / "work", ScoutConfig(max_px=200), tmp_path / "ev"))
+    inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "out")
+    card = json.loads((tmp_path / "out" / "transcript.json").read_text())[1]
+    assert "no survey was run (a synthesis without a target" in json.dumps(card)

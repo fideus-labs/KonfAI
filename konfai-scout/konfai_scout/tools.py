@@ -440,8 +440,8 @@ class Toolbox:
             # Scout's own check of the box: every criterion this case allows, recorded on the observation
             try:
                 check = self.evaluator.measure(box, None, measurement_id=f"m{len(self.measurements) + 1:03d}")
-            except (EvaluationError, ValueError) as error:
-                notes.append(f"Scout's check of the box: {error}")
+            except Exception as error:  # the check is Scout's own: it never costs the model its note
+                notes.append(f"Scout's check of the box: {type(error).__name__}: {error}")
             else:
                 check.request["check_of"] = observation_id
                 self.measurements.append(check)
