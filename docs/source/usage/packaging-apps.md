@@ -78,7 +78,23 @@ konfai-apps infer ./dist/CT_SEG \
 
 The label image is `AppCheck/CT_TWO_CLASSES/Dataset/P000/PRED.mha`. Compare it and its geometry
 with the quickstart prediction for CASE_000. Once checked, the `CT_SEG/` folder
-can be shared as a local app or placed in a Hugging Face model repository.
+can be shared as a local app or published on Hugging Face.
+
+## Publish it on Hugging Face
+
+Log in once with `hf auth login`, using a token that can write, then:
+
+```bash
+konfai-apps publish ./dist/CT_SEG your-name/my-apps
+```
+
+The command first loads the folder as an app: an `app.json` that does not load, or a
+missing checkpoint, stops it before anything is sent. It creates the repository when
+needed, private with `--private`, uploads the folder as `CT_SEG/`, removing there
+the files an earlier publish left that the folder no longer holds, and sets
+`library_name: konfai` in the repository's model card. Hugging Face then shows the
+KonfAI library on the model page, with the commands to list and run its apps. Anyone
+who can read the repository runs it with `konfai-apps infer your-name/my-apps:CT_SEG`.
 
 ## Fine-tune it
 

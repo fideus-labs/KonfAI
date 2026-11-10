@@ -774,7 +774,10 @@ class LocalAppRepository(AppRepositoryInfo):
                 self._download(filename)
         metadata_file_path = self._download("app.json")
         with open(metadata_file_path, encoding="utf-8") as file:
-            app_repository_metadata = json.load(file)
+            try:
+                app_repository_metadata = json.load(file)
+            except json.JSONDecodeError as exc:
+                raise AppMetadataError(f"'{self._app_name}/app.json' does not load as JSON: {exc}") from exc
 
         missing = [key for key in required_keys if key not in app_repository_metadata]
         if missing:
