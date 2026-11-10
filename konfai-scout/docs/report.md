@@ -86,8 +86,9 @@ lead is not a finding and its figures are not measurements; the model looks and 
 
 In active mode `conclude` refuses until every lead has been looked at through a slice of its box (a montage tile
 does not count), unless the budget is spent: then the unseen leads are named in the conclusion's `reason`. It also
-keeps the verdict in line with the observations: `defective` needs an error observation, and an error of severity
-major or critical at confidence 0.5 or more makes the verdict `defective`.
+keeps the verdict in line with the observations: it is `defective` when, and only when, an error of severity major
+or critical is noted at confidence 0.5 or more (Scout's own conclusion, when the model gives none, follows the same
+rule). Minor and moderate errors are recorded and leave the verdict to `acceptable` or `insufficient_evidence`.
 
 ### The blind second reading
 

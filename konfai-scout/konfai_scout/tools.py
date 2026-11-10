@@ -527,10 +527,12 @@ class Toolbox:
                 f"conclude in {MAX_WORDS['conclude']} words or fewer (this is {len(summary.split())}): the verdict and "
                 "why, citing the observations by id; their details are already recorded"
             )
-        errors = [o for o in self.observations if o.kind != "measured_property"]
-        if verdict == "defective" and not errors:
-            raise ValueError("a defective verdict rests on error observations: note them first")
-        serious = [o.id for o in errors if o.severity in ("major", "critical") and o.confidence >= 0.5]
+        serious = self.serious()
+        if verdict == "defective" and not serious:
+            raise ValueError(
+                "'defective' rests on a major or critical error noted at confidence 0.5 or more, and none is: "
+                "the result holds up ('acceptable') or could not be judged ('insufficient_evidence')"
+            )
         if verdict != "defective" and serious:
             raise ValueError(
                 f"{', '.join(serious)} records a major error at confidence 0.5 or more: the verdict is 'defective'"
@@ -561,6 +563,14 @@ class Toolbox:
         )
         record.summary = f"{verdict} ({confidence:.2f})"
         return {"conclusion": {"verdict": verdict, "note": reason}, "summary": record.summary}, []
+
+    def serious(self) -> list[str]:
+        """The errors that make the result defective: major or critical, noted at confidence 0.5 or more."""
+        return [
+            o.id
+            for o in self.observations
+            if o.kind != "measured_property" and o.severity in ("major", "critical") and o.confidence >= 0.5
+        ]
 
     def lead_views(self, lead: Lead) -> list[str]:
         """The slice views (not montage tiles) that show some of a lead's box."""
@@ -606,7 +616,7 @@ def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:
 
 
 #: The longest a description and a conclusion may be: the evidence is in the views and measurements they cite.
-MAX_WORDS = {"note": 70, "conclude": 80}
+MAX_WORDS = {"note": 70, "conclude": 50}
 
 #: Defects that may span the whole image; any other error is local.
 GLOBAL_DEFECTS = ("blur", "intensity_bias", "over_smoothing")

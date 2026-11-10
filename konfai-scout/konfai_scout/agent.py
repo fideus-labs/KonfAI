@@ -389,18 +389,18 @@ class Inspector:
             reason = self.error or (
                 f"budget exhausted: {exhausted}" if exhausted else "the model ended without concluding"
             )
-            confirmed = [o for o in self.toolbox.observations if o.kind == "confirmed_error"]
+            serious = self.toolbox.serious()
             conclusion = Conclusion(
-                verdict="defective" if confirmed else "insufficient_evidence",
+                verdict="defective" if serious else "insufficient_evidence",
                 summary=(
                     f"Scout concluded for the model ({reason}). "
                     + (
-                        f"{len(confirmed)} confirmed error(s) were recorded."
-                        if confirmed
-                        else f"{len(self.toolbox.observations)} observation(s) were recorded, none confirmed."
+                        f"Major error(s) {', '.join(serious)} were recorded."
+                        if serious
+                        else f"{len(self.toolbox.observations)} observation(s) were recorded, none major."
                     )
                 ),
-                confidence=0.5 if confirmed else 0.2,
+                confidence=0.5 if serious else 0.2,
                 by="scout",
                 reason=reason,
             )

@@ -27,13 +27,13 @@ def test_conclude_waits_for_the_leads_and_follows_the_observations(fixtures, tmp
     box.leads = survey(box.renderer)
     assert box.leads
     conclude = {"summary": "s", "confidence": 0.6}
-    wordy = {"summary": "word " * 81, "confidence": 0.5}
-    assert "80 words or fewer" in run(box, "conclude", verdict="acceptable", **wordy)["error"]
+    wordy = {"summary": "word " * 51, "confidence": 0.5}
+    assert "50 words or fewer" in run(box, "conclude", verdict="acceptable", **wordy)["error"]
     assert "not looked at" in run(box, "conclude", verdict="insufficient_evidence", **conclude)["error"]
     views = [run(box, "view", plane="axial", mode="prediction", zoom=lead.box_mm)["view"]["id"] for lead in box.leads]
     wordy_note = {"kind": "suspected_error", "defect": "leak", "severity": "minor", "confidence": 0.5}
     assert "70 words or fewer" in run(box, "note", **wordy_note, description="word " * 71, views=views[:1])["error"]
-    assert "rests on error observations" in run(box, "conclude", verdict="defective", **conclude)["error"]
+    assert "rests on a major or critical error" in run(box, "conclude", verdict="defective", **conclude)["error"]
     error = {"defect": "spurious_structure", "severity": "major", "description": "a blob", "plane": "axial"}
     lead = box.leads[0]
     run(

@@ -55,7 +55,7 @@ def test_notes_need_known_evidence_and_confirmation_needs_a_measurement(fixtures
         "note",
         kind="confirmed_error",
         defect="leak",
-        severity="minor",
+        severity="major",  # a major error, so that the defective conclusion below holds
         confidence=0.5,
         description="x",
         box_mm=view["box_mm"],

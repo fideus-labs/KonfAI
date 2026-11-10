@@ -246,9 +246,7 @@ class HeuristicProvider(ScriptedProvider):
                 )
             )
         kinds = [r["observation"]["kind"] for r in self.results if "observation" in r]
-        if "confirmed_error" in kinds or (
-            self.suspect and self.suspect["severity"] in ("major", "critical") and "suspected_error" in kinds
-        ):
+        if self.suspect and self.suspect["severity"] in ("major", "critical") and set(kinds) - {"measured_property"}:
             verdict = "defective"
         elif kinds:
             verdict = "acceptable"
