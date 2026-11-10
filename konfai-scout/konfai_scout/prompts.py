@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "2.0"
+PROMPT_VERSION = "2.1"
 
 SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
 it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.

@@ -15,20 +15,24 @@ The manifest names the sources, never a case to keep (Scout looks at them, a clo
 What each source becomes (`cases/<task>/<source>__<variant>/`, a `case.json` and the `defects.json` planted):
 
 - segmentation: the truth as the prediction (`clean`), its main component's upper 40 % left out
-  (`under_segmentation`), a 5 mm leak on one side into the body (`leak`), a 6 mm blob 20 mm or more away
-  (`spurious_structure`), a hole at its deepest point (`holes`). The truth is not given to Scout.
+  (`under_segmentation`), a 5 mm leak on one side into the body (`leak`), an irregular blob about 6 mm across, 20 mm
+  or more away (`spurious_structure`), an irregular hole at its deepest point (`holes`). The truth is not given.
 - registration: the image is the moving one, the fixed one is it pulled through a known smooth field of a few mm, and
-  the field inspected is that exact one (`clean`), zeroed over a 30 mm cube where it moved most
+  the field inspected is that exact one (`clean`), fading to nothing over about 20 mm where it moved most
   (`residual_misalignment`), or with a sharp 12 mm bump that folds the map (`folding`).
 - synthesis (a CT target in HU): a plausible model output, the target smoothed and noisier inside the mask
-  (`clean`), with +150 HU over a 30 mm cube of soft tissue (`intensity_bias`), a 6 mm air pocket
-  (`hallucinated_structure`), or bone erased over a 30 mm cube (`missing_structure`). Target and mask are given.
+  (`clean`), with a smooth bias peaking at +150 HU in soft tissue (`intensity_bias`), an irregular air pocket about
+  6 mm across (`hallucinated_structure`), or bone turned to soft tissue within 12 mm (`missing_structure`). Target
+  and mask are given.
+
+Every defect but the fold has no sharp edge a reader could spot as artificial; its box holds what changed.
 
 `--phantoms` adds the synthetic phantoms (`konfai_scout.synthetic`, several defects each). A defect that cannot be
 planted in a source (a lesion too thin for a hole) is skipped and said. A planted defect is found when an error
 observation's box overlaps it; on a clean case every error observation is a false alarm. `score` writes
-`scores.json` and `scores.md`: per task and depth, the sensitivity by defect, the false alarms, the verdicts, the
-agreement between repeats, the cost, the time and the tokens.
+`scores.json` and `scores.md`: per task and depth, the sensitivity by defect, the false alarms (a credible one has
+confidence 0.5 or more, a serious one is moderate or worse too), the verdicts, the agreement between repeats, the
+cost, the time and the tokens.
 """
 
 from __future__ import annotations
@@ -90,11 +94,20 @@ def _ball(shape: tuple[int, ...], center: np.ndarray, radius_mm: float, spacing_
     return sum(((a - c) * s) ** 2 for a, c, s in zip(axes, center, spacing_zyx, strict=True)) <= radius_mm**2
 
 
-def _cube(shape: tuple[int, ...], center: np.ndarray, side_mm: float, spacing_zyx: np.ndarray) -> np.ndarray:
-    half = np.ceil(side_mm / 2 / spacing_zyx).astype(int)
-    cube = np.zeros(shape, dtype=bool)
-    cube[tuple(slice(max(0, int(c) - h), int(c) + h + 1) for c, h in zip(center, half, strict=True))] = True
-    return cube
+def _lump(
+    shape: tuple[int, ...], center: np.ndarray, radius_mm: float, spacing_zyx: np.ndarray, rng: np.random.Generator
+) -> np.ndarray:
+    """An irregular blob about ``radius_mm`` across: three overlapping balls around a centre, not a sphere."""
+    offsets = rng.normal(0, radius_mm / 3, (3, 3)) / spacing_zyx
+    balls = [_ball(shape, center + o, radius_mm * rng.uniform(0.6, 0.85), spacing_zyx) for o in offsets]
+    return np.logical_or.reduce(balls)
+
+
+def _bump(shape: tuple[int, ...], center: np.ndarray, sigma_mm: float, spacing_zyx: np.ndarray) -> np.ndarray:
+    """A smooth weight, 1 at a centre and 0 far from it: a model's errors have no edges."""
+    axes = np.ogrid[tuple(slice(0, n) for n in shape)]
+    squared = sum(((a - c) * s) ** 2 for a, c, s in zip(axes, center, spacing_zyx, strict=True))
+    return np.exp(-squared / (2 * sigma_mm**2)).astype(np.float32)
 
 
 def _inside(mask: np.ndarray, margin_mm: float, spacing_zyx: np.ndarray) -> np.ndarray:
@@ -142,12 +155,13 @@ def plant_segmentation(entry: dict[str, Any], rng: np.random.Generator) -> dict[
         variants["leak"] = (truth | leak, leak)
     far = _inside(body, 8.0, spacing) & (ndimage.distance_transform_edt(~truth, sampling=spacing) >= 20.0)
     if (center := _pick(rng, far)) is not None:
-        blob = _ball(truth.shape, center, 6.0, spacing) & body
+        blob = _lump(truth.shape, center, 6.0, spacing, rng) & body
         variants["spurious_structure"] = (truth | blob, blob)
     depth = ndimage.distance_transform_edt(main, sampling=spacing)
     if depth.max() >= 3.0:
-        hole = _ball(truth.shape, np.unravel_index(np.argmax(depth), depth.shape), min(5.0, depth.max() / 2), spacing)
-        variants["holes"] = (truth & ~hole, hole & truth)
+        deepest = np.asarray(np.unravel_index(np.argmax(depth), depth.shape))
+        hole = _lump(truth.shape, deepest, min(5.0, depth.max() / 2), spacing, rng) & main
+        variants["holes"] = (truth & ~hole, hole)
     return {
         name: (
             prediction.astype(np.uint8),
@@ -179,10 +193,9 @@ def plant_registration(entry: dict[str, Any], rng: np.random.Generator) -> tuple
     variants: dict[str, Any] = {"clean": (vector(exact), {})}
     length = np.linalg.norm(exact, axis=0)
     if (center := _pick(rng, body & (length >= np.percentile(length[body], 75)))) is not None:
-        zeroed = _cube(image.shape, center, 30.0, spacing) & _body(image)
-        field = exact.copy()
-        field[:, zeroed] = 0.0
-        defect = {"defect": "residual_misalignment", "box_mm": _box(moving, zeroed)}
+        lost = _bump(image.shape, center, 10.0, spacing)  # the registration fades out there: what it moved stays
+        field = exact * (1.0 - lost)
+        defect = {"defect": "residual_misalignment", "box_mm": _box(moving, lost >= 0.5)}
         variants["residual_misalignment"] = (vector(field), {"residual_misalignment": defect})
     if (center := _pick(rng, body)) is not None:
         bump = _ball(image.shape, center, 4.0, spacing)
@@ -202,25 +215,24 @@ def plant_synthesis(entry: dict[str, Any], rng: np.random.Generator) -> dict[str
     soft = _inside(mask, 12.0, spacing) & (target > -100) & (target < 100)
     variants: dict[str, Any] = {"clean": (base, {})}
     if (center := _pick(rng, soft)) is not None:
-        biased = _cube(target.shape, center, 30.0, spacing) & mask
-        synthetic = base.copy()
-        synthetic[biased] += 150.0
+        bias = 150.0 * _bump(target.shape, center, 8.0, spacing) * mask
         variants["intensity_bias"] = (
-            synthetic,
-            {"intensity_bias": {"defect": "intensity_bias", "box_mm": _box(like, biased)}},
+            base + bias,
+            {"intensity_bias": {"defect": "intensity_bias", "box_mm": _box(like, bias >= 50.0)}},
         )
     if (center := _pick(rng, soft & _inside(mask, 20.0, spacing))) is not None:
-        pocket = _ball(target.shape, center, 6.0, spacing) & mask
+        pocket = _lump(target.shape, center, 6.0, spacing, rng) & mask
         synthetic = base.copy()
         synthetic[pocket] = -750.0 + rng.normal(0, 20, int(pocket.sum()))
         defect = {"defect": "hallucinated_structure", "box_mm": _box(like, pocket)}
         variants["hallucinated_structure"] = (synthetic, {"hallucinated_structure": defect})
     bone = (target > 300) & mask
     if (center := _pick(rng, bone)) is not None:
-        erased = _cube(target.shape, center, 30.0, spacing) & bone
-        if erased.sum() >= 100:
-            synthetic = base.copy()
-            synthetic[erased] = 40.0 + rng.normal(0, 15, int(erased.sum()))
+        erased = _ball(target.shape, center, 12.0, spacing) & bone
+        if erased.sum() >= 100:  # bone turned to soft tissue, with a soft edge
+            weight = ndimage.gaussian_filter(erased.astype(np.float32), 1.0)
+            soft_tissue = 40.0 + rng.normal(0, 15, target.shape).astype(np.float32)
+            synthetic = base * (1.0 - weight) + soft_tissue * weight
             defect = {"defect": "missing_structure", "box_mm": _box(like, erased)}
             variants["missing_structure"] = (synthetic, {"missing_structure": defect})
     return variants
@@ -342,6 +354,7 @@ def score(bench: Path) -> dict[str, Any]:
                 "found": matched["found_names"],
                 "typed": sorted(n for n, d in defects.items() if any(o.defect == d["defect"] for o in errors)),
                 "errors": len(errors),
+                "credible": sum(o.confidence >= 0.5 for o in errors),
                 "serious": sum(o.severity in SERIOUS and o.confidence >= 0.5 for o in errors),
                 "unmatched": matched["false_positives"],
                 "verdict": report.conclusion.verdict if report.conclusion else "none",
@@ -380,6 +393,7 @@ def score(bench: Path) -> dict[str, Any]:
             "planted": sum(len(r["planted"]) for r in planted),
             "clean": len(clean),
             "clean_with_an_error": sum(r["errors"] > 0 for r in clean),
+            "clean_with_a_credible_error": sum(r["credible"] > 0 for r in clean),
             "clean_with_a_serious_error": sum(r["serious"] > 0 for r in clean),
             "clean_acceptable": sum(r["verdict"] == "acceptable" for r in clean),
             "planted_defective": sum(r["verdict"] == "defective" for r in planted),
@@ -403,14 +417,16 @@ def markdown(scores: dict[str, Any]) -> str:
         return f"{a}/{b}" + (f" ({100 * a / b:.0f} %)" if b else "")
 
     lines = [
-        "| depth | task | found | clean: no error | clean: acceptable | planted: defective | repeats agree | $ | s | calls | tokens |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| depth | task | found | clean: no credible error | clean: no serious error | clean: acceptable | "
+        "planted: defective | repeats agree | $ | s | calls | tokens |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in scores.values():
         agree = s["repeat_agreement"]
         lines.append(
             f"| {s['depth']} | {s['task']} | {rate(s['found'], s['planted'])} | "
-            f"{rate(s['clean'] - s['clean_with_an_error'], s['clean'])} | {rate(s['clean_acceptable'], s['clean'])} | "
+            f"{rate(s['clean'] - s['clean_with_a_credible_error'], s['clean'])} | "
+            f"{rate(s['clean'] - s['clean_with_a_serious_error'], s['clean'])} | {rate(s['clean_acceptable'], s['clean'])} | "
             f"{rate(s['planted_defective'], s['planted_inspections'])} | {rate(*agree) if agree[1] else '-'} | "
             f"{s['mean_cost_usd']} | {s['mean_seconds']} | {s['mean_calls']} | {s['mean_tokens']} |"
         )

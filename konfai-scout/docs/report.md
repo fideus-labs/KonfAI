@@ -107,11 +107,12 @@ measurements the observations cite, once each. Every other view, measurement and
 
 Before the model's first turn a deterministic survey of the case lists leads, each a box and the reason it stands
 out, on the case card. Segmentation: stretches of a label's boundary where the image has almost no edge (a cut
-through a homogeneous lesion, a hole, a leak into tissue that does not differ, a component on nothing), components
-whose contrast against their surroundings is unlike the main component's, and with a truth the clusters of
-disagreement. Registration: folded voxels, and cells of about 16 mm where the edges of the warped and fixed images
-correlate much less than elsewhere in the case (edges, so that two modalities compare; voxels the warp read outside
-the moving image are left out). Synthesis with a target: clusters where the error, smoothed inside the mask, is
+through a homogeneous lesion, a hole, a leak into tissue that does not differ, a component on nothing), each with how
+much the label differs from just outside it there against the same along its whole border; components whose
+contrast against their surroundings is unlike the main component's; and with a truth the clusters of disagreement.
+Registration: folded voxels, and cells of about 16 mm where the edges of the warped and fixed images correlate much
+less than elsewhere in the case (edges, so that two modalities compare; voxels the warp read outside the moving
+image, which it fills with the moving image's minimum, are left out). Synthesis with a target: clusters where the error, smoothed inside the mask, is
 several times the case's typical error and at least 3 % of the target's range, off the target's strongest edges. A
 lead is not a finding and its figures are not measurements; the model looks and judges.
 

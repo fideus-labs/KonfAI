@@ -179,7 +179,8 @@ def _components(image: np.ndarray, mask: np.ndarray, other: np.ndarray, name: st
 
 def _edgeless(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name: str) -> list[tuple[int, Found]]:
     """Stretches of the label's boundary where the image has almost no edge: a cut through a homogeneous lesion, a
-    hole, a leak into tissue that does not differ, a component on nothing."""
+    hole, a leak into tissue that does not differ, a component on nothing. Each says how much the label differs from
+    what lies just outside it there, against the same along its whole border."""
     surface = mask & ~ndimage.binary_erosion(mask)
     if surface.sum() < 30:
         return []
@@ -187,10 +188,18 @@ def _edgeless(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name
     reference = float(np.median(edges[surface]))
     if reference <= 0:
         return []
+    spread = float(np.subtract(*np.percentile(image, [90, 10]))) or 1.0
+
+    def contrast(where: np.ndarray, inside: np.ndarray, values: np.ndarray) -> float:
+        near = ndimage.binary_dilation(where, iterations=2)
+        a, b = values[near & inside], values[near & ~inside]
+        return float(np.median(a) - np.median(b)) / spread if a.size and b.size else 0.0
+
+    overall = contrast(surface, mask, image)
     weak = surface & (edges < WEAK * reference)
     out = []
     for size, window in _clusters(weak, max(15, int(0.03 * surface.sum())))[:3]:
-        strength = float(edges[window][weak[window]].mean())
+        local = contrast(weak[window], mask[window], image[window])
         out.append(
             (
                 size,
@@ -198,7 +207,9 @@ def _edgeless(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name
                     "edgeless_boundary",
                     window,
                     f"{size} voxels of the {name} boundary where the image has almost no edge (strength "
-                    f"{strength:.3g} per mm, median {reference:.3g} along the whole boundary)",
+                    f"{float(edges[window][weak[window]].mean()):.3g} per mm, median {reference:.3g}); the label "
+                    f"differs from just outside it by {local:+.2f} there, {overall:+.2f} along its whole border "
+                    "(in units of the image's 10-90 % spread)",
                 ),
             )
         )
@@ -241,6 +252,7 @@ def _registration(r: Renderer) -> list[Found]:
 def _edge_disagreement(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> list[Found]:
     """Cells of about 16 mm where the edges of the warped image correlate with the fixed image's much less than
     elsewhere in the case: the edges, not the intensities, so that two modalities compare."""
+    assert r.derived is not None
     fixed, warped = r.volume(r.case.image_role), r.volume("warped")
     cell = tuple(int(max(4, round(CELL_MM / s))) for s in spacing)
     cells: list[tuple[float, float, tuple[int, int, int]]] = []
@@ -248,8 +260,8 @@ def _edge_disagreement(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) 
         inner = _inner(lo, hi, olo)
         f, w = fixed.region(olo, ohi)[0], warped.region(olo, ohi)[0]
         ef, ew = _edges(f, spacing)[inner], _edges(w, spacing)[inner]
-        # where the warp read outside the moving image it wrote its fill, 0: an edge of coverage, not of alignment
-        unread = ((w == 0) & (f != 0))[inner]
+        # where the warp read outside the moving image it wrote its fill: an edge of coverage, not of alignment
+        unread = ((w == r.derived.fill) & (f != r.derived.fill))[inner]
         for z in range(0, ef.shape[0], cell[0]):
             for y in range(0, ef.shape[1], cell[1]):
                 for x in range(0, ef.shape[2], cell[2]):
