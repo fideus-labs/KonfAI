@@ -16,7 +16,7 @@ An inspection leaves one directory:
 
 | Field | What it holds |
 |---|---|
-| `schema_version` | `"1.1"`; it changes when a field changes meaning (1.1: a confirmation rests on a value past a threshold, an error's measurements end with Scout's check, `budget.spent.tool_calls` counts the calls that explore; added: `budget.not_enforced`, `leads`, `config.blind`, `config.thresholds`) |
+| `schema_version` | `"1.1"`; it changes when a field changes meaning (1.1: a confirmation rests on a value past a threshold, an error's measurements end with Scout's check, `budget.spent.tool_calls` counts the calls that explore; added: `budget.not_enforced`, `leads`, `config.blind`, `config.thresholds`, `config.depth`) |
 | `scout_version`, `versions` | Scout, Python, numpy, SimpleITK, Pillow, scipy, konfai when installed, the provider SDK, the prompt version |
 | `created_at`, `duration_s` | when the inspection started (UTC) and how long it took |
 | `case` | the case with every input's path, SHA-256 and geometry, `truth_available`, the reference grid |

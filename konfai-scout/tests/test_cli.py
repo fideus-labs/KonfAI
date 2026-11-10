@@ -80,3 +80,23 @@ def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):
     )
     assert code == 2 and "allow-cloud-images" in capsys.readouterr().err
     assert not (tmp_path / "r" / "report.json").exists()
+
+
+def test_a_depth_sets_the_defaults_and_an_explicit_flag_wins():
+    from konfai_scout.cli import _config_from_args, _parser
+    from konfai_scout.config import ScoutConfig
+
+    def config(*flags):
+        return _config_from_args(_parser().parse_args(["inspect", "--out", "o", *flags]))
+
+    quick = config("--depth", "quick", "--max-tool-calls", "20")
+    assert (quick.effort, quick.budget.max_tool_calls, quick.budget.max_images, quick.second_reading) == (
+        "low",
+        20,
+        24,
+        False,
+    )
+    deep = ScoutConfig(depth="deep", effort="medium")
+    assert (deep.effort, deep.budget.max_tool_calls, deep.second_reading) == ("medium", 80, True)
+    assert config().budget.max_tool_calls == 40 and config().effort is None
+    assert ScoutConfig.from_dict(quick.to_dict()).budget.max_tool_calls == 20  # a saved config reads back as it was

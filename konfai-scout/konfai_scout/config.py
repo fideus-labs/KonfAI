@@ -17,6 +17,18 @@ DEFAULT_MODELS = {
     "mock": "heuristic",
 }
 
+#: How far an inspection looks and what it may spend: ``quick`` for a cheap first pass, ``deep`` for a case that
+#: matters. A depth changes the defaults only: a field set to anything but its standard value keeps that value.
+DEPTHS: dict[str, dict[str, object]] = {
+    "quick": {"effort": "low", "budget": {"max_tool_calls": 15, "max_images": 24, "max_seconds": 300.0}},
+    "standard": {},
+    "deep": {
+        "effort": "high",
+        "second_reading": True,
+        "budget": {"max_tool_calls": 80, "max_images": 120, "max_seconds": 1800.0},
+    },
+}
+
 
 @dataclass
 class Budget:
@@ -37,6 +49,8 @@ class Budget:
 class ScoutConfig:
     provider: str = "mock"
     model: str | None = None
+    #: ``quick``, ``standard`` or ``deep`` (``DEPTHS``): the budget, the effort and the second reading in one word.
+    depth: str = "standard"
     #: An OpenAI-compatible server (vLLM, Ollama, LM Studio) for ``provider: openai``; the official API when unset.
     base_url: str | None = None
     #: The environment variable holding the key; the SDK's own default when unset.
@@ -83,10 +97,20 @@ class ScoutConfig:
             raise ValueError(f"mode is one of {MODES}, not {self.mode!r}")
         if self.provider not in PROVIDERS:
             raise ValueError(f"provider is one of {PROVIDERS}, not {self.provider!r}")
+        if self.depth not in DEPTHS:
+            raise ValueError(f"depth is one of {tuple(DEPTHS)}, not {self.depth!r}")
         if isinstance(self.budget, dict):
             self.budget = Budget(**self.budget)
         if self.model is None:
             self.model = DEFAULT_MODELS[self.provider]
+        standard = ScoutConfig.__dataclass_fields__
+        for key, value in DEPTHS[self.depth].items():
+            if key == "budget":
+                for limit, amount in value.items():  # type: ignore[attr-defined]
+                    if getattr(self.budget, limit) == getattr(Budget(), limit):
+                        setattr(self.budget, limit, amount)
+            elif getattr(self, key) == standard[key].default:
+                setattr(self, key, value)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

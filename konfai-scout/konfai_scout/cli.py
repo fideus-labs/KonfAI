@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .agent import inspect, main_version
 from .case import TASKS, CaseError, InspectionCase
-from .config import MODES, PROVIDERS, ScoutConfig
+from .config import DEPTHS, MODES, PROVIDERS, ScoutConfig
 from .providers import ProviderError
 from .report import LEVELS, Report, compare, compare_markdown, defects_of, export, render_markdown
 
@@ -40,6 +40,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--model")
     p.add_argument("--base-url", help="An OpenAI-compatible server (a local VLM).")
     p.add_argument("--api-key-env", help="The environment variable holding the key.")
+    p.add_argument(
+        "--depth",
+        choices=list(DEPTHS),
+        help="quick: a cheap first pass (15 calls, low effort); standard (40 calls); deep: 80 calls, high effort and "
+        "a blind second reading. The flags below override it.",
+    )
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--mode", choices=MODES)
     p.add_argument("--max-tool-calls", type=int)
@@ -121,7 +127,7 @@ def _case_from_args(args: argparse.Namespace) -> InspectionCase:
 
 def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
     config = ScoutConfig.load(args.config) if args.config else ScoutConfig()
-    for key in ("provider", "model", "base_url", "api_key_env", "effort", "mode"):
+    for key in ("provider", "model", "base_url", "api_key_env", "depth", "effort", "mode"):
         value = getattr(args, key)
         if value is not None:
             setattr(config, key, value)

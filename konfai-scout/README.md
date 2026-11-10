@@ -102,6 +102,17 @@ is the image's own 1st to 99th percentile unless the model asks for `[low, high]
 
 ## Budget, privacy, cost
 
+`--depth` sets how far an inspection looks in one word; any flag below overrides what it sets:
+
+| Depth | Tool calls | Images | Time | Effort | Second reading | For |
+|---|---|---|---|---|---|---|
+| `quick` | 15 | 24 | 5 min | low | no | a cheap first pass over many cases |
+| `standard` (default) | 40 | 60 | 15 min | the model's | no | one case |
+| `deep` | 80 | 120 | 30 min | high | yes | a case that matters, or a doubt to settle |
+
+The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
+flagged box are the same at every depth.
+
 `--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
 model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
 call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
