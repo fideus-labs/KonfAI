@@ -138,25 +138,12 @@ The `codex` provider does the same with the Codex CLI under your ChatGPT login: 
 tools are served to it over a loopback MCP server, the case images are attached to the prompt; your own Codex
 configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the session under `~/.codex/sessions`.
 
-## Examples and benchmark
+## Examples
 
 ```bash
 python examples/inspect_synthetic.py                 # synthetic cases with planted defects, the free heuristic model
 konfai-scout compare reports/*                       # one row per report
 ```
-
-`examples/benchmark.py` measures Scout: it plants one defect at a time in real images you point it to (a manifest of
-sources: an image and its truth, a CT, an MR and its CT), keeps a clean control of each, inspects every case at each
-depth, and counts what was found, missed and invented, the verdicts, the agreement between repeats, the cost and the
-time:
-
-```bash
-python examples/benchmark.py build manifest.json --out bench --phantoms
-python examples/benchmark.py run bench --depth quick standard deep --repeats 2 --provider claude-code --allow-cloud-images
-python examples/benchmark.py score bench             # bench/scores.md and scores.json
-```
-
-`--mode fixed` among the run's flags gives the ablation of fixed views against active exploration.
 
 `docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use
 Scout.

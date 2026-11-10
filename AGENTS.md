@@ -146,7 +146,7 @@ to the case's name, notes and prior scores by default, `export` writes a report 
 every error from crops alone, a deterministic survey (`survey.py`) hands the model leads that `conclude` waits
 for, the verdict is `defective` exactly when a major or critical error is noted at confidence 0.5 or more,
 `depth` (`quick`, `standard`, `deep`) sets the budget, the effort and the second reading in one word, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
-invented defects are counted; `examples/benchmark.py` plants defects in real images and scores every depth.
+invented defects are counted.
 konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
 `konfai-scout/docs/` hold the user side, the report schema and the studies.
 
