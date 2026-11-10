@@ -70,11 +70,8 @@ def _pil_weights(n_in: int, n_out: int) -> tuple[torch.Tensor, torch.Tensor]:
             w = w / ww if ww != 0.0 else w
             row.append(int(0.5 + w * (1 << _PIL_BITS)) if w >= 0 else int(-0.5 + w * (1 << _PIL_BITS)))
         starts.append(xmin)
-        rows.append(row)
-    weights = torch.zeros(n_out, max(len(row) for row in rows), dtype=torch.int64)
-    for xx, row in enumerate(rows):
-        weights[xx, : len(row)] = torch.tensor(row, dtype=torch.int64)
-    return torch.tensor(starts, dtype=torch.int64), weights
+        rows.append(torch.tensor(row, dtype=torch.int64))
+    return torch.tensor(starts, dtype=torch.int64), torch.nn.utils.rnn.pad_sequence(rows, batch_first=True)
 
 
 def _pil_pass(values: torch.Tensor, band: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
