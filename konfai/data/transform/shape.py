@@ -368,8 +368,9 @@ class Crop(TransformInverse):
             )
         memo = holder.case_facts.setdefault((group_src, name), {})
         rule = f"labels {self.labels}" if self.labels is not None else "nonzero" if self.nonzero else "percentile"
-        # The stages themselves, not their names: two chains of one group (CT_1mm, CT_2mm) name the same classes.
-        key = f"box handed {rule} after {' '.join(str(id(stage)) for stage in self.preceding)} into {list(shape)}"
+        # The stages themselves, not their names: two chains of one group (CT_1mm, CT_2mm) name the same classes. The
+        # key holds them, so a freed chain's id is never another chain's while its box is remembered.
+        key = ("box handed", rule, tuple(self.preceding), tuple(shape))
         if key not in memo:
             self._price_replay(holder, group_src, name, shape)
             array, stored = holder.read_data(group_src, name)
