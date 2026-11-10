@@ -159,7 +159,7 @@ class _DerivedGrid(_TargetGrid):
 #: What ``Resample(interpolation=...)`` takes.
 INTERPOLATIONS = ("linear", "nearest", "cubic", "bspline", "nearest_even")
 #: The grid rules of ``Resample(grid=...)`` other than KonfAI's own.
-GRID_RULES = ("faces", "zoom", "centres")
+GRID_RULES = ("faces", "zoom", "centers")
 
 
 class _RuleGrid(_DerivedGrid):
@@ -168,9 +168,9 @@ class _RuleGrid(_DerivedGrid):
 
     - ``faces``: ``round(s / s' * n)`` voxels, the outer faces where the case's are;
     - ``zoom`` (``scipy.ndimage.zoom`` with its corners aligned): ``round(n * s / s')`` voxels, the first and
-      the last voxel centres where the case's are. The header then records voxel 0 where it was and the spacing
+      the last voxel centers where the case's are. The header then records voxel 0 where it was and the spacing
       ``s / (s / s')``, so a grid placed after it counts from that spacing;
-    - ``centres``: ``round((n - 1) s / s' + 1)`` voxels, voxel 0's centre where it was, the spacing ``s'``
+    - ``centers``: ``round((n - 1) s / s' + 1)`` voxels, voxel 0's center where it was, the spacing ``s'``
       exactly.
     """
 
@@ -207,7 +207,7 @@ class _RuleGrid(_DerivedGrid):
         size = self._size(source, name)
         if self.rule == "faces":
             return source.resampled(size_zyx=size, align="extent")
-        if self.rule == "centres":
+        if self.rule == "centers":
             return Grid(size, source.origin_xyz, self._wanted(source, name), source.direction_xyz)
         n = np.array(source.size_zyx[::-1], dtype=np.float64)
         m = np.array(size[::-1], dtype=np.float64)
@@ -842,7 +842,7 @@ class Resample(TransformInverse):
     decides), ``faces`` (``round(s / s' * n)`` voxels, extents aligned; ``linear`` and ``bspline`` are
     scikit-image's ``resize`` orders 1 and 3, clipped to the input's range, and an axis whose spacing is over
     three times the finest is resampled apart, by nearest neighbour), ``zoom`` (``scipy.ndimage.zoom`` with
-    its corners aligned, the header's spacing ``s / (s / s')``) or ``centres`` (voxel 0
+    its corners aligned, the header's spacing ``s / (s / s')``) or ``centers`` (voxel 0
     kept, ``round((n - 1) s / s' + 1)`` voxels).
 
     IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid or
@@ -1061,7 +1061,7 @@ class Resample(TransformInverse):
             if grid not in GRID_RULES:
                 raise TransformError(
                     f"'Resample' has an unknown grid '{grid}'.",
-                    "Use grid: konfai (the default: align decides where it sits), faces, zoom or centres.",
+                    "Use grid: konfai (the default: align decides where it sits), faces, zoom or centers.",
                 )
             if spacing is None:
                 raise TransformError(

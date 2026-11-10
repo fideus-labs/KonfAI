@@ -171,9 +171,9 @@ def test_zoom_counts_and_samples_as_scipy_and_records_the_zoomed_spacing() -> No
     np.testing.assert_allclose(back[0].numpy(), want_back, rtol=0, atol=1e-3)
 
 
-def test_the_centres_grid_counts_round_n_minus_one_s_over_s_prime_plus_one() -> None:
+def test_the_centers_grid_counts_round_n_minus_one_s_over_s_prime_plus_one() -> None:
     spacing = [0.79, 0.85, 2.5]
-    stage = Resample(spacing=[1.5, 1.5, 1.5], grid="centres")
+    stage = Resample(spacing=[1.5, 1.5, 1.5], grid="centers")
     attribute = Attribute(geometry([3.0, -2.0, 7.0], spacing, None))
     shape = stage.transform_shape("Volume", "case", [16, 40, 33], attribute)
     assert shape == [int(np.round((n - 1) * s / 1.5 + 1.0)) for n, s in zip([16, 40, 33], spacing[::-1], strict=True)]
@@ -183,7 +183,7 @@ def test_nearest_even_picks_as_grid_sample() -> None:
     """``grid_sample(mode='nearest')`` sends ties to the even voxel: at half the spacing every other voxel of the new
     grid lies EXACTLY between two of the case's."""
     labels = torch.from_numpy(_RNG.integers(0, 200, size=(1, 5, 9, 17)).astype(np.uint8))
-    stage = Resample(spacing=[1.0, 1.0, 1.0], grid="centres", interpolation="nearest_even", inverse=False)
+    stage = Resample(spacing=[1.0, 1.0, 1.0], grid="centers", interpolation="nearest_even", inverse=False)
     out = stage("case", labels.clone(), Attribute(geometry([0.0] * 3, [2.0, 2.0, 2.0], None)))
 
     # The source index of target voxel j is j / 2: normalised for align_corners=True, exactly, as the extents
@@ -195,7 +195,7 @@ def test_nearest_even_picks_as_grid_sample() -> None:
     want = torch.nn.functional.grid_sample(labels[None].double(), grid, mode="nearest", align_corners=True)[0]
     torch.testing.assert_close(out, want.to(torch.uint8), rtol=0, atol=0)
     # ITK's nearest takes the other voxel of every tie.
-    up = Resample(spacing=[1.0, 1.0, 1.0], grid="centres", interpolation="nearest", inverse=False)
+    up = Resample(spacing=[1.0, 1.0, 1.0], grid="centers", interpolation="nearest", inverse=False)
     assert not torch.equal(up("case", labels.clone(), Attribute(geometry([0.0] * 3, [2.0, 2.0, 2.0], None))), out)
 
 
@@ -203,7 +203,7 @@ def test_nearest_even_streams_what_the_whole_volume_holds() -> None:
     from test_resample import _inverse_streamed
 
     labels = torch.from_numpy(_RNG.integers(0, 200, size=(1, 9, 17, 13)).astype(np.uint8))
-    stage = Resample(spacing=[2.0, 2.0, 2.0], grid="centres", interpolation="nearest_even")
+    stage = Resample(spacing=[2.0, 2.0, 2.0], grid="centers", interpolation="nearest_even")
     case = Attribute(geometry([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], None))
     held = stage("case", labels.clone(), case)
     whole = stage.inverse("CASE", held.clone(), Attribute(case))
@@ -251,7 +251,7 @@ def test_canonical_without_resampling_is_nibabels_closest_canonical() -> None:
     [
         {"spacing": [1.0, 1.0, 1.0], "grid": "elastix"},
         {"shape": [4, 4, 4], "grid": "faces"},
-        {"spacing": [1.0, 1.0, 1.0], "grid": "centres", "interpolation": "bspline"},
+        {"spacing": [1.0, 1.0, 1.0], "grid": "centers", "interpolation": "bspline"},
         {"spacing": [1.0, 1.0, 1.0], "align": "origin", "interpolation": "bspline"},
         {"spacing": [1.0, 1.0, 1.0], "transforms": {"reg": False}, "interpolation": "bspline"},
     ],
