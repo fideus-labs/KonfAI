@@ -214,7 +214,7 @@ def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretizat
 
 
 def test_a_voxel_overlap_is_dropped_on_an_axis_one_patch_spans() -> None:
-    """The published TotalSegmentator presets write ``overlap: 32``: a case 30 voxels deep bounds the
+    """An app's preset writes ``overlap: 32``: a case 30 voxels deep bounds the
     96-deep patch to 30, and the plain int, alone among the spellings, kept 32 there and refused the
     case. Every spelling now tiles the same grid."""
     patch_size, shape = [96, 128, 160], [30, 200, 200]
@@ -278,7 +278,7 @@ def test_path_combine_overlap_zero_leaves_tensor_unchanged() -> None:
 def test_gaussian_window_favours_centre_and_reassembles_to_a_weighted_average():
     gaussian = Gaussian()
     gaussian.set_patch_config([8, 8], 2)
-    # nnU-Net-style importance map: centre weight far exceeds the border, but the edge stays > 0.
+    # A Gaussian importance map: centre weight far exceeds the border, but the edge stays > 0.
     assert float(gaussian.data[4, 4]) > float(gaussian.data[0, 0]) > 0
     # A single patch must still reassemble to its raw values (assemble divides by the accumulated weight).
     accumulator = Accumulator([(slice(0, 8), slice(0, 8))], patch_size=[8, 8], patch_combine=gaussian, batch=True)
@@ -725,7 +725,7 @@ def test_trim_kept_boxes_partition_the_volume(shape, patch, overlap):
     assert int(hits.max()) == 1, f"{int((hits > 1).sum())} voxel(s) written by more than one patch"
 
 
-@pytest.mark.parametrize("placement, last", [("pad", [12, 16]), ("monai", [12, 14]), ("spread", [10, 14])])
+@pytest.mark.parametrize("placement, last", [("pad", [12, 16]), ("end", [12, 14]), ("spread", [10, 14])])
 def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch(placement, last):
     """A kept box is the product of one span per axis, so the cache holds one span per (axis,
     start): sum(n_d) entries for prod(n_d) patches, and the grid's starts are read off the slices
@@ -733,7 +733,7 @@ def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch(placement, l
     O(P^2) over a case (15.6 s for 18,000 thin 2.5D patches, 16 ms here, measured).
 
     Each box keeps the voxels nearer its patch's centre than any other's (a tie to the later patch), however the
-    placement sets the patches (``monai``'s last one nearer its neighbour than the stride, ``spread``'s rounded
+    placement sets the patches (``end``'s last one nearer its neighbour than the stride, ``spread``'s rounded
     steps): checked voxel by voxel.
     """
     shape, patch, overlap = [20, 22, 24], [8, 8, 8], 4
@@ -1088,13 +1088,14 @@ def test_trim_streams_a_padded_final_patch_like_the_whole_volume(shape, patch, o
 
 
 # --------------------------------------------------------------------------------------
-# Placement: on the stride (default), MONAI's sliding window, nnU-Net's spread windows
+# Placement: on the stride (default), the last window moved back to the end, windows spread evenly
 # --------------------------------------------------------------------------------------
 
 
-def _monai_starts(extent: int, patch: int, overlap: float) -> list[int]:
-    """MONAI 1.5.1's window starts on one axis: ``_get_scan_interval`` then ``dense_patch_slices``, on the axis
-    padded up to the patch (``sliding_window_inference``)."""
+def _end_starts(extent: int, patch: int, overlap: float) -> list[int]:
+    """The ``end`` placement's window starts on one axis, written independently: the truncated step
+    ``int(patch * (1 - overlap))``, as many windows as reach the end of the axis padded up to the patch, the last one
+    moved back to end on it."""
     extent = max(extent, patch)
     interval = patch if patch == extent else max(int(patch * (1 - overlap)), 1)
     count = next(d for d in range(math.ceil(extent / interval)) if d * interval + patch >= extent) + 1
@@ -1102,7 +1103,9 @@ def _monai_starts(extent: int, patch: int, overlap: float) -> list[int]:
 
 
 def _importance_map(patch: list[int], sigma_scale: float = 0.125) -> torch.Tensor:
-    """MONAI 1.5.1's ``compute_importance_map(patch, mode="gaussian")``, line for line."""
+    """A Gaussian importance map written independently: per axis ``exp(-x ** 2 / (2 * sigma ** 2))`` about the
+    centre, ``sigma`` being ``size * sigma_scale``, their outer product floored at its own minimum or ``1e-3``,
+    whichever is larger."""
     sigmas = [size * sigma_scale for size in patch]
     importance_map = torch.ones(())
     for i, size in enumerate(patch):
@@ -1117,19 +1120,19 @@ def _importance_map(patch: list[int], sigma_scale: float = 0.125) -> torch.Tenso
     "extent, starts",
     [(154, [0, 58]), (247, [0, 72, 144, 151]), (96, [0]), (78, [0]), (168, [0, 72])],
 )
-def test_the_last_window_ends_inside_the_volume_where_monai_places_it(extent, starts):
-    """The wholeBody CT bundle's windows (96, overlap 0.25) on a 1.5 mm CT 154 voxels high start at 0 and 58 under
-    ``placement: monai``: the last one ends on the volume's last voxel. The default keeps it on the stride."""
-    assert _monai_starts(extent, 96, 0.25) == starts
-    slices = get_patch_slices_from_shape([96], [extent], 0.25, placement="monai")
+def test_the_end_placement_s_last_window_ends_on_the_last_voxel(extent, starts):
+    """Windows of 96 at overlap 0.25 on an axis 154 voxels long start at 0 and 58 under ``placement: end``: the
+    last one ends on the volume's last voxel. The default keeps it on the stride."""
+    assert _end_starts(extent, 96, 0.25) == starts
+    slices = get_patch_slices_from_shape([96], [extent], 0.25, placement="end")
     assert [s[0].start for s in slices] == starts
     if extent == 154:
         assert [s[0].start for s in get_patch_slices_from_shape([96], [extent], 0.25)] == [0, 72]
 
 
-def _nnunet_steps(image_size, tile_size, tile_step_size):
-    """nnU-Net v2's ``compute_steps_for_sliding_window`` (nnunetv2/inference/sliding_window_prediction.py), line for
-    line."""
+def _spread_steps(image_size, tile_size, tile_step_size):
+    """The ``spread`` placement's window starts, written independently: on each axis the fewest windows the step
+    ``tile_size * tile_step_size`` covers it with, spread evenly from the first voxel to the last."""
     assert [i >= j for i, j in zip(image_size, tile_size, strict=True)], (
         "image size must be as large or larger than patch_size"
     )
@@ -1161,26 +1164,26 @@ def _nnunet_steps(image_size, tile_size, tile_step_size):
 
 
 @pytest.mark.parametrize("tile_step_size", [0.5, 0.75, 0.25])
-def test_spread_places_the_windows_where_nnunet_does(tile_step_size):
-    """``placement: spread`` with ``overlap`` the fraction ``1 - tile_step_size`` starts every window where nnU-Net's
-    sliding window does, on every axis from shorter than the patch (nnU-Net pads it up to one patch) to many patches,
-    a multiple of the step among them."""
+def test_spread_places_the_windows_evenly_from_the_first_voxel_to_the_last(tile_step_size):
+    """``placement: spread`` with ``overlap`` the fraction ``1 - tile_step_size`` starts every window where the
+    reference does, on every axis from shorter than the patch (padded up to one patch) to many patches, a multiple of
+    the step among them."""
     checked = 0
     for patch in range(4, 132, 4):
         for extent in [*range(1, 3 * patch + 2), 5 * patch, 7 * patch + 1]:
-            expected = _nnunet_steps([max(extent, patch)], [patch], tile_step_size)[0]
+            expected = _spread_steps([max(extent, patch)], [patch], tile_step_size)[0]
             slices = get_patch_slices_from_shape([patch], [extent], 1 - tile_step_size, placement="spread")
             assert [s[0].start for s in slices] == expected, (patch, extent)
             assert [s[0].stop for s in slices] == [min(start + patch, extent) for start in expected]
             checked += 1
     assert checked > 5000
-    # The example of nnU-Net's own comment: 110 voxels, a patch of 64, step 0.5.
+    # 110 voxels, a patch of 64, step 0.5.
     assert [s[0].start for s in get_patch_slices_from_shape([64], [110], 0.5, placement="spread")] == [0, 23, 46]
 
 
 @pytest.mark.parametrize("combine_cls", [Mean, Gaussian])
-def test_spread_places_a_window_once_where_nnunet_repeats_it(combine_cls):
-    """A step under a voxel (a patch of 4 at overlap 0.9) rounds nnU-Net's starts onto one another, 0, 0, 1, 1: each
+def test_spread_places_a_window_once_where_two_starts_round_together(combine_cls):
+    """A step under a voxel (a patch of 4 at overlap 0.9) rounds the starts onto one another, 0, 0, 1, 1: each
     window is placed once, so a blend sees it once (the accumulator counts a start once in its total weight; placed
     twice, an all-ones prediction came out all twos)."""
     slices = get_patch_slices_from_shape([4], [5], 0.9, placement="spread")
@@ -1195,28 +1198,27 @@ def test_spread_places_a_window_once_where_nnunet_repeats_it(combine_cls):
 
 @pytest.mark.parametrize(
     "placement, starts",
-    [("pad", [0, 64, 128, 192]), ("monai", [0, 64, 128, 172]), ("spread", [0, 57, 115, 172])],
+    [("pad", [0, 64, 128, 192]), ("end", [0, 64, 128, 172]), ("spread", [0, 57, 115, 172])],
 )
 def test_each_placement_starts_its_windows(placement, starts):
-    """An axis of 300 under a patch of 128, overlap 64: on the stride with the last cut at 300 (the default, KonfAI's
-    from before MONAI's), the last moved back to end on voxel 299, or four spread evenly."""
+    """An axis of 300 under a patch of 128, overlap 64: on the stride with the last cut at 300 (the default), the last moved back to end on voxel 299, or four spread evenly."""
     slices = get_patch_slices_from_shape([128], [300], 64, placement=placement)
     assert [s[0].start for s in slices] == starts
     assert [s[0].stop for s in slices] == [min(start + 128, 300) for start in starts]
 
 
 def test_a_placed_grid_counts_on_the_unrounded_step_and_defaults_to_twenty_percent():
-    """``spread`` counts its windows on nnU-Net's fractional step (3.75 voxels here, not 4); ``monai`` and ``spread``
+    """``spread`` counts its windows on the fractional step (3.75 voxels here, not 4); ``end`` and ``spread``
     take the documented 20% when ``overlap`` is unset, ``pad`` keeps its remainder rule."""
     starts = [s[0].start for s in get_patch_slices_from_shape([5], [17], 0.25, placement="spread")]
     assert starts == [0, 3, 6, 9, 12]
-    # nnU-Net's tile_step_size 0.2: the float error of 10 * (1 - 0.8) adds no window.
+    # A step of 0.2: the float error of 10 * (1 - 0.8) adds no window.
     starts = [s[0].start for s in get_patch_slices_from_shape([10], [20], 0.8, placement="spread")]
     assert starts == [0, 2, 4, 6, 8, 10]
-    # A stride truly short of 2 still takes the extra window nnU-Net's ceiling takes.
+    # A stride truly short of 2 still takes the extra window the ceiling takes.
     assert len(get_patch_slices_from_shape([10], [20], 0.800000000008, placement="spread")) == 7
-    monai = [s[0].start for s in get_patch_slices_from_shape([128], [350], None, placement="monai")]
-    assert monai == [0, 102, 204, 222]  # MONAI steps int(128 * 0.8)
+    end = [s[0].start for s in get_patch_slices_from_shape([128], [350], None, placement="end")]
+    assert end == [0, 102, 204, 222]  # the truncated step int(128 * 0.8)
     with pytest.raises(ConfigError, match="unknown placement 'mona'"):
         DatasetPatch(patch_size=[4, 4], placement="mona")
 
@@ -1239,7 +1241,7 @@ def test_a_patch_places_on_the_stride_unless_told_and_carries_its_placement(stre
     assert [s[1].start for s in manager.patch.get_patch_slices()] == [0, 57, 115, 172]
 
 
-@pytest.mark.parametrize("placement", ["monai", "spread"])
+@pytest.mark.parametrize("placement", ["end", "spread"])
 def test_a_reduction_refuses_windows_that_overlap(placement):
     """A reduction's slots must not overlap: only ``pad`` keeps them disjoint at the volume's end."""
     patch = DatasetPatch(patch_size=[96], overlap=0, placement=placement)
@@ -1250,17 +1252,17 @@ def test_a_reduction_refuses_windows_that_overlap(placement):
 
 
 def test_the_default_pads_after_the_volume():
-    """On the stride, a patch past the volume is padded after it, as before ``placement`` existed; ``monai`` and
+    """On the stride, a patch past the volume is padded after it, as before ``placement`` existed; ``end`` and
     ``spread`` centre an axis shorter than the patch."""
     volume = torch.randn(1, 12, 7)
-    for placement, padding in (("pad", (0, 5, 0, 2)), ("monai", (2, 3, 0, 0)), ("spread", (2, 3, 0, 0))):
+    for placement, padding in (("pad", (0, 5, 0, 2)), ("end", (2, 3, 0, 0)), ("spread", (2, 3, 0, 0))):
         patch = DatasetPatch(patch_size=[8, 12], overlap=0.25, placement=placement)
         patch.load([12, 7])
         last = patch.get_size() - 1
         assert patch.get_read_plan(list(volume.shape), last, 0, True).constant_padding == padding, placement
 
 
-@pytest.mark.parametrize("placement", ["pad", "monai", "spread"])
+@pytest.mark.parametrize("placement", ["pad", "end", "spread"])
 @pytest.mark.parametrize("combine_cls", [None, Trim, Mean, Cosinus, Gaussian])
 def test_each_placement_streams_as_it_assembles_whole(placement, combine_cls):
     """Whatever the placement, the patches read off a volume reassemble it, whole and slab by slab alike."""
@@ -1294,11 +1296,10 @@ def test_each_placement_streams_as_it_assembles_whole(placement, combine_cls):
 
 
 def test_a_short_axis_is_padded_on_both_sides_with_its_edge():
-    """Under ``placement: monai``, an axis shorter than the window is padded half before (the floor), half after,
-    as MONAI pads it, here with the edge voxel
-    (``padding_mode: replicate``); the accumulator crops the same middle back out."""
+    """Under ``placement: end``, an axis shorter than the window is padded half before (the floor), half after,
+    here with the edge voxel; the accumulator crops the same middle back out."""
     volume = torch.randn(1, 12, 7)
-    patch = DatasetPatch(patch_size=[8, 12], overlap=0.25, pad_value="edge", placement="monai")
+    patch = DatasetPatch(patch_size=[8, 12], overlap=0.25, pad_value="edge", placement="end")
     patch.load([12, 7])
     assert [s[0].start for s in patch.get_patch_slices()] == [0, 4]
     plan = patch.get_read_plan(list(volume.shape), 0, 0, True)
@@ -1306,7 +1307,7 @@ def test_a_short_axis_is_padded_on_both_sides_with_its_edge():
     padded = patch.get_data(volume, 0, 0, True)
     assert torch.equal(padded, torch.nn.functional.pad(volume[:, 0:8], (2, 3), "replicate"))
 
-    accumulator = Accumulator(patch.get_patch_slices(), [8, 12], None, batch=False, placement="monai")
+    accumulator = Accumulator(patch.get_patch_slices(), [8, 12], None, batch=False, placement="end")
     for index in range(patch.get_size()):
         accumulator.add_layer(index, patch.get_data(volume, index, 0, True))
     assert torch.equal(accumulator.assemble(), volume)
@@ -1314,13 +1315,13 @@ def test_a_short_axis_is_padded_on_both_sides_with_its_edge():
 
 @pytest.mark.parametrize("shape, overlap", [([21, 17, 6], 0.25), ([16, 30, 11], 0.25), ([16, 30, 11], 0.0)])
 def test_a_gaussian_blends_as_a_sliding_window_inference(shape, overlap):
-    """Under ``placement: monai``, ``Gaussian`` reassembles the patches as MONAI's sliding window does: each patch
+    """Under ``placement: end``, ``Gaussian`` reassembles the patches as a sliding-window inference does: each patch
     weighted by the importance map clamped at 1e-3, divided by the sum of the maps covering the voxel, an axis shorter
     than the window padded on both sides and cropped back. At ``overlap: 0`` too: the last window, moved back, overlaps
-    its neighbour, and MONAI's map weighs that band as any other."""
+    its neighbour, and the map weighs that band as any other."""
     torch.manual_seed(0)
     size = [8, 8, 8]
-    starts = [_monai_starts(extent, p, overlap) for extent, p in zip(shape, size, strict=True)]
+    starts = [_end_starts(extent, p, overlap) for extent, p in zip(shape, size, strict=True)]
     outputs = {start: torch.randn(2, *size) for start in itertools.product(*starts)}
 
     padded = [max(extent, p) for extent, p in zip(shape, size, strict=True)]
@@ -1333,10 +1334,10 @@ def test_a_gaussian_blends_as_a_sliding_window_inference(shape, overlap):
     crop = tuple(slice((p - e) // 2, (p - e) // 2 + e) for p, e in zip(padded, shape, strict=True))
     reference = (total / weight)[(slice(None), *crop)]
 
-    slices = get_patch_slices_from_shape(size, shape, overlap, placement="monai")
+    slices = get_patch_slices_from_shape(size, shape, overlap, placement="end")
     gaussian = Gaussian()
     gaussian.set_patch_config(size, blend_overlap(overlap, size))
-    accumulator = Accumulator(slices, size, gaussian, batch=False, placement="monai")
+    accumulator = Accumulator(slices, size, gaussian, batch=False, placement="end")
     for index, patch_slice in enumerate(slices):
         accumulator.add_layer(index, outputs[tuple(s.start for s in patch_slice)].clone())
     torch.testing.assert_close(accumulator.assemble(), reference, rtol=1e-5, atol=1e-5)
@@ -1351,9 +1352,9 @@ def test_a_pad_value_spelled_as_a_word_must_be_edge():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.int16, torch.uint8, torch.bool])
 def test_an_edge_pad_repeats_the_edge_voxel_of_any_dtype(dtype):
     """``pad_value: edge`` pads a label map or a mask with its edge voxel too, not with 0 or its minimum: after the
-    volume on the stride, on both sides of it under ``monai``."""
+    volume on the stride, on both sides of it under ``end``."""
     volume = torch.randint(0, 3, (1, 5, 6)).to(dtype)
-    for placement, index in (("pad", [0, 1, 2, 3, 4, 4, 4, 4]), ("monai", [0, 0, 1, 2, 3, 4, 4, 4])):
+    for placement, index in (("pad", [0, 1, 2, 3, 4, 4, 4, 4]), ("end", [0, 0, 1, 2, 3, 4, 4, 4])):
         patch = DatasetPatch(patch_size=[8, 6], pad_value="edge", placement=placement)
         patch.load([5, 6])
         assert torch.equal(patch.get_data(volume, 0, 0, True), volume[:, index])

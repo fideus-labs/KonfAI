@@ -41,7 +41,7 @@ class Accumulator:
         placement: Placement = "pad",
     ) -> None:
         #: The grid's ``Patch.placement``: where a padded patch holds its in-volume voxels (``_inside``), and whether
-        #: a floored blend weight applies (``monai``).
+        #: a floored blend weight applies (``end``).
         self.placement = placement
         # Which spatial axis the window slides along: the patch grid is emitted with this axis outermost.
         self.sweep_axis = sweep_axis
@@ -239,7 +239,7 @@ class Accumulator:
         is not identically one are applied (``_share``). Out of place, into a staging buffer the
         patches share: the caller's tensor is never touched, so the OOM retry never re-weights it.
         """
-        if self.placement == "monai" and cast(PathCombine, self.patch_combine).min_weight is not None:
+        if self.placement == "end" and cast(PathCombine, self.patch_combine).min_weight is not None:
             return data * self._castable(self._floored_share(data, patch_slice), data).to(data.dtype)
         shares = []
         for dim, s in enumerate(patch_slice):

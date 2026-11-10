@@ -76,7 +76,7 @@ A transform group holding a stack (an ensemble's members, `InferenceStack`) is a
 | `Otsu` | A body mask: 1 above Otsu's threshold of the whole case (ITK's, 128 bins), one `uint8` channel; a multichannel image is the mean of its channels. | | no | no | no |
 | `Dilate` | Binary dilation. | `dilate=1` | no | no | yes |
 | `Sum` | Sum over `dim`. | `dim=0` | no † | no | yes over channels |
-| `MergeLabels` | Merge the label maps of a `combine: Concat` ensemble of disjoint tasks into one (TotalSegmentator's five tasks). | | no | no | yes |
+| `MergeLabels` | Merge the label maps of a `combine: Concat` ensemble of disjoint tasks into one (a model per group of structures). | | no | no | yes |
 | `Gradient` | Gradient magnitude, or its components. | `per_dim=False` | no † | no | yes |
 
 ## Ensembles and uncertainty

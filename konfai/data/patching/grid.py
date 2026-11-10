@@ -63,8 +63,7 @@ class Patch(ABC):
         if isinstance(pad_value, str) and pad_value != "edge":
             raise ConfigError(
                 f"Patch has an unknown pad_value '{pad_value}'.",
-                "Give a number, 'edge' (the volume's edge voxel, MONAI's padding_mode: replicate), or None (the"
-                " data's minimum).",
+                "Give a number, 'edge' (the volume's edge voxel), or None (the data's minimum).",
             )
         if placement not in get_args(Placement):
             raise ConfigError(f"Patch has an unknown placement '{placement}'.", f"Give one of {get_args(Placement)}.")
@@ -86,7 +85,7 @@ class Patch(ABC):
         #: (the edge voxel), or None (the data's minimum).
         self.pad_value = pad_value
         self.extend_slice = extend_slice
-        #: Where the windows of an axis sit (``get_patch_slices_from_shape``): ``pad``, ``monai`` or ``spread``.
+        #: Where the windows of an axis sit (``get_patch_slices_from_shape``): ``pad``, ``end`` or ``spread``.
         self.placement = placement
         # The last patch of an axis is padded up to the patch size for a model. A consumer that REDUCES
         # patches (streamed evaluation) must see only in-volume voxels and turns this off.
@@ -202,8 +201,8 @@ class Patch(ABC):
                     m = free_axis_rounding(self.free_axis_multiple, axis, nspatial)
                     target = ((extent + m - 1) // m) * m if m > 1 else extent
                 p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
-                # Placed as MONAI or nnU-Net place it, the volume sits in the middle of its patch: half the padding
-                # before it (the floor). Placed on the stride, all of it comes after.
+                # Placed ``end`` or ``spread``, the volume sits in the middle of its patch: half the padding before
+                # it (the floor). Placed on the stride, all of it comes after.
                 before = 0 if self.placement == "pad" else p // 2
                 constant_padding.append(before)
                 constant_padding.append(p - before)
@@ -288,11 +287,12 @@ class DatasetPatch(Patch):
 
     ``placement`` says where the patches of an axis sit, so a port reads the windows its source model was run on:
     ``pad`` (the default) every ``patch - overlap`` voxels, the last one cut at the volume's end and padded after it;
-    ``monai`` the same, the last one moved back to end on the volume's last voxel (MONAI's sliding window, which
-    also floors a ``Gaussian`` blend's weight at ``1e-3``); ``spread`` the fewest patches that step covers the axis
-    with, spread evenly from its first voxel to its last (nnU-Net's, ``overlap: 0.5`` its ``tile_step_size: 0.5``).
-    Under ``monai`` and ``spread`` only an axis shorter than the patch is padded, half before the volume and half
-    after.
+    ``end`` every ``patch - overlap`` voxels, a fraction's ``patch * (1 - overlap)`` truncated to a whole voxel (at
+    least one), the last one moved back to end on the volume's last voxel (a ``Gaussian`` blend's weight then floored
+    at ``1e-3``); ``spread`` the fewest patches that step, unrounded, covers the axis with, spread evenly from its first
+    voxel to its last, each start rounded to a voxel and one that rounds onto the previous start placed once. Under
+    ``end`` and ``spread`` only an axis shorter than the patch is padded, the floor of half the padding before the
+    volume and the rest after.
     """
 
     def __init__(

@@ -1106,7 +1106,7 @@ def test_an_out_of_memory_restart_finishes_on_the_host_only_after_an_error_in_th
 # Device co-location of modules a per-model load() adds after placement
 # ---------------------------------------------------------------------------
 class _LateHeadNetwork(Network):
-    """Model whose load() appends a checkpoint-sized module, mimicking TotalSegmentator's Head.Conv."""
+    """Model whose load() appends a checkpoint-sized module: a head sized from the checkpoint."""
 
     def __init__(self) -> None:
         super().__init__(in_channels=1)
@@ -1129,7 +1129,7 @@ def test_colocate_is_a_safe_noop_when_model_is_all_cpu() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="device co-location only manifests on GPU")
 def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
-    # The TotalSegmentator pattern: the model is placed on the GPU, then a per-model load() appends
+    # A head added at load: the model is placed on the GPU, then a per-model load() appends
     # a Head on CPU. The forward must not hit "Input cuda, weight CPU".
     composite = ModelComposite(_LateHeadNetwork(), Mean())
     place_graph(composite, 0)  # place on cuda:0, exactly as the predictor does before inference

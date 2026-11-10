@@ -486,8 +486,8 @@ def test_the_host_blends_as_itk_a_chunk_at_a_time(monkeypatch) -> None:
 
 @pytest.mark.parametrize("mode", ["linear", "nearest"])
 def test_an_edge_fill_reads_the_edge_voxel_past_the_volume(mode: str) -> None:
-    """``fill: edge`` is MONAI's ``padding_mode: border``: a sample past the volume reads the edge voxel the taps
-    clamp to, where a number fills it. MONAI's Spacingd grid can end a voxel past an anisotropic CT."""
+    """``fill: edge``: a sample past the volume reads the edge voxel the taps clamp to, where a number fills it. A
+    grid that keeps voxel 0's center can end a voxel past an anisotropic CT."""
     from konfai.data.sampling import gather, gather_separable
     from konfai.utils.errors import TransformError
 
