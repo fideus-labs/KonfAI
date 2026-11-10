@@ -281,6 +281,28 @@ def value_text(value: object) -> str:
     return str(value)
 
 
+def _findings_table(report: Report) -> list[str]:
+    """The errors at a glance, built by Scout from the record, worst first: the same report reads the same way."""
+    rank = {s: n for n, s in enumerate(reversed(SEVERITIES))}
+    errors = sorted(
+        (o for o in report.observations if o.kind != "measured_property"),
+        key=lambda o: (rank[o.severity], -o.confidence, o.id),
+    )
+    if not errors:
+        return ["No error was recorded.", ""]
+    lines = [
+        "| Finding | Defect | Kind | Severity | Confidence | Where | Second reading |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for o in errors:
+        kind = "confirmed" if o.kind == "confirmed_error" else "suspected"
+        reading = (o.second_reading or {}).get("answer", "")
+        lines.append(
+            f"| {o.id} | {o.defect} | {kind} | {o.severity} | {o.confidence:.2f} | {_box_text(o.box_mm)} | {reading} |"
+        )
+    return [*lines, ""]
+
+
 def render_markdown(report: Report) -> str:
     """The report for a person: verdict first, then the observations with their evidence, then the record."""
     case = report.case
@@ -295,6 +317,7 @@ def render_markdown(report: Report) -> str:
         ]
         if conclusion.reason:
             lines += [f"_{conclusion.reason}_", ""]
+    lines += _findings_table(report)
     if report.error:
         lines += [f"**Error:** {report.error}", ""]
     provider = report.provider

@@ -94,6 +94,9 @@ def test_markdown_names_the_evidence():
     assert "Verdict: defective" in text
     assert "missing_structure" in text and "m001" in text and "![v001" in text and "evidence/v001.png" in text
     assert "PRED:TRUTH:Dice = 0.5" in text
+    # the findings at a glance, built from the record, before the details
+    row = "| o001 | missing_structure | confirmed | major | 0.90 | centre (0.5, 0.5, 0.5) mm, size 1.0 x 1.0 x 1.0 mm |  |"
+    assert row in text and text.index(row) < text.index("## Observations")
 
 
 def test_compare_rows():

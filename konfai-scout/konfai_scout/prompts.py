@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
 
-PROMPT_VERSION = "1.5"
+PROMPT_VERSION = "1.6"
 
 SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
 write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
@@ -49,8 +49,8 @@ the warped image against the fixed one), then compare with the reference when th
 what you saw. Describe what you see so that a reader opening the cited view finds it: which structure, which edge, \
 which direction, how far. Record each finding with `note` as soon as it is established, citing the view ids (as \
 printed on each image) and the measurement ids that support it, with a confidence from 0 to 1. Prefer few, \
-decisive views. Every finding goes through `note`. Finish with `conclude`: the verdict and why, in a few sentences \
-that cite the observations instead of repeating them. Your budget: {budget}.
+decisive views. Every finding goes through `note`, in 70 words at most. Finish with `conclude`: the verdict and why \
+in 80 words at most, citing the observations instead of repeating them. Your budget: {budget}.
 
 ## Severity
 minor: cosmetic, no consequence on a measure or a decision. moderate: a visible local error that changes a measure \

@@ -402,6 +402,11 @@ class Toolbox:
             raise ValueError(f"severity is one of {SEVERITIES}")
         if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
             raise ValueError("confidence is a number between 0 and 1")
+        if len(description.split()) > MAX_WORDS["note"]:
+            raise ValueError(
+                f"say it in {MAX_WORDS['note']} words or fewer (this is {len(description.split())}): what, where, "
+                "and which view or measurement shows it"
+            )
         if kind == "measured_property" and defect != "other":
             raise ValueError(
                 f"a measured_property is a number, not a defect: a {defect} is a suspected_error or a "
@@ -517,6 +522,11 @@ class Toolbox:
             raise ValueError(f"verdict is one of {VERDICTS}")
         if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
             raise ValueError("confidence is a number between 0 and 1")
+        if len(summary.split()) > MAX_WORDS["conclude"]:
+            raise ValueError(
+                f"conclude in {MAX_WORDS['conclude']} words or fewer (this is {len(summary.split())}): the verdict and "
+                "why, citing the observations by id; their details are already recorded"
+            )
         errors = [o for o in self.observations if o.kind != "measured_property"]
         if verdict == "defective" and not errors:
             raise ValueError("a defective verdict rests on error observations: note them first")
@@ -594,6 +604,9 @@ def _shows(view: Any, box: WorldBox, grid: Grid) -> bool:
         return False
     return box_intersection(box_from_dict(view.box_mm), box) is not None
 
+
+#: The longest a description and a conclusion may be: the evidence is in the views and measurements they cite.
+MAX_WORDS = {"note": 70, "conclude": 80}
 
 #: Defects that may span the whole image; any other error is local.
 GLOBAL_DEFECTS = ("blur", "intensity_bias", "over_smoothing")

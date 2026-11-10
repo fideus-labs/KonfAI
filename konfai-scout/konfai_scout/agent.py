@@ -119,6 +119,7 @@ class Inspector:
         #: A fresh session per blind second reading: the same model by default, never the inspecting session.
         self.reader = reader or (lambda: make_provider(config))
         self.second_reading: dict[str, Any] | None = None
+        self.lead_views: dict[str, list[str]] = {}
         case.stage(
             self.out / "work" / "stage"
         )  # the case as KonfAI reads it: every read, warp and measure goes through it
@@ -155,6 +156,8 @@ class Inspector:
             self.error = f"provider error: {error}"
         except Exception as error:  # the report must still be written
             self.error = f"{type(error).__name__}: {error}"
+        # what the inspector looked at, before the second reader renders its own crops
+        self.lead_views = {lead.id: self.toolbox.lead_views(lead) for lead in self.toolbox.leads}
         if self.config.second_reading and self.error is None:
             self._second_reading()
         return self._finish()
@@ -446,7 +449,7 @@ class Inspector:
             },
             error=self.error,
             transcript_path="transcript.json",
-            leads=[{**lead.to_dict(), "views": self.toolbox.lead_views(lead)} for lead in self.toolbox.leads],
+            leads=[{**lead.to_dict(), "views": self.lead_views.get(lead.id, [])} for lead in self.toolbox.leads],
             second_reading=self.second_reading,
         )
         report.save(self.out)
