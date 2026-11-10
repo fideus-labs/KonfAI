@@ -147,15 +147,12 @@ def colormap(unit: np.ndarray, name: str) -> np.ndarray:
     return np.stack([np.interp(unit, positions, anchors[:, channel]) for channel in range(3)], axis=-1)
 
 
-def contours(labels: np.ndarray) -> np.ndarray:
-    """The pixels where a label meets another (or the background), 4-connected."""
-    array = np.asarray(labels)
-    edge = np.zeros(array.shape, dtype=bool)
-    edge[:-1, :] |= array[:-1, :] != array[1:, :]
-    edge[1:, :] |= array[1:, :] != array[:-1, :]
-    edge[:, :-1] |= array[:, :-1] != array[:, 1:]
-    edge[:, 1:] |= array[:, 1:] != array[:, :-1]
-    return edge & (array != 0)
+def contours(mask: np.ndarray) -> np.ndarray:
+    """The pixels of a mask that touch the outside of it, 4-connected; the image's edge is not an outside."""
+    from scipy import ndimage
+
+    mask = np.asarray(mask, dtype=bool)
+    return mask & ~ndimage.binary_erosion(mask, border_value=1)
 
 
 def fill_labels(rgb: np.ndarray, labels: np.ndarray, alpha: float, only: int | None = None) -> np.ndarray:

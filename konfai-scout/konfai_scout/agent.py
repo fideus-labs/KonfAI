@@ -15,7 +15,6 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,7 @@ from .planes import box_around, box_center, box_from_dict, box_intersection, box
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers import Usage as TokenUsage
+from .providers.base import package_version
 from .providers.pricing import cost_usd, price_of
 from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
 from .survey import Lead, SurveySkipped, leads_text, survey
@@ -58,19 +58,12 @@ NOTICE_SILENT = (
 
 
 def scout_version() -> str:
-    try:
-        return version("konfai-scout")
-    except PackageNotFoundError:
-        return "0.0.0+source"
+    return package_version("konfai-scout")
 
 
 def _versions(provider: Provider) -> dict[str, str]:
     out = {"python": platform.python_version(), "platform": platform.platform()}
-    for name in ("numpy", "SimpleITK", "Pillow", "scipy", "konfai"):
-        try:
-            out[name] = version(name)
-        except PackageNotFoundError:
-            pass
+    out |= {name: package_version(name) for name in ("numpy", "SimpleITK", "Pillow", "scipy", "konfai")}
     out[f"{provider.name}_sdk"] = provider.sdk_version()
     out["prompt"] = PROMPT_VERSION
     return out

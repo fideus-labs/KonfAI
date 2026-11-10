@@ -59,15 +59,6 @@ class EvaluationError(RuntimeError):
     """A measurement KonfAI Eval could not make; the message is for the model."""
 
 
-def konfai_version() -> str | None:
-    try:
-        from importlib.metadata import version
-
-        return version("konfai")
-    except Exception:
-        return None
-
-
 def load_prior(evaluation: list[Path] | dict[str, Any] | None, case_name: str) -> dict[str, Any]:
     """The whole-case values of a KonfAI Eval report for this case (``{metric key: value}``); a dict is taken as
     given. A case absent from a report contributes nothing."""
