@@ -368,8 +368,10 @@ class Crop(TransformInverse):
             )
         memo = holder.case_facts.setdefault((group_src, name), {})
         rule = f"labels {self.labels}" if self.labels is not None else "nonzero" if self.nonzero else "percentile"
-        # The stages themselves, not their names: two chains of one group (CT_1mm, CT_2mm) name the same classes.
-        key = f"box handed {rule} after {' '.join(str(id(stage)) for stage in self.preceding)} into {list(shape)}"
+        # The stages themselves, not their names: two chains of one group (CT_1mm, CT_2mm) name the same classes. By
+        # identity (a stage may compare equal to another, or not hash), and kept beside their box, so a freed chain's
+        # ids are never another chain's while the box is remembered.
+        key = ("box handed", rule, tuple(id(stage) for stage in self.preceding), tuple(shape))
         if key not in memo:
             self._price_replay(holder, group_src, name, shape)
             array, stored = holder.read_data(group_src, name)
@@ -383,8 +385,9 @@ class Crop(TransformInverse):
                     f" where the plan hands it {list(shape)}.",
                     "Report this: a stage's transform_shape disagrees with its call.",
                 )
-            memo[key] = self._box_of(tensor)
-        return None if memo[key] is None else np.array(memo[key], copy=True)
+            memo[key] = (tuple(self.preceding), self._box_of(tensor))
+        box = memo[key][1]
+        return None if box is None else np.array(box, copy=True)
 
     def _price_replay(self, holder: Dataset, group_src: str, name: str, handed: list[int]) -> None:
         """Refuse a replay whose whole volume, in float32 at the larger of its stored and handed extents (a

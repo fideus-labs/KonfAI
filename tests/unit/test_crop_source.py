@@ -16,6 +16,7 @@
 
 """``Crop(source=...)``: the box of another group of the case, grown by a margin in mm."""
 
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -226,6 +227,9 @@ def test_a_handed_box_is_its_own_chains_when_two_chains_share_their_stage_names(
         def __init__(self, first: bool) -> None:
             self.first = first
 
+        def __eq__(self, other: object) -> bool:  # both chains' stages equal, and unhashable: the memo goes by identity
+            return isinstance(other, KeepHalf)
+
         def transform_shape(self, group: str, name: str, shape: list[int], attribute: object) -> list[int]:
             return shape
 
@@ -245,12 +249,18 @@ def test_a_handed_box_is_its_own_chains_when_two_chains_share_their_stage_names(
         read_data=lambda group, name: (volume, Attribute()),
         get_infos=lambda group, name: ([1, 8, 4, 4], Attribute()),
     )
-    boxes = []
-    for first in (True, False):
-        crop = Crop(nonzero=True, handed=True)
-        crop.preceding = [KeepHalf(first)]
-        boxes.append(crop._handed_box(cast(Any, holder), "CT", "P000", [8, 4, 4]))
-    assert boxes[0][0].tolist() == [0, 3] and boxes[1][0].tolist() == [4, 7]
+    # A freed chain's stage often lends its address to the next one's: remembered by id, one pair in four got the
+    # first chain's box.
+    for _ in range(30):
+        holder.case_facts.clear()
+        boxes = []
+        for first in (True, False):
+            crop = Crop(nonzero=True, handed=True)
+            crop.preceding = [KeepHalf(first)]
+            boxes.append(crop._handed_box(cast(Any, holder), "CT", "P000", [8, 4, 4]))
+            del crop
+            gc.collect()
+        assert boxes[0][0].tolist() == [0, 3] and boxes[1][0].tolist() == [4, 7]
 
 
 def test_a_handed_replay_over_the_memory_budget_is_refused_before_the_read(monkeypatch: pytest.MonkeyPatch) -> None:
