@@ -176,6 +176,25 @@ def test_a_support_file_with_a_weight_suffix_is_refused(tmp_path):
         )
 
 
+def test_an_app_without_weights_bundles_its_own_model_file(tmp_path):
+    """A wrapped tool has no checkpoint: its ``model.py`` keeps its name, the one ``classpath: model:Net`` imports."""
+    app_json = _write(tmp_path / "app.json", {**VALID_META, "models": []})
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    (tmp_path / "model.py").write_text("class Net: ...\n")
+    bundle = assemble_bundle(
+        "Wrapped",
+        tmp_path / "dist",
+        app_json,
+        [str(config)],
+        [],
+        support_files={"model.py": "model.py"},
+        support_root=tmp_path,
+    )
+    assert json.loads((bundle / "app.json").read_text())["models"] == []
+    assert (bundle / "model.py").exists() and (bundle / "Prediction.yml").exists()
+
+
 def test_missing_required_keys_raises(tmp_path):
     app_json = _write(tmp_path / "app.json", {"display_name": "x"})
     with pytest.raises(AppMetadataError):

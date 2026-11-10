@@ -925,8 +925,9 @@ def main_apps() -> None:
     bundle_p.add_argument(
         "--checkpoint",
         nargs="+",
-        required=True,
-        help="Checkpoint file(s): CV_0.pt CV_1.pt …, written to the bundle as .safetensors weights.",
+        default=[],
+        help="Checkpoint file(s): CV_0.pt CV_1.pt …, written to the bundle as .safetensors weights; none for an app"
+        ' without weights ("models": [] in app.json).',
     )
     bundle_p.add_argument("--model-py", help="Optional custom Model.py to include.")
     bundle_p.add_argument(
