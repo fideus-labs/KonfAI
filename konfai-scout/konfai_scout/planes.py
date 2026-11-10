@@ -50,6 +50,14 @@ def plane_axes(grid: Grid) -> dict[str, int]:
     return assignment
 
 
+def native_plane(grid: Grid) -> str:
+    """The plane a volume was acquired in: across its thickest axis when that axis is clearly the thickest (1.5 times
+    the finest spacing: a coronal MRI read axially is blocks), axial otherwise."""
+    spacing_zyx = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
+    plane, axis = max(plane_axes(grid).items(), key=lambda item: spacing_zyx[item[1]])
+    return plane if spacing_zyx[axis] >= 1.5 * spacing_zyx.min() else "axial"
+
+
 def plane_axis(grid: Grid, plane: str) -> int:
     if plane not in PLANE_WORLD_AXIS:
         raise ValueError(f"unknown plane {plane!r}; one of {', '.join(PLANES)}")

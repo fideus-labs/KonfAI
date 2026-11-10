@@ -24,7 +24,7 @@ from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import RegionEvaluator, load_prior
 from .measure import label_stats
-from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid
+from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid, native_plane
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers import Usage as TokenUsage
@@ -294,12 +294,14 @@ class Inspector:
         }
 
     def _crops(self, observation: Observation) -> tuple[list[ImageContent], list[str], list[str]]:
-        """The region of an observation, twice its box (at least a dozen voxels), in the second reader's modes, on
-        the slice the first reader cited (the box's centre slice may miss what a large box holds elsewhere)."""
+        """The region of an observation, twice its box and at least 64 mm (a small region keeps its surroundings:
+        a few voxels alone are blocks of colour), in the second reader's modes, on the slice the first reader cited
+        (the box's centre slice may miss what a large box holds elsewhere), else in the plane the volume was acquired
+        in."""
         box = box_from_dict(observation.box_mm)
         spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
-        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, 12.0 * spacing))
-        plane = observation.plane or "axial"
+        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, np.maximum(12.0 * spacing, 64.0)))
+        plane = observation.plane or native_plane(self.case.grid)
         known = {v.id: v for v in self.renderer.views}
         cited = [
             known[v]

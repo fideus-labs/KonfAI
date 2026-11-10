@@ -12,6 +12,7 @@ from konfai_scout.planes import (
     box_to_dict,
     dominant_world_axis,
     index_along,
+    native_plane,
     plane_axes,
     plane_axis,
     plane_frame,
@@ -38,6 +39,13 @@ def test_planes_name_the_dominant_axis_and_stay_distinct():
     assert [plane_axis(identity_grid(), plane) for plane in PLANES] == [0, 1, 2]
     with pytest.raises(ValueError):
         plane_axis(identity_grid(), "oblique")
+
+
+def test_the_native_plane_is_across_the_thickest_axis():
+    assert native_plane(identity_grid()) == native_plane(oblique_grid()) == "axial"
+    coronal = Grid((30, 12, 30), np.zeros(3), np.array([0.8, 5.0, 0.8]), np.eye(3))  # 5 mm slices along y (A-P)
+    assert native_plane(coronal) == "coronal"
+    assert native_plane(Grid((10, 10, 10), np.zeros(3), np.array([1.0, 1.2, 1.1]), np.eye(3))) == "axial"
 
 
 def test_the_radiological_frame():
