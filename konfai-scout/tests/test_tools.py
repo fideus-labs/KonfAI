@@ -36,7 +36,7 @@ def test_region_stats_see_the_planted_defects(fixtures, tmp_path):
 
 
 def test_notes_need_known_evidence_and_confirmation_needs_a_measurement(fixtures, tmp_path):
-    box = toolbox(fixtures, "segmentation", tmp_path)
+    box = toolbox(fixtures, "segmentation_clean", tmp_path)  # Scout's own check of a box finds nothing wrong
     view = run(box, "view", plane="axial", mode="prediction")["view"]
     bad = run(
         box,
@@ -111,9 +111,8 @@ def test_registration_tools_without_references(fixtures, tmp_path):
 
 def test_the_hard_rules_of_note(fixtures, tmp_path):
     """What never enters the report: an error no cited view shows, a measurement taken elsewhere, a figure without a
-    source. What is downgraded: a confirmation whose measurement holds no value. What is marked: an estimate."""
+    source. What is marked: an estimate, a measurement cited as context."""
     from konfai_scout.report import Measurement
-    from konfai_scout.tools import _defect_by_definition
 
     _case, defects = fixtures["segmentation"]
     box = toolbox(fixtures, "segmentation", tmp_path)
@@ -134,7 +133,7 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
     assert "at least one view" in run(box, "note", **error, views=[], measurements=[])["error"]
     assert "none of the cited views shows" in run(box, "note", **error, views=[zoom["id"]], measurements=[])["error"]
     seen = run(box, "note", **error, views=[montage["id"]], measurements=[])["observation"]
-    assert seen["kind"] == "suspected_error" and not seen["notes"]
+    assert seen["kind"] == "suspected_error" and [n.split(":")[0] for n in seen["notes"]] == ["Scout's check m001"]
     # a figure needs a source: the measurement that holds it, cited
     stats = run(box, "region_stats", box_mm=cube)
     mid, voxels = stats["measurement"]["id"], stats["region"]["truth_labels"]["2"]["voxels"]
@@ -168,17 +167,8 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
         box, "note", **{**error, "description": "a blob about 6 mm across"}, views=[montage["id"]], measurements=[]
     )
     assert any("read from the views" in note and "6 mm" in note for note in estimate["observation"]["notes"])
-    # a confirmation needs a value against a reference: None proves nothing, by definition or otherwise
-    box.measurements.append(Measurement("m099", "konfai_eval", True, cube, cube, {"PREDICTION:TRUTH:Dice:2": None}))
-    confirmed = {**measured, "kind": "confirmed_error", "description": "the cube is missing"}
-    empty = run(box, "note", **confirmed, measurements=["m099"])["observation"]
-    assert empty["kind"] == "suspected_error" and any("hold no value" in note for note in empty["notes"])
-    held = run(box, "note", **confirmed, measurements=[mid])["observation"]
-    assert held["kind"] == "confirmed_error"  # the statistics compare prediction and truth voxels: a reference
-    assert not _defect_by_definition(Measurement("m1", "konfai_eval", False, None, None, {"F:JacobianFolding": None}))
-    assert _defect_by_definition(Measurement("m2", "konfai_eval", False, None, None, {"F:JacobianFolding": 0.01}))
-    assert _defect_by_definition(Measurement("m3", "konfai_eval", False, None, None, {"F:JacobianMin": float("nan")}))
     assert [c.ok for c in box.calls].count(False) == 5
+    confirmed = {**measured, "kind": "confirmed_error", "description": "the cube is missing"}
     far = run(box, "region_stats", box_mm=blob)["measurement"]["id"]
     assert "measurement of the region" in run(box, "note", **confirmed, measurements=[far])["error"]
     # the figures of the case card (spacing, size, bounds) and scientific notation are sourced; "label 2" is no figure
@@ -203,3 +193,75 @@ def test_a_figure_is_held_to_the_precision_written():
     assert _unsourced_figures("-3.2 mm", [], None, [-3.0]) == ["-3.2 mm"]
     cited = Measurement("m1", "konfai_eval", True, None, None, {"A:B:TRE": 5.563e-05, "A:B:Dice": 0.7312})
     assert not _unsourced_figures("Dice = 0.73, TRE = 5.563e-05 mm", [cited], None)
+
+
+def test_a_confirmation_rests_on_a_value_past_its_threshold_and_scout_checks_every_flagged_box(fixtures, tmp_path):
+    """A cited value confirms an error only past its criterion's threshold, in the bad direction; Scout measures every
+    flagged box itself, records it on the observation, and downgrades a confirmation nothing measured supports."""
+    from konfai_scout.tools import _past
+
+    cube = fixtures["segmentation"][1]["missing_cube"]["box_mm"]
+    box = toolbox(fixtures, "segmentation_clean", tmp_path / "clean")  # the prediction is the truth
+    view = run(box, "view", plane="axial", mode="both", zoom=cube)["view"]
+    perfect = run(box, "measure", box_mm=cube, metrics=None)["measurement"]
+    assert perfect["values"]["PRED:TRUTH:Dice:2"] > 0.99
+    claim = {
+        "kind": "confirmed_error",
+        "defect": "boundary_error",
+        "severity": "major",
+        "confidence": 0.9,
+        "description": "the cube is wrong",
+        "box_mm": cube,
+        "plane": "axial",
+        "views": [view["id"]],
+    }
+    wrong = run(box, "note", **claim, measurements=[perfect["id"]])["observation"]
+    assert wrong["kind"] == "suspected_error"  # a perfect Dice confirms nothing
+    assert "Scout's check m002: no value past a threshold" in wrong["notes"]
+    assert any(n.startswith("downgraded from confirmed_error") for n in wrong["notes"])
+    observation, check = box.observations[-1], box.measurements[-1]
+    assert observation.measurements == [perfect["id"], "m002"] and check.request["check_of"] == observation.id
+    assert box.calls[-1].measurements == ["m002"]
+
+    box = toolbox(fixtures, "segmentation", tmp_path / "planted")
+    view = run(box, "view", plane="axial", mode="both", zoom=cube)["view"]
+    missing = run(box, "note", **{**claim, "views": [view["id"]]}, measurements=[])["observation"]
+    assert missing["kind"] == "confirmed_error"  # nothing cited, but Scout's own check of the box shows Dice:2 = 0
+    assert any(n.startswith("Scout's check m001: Dice:2 = ") and "< 0.8" in n for n in missing["notes"])
+
+    box = toolbox(fixtures, "segmentation_no_truth", tmp_path / "no_truth")
+    view = run(box, "view", plane="axial", mode="prediction", zoom=cube)["view"]
+    blind = run(box, "note", **{**claim, "views": [view["id"]]}, measurements=[])["observation"]
+    assert blind["kind"] == "suspected_error" and any("nothing to measure" in n for n in blind["notes"])
+
+    thresholds = {"Dice": {"below": 0.8}, "JacobianFolding": {"above": 0.0}, "JacobianMin": {"below": 0.0}}
+    assert _past("PRED:TRUTH:Dice:1", 0.95, thresholds) is None and _past("PRED:TRUTH:Dice:1", None, thresholds) is None
+    assert _past("PRED:TRUTH;MASK:Dice:1", 0.3, thresholds) == "Dice:1 = 0.3 < 0.8"
+    assert _past("FIELD:None:JacobianFolding", 0.01, thresholds) and not _past(
+        "FIELD:None:JacobianFolding", 0, thresholds
+    )
+    assert _past("FIELD:None:JacobianMin", float("nan"), thresholds) == "JacobianMin is not finite"
+    assert _past("SYN:TARGET:MAE", float("nan"), thresholds) is None  # an empty mask, not an error
+    assert _past("SYN:TARGET:MAE", 500.0, thresholds) is None  # no threshold: the scale is the data's
+    assert _past("SYN:TARGET:MAE", 500.0, {"MAE": {"above": 100}}) == "MAE = 500 > 100"
+    assert _past("overlap_voxels_prediction_vs_truth.2.only_b", 120, thresholds) is None
+
+
+def test_a_mask_restricts_the_statistics_and_a_ct_preset_follows_a_stored_offset(fixtures, tmp_path):
+    import SimpleITK as sitk
+    from konfai_scout import InspectionCase
+
+    case, _ = fixtures["synthesis"]
+    target = sitk.ReadImage(str(case.inputs["target"]))
+    sitk.WriteImage(sitk.BinaryThreshold(target, 0.0, 1e9), str(tmp_path / "mask.mha"))  # the sphere and the bone
+    sitk.WriteImage(sitk.ReadImage(str(case.inputs["synthetic"])) + 1024.0, str(tmp_path / "hu1024.mha"))
+    inputs = {**case.inputs, "mask": tmp_path / "mask.mha", "synthetic": tmp_path / "hu1024.mha"}
+    masked = InspectionCase("synthesis", "masked", inputs)
+    masked.stage(tmp_path / "work" / "stage")
+    config = ScoutConfig(max_px=200)
+    renderer = Renderer(masked, tmp_path / "work", config, tmp_path / "evidence")
+    box = Toolbox(masked, config, renderer, RegionEvaluator(masked, config, tmp_path / "work", None))
+    region = run(box, "region_stats", box_mm=box_to_dict(masked.grid.world_box()))["region"]
+    assert 0 < region["mask_voxels"] < region["voxels"] and region["synthetic"]["voxels"] == region["mask_voxels"]
+    assert renderer.resolve_window("ct_soft", "synthetic") == (864.0, 1264.0)  # stored as HU + 1024
+    assert renderer.resolve_window("ct_soft", "target") == (-160.0, 240.0)  # stored in HU

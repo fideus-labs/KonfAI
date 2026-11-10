@@ -18,15 +18,19 @@ and the measurements that support them.
   and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
   the agent and the report, nothing that KonfAI already does.
 - **It keeps its statements apart, and enforces it.** A *measured property*, a *suspected error* (seen, not proven)
-  and a *confirmed error* (a cited measurement) are distinct, and without a truth nothing is confirmed from
-  appearance. `note` refuses an error that no cited view shows, a figure that no cited measurement holds, a
-  confirmation resting on measurements taken elsewhere; one resting on an empty measurement is downgraded.
-  "Insufficient evidence"
-  is a legitimate conclusion. On request, a fresh session of the model re-reads every error blind, from crops of its
-  box and the claim alone, and its answer stands in the report next to the first reader's.
+  and a *confirmed error* (a measured value past its criterion's threshold: Dice below 0.8, TRE above 3 mm, a
+  folded field...) are distinct, and without a truth nothing is confirmed from appearance. `note` refuses an error
+  that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken
+  elsewhere. Scout measures every flagged box itself with KonfAI Eval, records it on the observation, and
+  downgrades a confirmation that no measured value supports. "Insufficient evidence" is a legitimate conclusion. On
+  request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and
+  its answer stands in the report next to the first reader's.
+- **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
+  prior scores: it judges the images and its own measurements (`--no-blind` hands them over, for a study).
 - **It leaves a record.** A versioned JSON report with versions, configuration, prompts, every tool call, every view,
-  every measurement, cost and duration, and a Markdown rendition with the evidence images. Two modes, fixed views
-  and active exploration, for a study of what exploration buys.
+  every measurement, cost and duration, and a Markdown rendition that opens with the verdict and the findings at a
+  glance, then each observation with its images. Two modes, fixed views and active exploration, for a study of what
+  exploration buys.
 - **It works with Claude, GPT, or a local vision model** through an OpenAI-compatible server, and sends images to a
   cloud API only when told to.
 
@@ -86,18 +90,24 @@ for o in report.observations:
 | `view` | one slice: a plane, a position in mm or an index, a mode, a window, a zoom box, one label |
 | `montage` | equally spaced slices of a plane in one image |
 | `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria, named as KonfAI names them or by a result key; SSIM is left out of a box thinner than its 7-voxel window |
-| `region_stats` | labels, volumes, pieces, intensities, displacement lengths, landmarks in a box: no reference needed; a measurement of kind `scout`, citable |
+| `region_stats` | labels, volumes, pieces, intensities (inside the case's mask when it has one), displacement lengths, landmarks in a box: no reference needed; a measurement of kind `scout`, citable |
 | `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
 | `conclude` | the verdict |
 
 Modes: segmentation `image`, `prediction`, `truth`, `both`, `disagreement`; registration `fixed`, `moving`, `warped`,
 `before`, `checkerboard`, `overlay`, `difference`, `field_magnitude`, `field_arrows`, `grid`, `jacobian`, `labels`,
-`landmarks`; synthesis `synthetic`, `target`, `source`, `difference`, `side_by_side`, `checkerboard`.
+`landmarks`; synthesis `synthetic`, `target`, `source`, `difference`, `side_by_side`, `checkerboard`. A view's window
+is the image's own 1st to 99th percentile unless the model asks for `[low, high]` or a CT preset (in HU, shifted by
+1024 on a CT stored as HU + 1024).
 
 ## Budget, privacy, cost
 
 `--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
-model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why.
+model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
+call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
+never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
+are counted inside the served tools, and `claude-code`'s cost message by message; `codex` reports its cost only once
+its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price is unknown).
 `--second-reading` adds, after the inspection, one short session per error observation for the blind re-read.
 Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is local. The cost
 is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
@@ -123,6 +133,17 @@ konfai-scout compare reports/*                       # one row per report
 
 `docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use
 Scout.
+
+## Export at a confidentiality level
+
+```bash
+konfai-scout export reports/case01 --level regions --out case01.regions.json
+```
+
+`full` is the report as is; `regions` the verdict and the observations with their boxes, defects, severities and
+measured values, without the case's name, paths, images, descriptions or transcript; `counts` the verdict and the
+observations counted by kind, defect and severity. In Python: `konfai_scout.export(Report.load(dir), "regions")`.
+`docs/report.md` says what each level holds.
 
 ## Development
 

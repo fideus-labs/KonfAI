@@ -54,6 +54,7 @@ class ClaudeCodeProvider(ToolDriver):
 
     name = "claude-code"
     remote = True
+    running_cost = True  # every assistant message carries its request's usage
 
     def __init__(self, model: str, *, effort: str | None = None, max_turns: int = 60) -> None:
         super().__init__()
@@ -146,7 +147,6 @@ class ClaudeCodeProvider(ToolDriver):
     async def _turn(self, content: list[dict[str, Any]]) -> Turn:
         from claude_agent_sdk import (
             AssistantMessage,
-            ClaudeSDKError,
             ResultMessage,
             TextBlock,
             ThinkingBlock,
@@ -158,9 +158,14 @@ class ClaudeCodeProvider(ToolDriver):
         texts: list[str] = []
         model: str | None = None
         result: Any = None
+        counted: set[str] = set()  # one request's content blocks arrive as several messages with one id and usage
         try:
             async for message in self._stream(content, self._options()):
                 if isinstance(message, AssistantMessage):
+                    if message.usage and self.on_usage and message.message_id not in counted:
+                        if message.message_id:  # without an id, each message counts: a stop too early, not too late
+                            counted.add(message.message_id)
+                        self.on_usage(_usage(message.usage))
                     blocks: list[dict[str, Any]] = []
                     for block in message.content:
                         if isinstance(block, TextBlock):
@@ -189,8 +194,9 @@ class ClaudeCodeProvider(ToolDriver):
                         self.messages.append({"role": "user", "content": results})
                 elif isinstance(message, ResultMessage):
                     result = message
-        except ClaudeSDKError as error:
-            raise ProviderError(f"Claude Code: {error}") from error
+        except Exception as error:  # the SDK raises a bare Exception once the CLI has ended on an error result
+            if result is None or not result.is_error:
+                raise ProviderError(f"Claude Code: {error}") from error
         if result is None:
             raise ProviderError("Claude Code ended without a result", retryable=True)
         self.session_id = result.session_id or self.session_id
@@ -208,21 +214,25 @@ class ClaudeCodeProvider(ToolDriver):
             }
         )
         if result.is_error and result.subtype != "error_max_turns":
-            detail = result.result or result.errors or result.subtype
+            detail = result.result or result.errors or "\n".join(texts) or result.subtype  # an API error is a text
             raise ProviderError(f"Claude Code: {detail}", retryable=result.api_error_status in TRANSIENT)
         stop = str(result.stop_reason or ("other" if result.subtype != "success" else "end_turn"))
         return Turn(
             text="\n".join(texts).strip(),
             tool_calls=[],  # the calls ran already, through `execute`
             stop={"end_turn": "end_turn", "max_tokens": "max_tokens", "refusal": "refusal"}.get(stop, "other"),
-            usage=Usage(
-                input_tokens=int(usage.get("input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
-                cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-                cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-            ),
+            usage=_usage(usage),
             model=model or self.model,
         )
+
+
+def _usage(usage: dict[str, Any]) -> Usage:
+    return Usage(
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+        cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+    )
 
 
 def _run(coroutine: Any) -> Any:

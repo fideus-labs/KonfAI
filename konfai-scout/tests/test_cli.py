@@ -48,10 +48,15 @@ def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
             "mock",
             "--mode",
             "fixed",
+            "--no-blind",
         ]
     )
     assert code == 0 and "->" in capsys.readouterr().out
+    assert json.loads((tmp_path / "fixed" / "report.json").read_text())["config"]["blind"] is False
     assert main(["render", str(out)]) == 0
+    assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "counts.json")]) == 0
+    counts = json.loads((tmp_path / "counts.json").read_text())
+    assert set(counts) == {"level", "verdict", "counts"} and counts["verdict"] == summary["verdict"]
     assert main(["compare", str(out), str(tmp_path / "fixed")]) == 0
     table = capsys.readouterr().out
     assert "| active |" in table and "| fixed |" in table

@@ -28,6 +28,7 @@ from .measure import label_stats
 from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
+from .providers import Usage as TokenUsage
 from .providers.pricing import cost_usd, price_of
 from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
 from .survey import Lead, leads_text, survey
@@ -45,6 +46,8 @@ SECOND_READING_MODES = {
     "registration": ["fixed", "warped", "checkerboard"],
     "synthesis": ["synthetic", "target", "difference", "source"],
 }
+#: The calls that record rather than explore: outside the call budget, and still run once it is spent.
+RECORDING = ("note", "conclude")
 NOTICE_BUDGET = (
     "Budget exhausted ({exhausted}). Call `note` for anything established and not yet recorded, then `conclude` now."
 )
@@ -84,6 +87,8 @@ class BudgetState:
     images: int = 0
     tokens: int = 0
     usd: float = 0.0
+    #: The cost of the request in flight, as a provider that runs the tool loop reports it message by message.
+    running_usd: float = 0.0
 
     def exhausted(self) -> str | None:
         budget = self.config.budget
@@ -93,8 +98,8 @@ class BudgetState:
             return f"{self.images} images (limit {budget.max_images})"
         if budget.max_seconds is not None and time.time() - self.started >= budget.max_seconds:
             return f"{time.time() - self.started:.0f} s (limit {budget.max_seconds:.0f} s)"
-        if budget.max_usd is not None and self.usd >= budget.max_usd:
-            return f"${self.usd:.3f} (limit ${budget.max_usd:.2f})"
+        if budget.max_usd is not None and self.usd + self.running_usd >= budget.max_usd:
+            return f"${self.usd + self.running_usd:.3f} (limit ${budget.max_usd:.2f})"
         if budget.max_tokens is not None and self.tokens >= budget.max_tokens:
             return f"{self.tokens} tokens (limit {budget.max_tokens})"
         return None
@@ -145,7 +150,12 @@ class Inspector:
         images, views_text = self._coverage()
         self.toolbox.leads, survey_text = self._survey(exploration)
         card = case_card(
-            self.case, prior, self._labels_summary(), self.renderer.modes(), f"{views_text}\n\n{survey_text}"
+            self.case,
+            prior,
+            self._labels_summary(),
+            self.renderer.modes(),
+            f"{views_text}\n\n{survey_text}",
+            self.config.blind,
         )
         try:
             if getattr(self.provider, "drives_tools", False):
@@ -181,9 +191,7 @@ class Inspector:
                     # the budget is spent: only a note or a conclusion still runs, once
                     final = True
                     results = [
-                        self._refused(call, exhausted)
-                        if call.name not in ("note", "conclude")
-                        else self.toolbox.call(call)
+                        self._refused(call, exhausted) if call.name not in RECORDING else self.toolbox.call(call)
                         for call in turn.tool_calls
                     ]
                     if self.toolbox.conclusion is not None:
@@ -192,7 +200,7 @@ class Inspector:
                     turn = self._request(lambda r=results, t=final_specs: self.provider.tool_results(r, t))
                     continue
                 results = [self.toolbox.call(call) for call in turn.tool_calls]
-                self.budget.calls += len(results)
+                self.budget.calls += sum(call.name not in RECORDING for call in turn.tool_calls)
                 self.budget.images += sum(len(r.images) for r in results)
                 if self.toolbox.conclusion is not None:
                     break
@@ -211,6 +219,7 @@ class Inspector:
         """The provider runs the tool loop itself (the Claude Agent SDK): every call it makes lands in ``_execute``,
         so the record and the budget are the same; Scout only speaks between its turns."""
         self.provider.execute = self._execute  # type: ignore[attr-defined]
+        self.provider.on_usage = self._running  # type: ignore[attr-defined]
         turn = self._request(lambda: self.provider.user(card, images))
         self.budget.images += len(images)
         self.toolbox.images_sent += len(images)
@@ -225,15 +234,19 @@ class Inspector:
 
     def _execute(self, call: ToolCall) -> ToolResult:
         """One tool call under the budget: refused once the budget is spent, except a note or the conclusion."""
-        exhausted = self.budget.exhausted()
-        if exhausted:  # the budget is spent: a note or the conclusion still runs, uncounted as in the API loop
-            if call.name not in ("note", "conclude"):
-                return self._refused(call, exhausted)
+        if call.name in RECORDING:  # a note or the conclusion: never counted, never refused
             return self.toolbox.call(call)
+        exhausted = self.budget.exhausted()
+        if exhausted:
+            return self._refused(call, exhausted)
         result = self.toolbox.call(call)
         self.budget.calls += 1
         self.budget.images += len(result.images)
         return result
+
+    def _running(self, usage: TokenUsage) -> None:
+        """One message's usage while the provider's request is in flight: what ``max_usd`` stops on mid-request."""
+        self.budget.running_usd += cost_usd(usage, self.price) or 0.0
 
     def _request(self, call) -> Turn:
         attempts = 0
@@ -248,6 +261,7 @@ class Inspector:
                 time.sleep(self.config.retry_wait_seconds * attempts)
         if self.price is None and turn.model:  # a provider that names its model only once it answered
             self.price = price_of(turn.model, self.config.prices)
+        self.budget.running_usd = 0.0  # the turn's own usage replaces the running estimate
         self.usage.requests += 1
         self.usage.input_tokens += turn.usage.input_tokens
         self.usage.output_tokens += turn.usage.output_tokens
@@ -439,6 +453,7 @@ class Inspector:
             budget={
                 "limits": self.config.budget.to_dict(),
                 "exhausted": exhausted,
+                "not_enforced": self._unenforced(),
                 "spent": {
                     "tool_calls": self.budget.calls,
                     "images": self.budget.images,
@@ -454,6 +469,16 @@ class Inspector:
         )
         report.save(self.out)
         return report
+
+    def _unenforced(self) -> str | None:
+        """Why ``max_usd`` could not stop this inspection, when it could not: said, never pretended."""
+        if self.config.budget.max_usd is None:
+            return None
+        if self.price is None:
+            return f"max_usd: the price of {self.provider.model} is unknown, the cost was not counted"
+        if not getattr(self.provider, "running_cost", True):
+            return f"max_usd: the {self.provider.name} CLI reports its cost only once its whole loop has run"
+        return None
 
 
 def parse_second_reading(text: str) -> tuple[str, str]:

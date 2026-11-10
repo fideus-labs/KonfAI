@@ -11,6 +11,7 @@ from konfai_scout.report import (
     View,
     compare,
     compare_markdown,
+    export,
     match_defects,
     render_markdown,
 )
@@ -89,14 +90,25 @@ def test_json_round_trip_and_summary(tmp_path):
     assert summary["counts"]["confirmed_error"] == 1 and summary["counts"]["major"] == 1 and summary["views"] == 1
 
 
-def test_markdown_names_the_evidence():
+def test_markdown_is_short_and_names_the_evidence():
     text = render_markdown(sample())
-    assert "Verdict: defective" in text
-    assert "missing_structure" in text and "m001" in text and "![v001" in text and "evidence/v001.png" in text
-    assert "PRED:TRUTH:Dice = 0.5" in text
+    lines = text.splitlines()
+    assert "Verdict: defective" in text and "![v001" in text and "evidence/v001.png" in text
     # the findings at a glance, built from the record, before the details
-    row = "| o001 | missing_structure | confirmed | major | 0.90 | centre (0.5, 0.5, 0.5) mm, size 1.0 x 1.0 x 1.0 mm |  |"
+    row = "| o001 | missing_structure | confirmed | major | 0.90 | (0, 0, 0) mm, 1 x 1 x 1 mm |  |"
     assert row in text and text.index(row) < text.index("## Observations")
+    assert "- m001 (0, 0, 0) mm, 1 x 1 x 1 mm: Dice 0.1" in lines  # the measurements cited, once, under Evidence
+    assert "- prior evaluation (whole case): Dice 0.5" in lines and "## Tool calls" not in text
+    report = sample()
+    report.measurements.append(
+        Measurement(
+            "m002", "konfai_eval", True, None, report.measurements[0].box_measured, dict(report.measurements[0].values)
+        )
+    )
+    report.observations[0].measurements.append("m002")
+    assert "- m002 same as m001" in render_markdown(report).splitlines()  # Scout's check of a box measured already
+    report.measurements[1].values["PRED:TRUTH:Dice"] = 0.10001  # displayed alike, measured apart
+    assert "- m002 same as m001" not in render_markdown(report).splitlines()
 
 
 def test_compare_rows():
@@ -135,3 +147,40 @@ def test_a_non_finite_value_is_saved_by_its_name(tmp_path):
     loaded = Report.load(report.save(tmp_path))
     assert loaded.prior_evaluation["PRED:TRUTH:Dice"] == "NaN"
     assert loaded.measurements[0].values["F:JacobianMin"] == "-Infinity"
+
+
+def test_export_levels_show_less_and_less_of_the_case():
+    report = sample()
+    report.observations[0].second_reading = {"answer": "visible", "text": "the cube of c1 is gone", "views": ["v001"]}
+    report.measurements[0].values["prediction_labels.2.name"] = "c1 lesion"  # a label name is text: never exported
+    assert export(report, "full") == report.to_dict()
+    regions = export(report, "regions")
+    assert regions["verdict"] == "defective" and regions["task"] == "segmentation"
+    assert regions["observations"] == [
+        {
+            "id": "o001",
+            "kind": "confirmed_error",
+            "defect": "missing_structure",
+            "severity": "major",
+            "confidence": 0.9,
+            "box_mm": {"min": [0, 0, 0], "max": [1, 1, 1]},
+            "plane": "axial",
+            "measurements": [
+                {
+                    "id": "m001",
+                    "reference": True,
+                    "box_measured": {"min": [0, 0, 0], "max": [1, 1, 1]},
+                    "values": {"PRED:TRUTH:Dice": 0.1},
+                }
+            ],
+            "second_reading": "visible",
+        }
+    ]
+    text = json.dumps(regions)
+    for secret in ("c1", "image.mha", "evidence/", "the cube is missing", "transcript", "0.5"):
+        assert secret not in text  # the name, a path, an image, a description, the prior evaluation
+    assert export(report, "counts") == {
+        "level": "counts",
+        "verdict": "defective",
+        "counts": {"confirmed_error": {"missing_structure": {"major": 1}}},
+    }

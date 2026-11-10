@@ -90,17 +90,20 @@ class FakeSession:
         if "error" in plan:
             yield _result(is_error=True, api_error_status=plan["error"], result="boom", num_turns=0)
             return
+        if "cli_error" in plan:  # what an outdated CLI does: an API error as text, then the SDK's bare Exception
+            yield AssistantMessage(content=[TextBlock(text=plan["cli_error"])], model="<synthetic>")
+            yield _result(is_error=True, result=None, num_turns=1)
+            raise Exception("Claude Code returned an error result: success")
         views: list[str] = []
+        usage = plan.get("usage")  # each request's usage, on its message, as the CLI reports it while it runs
         for n, (name, args) in enumerate(plan.get("calls", []), 1):
             if callable(args):
                 args = args(views)
-            yield AssistantMessage(
-                content=[
-                    TextBlock(text=f"calling {name}"),
-                    ToolUseBlock(id=f"toolu_{n}", name=f"mcp__scout__{name}", input=args),
-                ],
-                model=MODEL,
-            )
+            for block in (
+                TextBlock(text=f"calling {name}"),
+                ToolUseBlock(id=f"toolu_{n}", name=f"mcp__scout__{name}", input=args),
+            ):
+                yield AssistantMessage(content=[block], model=MODEL, usage=usage, message_id=f"msg_{n}")
             result = await self.provider.sdk_tools[name].handler(args)
             self.results.append(result)
             if not result.get("is_error"):
@@ -113,7 +116,9 @@ class FakeSession:
                 ]
             )
         yield AssistantMessage(content=[TextBlock(text=plan.get("text", "done"))], model=MODEL)
-        yield _result(num_turns=len(plan.get("calls", [])) + 1)
+        calls = len(plan.get("calls", []))
+        total = {key: value * calls for key, value in usage.items()} if usage else None
+        yield _result(num_turns=calls + 1, **({"usage": total} if total else {}))
 
 
 def _provider(monkeypatch, script: list[dict]) -> tuple[ClaudeCodeProvider, FakeSession]:
@@ -175,6 +180,32 @@ def test_the_session_drives_the_tools_under_the_budget_and_the_record_is_complet
     assert transcript[-1]["role"] == "result" and transcript[-1]["session_id"] == "s1"
 
 
+def test_max_usd_and_max_seconds_stop_the_session_mid_loop(fixtures, tmp_path, monkeypatch):
+    """The SDK runs the whole loop in one request: the cost of each message and the time are counted as it runs,
+    inside the served tools, and an exploring call past a limit is refused while a note and the conclusion run."""
+    case, _ = fixtures["segmentation"]
+    calls = [
+        ("view", VIEW),
+        ("view", {**VIEW, "mode": "both"}),  # refused: two requests of 100k input tokens are $0.80 at $4/M
+        ("note", lambda views: {**NOTE, "views": views[:1]}),
+        ("conclude", CONCLUDE),
+    ]
+    provider, fake = _provider(monkeypatch, [{"calls": calls, "usage": {"input_tokens": 100_000}}])
+    config = ScoutConfig(provider="claude-code", allow_cloud_images=True, budget=Budget(max_usd=0.5), max_px=200)
+    report = inspect(case, config, tmp_path / "usd", provider=provider)
+    assert [c.tool for c in report.tool_calls] == ["view", "note", "conclude"]
+    assert "Budget exhausted ($0.800 (limit $0.50))" in fake.results[1]["content"][0]["text"]
+    assert report.budget["exhausted"] == "$1.600 (limit $0.50)" and report.budget["not_enforced"] is None
+    assert report.usage.cost_usd == 1.6  # the result's usage replaces the running estimate, not added to it
+
+    calls[-1] = ("conclude", {**CONCLUDE, "verdict": "insufficient_evidence"})  # no view: the note is refused
+    provider, fake = _provider(monkeypatch, [{"calls": calls}])
+    config = ScoutConfig(provider="claude-code", allow_cloud_images=True, budget=Budget(max_seconds=0), max_px=200)
+    report = inspect(case, config, tmp_path / "seconds", provider=provider)
+    assert [c.tool for c in report.tool_calls] == ["note", "conclude"] and report.conclusion.by == "model"
+    assert "s (limit 0 s)" in fake.results[0]["content"][0]["text"] and report.budget["spent"]["tool_calls"] == 0
+
+
 def _png_of(result: dict) -> bytes:
     return base64.b64decode(result["content"][2]["data"])
 
@@ -204,6 +235,9 @@ def test_errors_are_classified(fixtures, tmp_path, monkeypatch):
     provider, fake = _provider(monkeypatch, [{"error": None}])
     report = inspect(case, config, tmp_path / "fatal", provider=provider)
     assert report.error == "provider error: Claude Code: boom" and len(fake.prompts) == 1
+    provider, fake = _provider(monkeypatch, [{"cli_error": "API Error: 400 this CLI does not support this model"}])
+    report = inspect(case, config, tmp_path / "outdated", provider=provider)
+    assert report.error == "provider error: Claude Code: API Error: 400 this CLI does not support this model"
 
 
 def test_the_gate_and_the_factory():
@@ -213,7 +247,7 @@ def test_the_gate_and_the_factory():
     check_privacy(config)
     provider = make_provider(config)
     assert isinstance(provider, ClaudeCodeProvider) and provider.model == MODEL and provider.effort == "high"
-    assert provider.max_turns == config.budget.max_tool_calls + 8 and provider.drives_tools
+    assert provider.max_turns == 2 * config.budget.max_tool_calls + 8 and provider.drives_tools
     with pytest.raises(ProviderError, match="runs the tool loop itself"):
         provider.tool_results([])
 

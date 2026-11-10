@@ -19,7 +19,7 @@ from konfai.data.geometry import Grid, WorldBox
 from konfai.utils.dataset import Attribute, Dataset, write_landmarks
 from konfai.utils.errors import KonfAIError
 
-from .case import InspectionCase, Volume
+from .case import MASK_ROLES, InspectionCase, Volume
 from .config import ScoutConfig
 from .derived import Derived
 from .planes import box_to_dict, same_grid, window_of
@@ -40,6 +40,18 @@ DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
     },
     "registration_landmarks": {"TRE": {}},
     "synthesis": {"MAE": {}, "PSNR": {}, "SSIM": {}},
+}
+#: When a measured value is an error, by KonfAI's result name (the third part of `PRED:TRUTH:Dice:1`). A criterion
+#: whose scale is the data's (MAE, PSNR, SSIM, displacement lengths) has none: it confirms nothing until
+#: ``ScoutConfig.thresholds`` sets one for the data at hand.
+DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
+    "Dice": {"below": 0.8},
+    "SurfaceDice": {"below": 0.8},
+    "HD95": {"above": 5.0},
+    "ASSD": {"above": 2.0},
+    "TRE": {"above": 3.0},
+    "JacobianFolding": {"above": 0.0},
+    "JacobianMin": {"below": 0.0},
 }
 
 
@@ -241,7 +253,7 @@ class RegionEvaluator:
         tree: dict[str, Any] = {}
         reference = False
         labels_used: list[int] = []
-        mask_role = {"segmentation": "mask", "registration": "fixed_mask", "synthesis": "mask"}[task]
+        mask_role = MASK_ROLES[task]
         mask_group = ""
         if mask_role in self.case.inputs:
             self._write(dataset, "MASK", self.case.volume(mask_role), window, "uint8")

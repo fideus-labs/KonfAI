@@ -177,6 +177,20 @@ def test_a_silent_turn_is_reminded_on_the_resumed_session_and_failures_are_class
     assert report.error == "provider error: Codex: boom" and report.conclusion.by == "scout"
 
 
+def test_max_usd_is_said_not_enforced_for_the_codex_cli(fixtures, tmp_path, monkeypatch):
+    """Codex reports its usage once its whole loop has run: max_usd cannot stop it, and the report says so."""
+    case, _ = fixtures["segmentation_no_truth"]
+    script = [{"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}]
+    budget = Budget(max_usd=0.01)
+    config = ScoutConfig(provider="codex", allow_cloud_images=True, budget=budget, max_px=200)
+    report = inspect(case, config, tmp_path / "unknown", provider=_provider(monkeypatch, list(script))[0])
+    assert "the price of default is unknown" in report.budget["not_enforced"]
+    priced = ScoutConfig(**{**config.__dict__, "prices": {"default": {"input": 1.0, "output": 1.0}}})
+    report = inspect(case, priced, tmp_path / "priced", provider=_provider(monkeypatch, list(script))[0])
+    assert "the codex CLI reports its cost only once its whole loop has run" in report.budget["not_enforced"]
+    assert "max_usd: the codex CLI" in (tmp_path / "priced" / "report.md").read_text()
+
+
 def test_the_gate_the_factory_and_the_records(tmp_path, monkeypatch):
     with pytest.raises(ProviderError, match="allow_cloud_images"):
         check_privacy(ScoutConfig(provider="codex"))

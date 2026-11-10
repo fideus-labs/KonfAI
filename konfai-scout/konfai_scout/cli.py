@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``konfai-scout inspect | render | compare``."""
+"""``konfai-scout inspect | render | compare | export``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .agent import inspect, main_version
 from .case import TASKS, CaseError, InspectionCase
 from .config import MODES, PROVIDERS, ScoutConfig
 from .providers import ProviderError
-from .report import Report, compare, compare_markdown, defects_of, render_markdown
+from .report import LEVELS, Report, compare, compare_markdown, defects_of, export, render_markdown
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,6 +49,13 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-cloud-images", action="store_true", help="Authorise sending images of the case to a cloud API."
     )
+    p.add_argument(
+        "--no-blind",
+        dest="blind",
+        action="store_false",
+        default=None,
+        help="Tell the model the case's name, notes and prior evaluation (blind by default).",
+    )
     p.add_argument("--local-provider", action="store_true", help="The base-url is a server on this machine or network.")
     p.add_argument(
         "--second-reading",
@@ -67,6 +74,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("reports", type=Path, nargs="+")
     p.add_argument("--json", action="store_true")
+
+    p = commands.add_parser(
+        "export", help="Write what may be shown of a report at a confidentiality level (docs/report.md)."
+    )
+    p.add_argument("report", type=Path, help="A report directory or report.json.")
+    p.add_argument(
+        "--level",
+        choices=LEVELS,
+        required=True,
+        help="full: the report; regions: observations, boxes and measured values, nothing that names or shows the "
+        "case; counts: the verdict and the observations counted by kind, defect and severity.",
+    )
+    p.add_argument("--out", type=Path, required=True, help="The JSON file to write.")
     return parser
 
 
@@ -118,6 +138,8 @@ def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
         config.local_provider = True
     if args.second_reading:
         config.second_reading = True
+    if args.blind is not None:
+        config.blind = args.blind
     return config
 
 
@@ -148,6 +170,10 @@ def main(argv: list[str] | None = None) -> int:
         path = (args.report if args.report.is_dir() else args.report.parent) / "report.md"
         path.write_text(render_markdown(report), encoding="utf-8")
         print(path)
+        return 0
+    if args.command == "export":
+        args.out.write_text(json.dumps(export(Report.load(args.report), args.level), indent=2), encoding="utf-8")
+        print(args.out)
         return 0
     reports = [Report.load(p) for p in args.reports]
     comparison = compare(reports, [defects_of(r) for r in reports])
