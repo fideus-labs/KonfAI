@@ -48,13 +48,14 @@ def triangle_resize(tensor: torch.Tensor, size: list[int]) -> torch.Tensor:
 _PIL_BITS = 22
 
 
-def _pil_weights(n_in: int, n_out: int) -> torch.Tensor:
-    """PIL's ``precompute_coeffs`` for its bilinear (triangle) filter, then ``normalize_coeffs_8bpc``: the
-    ``[n_out, n_in]`` integer weights, computed in double exactly as its C does."""
+def _pil_weights(n_in: int, n_out: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """PIL's ``precompute_coeffs`` for its bilinear (triangle) filter, then ``normalize_coeffs_8bpc``, computed in
+    double exactly as its C does, kept as PIL keeps them: each output's first input ``[n_out]`` and its integer
+    weights ``[n_out, taps]``, as many taps as the filter's support spans, not one weight per input."""
     scale = n_in / n_out
     filterscale = max(scale, 1.0)
     support = 1.0 * filterscale
-    weights = torch.zeros(n_out, n_in, dtype=torch.int64)
+    starts, rows = [], []
     for xx in range(n_out):
         center = (xx + 0.5) * scale
         ss = 1.0 / filterscale
@@ -64,15 +65,27 @@ def _pil_weights(n_in: int, n_out: int) -> torch.Tensor:
         ww = 0.0
         for w in k:
             ww += w
-        for x, w in enumerate(k):
+        row = []
+        for w in k:
             w = w / ww if ww != 0.0 else w
-            weights[xx, xmin + x] = int(0.5 + w * (1 << _PIL_BITS)) if w >= 0 else int(-0.5 + w * (1 << _PIL_BITS))
-    return weights
+            row.append(int(0.5 + w * (1 << _PIL_BITS)) if w >= 0 else int(-0.5 + w * (1 << _PIL_BITS)))
+        starts.append(xmin)
+        rows.append(row)
+    weights = torch.zeros(n_out, max(len(row) for row in rows), dtype=torch.int64)
+    for xx, row in enumerate(rows):
+        weights[xx, : len(row)] = torch.tensor(row, dtype=torch.int64)
+    return torch.tensor(starts, dtype=torch.int64), weights
 
 
-def _pil_pass(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """One of PIL's 8-bit passes along the last axis: ``(2^21 + sum x k) >> 22``, clipped to 0..255."""
-    return ((values @ weights.T + (1 << (_PIL_BITS - 1))) >> _PIL_BITS).clamp_(0, 255)
+def _pil_pass(values: torch.Tensor, band: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    """One of PIL's 8-bit passes along the last axis: ``(2^21 + sum x k) >> 22``, clipped to 0..255. Summed tap by
+    tap in int64 on the values' device, where an integer matmul has no kernel; a tap past a row's span weighs 0."""
+    starts, weights = (part.to(values.device) for part in band)
+    index = (starts[:, None] + torch.arange(weights.shape[1], device=values.device)).clamp_(max=values.shape[-1] - 1)
+    total = torch.full((*values.shape[:-1], len(starts)), 1 << (_PIL_BITS - 1), dtype=torch.int64, device=values.device)
+    for tap in range(weights.shape[1]):
+        total += values[..., index[:, tap]] * weights[:, tap]
+    return (total >> _PIL_BITS).clamp_(0, 255)
 
 
 def _pil_resize(tensor: torch.Tensor, size: list[int]) -> torch.Tensor:

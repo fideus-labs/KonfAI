@@ -73,6 +73,35 @@ def test_a_triangle_antialiasing_of_a_uint8_image_is_pils_bilinear_resize() -> N
         assert np.array_equal(got.permute(1, 2, 0).numpy(), expected), (shape, size)
 
 
+def test_the_uint8_triangle_weights_follow_the_filters_support() -> None:
+    # One weight per tap the support spans, not one per input: a dense [n_out, n_in] table of a 65536 to 32768 row
+    # is 16 GiB. The band's pass is the dense integer product it stands for, to the bit.
+    from konfai.data.transform.antialias import _pil_pass, _pil_weights
+
+    starts, weights = _pil_weights(4096, 2048)
+    assert weights.shape == (2048, 4)
+    rng = np.random.default_rng(2)
+    for n_in, n_out in [(64, 33), (33, 64), (100, 7), (7, 7)]:
+        starts, weights = _pil_weights(n_in, n_out)
+        dense = torch.zeros(n_out, n_in, dtype=torch.int64)
+        for row, (start, taps) in enumerate(zip(starts.tolist(), weights, strict=True)):
+            span = min(len(taps), n_in - start)
+            dense[row, start : start + span] = taps[:span]
+        values = torch.from_numpy(rng.integers(0, 256, size=(3, 5, n_in)))
+        expected = ((values @ dense.T + (1 << 21)) >> 22).clamp(0, 255)
+        assert torch.equal(_pil_pass(values, (starts, weights)), expected), (n_in, n_out)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_a_uint8_triangle_antialiasing_runs_on_the_images_device() -> None:
+    # CUDA has no int64 matmul: the integer passes sum tap by tap on the image's device, as on the host.
+    image = torch.from_numpy(np.random.default_rng(3).integers(0, 256, size=(3, 90, 70)).astype(np.uint8))
+    stage = Resample(shape=[40, 50], interpolation="linear", antialias="triangle")
+    host = stage("case", image.clone(), _header(2))
+    device = stage("case", image.cuda(), _header(2))
+    assert device.device.type == "cuda" and torch.equal(device.cpu(), host)
+
+
 @pytest.mark.parametrize("shape", [(40, 37), (9, 50, 61)])
 def test_a_gaussian_filter_is_scipys(shape) -> None:
     ndimage = pytest.importorskip("scipy.ndimage")
