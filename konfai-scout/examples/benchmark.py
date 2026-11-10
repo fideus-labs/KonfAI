@@ -17,8 +17,9 @@ What each source becomes (`cases/<task>/<source>__<variant>/`, a `case.json` and
 - segmentation: the truth as the prediction (`clean`), its main component's upper 40 % left out
   (`under_segmentation`), a 5 mm leak on one side into the body (`leak`), an irregular blob about 6 mm across, 20 mm
   or more away (`spurious_structure`), an irregular hole at its deepest point (`holes`). The truth is not given.
-- registration: the image is the moving one, the fixed one is it pulled through a known smooth field of a few mm, and
-  the field inspected is that exact one (`clean`), fading to nothing over about 20 mm where it moved most
+- registration: the image is the moving one; the fixed one is it pulled through a known field (smooth random
+  displacements of up to 4 mm, fading to nothing outside the body) under fresh noise; the field inspected is that
+  exact one (`clean`), fading to nothing over about 20 mm where it moved most along an edge
   (`residual_misalignment`), or with a sharp 12 mm bump that folds the map (`folding`).
 - synthesis (a CT target in HU): a plausible model output, the target smoothed and noisier inside the mask
   (`clean`), with a smooth bias peaking at +150 HU in soft tissue (`intensity_bias`), an irregular air pocket about
@@ -29,7 +30,8 @@ Every defect but the fold has no sharp edge a reader could spot as artificial; i
 
 `--phantoms` adds the synthetic phantoms (`konfai_scout.synthetic`, several defects each). A defect that cannot be
 planted in a source (a lesion too thin for a hole) is skipped and said. A planted defect is found when an error
-observation's box overlaps it; on a clean case every error observation is a false alarm. `score` writes
+observation's box overlaps it, and its type is named when that observation's defect is one of `NAMES` (a leak is an
+over-segmentation too); on a clean case every error observation is a false alarm. `score` writes
 `scores.json` and `scores.md`: per task and depth, the sensitivity by defect, the false alarms (a credible one has
 confidence 0.5 or more, a serious one is moderate or worse too), the verdicts, the agreement between repeats, the
 cost, the time and the tokens.
@@ -59,6 +61,18 @@ from scipy import ndimage
 
 DEPTHS = ("quick", "standard", "deep")
 SERIOUS = ("moderate", "major", "critical")
+#: The defect types that name a planted defect correctly: a leak is an over-segmentation too.
+NAMES = {
+    "under_segmentation": {"under_segmentation", "missing_structure", "boundary_error"},
+    "leak": {"leak", "over_segmentation", "boundary_error"},
+    "spurious_structure": {"spurious_structure", "fragmentation"},
+    "holes": {"holes", "under_segmentation", "fragmentation"},
+    "residual_misalignment": {"residual_misalignment"},
+    "folding": {"folding", "implausible_deformation"},
+    "intensity_bias": {"intensity_bias", "artifact", "hallucinated_structure"},  # a local bright bump reads as one
+    "hallucinated_structure": {"hallucinated_structure", "artifact"},
+    "missing_structure": {"missing_structure"},
+}
 
 
 # ---------------------------------------------------------------- planting
@@ -176,13 +190,21 @@ def plant_registration(entry: dict[str, Any], rng: np.random.Generator) -> tuple
     """The fixed image (the moving one pulled through a known field) and {variant: (field, defects)}."""
     moving, image = _read(entry["image"])
     spacing = _spacing(moving)
-    body = _inside(_body(image), 10.0, spacing)
-    z, y, x = (np.arange(n, dtype=np.float32) * s for n, s in zip(image.shape, spacing, strict=True))
-    phase = rng.uniform(0, 2 * np.pi, 3)
-    exact = np.zeros((3, *image.shape), dtype=np.float32)  # mm along x, y, z
-    exact[0] = 4.0 * np.sin(y[None, :, None] / 15.0 + phase[0])
-    exact[1] = 3.0 * np.cos(x[None, None, :] / 12.0 + phase[1])
-    exact[2] = 2.0 * np.sin(z[:, None, None] / 10.0 + phase[2])
+    whole = _body(image)
+    body = _inside(whole, 10.0, spacing)
+    # the known registration: smooth random displacements (noise on a 10 mm lattice, blurred, interpolated), fading
+    # to nothing outside the body, at most 4 mm long: no period, no motion of the air
+    lattice = tuple(max(4, int(np.ceil(n * s / 10.0))) for n, s in zip(image.shape, spacing, strict=True))
+    exact = np.stack(
+        [
+            ndimage.zoom(
+                ndimage.gaussian_filter(rng.normal(size=lattice), 1.5), np.divide(image.shape, lattice), order=3
+            )
+            for _ in range(3)
+        ]
+    ).astype(np.float32)
+    exact *= ndimage.gaussian_filter(whole.astype(np.float32), 5.0 / spacing)
+    exact *= 4.0 / max(float(np.linalg.norm(exact, axis=0).max()), 1e-6)
 
     def vector(field: np.ndarray) -> sitk.Image:
         out = sitk.GetImageFromArray(np.ascontiguousarray(np.moveaxis(field, 0, -1)), isVector=True)
@@ -191,9 +213,15 @@ def plant_registration(entry: dict[str, Any], rng: np.random.Generator) -> tuple
 
     transform = sitk.DisplacementFieldTransform(sitk.Cast(vector(exact), sitk.sitkVectorFloat64))
     fixed = sitk.Resample(moving, moving, transform, sitk.sitkLinear, float(image.min()), sitk.sitkFloat32)
+    low, high = np.percentile(image, (1, 99))  # a second acquisition is not the first one warped: fresh noise
+    noise = sitk.GetImageFromArray(rng.normal(0, 0.01 * (high - low), image.shape).astype(np.float32))
+    noise.CopyInformation(fixed)
+    fixed = fixed + noise
     variants: dict[str, Any] = {"clean": (vector(exact), {})}
     length = np.linalg.norm(exact, axis=0)
-    if (center := _pick(rng, body & (length >= np.percentile(length[body], 75)))) is not None:
+    edges = ndimage.gaussian_gradient_magnitude(image, 1.0)  # where an edge would show the misalignment
+    strong = body & (length >= np.percentile(length[body], 75)) & (edges >= np.percentile(edges[body], 75))
+    if (center := _pick(rng, strong)) is not None:
         lost = _bump(image.shape, center, 10.0, spacing)  # the registration fades out there: what it moved stays
         field = exact * (1.0 - lost)
         defect = {"defect": "residual_misalignment", "box_mm": _box(moving, lost >= 0.5)}
@@ -348,12 +376,17 @@ def score(bench: Path) -> dict[str, Any]:
         errors = [o for o in report.observations if o.kind != "measured_property"]
         runs[(depth, task)].append(
             {
+                "task": task,
                 "case": case,
                 "repeat": repeat,
                 "variant": case.rsplit("__", 1)[-1],
                 "planted": sorted(defects),
                 "found": matched["found_names"],
-                "typed": sorted(n for n, d in defects.items() if any(o.defect == d["defect"] for o in errors)),
+                "typed": sorted(
+                    n
+                    for n, d in defects.items()
+                    if any(o.defect in NAMES.get(d["defect"], {d["defect"]}) for o in errors if _hits(o, d))
+                ),
                 "errors": len(errors),
                 "credible": sum(o.confidence >= 0.5 for o in errors),
                 "serious": sum(o.severity in SERIOUS and o.confidence >= 0.5 for o in errors),
@@ -387,6 +420,18 @@ def score(bench: Path) -> dict[str, Any]:
     return scores
 
 
+def _hits(observation: Any, defect: dict[str, Any]) -> bool:
+    """An error observation over a planted defect's box (any error, for a defect planted without one)."""
+    box = defect.get("box_mm")
+    return not box or (
+        bool(observation.box_mm)
+        and all(
+            observation.box_mm["min"][i] < box["max"][i] and box["min"][i] < observation.box_mm["max"][i]
+            for i in range(3)
+        )
+    )
+
+
 def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """One group's figures, from each case's first inspection; the repeats only for their agreement."""
     first = [r for r in rows if r["repeat"] == "1"]
@@ -398,10 +443,13 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
             by_defect[name][0] += name in r["found"]
             by_defect[name][1] += name in r["typed"]
             by_defect[name][2] += 1
-    verdicts = defaultdict(list)
+    verdicts, founds = defaultdict(list), defaultdict(list)
     for r in rows:
-        verdicts[r["case"]].append(r["verdict"])
+        verdicts[(r["task"], r["case"])].append(r["verdict"])  # the phantoms of every task share their names
+        if r["planted"]:
+            founds[(r["task"], r["case"])].append(tuple(r["found"]))
     repeated = [v for v in verdicts.values() if len(v) > 1]
+    refound = [f for f in founds.values() if len(f) > 1]
     known = [r["cost"] for r in first if r["cost"] is not None]
     return {
         "inspections": len(first),
@@ -418,6 +466,7 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "unmatched_on_planted": sum(r["unmatched"] for r in planted),
         "concluded_by_scout": sum(r["by"] == "scout" for r in first),
         "repeat_agreement": (sum(len(set(v)) == 1 for v in repeated), len(repeated)),
+        "repeat_found_agreement": (sum(len(set(f)) == 1 for f in refound), len(refound)),
         "mean_cost_usd": round(mean(known), 4) if known else None,
         "mean_seconds": round(mean(r["seconds"] for r in first), 1) if first else None,
         "mean_calls": round(mean(r["calls"] for r in first), 1) if first else None,
@@ -442,20 +491,20 @@ def markdown(scores: dict[str, Any]) -> str:
 
     lines = [
         "| depth | task | found | clean: no credible error | clean: no serious error | clean: acceptable | "
-        "planted: defective | repeats agree | $ | s | calls | tokens |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "planted: defective | repeats: same verdict | repeats: same found | $ | s | calls | tokens |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for s in scores.values():
-        agree = s["repeat_agreement"]
+        agree, refound = s["repeat_agreement"], s["repeat_found_agreement"]
         lines.append(
             f"| {s['depth']} | {s['task']} | {rate(s['found'], s['planted'])} | "
             f"{rate(s['clean'] - s['clean_with_a_credible_error'], s['clean'])} | "
             f"{rate(s['clean'] - s['clean_with_a_serious_error'], s['clean'])} | {rate(s['clean_acceptable'], s['clean'])} | "
-            f"{rate(s['planted_defective'], s['planted_inspections'])} | {rate(*agree) if agree[1] else '-'} | "
+            f"{rate(s['planted_defective'], s['planted_inspections'])} | {rate(*agree)} | {rate(*refound)} | "
             f"{s['mean_cost_usd']} | {s['mean_seconds']} | {s['mean_calls']} | {s['mean_tokens']} |"
         )
     lines += ["", "| depth | task | defect | found | found, type named |", "|---|---|---|---|---|"]
-    for s in scores.values():
+    for s in (s for s in scores.values() if s["task"] != "all"):
         for name, c in s["sensitivity"].items():
             lines.append(
                 f"| {s['depth']} | {s['task']} | {name} | {rate(c['found'], c['planted'])} | {rate(c['typed'], c['planted'])} |"

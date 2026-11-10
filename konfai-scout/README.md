@@ -13,6 +13,10 @@ and the measurements that support them.
 
 - **It explores.** Coverage first (a montage per plane), then targeted views: slices, zooms, checkerboards, difference
   maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.
+- **It knows where to look first.** Before the model's first turn a deterministic survey lists leads, each a box and
+  why: a boundary the image does not support, a component unlike the main one, a fold, a region where the warped
+  image's edges stop following the fixed one's, an error well above the case's typical one. A lead is not a
+  finding; the model must look at each before it concludes.
 - **It measures with KonfAI Eval, not with a scorer of its own.** A region is cropped and scored by `konfai.evaluate`
   with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
   and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
@@ -22,7 +26,8 @@ and the measurements that support them.
   folded field...) are distinct, and without a truth nothing is confirmed from appearance. `note` refuses an error
   that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken
   elsewhere. Scout measures every flagged box itself with KonfAI Eval, records it on the observation, and
-  downgrades a confirmation that no measured value supports. "Insufficient evidence" is a legitimate conclusion. On
+  downgrades a confirmation that no measured value supports. The verdict is *defective* exactly when a major or
+  critical error is noted at confidence 0.5 or more; "insufficient evidence" is a legitimate conclusion. On
   request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and
   its answer stands in the report next to the first reader's.
 - **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
