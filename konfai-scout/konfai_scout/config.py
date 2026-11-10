@@ -86,6 +86,8 @@ class ScoutConfig:
     #: box in a few modes and the claim, without the method, the history or the measurements. Its answer (visible,
     #: not visible, unsure) is recorded on the observation; nothing is removed.
     second_reading: bool = False
+    #: The deterministic survey of where to look; off only to measure what it brings.
+    survey: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:

@@ -96,3 +96,13 @@ def test_a_depth_sets_the_defaults_and_an_explicit_flag_wins():
     assert (deep.effort, deep.budget.max_tool_calls, deep.second_reading) == ("medium", 40, True)
     assert config().budget.max_tool_calls == 25 and config().effort is None
     assert ScoutConfig.from_dict(quick.to_dict()).budget.max_tool_calls == 20  # a saved config reads back as it was
+
+
+def test_the_survey_can_be_turned_off(fixtures, tmp_path):
+    import json
+
+    case, _ = fixtures["segmentation"]
+    case.save(tmp_path / "case.json")
+    main(["inspect", "--case", str(tmp_path / "case.json"), "--out", str(tmp_path / "out"), "--no-survey"])
+    report = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert report["config"]["survey"] is False and report["leads"] == []

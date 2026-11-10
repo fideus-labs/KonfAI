@@ -357,6 +357,8 @@ class Inspector:
     def _survey(self, active: bool) -> tuple[list[Lead], str]:
         """The leads, and their text for the case card: a survey that fails costs the leads, not the inspection."""
         try:
+            if not self.config.survey:
+                raise SurveySkipped("turned off")
             leads = survey(self.renderer)
         except SurveySkipped as error:
             return [], f"Leads: no survey was run ({error}); no lead says nothing about the result."

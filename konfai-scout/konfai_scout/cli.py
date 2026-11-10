@@ -68,6 +68,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Have a fresh session of the model re-read every error observation blind, from crops of its box.",
     )
+    p.add_argument(
+        "--no-survey", dest="survey", action="store_false", default=None, help="Skip the survey of where to look."
+    )
     p.add_argument("--json", action="store_true", help="Print the report's summary as JSON.")
 
     p = commands.add_parser("render", help="Rewrite report.md from report.json.")
@@ -144,6 +147,8 @@ def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
         config.local_provider = True
     if args.second_reading:
         config.second_reading = True
+    if args.survey is not None:
+        config.survey = args.survey
     if args.blind is not None:
         config.blind = args.blind
     return config
