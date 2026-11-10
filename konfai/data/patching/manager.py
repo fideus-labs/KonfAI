@@ -879,9 +879,11 @@ class DatasetManager:
     def _adopt_case_facts(folding: Attribute, case: Attribute) -> None:
         """Keep what a landing fold computed about the CASE (Crop's content-derived box) off its walk
         state. The geometry the fold evolved is the walk's own; the box is expensive, immutable per
-        case, and read by every later fold, the streamed replays and the run."""
+        case, and read by every later fold, the streamed replays and the run. An empty box's mark goes with it."""
         if "box" in folding and "box" not in case:
             case["box"] = folding["box"]
+            if "boxempty" in folding:
+                case["boxempty"] = folding["boxempty"]
 
     def chain_stages(self, a: int = 0) -> list[Stage]:
         """The ordered stages copy ``a`` is made of: the one definition of what a copy IS.

@@ -23,7 +23,7 @@ from typing import cast
 
 import torch
 
-from konfai.data.patching.blend import PathCombine, outer_product
+from konfai.data.patching.blend import GaussianFloat16, PathCombine, outer_product
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import Placement
 
@@ -66,6 +66,9 @@ class Accumulator:
         # Patches are blended into this running buffer as they arrive (add_layer), never kept.
         self._result: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
+        #: Under a ``float16_sums`` blend: ``_result`` is the float16 sum, this the float16 sum of the windows.
+        self._float16_sums = getattr(patch_combine, "float16_sums", False)
+        self._window_sums: torch.Tensor | None = None
         # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per axis.
         self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
@@ -80,12 +83,23 @@ class Accumulator:
         if self._result is None:
             # Allocated to the ACTUAL volume extent (self.shape): each patch is cropped to its in-volume
             # part at blend time.
-            n = self._n
-            self._result = torch.zeros(list(layer.shape[:n]) + list(self.shape), dtype=layer.dtype, device=layer.device)
+            self._allocate(layer, list(self.shape))
         self._blend(layer, self.patch_slices[index])
         self._done[index] = True
         self._filled += 1
         return []
+
+    def _allocate(self, layer: torch.Tensor, spatial: list[int]) -> None:
+        """The running buffers over ``spatial``."""
+        dtype = torch.float16 if self._float16_sums else layer.dtype
+        self._result = torch.zeros(list(layer.shape[: self._n]) + spatial, dtype=dtype, device=layer.device)
+        if self._float16_sums:
+            if not layer.dtype.is_floating_point:
+                raise PatchError(
+                    f"'{type(self.patch_combine).__name__}' blends floating-point outputs, and this one is {layer.dtype}.",
+                    "Blend the logits the labels are taken from, or use 'patch_combine: Trim'.",
+                )
+            self._window_sums = torch.zeros(spatial, dtype=torch.float16, device=layer.device)
 
     def _blend(self, layer: torch.Tensor, patch_slice: tuple[slice, ...], row_offset: int = 0) -> None:
         """Blend one patch at its in-volume destination, ``row_offset`` rows down on the first spatial
@@ -95,6 +109,7 @@ class Accumulator:
         for dim, s in enumerate(patch_slice):
             if s.stop - s.start == 1:
                 data = data.unsqueeze(dim=dim + n)
+        extents = list(data.shape[n:])
         # Clamp each spatial destination to the volume and crop the patch to it, BEFORE weighting.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
         crop = [self._inside(data.shape[n + dim], d.stop - d.start) for dim, d in enumerate(dest)]
@@ -106,6 +121,11 @@ class Accumulator:
         lead = slices_dest[:n]
         if self.patch_combine is None:
             result[slices_dest] = data
+        elif self._float16_sums:
+            # The patch times the window in the output's dtype, added to the float16 sum.
+            window = cast(GaussianFloat16, self.patch_combine).weights(extents).to(data.device)[tuple(crop)]
+            result[slices_dest] += data * window
+            cast(torch.Tensor, self._window_sums)[tuple(dest)] += window
         elif self.patch_combine.selects:
             # The kept regions partition the volume: the box this patch owns is written, not summed.
             # Cut to the patch's in-volume part like the data above: the kept run of the last patch
@@ -310,6 +330,8 @@ class Accumulator:
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
         result = self._result
+        if self._float16_sums:
+            torch.div(result, cast(torch.Tensor, self._window_sums), out=result)
         # Nothing to normalise or crop: both happened at blend time.
         self._reset()
         return result
@@ -317,6 +339,7 @@ class Accumulator:
     def _reset(self) -> None:
         self._result = None
         self._weighted = None
+        self._window_sums = None
         self._filled = 0
         self._done = [False] * self._count
 
@@ -359,7 +382,6 @@ class StreamingAccumulator(Accumulator):
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
         if self._done[index]:
             return []
-        n = self._n
         patch_slice = self.patch_slices[index]
         # A patch whose start is already flushed would write at a negative window offset, which torch
         # reads from the end without an error.
@@ -371,11 +393,7 @@ class StreamingAccumulator(Accumulator):
             )
         slabs = self._advance_to(patch_slice[self.sweep_axis].start)
         if self._result is None:
-            self._result = torch.zeros(
-                [*layer.shape[:n], *self._sweep_shape(self._window)],
-                dtype=layer.dtype,
-                device=layer.device,
-            )
+            self._allocate(layer, self._sweep_shape(self._window))
         self._blend(layer, patch_slice, row_offset=self._flushed)
         self._done[index] = True
         self._filled += 1
@@ -419,6 +437,11 @@ class StreamingAccumulator(Accumulator):
             self._along_sweep(slice(length, self._window), n)
         ].clone()
         self._result[self._along_sweep(slice(keep, self._window), n)] = 0
+        if self._float16_sums:
+            sums = cast(torch.Tensor, self._window_sums)
+            slab = torch.div(slab, sums[self._along_sweep(slice(0, length), 0)])
+            sums[self._along_sweep(slice(0, keep), 0)] = sums[self._along_sweep(slice(length, self._window), 0)].clone()
+            sums[self._along_sweep(slice(keep, self._window), 0)] = 0
         region = slice(self._flushed, z)
         self._flushed = z
         return [(region, slab)]

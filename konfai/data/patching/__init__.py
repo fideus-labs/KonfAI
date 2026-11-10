@@ -23,6 +23,7 @@ from konfai.data.patching.accumulate import SlabRegionStream as SlabRegionStream
 from konfai.data.patching.accumulate import StreamingAccumulator as StreamingAccumulator
 from konfai.data.patching.blend import Cosinus as Cosinus
 from konfai.data.patching.blend import Gaussian as Gaussian
+from konfai.data.patching.blend import GaussianFloat16 as GaussianFloat16
 from konfai.data.patching.blend import Mean as Mean
 from konfai.data.patching.blend import PathCombine as PathCombine
 from konfai.data.patching.blend import Trim as Trim
@@ -61,6 +62,7 @@ __all__ = [
     "DatasetManager",
     "DatasetPatch",
     "Gaussian",
+    "GaussianFloat16",
     "HeldMeter",
     "Mean",
     "ModelPatch",
