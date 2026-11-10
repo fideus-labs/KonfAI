@@ -180,6 +180,7 @@ class GroupTransform:
                 )
                 if isinstance(transform, (Expand, Reduce)) and not self.takes_cardinality_markers:
                     _refuse_cardinality_marker(transform, group_src, group_dest)
+                transform.preceding = list(self.transforms)
                 self.transforms.append(transform)
         if self._patch_transforms is not None:
             for classpath, transform_loader in self._patch_transforms.items():

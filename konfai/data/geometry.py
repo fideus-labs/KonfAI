@@ -249,6 +249,13 @@ class Grid:
         low, high = self._index_box(region_zyx)
         return WorldBox(low, high).image_under(self.index_to_world)
 
+    def box_on(self, other: Grid, region_zyx: tuple[slice, ...]) -> tuple[np.ndarray, np.ndarray]:
+        """The hull of a region's outer faces in ``other``'s continuous indices ``(low_xyz, high_xyz)``. Straight from
+        one index space to the other: a hull taken in the world between them would grow a tilted region."""
+        low, high = self._index_box(region_zyx)
+        image = WorldBox(low, high).image_under(self.index_to_world.then(other.world_to_index))
+        return image.low_xyz, image.high_xyz
+
     def centres_box(self) -> WorldBox:
         """The axis-aligned world hull of the grid's voxel centres, the points a sampler evaluates."""
         low, high = self._index_box(None)
