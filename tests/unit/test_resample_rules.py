@@ -278,3 +278,25 @@ def test_growing_a_one_voxel_axis_on_the_zoom_grid_is_refused_by_name() -> None:
     )
     with pytest.raises(TransformError, match="one-voxel axis of case 'c'"):
         Resample(spacing=[1, 1, 1], grid="zoom", interpolation="linear").transform_shape("G", "c", [1, 5, 6], attribute)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"grid": "faces", "interpolation": "linear"},
+        {"grid": "faces", "interpolation": "bspline"},
+        {"grid": "zoom", "interpolation": "linear"},
+        {"grid": "zoom", "interpolation": "bspline"},
+    ],
+)
+def test_the_numpy_routes_take_bfloat16_as_float32_and_give_it_back(settings) -> None:
+    # NumPy has no bfloat16: those routes read it as float32 and cast back, logits on the way back included.
+    image = torch.from_numpy(_RNG.normal(size=(2, 7, 11, 9)).astype(np.float32))
+    stage = Resample(spacing=[1.5, 1.5, 2.0], inverse_interpolation="linear", **settings)
+    want = stage("case", image.clone(), Attribute(geometry([0.0] * 3, [1.0, 1.0, 1.0], None)))
+    case = Attribute(geometry([0.0] * 3, [1.0, 1.0, 1.0], None))
+    got = stage("case", image.to(torch.bfloat16), case)
+    assert got.dtype == torch.bfloat16
+    torch.testing.assert_close(got, want.to(torch.bfloat16), rtol=0, atol=0.05)
+    back = stage.inverse("case", got.clone(), Attribute(case))
+    assert back.dtype == torch.bfloat16 and tuple(back.shape) == tuple(image.shape)

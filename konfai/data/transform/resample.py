@@ -637,6 +637,13 @@ class _StoredMap:
     spline: bool = False
 
 
+def _host_array(tensor: torch.Tensor) -> np.ndarray:
+    """``tensor``'s values in NumPy on the host, for the routes that compute in NumPy: bfloat16, which NumPy has no
+    type for, is read as float32 and cast back by the caller."""
+    host = tensor.detach().cpu()
+    return (host.float() if host.dtype == torch.bfloat16 else host).numpy()
+
+
 def _stages_bytes(stages: SpatialStages) -> int:
     """What decoded stages hold: a dense field's values, an affine map next to nothing."""
     return sum(stage.values.nbytes for stage in stages if isinstance(stage, DisplacementStage))
@@ -1685,10 +1692,10 @@ class Resample(TransformInverse):
         shape, mode = list(source.size_zyx), self._mode(sub_tensor)
         if self.grid == "zoom" and mode == "linear" and not stages and target.size_zyx != source.size_zyx:
             # scipy's sum to the bit, on float64: its rounding is what a cast to integers then truncates.
-            array = sub_tensor.detach().cpu().numpy()
+            array = _host_array(sub_tensor)
             read = [zoom_region(c, region_starts, shape, target.size_zyx, target_slices) for c in array]
             out = np.stack(read).astype(array.dtype, copy=False)
-            return torch.from_numpy(np.ascontiguousarray(out)).to(sub_tensor.device)
+            return torch.from_numpy(np.ascontiguousarray(out)).to(device=sub_tensor.device, dtype=sub_tensor.dtype)
         # A map that factorises is read one axis at a time, the same arithmetic without the terms
         # that are zero and without a coordinate per voxel, and it is most maps. The general form is
         # what a rotation or a displacement needs; the two are bit-identical wherever both apply.
@@ -1831,13 +1838,14 @@ class Resample(TransformInverse):
         """The whole volume onto ``shape`` in :mod:`konfai.data.spline`'s arithmetic, cast back to the input's
         dtype: scikit-image's resize on the faces grid, ``scipy.ndimage.zoom`` on the others."""
         order = 3 if self._mode(tensor, inverse=inverse) == "bspline" else 1
-        array = tensor.detach().cpu().numpy()
+        array = _host_array(tensor)
         shape = tuple(int(extent) for extent in shape)
         if self.grid == "faces":
             out = resample_faces(array, shape, order, axis)
         else:
             out = np.stack([spline_zoom(channel, shape, order, corners=self.grid == "zoom") for channel in array])
-        return torch.from_numpy(np.ascontiguousarray(out.astype(array.dtype, copy=False))).to(tensor.device)
+        out = np.ascontiguousarray(out.astype(array.dtype, copy=False))
+        return torch.from_numpy(out).to(device=tensor.device, dtype=tensor.dtype)
 
     def _mode(self, tensor: torch.Tensor, inverse: bool = False) -> str:
         """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.
