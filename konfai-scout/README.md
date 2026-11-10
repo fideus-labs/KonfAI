@@ -142,7 +142,6 @@ configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the ses
 
 ```bash
 python examples/inspect_synthetic.py                 # synthetic cases with planted defects, the free heuristic model
-konfai-scout compare reports/*                       # one row per report
 ```
 
 `docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use

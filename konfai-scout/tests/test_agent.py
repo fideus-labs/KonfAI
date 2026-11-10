@@ -13,7 +13,6 @@ from konfai_scout.planes import box_to_dict
 from konfai_scout.prompts import PROMPT_VERSION
 from konfai_scout.providers.base import ProviderError, Turn, Usage
 from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, call, turn
-from konfai_scout.report import compare, defects_of, match_defects
 from konfai_scout.synthetic import registration_case, segmentation_case, synthesis_case
 
 
@@ -238,7 +237,6 @@ def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
     assert (tmp_path / "blind" / "second_reading.json").exists()
     assert "Second reading (not_visible" in (tmp_path / "blind" / "report.md").read_text()
     assert report.summary()["observations"][0]["second_reading"] == "not_visible"
-    assert compare([report])["rows"][0]["not_visible"] == len(errors)
     assert report.usage.images_sent >= 3 + 3 * len(errors) and report.usage.requests > readers[0].calls
     # the default reader is a fresh session of the configured provider: the heuristic one cannot see, and says so
     report = inspect(case, config, tmp_path / "default", provider=HeuristicProvider())
@@ -252,15 +250,9 @@ def test_a_clean_case_is_a_negative_control(tmp_path):
     case, defects = segmentation_case(tmp_path / "clean", clean=True)
     assert defects == {} and json.loads((tmp_path / "clean" / "defects.json").read_text()) == {}
     report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "out")
-    assert report.error is None and report.observations
-    assert all(o.kind == "measured_property" for o in report.observations)
-    assert match_defects(report, defects) == {
-        "planted": 0,
-        "found": 0,
-        "found_names": [],
-        "false_positives": 0,
-        "false_positive_ids": [],
-    }
-    assert defects_of(report) == {}
+    assert (
+        report.error is None and report.leads == [] and report.observations == []
+    )  # nothing to point at, nothing invented
+    assert report.conclusion is not None and report.conclusion.verdict == "acceptable"
     assert registration_case(tmp_path / "reg", clean=True)[1] == {}
     assert synthesis_case(tmp_path / "syn", clean=True)[1] == {}

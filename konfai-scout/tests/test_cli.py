@@ -4,7 +4,7 @@ import json
 from konfai_scout.cli import main
 
 
-def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
+def test_inspect_render_export(fixtures, tmp_path, capsys, monkeypatch):
     case, _ = fixtures["segmentation"]
     out = tmp_path / "active"
     code = main(
@@ -57,11 +57,6 @@ def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
     assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "counts.json")]) == 0
     counts = json.loads((tmp_path / "counts.json").read_text())
     assert set(counts) == {"level", "verdict", "counts"} and counts["verdict"] == summary["verdict"]
-    assert main(["compare", str(out), str(tmp_path / "fixed")]) == 0
-    table = capsys.readouterr().out
-    assert "| active |" in table and "| fixed |" in table
-    rows = json.loads(capsys.readouterr().out)["rows"] if main(["compare", str(out), "--json"]) == 0 else []
-    assert rows and rows[0]["planted"] == 4 and rows[0]["found"] >= 1  # the fixture's defects.json, found by itself
 
 
 def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):

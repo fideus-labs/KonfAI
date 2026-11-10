@@ -7,7 +7,7 @@ from __future__ import annotations
 from .agent import Inspector, inspect, scout_version
 from .case import InspectionCase, Volume
 from .config import Budget, ScoutConfig
-from .report import Report, compare, export, render_markdown
+from .report import Report, export, render_markdown
 
 __version__ = scout_version()
 __all__ = [
@@ -18,7 +18,6 @@ __all__ = [
     "ScoutConfig",
     "Volume",
     "__version__",
-    "compare",
     "export",
     "inspect",
     "render_markdown",

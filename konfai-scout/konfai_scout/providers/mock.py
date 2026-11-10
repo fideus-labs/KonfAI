@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from ..views import DEFAULT_MODE
 from .base import ImageContent, ToolCall, ToolResult, ToolSpec, Turn, Usage
@@ -85,28 +85,31 @@ def turn(*calls: ToolCall, text: str = "") -> Turn:
 
 
 class HeuristicProvider(ScriptedProvider):
-    """Explores like a careful but simple agent: a coverage montage (when it may ask for views), the statistics of
-    the whole case, a measurement where something looks off, a zoomed view of it, an observation, a conclusion.
-    What "looks off" is read from the tool results: a label in several pieces or absent, a folded field, a large
-    difference. Deterministic, so a study can compare runs."""
+    """A deterministic stand-in for a model, for tests and examples: it looks at the coverage and at every lead,
+    measures the first lead, notes it as a major confirmed error of the lead's kind (Scout's rules downgrade what no
+    measurement supports), and concludes from what entered the report. With no lead it has nothing to say."""
+
+    #: The defect a lead of each kind points at.
+    DEFECT: ClassVar[dict[str, str]] = {
+        "edgeless_boundary": "boundary_error",
+        "component": "spurious_structure",
+        "false_positive": "spurious_structure",
+        "false_negative": "under_segmentation",
+        "folding": "folding",
+        "edge_disagreement": "residual_misalignment",
+        "error_cluster": "artifact",
+    }
 
     def __init__(self, model: str = "heuristic") -> None:
         super().__init__([], model=model)
         self.task = ""
         self.card = ""
         self.step = 0
-        self.suspect: dict[str, Any] | None = None
-        self.view_id: str | None = None
-        self.coverage_views: list[str] = []
-        self.stats_asked = False
-        self.results: list[dict[str, Any]] = []
         self.n = 0
-        self.leads: list[tuple[str, dict[str, Any]]] = []
-        self.leads_seen = False
-        self.lead_views: list[str] = []
-
-    def _tool_names(self) -> set[str]:
-        return {t.name for t in self.tools}
+        self.coverage: list[str] = []
+        self.leads: list[tuple[str, str, dict[str, Any]]] = []
+        self.seen: list[str] = []
+        self.measured: list[str] = []
 
     def _call(self, name: str, **arguments: Any) -> ToolCall:
         self.n += 1
@@ -125,10 +128,10 @@ class HeuristicProvider(ScriptedProvider):
         self.card = text
         match = re.search(r"Task: (\w+)", text)
         self.task = match.group(1) if match else "segmentation"
-        self.coverage_views = re.findall(r"^- (v\d+):", text, flags=re.MULTILINE)
+        self.coverage = re.findall(r"^- (v\d+):", text, flags=re.MULTILINE)
         self.leads = [
-            (lead, json.loads(box))
-            for lead, box in re.findall(r"^- (l\d+) \w+, box (\{.*?\}):", text, flags=re.MULTILINE)
+            (lead, kind, json.loads(box))
+            for lead, kind, box in re.findall(r"^- (l\d+) (\w+), box (\{.*?\}):", text, flags=re.MULTILINE)
         ]
         return self._plan([])
 
@@ -139,211 +142,59 @@ class HeuristicProvider(ScriptedProvider):
             try:
                 parsed.append(json.loads(result.text))
             except json.JSONDecodeError:
-                parsed.append({"text": result.text, "error": result.is_error})
-        self.results.extend(parsed)
+                parsed.append({})
+        self.seen += [r["view"]["id"] for r in parsed if "view" in r]
+        self.measured += [r["measurement"]["id"] for r in parsed if "measurement" in r]
         return self._plan(parsed)
 
-    def _extent_box(self) -> dict[str, Any]:
-        match = re.search(r"bounds_mm: (\{.*?\})\n", self.card)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-        return {"min": [-1000, -1000, -1000], "max": [1000, 1000, 1000]}
-
     def _plan(self, parsed: list[dict[str, Any]]) -> Turn:
-        names = self._tool_names()
+        names = {t.name for t in self.tools}
         self.calls += 1
         self.step += 1
         if self.step == 1 and "montage" in names:
             return turn(self._call("montage", plane="axial"), text="Coverage first.")
-        if self.leads and not self.leads_seen and "view" in names:  # then every lead, before anything else
-            self.leads_seen = True
-            return turn(
-                *[
-                    self._call(
-                        "view",
-                        plane="axial",
-                        mode=DEFAULT_MODE.get(self.task, "image"),
-                        position_mm=None,
-                        index=None,
-                        window=None,
-                        label=None,
-                        zoom=box,
-                    )
-                    for _, box in self.leads
-                ],
-                text="Looking at each lead.",
-            )
-        if self.leads_seen and not self.lead_views:
-            self.lead_views = [r["view"]["id"] for r in parsed if "view" in r]
-        asked = any("region" in r for r in self.results) or any(
-            r.get("error") and "region_stats" in str(r.get("text", "")) for r in self.results
-        )
-        if self.suspect is None and "region_stats" in names and not asked and not self.stats_asked:
-            self.stats_asked = True
-            return turn(self._call("region_stats", box_mm=self._extent_box()), text="Statistics of the whole case.")
-        if self.suspect is None:
-            self.suspect = self._find_suspect()
-            if self.suspect is None:
-                return turn(
-                    self._call(
-                        "conclude",
-                        verdict="insufficient_evidence",
-                        confidence=0.3,
-                        summary="Nothing stood out in the coverage views and the statistics; no reference "
-                        "measurement was possible, so no error is confirmed.",
-                    )
+        if self.step <= 2 and self.leads and "view" in names:
+            mode = DEFAULT_MODE.get(self.task, "image")
+            views = [
+                self._call(
+                    "view", plane="axial", mode=mode, position_mm=None, index=None, window=None, label=None, zoom=box
                 )
-            calls = []
-            if "measure" in names:
-                calls.append(self._call("measure", box_mm=self.suspect["box"]))
-            if "view" in names:
-                calls.append(
-                    self._call(
-                        "view",
-                        plane="axial",
-                        mode=self.suspect["mode"],
-                        position_mm=None,
-                        index=None,
-                        window=None,
-                        label=None,
-                        zoom={"center": self.suspect["center"], "size": self.suspect["size"]},
-                    )
-                )
-            if calls:
-                return turn(*calls, text=f"Looking closer at {self.suspect['why']}.")
-        if self.suspect is not None and "note" in names and not any("observation" in r for r in self.results):
-            measurement_ids = [r["measurement"]["id"] for r in self.results if "measurement" in r]
-            for r in parsed:
-                if "view" in r:
-                    self.view_id = r["view"]["id"]
-            measured = self._measured_values()
-            kind, severity = self.suspect["kind"], self.suspect["severity"]
-            if measured is not None:
-                kind = "confirmed_error" if measured["bad"] else "measured_property"
-                severity = severity if measured["bad"] else "minor"
+                for _, _, box in self.leads
+            ]
+            return turn(*views, text="Looking at each lead.")
+        if self.step <= 3 and self.leads and "measure" in names:
+            return turn(self._call("measure", box_mm=self.leads[0][2], metrics=None), text="Measuring the first lead.")
+        noted = any("observation" in r for r in parsed) or self.step > 5
+        if self.leads and not noted and "note" in names:
+            lead, kind, _ = self.leads[0]
             return turn(
                 self._call(
                     "note",
-                    kind=kind,
-                    defect=self.suspect["defect"] if kind != "measured_property" else "other",
-                    severity=severity,
-                    confidence=0.8 if kind == "confirmed_error" else 0.5,
-                    description=self.suspect["why"] + (f"; {measured['text']}" if measured else ""),
-                    box_mm=self.leads[0][0] if self.leads else self.suspect["box"],
+                    kind="confirmed_error",
+                    defect=self.DEFECT.get(kind, "other"),
+                    severity="major",
+                    confidence=0.8,
+                    description=f"Lead {lead} ({kind}) looks wrong in the zoomed view.",
+                    box_mm=lead,
                     plane="axial",
-                    views=self.lead_views[:1] or [v for v in [self.view_id] if v] + self.coverage_views,
-                    measurements=measurement_ids,
+                    views=self.seen[1:2] or self.seen[:1] or self.coverage,
+                    measurements=self.measured[:1],
                 )
             )
-        kinds = [r["observation"]["kind"] for r in self.results if "observation" in r]
-        if self.suspect and self.suspect["severity"] in ("major", "critical") and set(kinds) - {"measured_property"}:
-            verdict = "defective"
-        elif kinds:
-            verdict = "acceptable"
-        else:
-            verdict = "insufficient_evidence"
+        recorded = any("observation" in r for r in parsed)
+        verdict = "defective" if recorded else "insufficient_evidence" if self.leads else "acceptable"
         return turn(
             self._call(
                 "conclude",
                 verdict=verdict,
                 confidence=0.7,
-                summary=f"Inspection done: {self.suspect['why'] if self.suspect else 'nothing stood out'}.",
+                summary="Inspection done: "
+                + (
+                    "the first lead holds an error."
+                    if recorded
+                    else "nothing was recorded."
+                    if self.leads
+                    else "no lead stood out."
+                ),
             )
         )
-
-    def _measured_values(self) -> dict[str, Any] | None:
-        for r in self.results:
-            values = (r.get("measurement") or {}).get("values")
-            if not values:
-                continue
-            for key, value in values.items():
-                if value is None:
-                    continue
-                if key.endswith("Dice") and value < 0.5:
-                    return {"bad": True, "text": f"{key} = {value:.3f} in the region"}
-                if "JacobianFolding" in key and value > 0:
-                    return {"bad": True, "text": f"{key} = {value:.4f}: the field folds"}
-                if key.endswith("MAE") and value > 100:
-                    return {"bad": True, "text": f"{key} = {value:.1f} in the region"}
-            first = next(((k, v) for k, v in values.items() if v is not None), None)
-            if first:
-                return {"bad": False, "text": f"{first[0]} = {first[1]:.4g}"}
-        return None
-
-    def _find_suspect(self) -> dict[str, Any] | None:
-        region = next((r["region"] for r in self.results if "region" in r), None)
-        if region is None:
-            return None
-        if self.task == "segmentation":
-            labels = region.get("prediction_labels") or {}
-            truth = region.get("truth_labels") or {}
-            for label, entry in truth.items():
-                if label not in labels:
-                    return self._suspect(
-                        entry["bbox_mm"],
-                        "both",
-                        "missing_structure",
-                        "major",
-                        "suspected_error",
-                        f"label {label} is in the truth and not in the prediction",
-                    )
-            worst = max(labels.items(), key=lambda kv: kv[1].get("components", 1), default=None)
-            if worst and worst[1].get("components", 1) > 1:
-                return self._suspect(
-                    worst[1]["bbox_mm"],
-                    "prediction",
-                    "fragmentation",
-                    "moderate",
-                    "suspected_error",
-                    f"label {worst[0]} is in {worst[1]['components']} pieces",
-                )
-            if worst:
-                return self._suspect(
-                    worst[1]["bbox_mm"],
-                    "prediction",
-                    "boundary_error",
-                    "minor",
-                    "measured_property",
-                    f"label {worst[0]} covers {worst[1]['volume_mm3']} mm3",
-                )
-        if self.task == "registration":
-            field = region.get("displacement") or {}
-            box = region.get("box_measured") or self._extent_box()
-            return self._suspect(
-                box,
-                "jacobian",
-                "implausible_deformation",
-                "moderate",
-                "suspected_error",
-                f"displacements reach {field.get('max_mm', '?')} mm (p95 {field.get('p95_mm', '?')} mm)",
-            )
-        if self.task == "synthesis":
-            stats = region.get("synthetic") or {}
-            box = region.get("box_measured") or self._extent_box()
-            return self._suspect(
-                box,
-                "difference",
-                "intensity_bias",
-                "moderate",
-                "suspected_error",
-                f"synthetic intensities span {stats.get('p1', '?')} to {stats.get('p99', '?')}",
-            )
-        return None
-
-    @staticmethod
-    def _suspect(box: dict[str, Any], mode: str, defect: str, severity: str, kind: str, why: str) -> dict[str, Any]:
-        center = [(a + b) / 2 for a, b in zip(box["min"], box["max"], strict=True)]
-        size = max(max(b - a for a, b in zip(box["min"], box["max"], strict=True)) * 1.5, 10.0)
-        return {
-            "box": box,
-            "center": center,
-            "size": size,
-            "mode": mode,
-            "defect": defect,
-            "severity": severity,
-            "kind": kind,
-            "why": why,
-        }
