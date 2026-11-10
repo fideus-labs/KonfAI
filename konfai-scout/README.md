@@ -97,18 +97,18 @@ for o in report.observations:
 Modes: segmentation `image`, `prediction`, `truth`, `both`, `disagreement`; registration `fixed`, `moving`, `warped`,
 `before`, `checkerboard`, `overlay`, `difference`, `field_magnitude`, `field_arrows`, `grid`, `jacobian`, `labels`,
 `landmarks`; synthesis `synthetic`, `target`, `source`, `difference`, `side_by_side`, `checkerboard`. A view's window
-is the image's own 1st to 99th percentile unless the model asks for `[low, high]` or a CT preset (in HU, shifted by
+is the image's own 1st to 99.9th percentile unless the model asks for `[low, high]` or a CT preset (in HU, shifted by
 1024 on a CT stored as HU + 1024).
 
 ## Budget, privacy, cost
 
 `--depth` sets how far an inspection looks in one word; any flag below overrides what it sets:
 
-| Depth | Tool calls | Images | Time | Effort | Second reading | For |
-|---|---|---|---|---|---|---|
-| `quick` | 15 | 24 | 5 min | low | no | a cheap first pass over many cases |
-| `standard` (default) | 40 | 60 | 15 min | the model's | no | one case |
-| `deep` | 80 | 120 | 30 min | high | yes | a case that matters, or a doubt to settle |
+| Depth | Tool calls | Effort | Second reading | For |
+|---|---|---|---|---|
+| `quick` | 10 | low | no | a cheap first pass over many cases |
+| `standard` (default) | 25 | the model's | no | one case |
+| `deep` | 40 | high | yes | a case that matters, or a doubt to settle |
 
 The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
 flagged box are the same at every depth.
@@ -133,14 +133,25 @@ The `codex` provider does the same with the Codex CLI under your ChatGPT login: 
 tools are served to it over a loopback MCP server, the case images are attached to the prompt; your own Codex
 configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the session under `~/.codex/sessions`.
 
-## Examples and study
+## Examples and benchmark
 
 ```bash
 python examples/inspect_synthetic.py                 # synthetic cases with planted defects, the free heuristic model
-python examples/study_fixed_vs_active.py             # fixed views against active exploration, side by side
-python examples/study_controls.py                    # clean cases against planted ones: invented and found defects
 konfai-scout compare reports/*                       # one row per report
 ```
+
+`examples/benchmark.py` measures Scout: it plants one defect at a time in real images you point it to (a manifest of
+sources: an image and its truth, a CT, an MR and its CT), keeps a clean control of each, inspects every case at each
+depth, and counts what was found, missed and invented, the verdicts, the agreement between repeats, the cost and the
+time:
+
+```bash
+python examples/benchmark.py build manifest.json --out bench --phantoms
+python examples/benchmark.py run bench --depth quick standard deep --repeats 2 --provider claude-code --allow-cloud-images
+python examples/benchmark.py score bench             # bench/scores.md and scores.json
+```
+
+`--mode fixed` among the run's flags gives the ablation of fixed views against active exploration.
 
 `docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use
 Scout.
