@@ -134,8 +134,8 @@ DEFAULT_OVERLAP_FRACTION = 0.2
 OverlapSpec = int | float | str | list[int | float | str] | None
 
 #: Where the windows of an axis sit (``Patch.placement``): ``pad`` on the stride, the last one cut at the volume's end
-#: and padded; ``end`` on the truncated step, the last one moved back to end on the last voxel; ``spread`` the fewest
-#: windows the step covers the axis with, evenly from the first voxel to the last.
+#: and padded; ``end`` on the step truncated to a whole voxel, the last one moved back to end on the last voxel;
+#: ``spread`` the fewest windows the unrounded step covers the axis with, evenly from the first voxel to the last.
 Placement = Literal["pad", "end", "spread"]
 
 
@@ -363,7 +363,7 @@ def get_patch_slices_from_shape(
                 f" ≥ patch_size={patch_size[dim]} at dim={dim}",
             )
 
-    # ``end`` and ``spread`` step on a fraction's unrounded step: ``end`` truncates it, ``spread`` counts its windows on it.
+    # ``end`` and ``spread`` walk a fraction's unrounded step: ``end`` truncates it, ``spread`` counts windows on it.
     steps = resolve_overlap(overlap_tmp, patch_size, shape, step=True) if placement != "pad" else []
     for dim in range(len(shape)):
         slices.append([])

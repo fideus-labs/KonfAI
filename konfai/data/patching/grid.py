@@ -287,10 +287,11 @@ class DatasetPatch(Patch):
 
     ``placement`` says where the patches of an axis sit, so a port reads the windows its source model was run on:
     ``pad`` (the default) every ``patch - overlap`` voxels, the last one cut at the volume's end and padded after it;
-    ``end`` on the truncated step, the last one moved back to end on the volume's last voxel (a ``Gaussian`` blend's
-    weight then floored at ``1e-3``); ``spread`` the fewest patches that step covers the axis with, spread evenly from
-    its first voxel to its last. Under ``end`` and ``spread`` only an axis shorter than the patch is padded, half
-    before the volume and half after.
+    ``end`` every ``patch - overlap`` voxels, a fraction's ``patch * (1 - overlap)`` truncated to a whole voxel, the
+    last one moved back to end on the volume's last voxel (a ``Gaussian`` blend's weight then floored at ``1e-3``);
+    ``spread`` the fewest patches that step, unrounded, covers the axis with, spread evenly from its first voxel to its
+    last. Under ``end`` and ``spread`` only an axis shorter than the patch is padded, half before the volume and half
+    after.
     """
 
     def __init__(
