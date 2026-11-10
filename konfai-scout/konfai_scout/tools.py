@@ -31,29 +31,27 @@ from .report import (
     Conclusion,
     Measurement,
     Observation,
+    json_default,
     short_key,
     value_text,
 )
 from .report import ToolCall as ToolCallRecord
 from .survey import Lead
-from .views import WINDOW_PRESETS, Renderer, ViewError
+from .views import WARPED_LABEL_ROLES, WINDOW_PRESETS, Renderer, ViewError
 
+_XYZ = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
 _BOX = {
     "type": "object",
-    "description": "A box in millimetres (LPS): {min: [x, y, z], max: [x, y, z]} or {center: [x, y, z], size: mm}.",
-    "properties": {
-        "min": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-        "max": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-        "center": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
-        "size": {"type": "number"},
-    },
+    "description": "mm, LPS: {min, max} or {center, size}.",
+    "properties": {"min": _XYZ, "max": _XYZ, "center": _XYZ, "size": {"type": "number"}},
     "additionalProperties": False,
 }
-_XYZ = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+_IDS = {"type": "array", "items": {"type": "string"}}
 
 
-def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+def _schema(properties: dict[str, Any]) -> dict[str, Any]:
+    """Every property required, an optional one nullable: the form strict tool calling accepts."""
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
 def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
@@ -82,162 +80,95 @@ class Toolbox:
     # ------------------------------------------------------------------ schemas
 
     def specs(self, exploration: bool, final: bool = False) -> list[ToolSpec]:
-        modes = self.renderer.modes()
-        mode = {"type": "string", "enum": modes, "description": "What to draw over the reference image."}
+        plane = {"type": "string", "enum": list(PLANES)}
+        mode = {"type": "string", "enum": self.renderer.modes()}
         window = _nullable(
             {
                 "anyOf": [
                     {"type": "string", "enum": [*sorted(WINDOW_PRESETS), "auto"]},
                     {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
                 ],
-                "description": "Intensity window: a CT preset in HU (shifted by 1024 on a CT stored as HU + 1024, "
-                "with no value below 0), or [low, high] in the image's own values; auto (its 1st to 99th "
-                "percentile) by default.",
+                "description": "A CT preset in HU, [low, high], or auto (1st to 99.9th percentile).",
             }
         )
         tools: list[ToolSpec] = []
         if exploration and not final:
-            tools.append(
+            tools += [
                 ToolSpec(
                     "view",
-                    "Render one slice. Choose the plane and either the world position the slice passes through, "
-                    "its index, "
-                    "or a zoom box (the slice through its centre, cropped to it). Returns the image and its record.",
+                    "One slice: a plane and a world position, an index, or a zoom box (the slice through its centre, "
+                    "cropped to the box).",
                     _schema(
                         {
-                            "plane": {"type": "string", "enum": list(PLANES)},
+                            "plane": plane,
                             "mode": mode,
-                            "position_mm": _nullable(
-                                {**_XYZ, "description": "A world point the slice passes through."}
-                            ),
-                            "index": _nullable(
-                                {"type": "integer", "description": "The slice index along the plane's axis."}
-                            ),
-                            "zoom": _nullable(
-                                {
-                                    **_BOX,
-                                    "description": "Crop the slice to this box (the slice through its centre).",
-                                }
-                            ),
+                            "position_mm": _nullable(_XYZ),
+                            "index": _nullable({"type": "integer"}),
+                            "zoom": _nullable(_BOX),
                             "window": window,
                             "label": _nullable({"type": "integer", "description": "Show this label only."}),
-                        },
-                        ["plane", "mode", "position_mm", "index", "zoom", "window", "label"],
+                        }
                     ),
-                )
-            )
-            tools.append(
+                ),
                 ToolSpec(
                     "montage",
-                    "Render equally spaced slices of a plane as one image, for coverage.",
+                    "Equally spaced slices of a plane in one image.",
                     _schema(
                         {
-                            "plane": {"type": "string", "enum": list(PLANES)},
+                            "plane": plane,
                             "mode": _nullable(mode),
                             "count": _nullable({"type": "integer", "minimum": 1, "maximum": 16}),
                             "window": window,
-                        },
-                        ["plane", "mode", "count", "window"],
+                        }
                     ),
-                )
-            )
+                ),
+            ]
         if not final:
-            tools.append(
+            tools += [
                 ToolSpec(
                     "measure",
-                    "Measure a box with KonfAI Eval: the case's groups cropped to the box and scored with KonfAI's own "
-                    "criteria (Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's Jacobian "
-                    "folding, "
-                    "minimum and log-std, bending energy and displacement lengths without one). Returns the values and "
-                    "the measurement id to cite.",
-                    _schema(
-                        {
-                            "box_mm": _BOX,
-                            "metrics": _nullable(
-                                {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Criterion names to restrict to; all of them by default.",
-                                }
-                            ),
-                        },
-                        ["box_mm", "metrics"],
-                    ),
-                )
-            )
-            tools.append(
+                    "KonfAI Eval on a box: the criteria the case allows (Dice, MAE, PSNR, SSIM, TRE against its "
+                    "references; a field's Jacobian and displacement statistics without). Returns the values and a "
+                    "measurement id.",
+                    _schema({"box_mm": _BOX, "metrics": _nullable({**_IDS, "description": "Criteria to keep."})}),
+                ),
                 ToolSpec(
                     "region_stats",
-                    "Descriptive statistics of a box, no reference needed: labels present with volume, pieces and "
-                    "bounding "
-                    "box, intensities, displacement lengths, landmarks inside.",
-                    _schema({"box_mm": _BOX}, ["box_mm"]),
-                )
-            )
-        tools.append(
+                    "Statistics of a box, no reference needed: labels (volume, pieces, bounds), intensities, "
+                    "displacement lengths, landmarks. Returns them and a measurement id.",
+                    _schema({"box_mm": _BOX}),
+                ),
+            ]
+        tools += [
             ToolSpec(
                 "note",
-                "Record one observation with its evidence. kind: measured_property (a number), suspected_error "
-                "(seen, not "
-                "measured against a reference), confirmed_error (established by a cited measurement).",
+                "Record one observation and the evidence that shows it.",
                 _schema(
                     {
                         "kind": {"type": "string", "enum": list(KINDS)},
                         "defect": {"type": "string", "enum": list(DEFECTS[self.case.task])},
                         "severity": {"type": "string", "enum": list(SEVERITIES)},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                        "description": {
-                            "type": "string",
-                            "description": f"At most {MAX_WORDS['note']} words: what, where, how bad, the view or "
-                            "measurement that shows it.",
-                        },
-                        "box_mm": _nullable(
-                            {"anyOf": [_BOX, {"type": "string", "description": "A lead's id: its box is taken."}]}
-                        ),
-                        "plane": _nullable({"type": "string", "enum": list(PLANES)}),
-                        "views": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "View ids that show it.",
-                        },
-                        "measurements": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Measurement ids that support it.",
-                        },
-                    },
-                    [
-                        "kind",
-                        "defect",
-                        "severity",
-                        "confidence",
-                        "description",
-                        "box_mm",
-                        "plane",
-                        "views",
-                        "measurements",
-                    ],
+                        "description": {"type": "string", "description": f"{MAX_WORDS['note']} words at most."},
+                        "box_mm": _nullable({"anyOf": [_BOX, {"type": "string", "description": "A lead's id."}]}),
+                        "plane": _nullable(plane),
+                        "views": _IDS,
+                        "measurements": _IDS,
+                    }
                 ),
-            )
-        )
-        tools.append(
+            ),
             ToolSpec(
                 "conclude",
-                "End the inspection with a verdict and a summary of what was found and what could not be told.",
+                "End the inspection with the verdict.",
                 _schema(
                     {
                         "verdict": {"type": "string", "enum": list(VERDICTS)},
-                        "summary": {
-                            "type": "string",
-                            "description": f"At most {MAX_WORDS['conclude']} words: the verdict and the observation "
-                            "ids it rests on, not their descriptions again.",
-                        },
+                        "summary": {"type": "string", "description": f"{MAX_WORDS['conclude']} words at most."},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    },
-                    ["verdict", "summary", "confidence"],
+                    }
                 ),
-            )
-        )
+            ),
+        ]
         return tools
 
     # ------------------------------------------------------------------ dispatch
@@ -260,7 +191,7 @@ class Toolbox:
             if handler is None:
                 raise ValueError(f"unknown tool {call.name!r}")
             payload, images = handler(record, **call.arguments)
-            text = json.dumps(payload, default=_default)
+            text = json.dumps(payload, default=json_default)
             record.summary = payload.get("summary", "") if isinstance(payload, dict) else ""
         except TypeError as error:
             record.ok, record.error = False, f"bad arguments: {error}"
@@ -343,50 +274,47 @@ class Toolbox:
         measured = grid.world_box(window)
         out: dict[str, Any] = {"box_measured": box_to_dict(measured), "voxels": int(np.prod(np.subtract(hi, lo)))}
         task = self.case.task
+
+        def read(role: str) -> np.ndarray:
+            return self.renderer.volume(role).region(lo, hi)[0]
+
         mask = None  # the intensities are those of the case's mask when it has one, as KonfAI Eval scores them
         if MASK_ROLES[task] in self.case.inputs:
-            mask = self.renderer.volume(MASK_ROLES[task]).region(lo, hi)[0] != 0
+            mask = read(MASK_ROLES[task]) != 0
             out["mask_voxels"] = int(mask.sum())
         if task == "segmentation":
-            prediction = self.renderer.volume("prediction").region(lo, hi)[0]
+            prediction, image = read("prediction"), read("image")
             out["prediction_labels"] = label_stats(prediction, grid, self.case.labels, lo)
-            image = self.renderer.volume("image").region(lo, hi)[0]
             out["image"] = intensity_stats(image, mask)
             if prediction.any():
                 out["image_inside_prediction"] = intensity_stats(image, prediction != 0)
             if "truth" in self.case.inputs:
-                truth = self.renderer.volume("truth").region(lo, hi)[0]
+                truth = read("truth")
                 out["truth_labels"] = label_stats(truth, grid, self.case.labels, lo)
                 out["overlap_voxels_prediction_vs_truth"] = label_overlap(prediction, truth)
         elif task == "registration":
-            out["fixed"] = intensity_stats(self.renderer.volume("fixed").region(lo, hi)[0], mask)
-            out["warped"] = intensity_stats(self.renderer.volume("warped").region(lo, hi)[0], mask)
+            out["fixed"] = intensity_stats(read("fixed"), mask)
+            out["warped"] = intensity_stats(read("warped"), mask)
             out["displacement"] = displacement_stats(self.renderer.volume("field").region(lo, hi))
-            if "fixed_labels" in self.case.inputs:
-                out["fixed_labels"] = label_stats(
-                    self.renderer.volume("fixed_labels").region(lo, hi)[0], grid, self.case.labels, lo
-                )
-            try:
-                warped_labels = self.renderer.volume("warped_labels").region(lo, hi)[0]
-            except ViewError:
-                warped_labels = None
-            if warped_labels is not None:
+            fixed_labels = read("fixed_labels") if "fixed_labels" in self.case.inputs else None
+            if fixed_labels is not None:
+                out["fixed_labels"] = label_stats(fixed_labels, grid, self.case.labels, lo)
+            if WARPED_LABEL_ROLES & self.case.inputs.keys():
+                warped_labels = read("warped_labels")
                 out["warped_labels"] = label_stats(warped_labels, grid, self.case.labels, lo)
-                if "fixed_labels" in self.case.inputs:
-                    out["overlap_voxels_warped_vs_fixed_labels"] = label_overlap(
-                        warped_labels, self.renderer.volume("fixed_labels").region(lo, hi)[0]
-                    )
+                if fixed_labels is not None:
+                    out["overlap_voxels_warped_vs_fixed_labels"] = label_overlap(warped_labels, fixed_labels)
             points = self.case.landmarks("fixed_landmarks")
             if points is not None:
                 out["fixed_landmarks_inside"] = int(
                     np.sum(np.all((points >= measured.low_xyz) & (points <= measured.high_xyz), axis=1))
                 )
         else:
-            synthetic = self.renderer.volume("synthetic").region(lo, hi)[0]
+            synthetic = read("synthetic")
             out["synthetic"] = intensity_stats(synthetic, mask)
-            out["source"] = intensity_stats(self.renderer.volume("source").region(lo, hi)[0], mask)
+            out["source"] = intensity_stats(read("source"), mask)
             if "target" in self.case.inputs:
-                target = self.renderer.volume("target").region(lo, hi)[0]
+                target = read("target")
                 out["target"] = intensity_stats(target, mask)
                 out["difference_synthetic_minus_target"] = intensity_stats(
                     synthetic.astype(np.float64) - target.astype(np.float64), mask
@@ -425,8 +353,7 @@ class Toolbox:
             raise ValueError(f"defect is one of {DEFECTS[self.case.task]}")
         if severity not in SEVERITIES:
             raise ValueError(f"severity is one of {SEVERITIES}")
-        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
-            raise ValueError("confidence is a number between 0 and 1")
+        confidence = _confidence(confidence)
         if len(description.split()) > MAX_WORDS["note"]:
             raise ValueError(
                 f"say it in {MAX_WORDS['note']} words or fewer (this is {len(description.split())}): what, where, "
@@ -534,7 +461,7 @@ class Toolbox:
             kind=kind,
             defect=defect,
             severity=severity,
-            confidence=float(min(max(confidence, 0.0), 1.0)),
+            confidence=confidence,
             description=description,
             box_mm=box_to_dict(box) if box is not None else None,
             plane=plane,
@@ -555,8 +482,7 @@ class Toolbox:
     ) -> tuple[dict[str, Any], list[ImageContent]]:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict is one of {VERDICTS}")
-        if math.isnan(confidence):  # JSON parsed by Python lets NaN through, and a clamp keeps it
-            raise ValueError("confidence is a number between 0 and 1")
+        confidence = _confidence(confidence)
         if len(summary.split()) > MAX_WORDS["conclude"]:
             raise ValueError(
                 f"conclude in {MAX_WORDS['conclude']} words or fewer (this is {len(summary.split())}): the verdict and "
@@ -592,7 +518,7 @@ class Toolbox:
         self.conclusion = Conclusion(
             verdict=verdict,
             summary=summary,
-            confidence=float(min(max(confidence, 0.0), 1.0)),
+            confidence=confidence,
             by="model",
             reason=reason,
         )
@@ -611,6 +537,13 @@ class Toolbox:
         """The slice views (not montage tiles) that show some of a lead's box."""
         box = box_from_dict(lead.box_mm)
         return [v.id for v in self.renderer.views if v.kind == "slice" and _shows(v, box, self.case.grid)]
+
+
+def _confidence(value: float) -> float:
+    """A confidence in [0, 1]; NaN, which JSON parsed by Python lets through and a clamp keeps, is refused."""
+    if math.isnan(value):
+        raise ValueError("confidence is a number between 0 and 1")
+    return float(min(max(value, 0.0), 1.0))
 
 
 def _number(value: object) -> float | None:
@@ -735,11 +668,3 @@ def _view_payload(view: Any) -> dict[str, Any]:
         "size_px": view.size_px,
         **{k: v for k, v in view.extra.items() if k in ("legend", "scale", "labels", "indices", "landmarks_in_plane")},
     }
-
-
-def _default(value: object) -> object:
-    if hasattr(value, "item"):
-        return value.item()
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    return str(value)

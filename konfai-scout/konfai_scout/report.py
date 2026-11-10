@@ -198,7 +198,7 @@ class Report:
         out.mkdir(parents=True, exist_ok=True)
         # JSON has no NaN or infinity, which a prior evaluation or a measurement can hold: they are written as the
         # strings "NaN", "Infinity" and "-Infinity", so a confirmation resting on one stays readable as such
-        finite = json.loads(json.dumps(self.to_dict(), default=_json_default), parse_constant=str)
+        finite = json.loads(json.dumps(self.to_dict(), default=json_default), parse_constant=str)
         (out / "report.json").write_text(json.dumps(finite, indent=2, allow_nan=False), encoding="utf-8")
         (out / "report.md").write_text(render_markdown(self), encoding="utf-8")
         return out / "report.json"
@@ -253,14 +253,13 @@ class Report:
         }
 
 
-def _json_default(value: object) -> object:
-    if isinstance(value, Path):
-        return str(value)
+def json_default(value: object) -> object:
+    """numpy scalars and arrays as numbers and lists, anything else (a path) as its text."""
     if hasattr(value, "item"):
         return value.item()
     if hasattr(value, "tolist"):
         return value.tolist()
-    raise TypeError(f"{type(value).__name__} is not JSON serialisable")
+    return str(value)
 
 
 def _box_text(box: dict[str, list[float]] | None) -> str:
@@ -530,29 +529,9 @@ def compare(reports: list[Report], defects: list[dict[str, Any] | None] | None =
 
 
 def compare_markdown(comparison: dict[str, Any]) -> str:
-    columns = [
-        "case",
-        "mode",
-        "model",
-        "verdict",
-        "confidence",
-        "tool_calls",
-        "views",
-        "images_sent",
-        "measurements",
-        "observations",
-        "confirmed",
-        "suspected",
-        "measured",
-        "planted",
-        "found",
-        "false_positives",
-        "not_visible",
-        "tokens",
-        "cost_usd",
-        "duration_s",
-    ]
+    rows = comparison["rows"]
+    columns = [c for c in (rows[0] if rows else {}) if c not in ("provider", "budget_exhausted", "error")]
     lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
-    for row in comparison["rows"]:
+    for row in rows:
         lines.append("| " + " | ".join("" if row.get(c) is None else value_text(row[c]) for c in columns) + " |")
     return "\n".join(lines)

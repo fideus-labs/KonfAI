@@ -9,93 +9,66 @@ import json
 from .case import InspectionCase
 from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
-from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, value_text
+from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "1.8"
+PROMPT_VERSION = "2.0"
 
-SYSTEM = """You are KonfAI Scout, an inspector of medical image analysis results. You examine one case of a {task} and \
-write down what you can see and measure: localised defects, their type, severity and your uncertainty, each with the \
-views and measurements that support it. You are not the scorer: deterministic scores exist already (KonfAI Eval); \
-your job is to say where and why a result is wrong, or that it holds up, or that you could not tell.
+SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
+it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.
 
 ## Coordinates
-Every location is in physical millimetres in the LPS frame of the image headers (x towards the patient's Left, y \
-towards Posterior, z towards Superior). A view's header names its plane and the position of the slice; the yellow \
-letters on its edges say which way is L/R, A/P, S/I; a white bar gives the scale. Planes: axial (normal along z), \
-coronal (along y), sagittal (along x). A box is {{"min": [x, y, z], "max": [x, y, z]}} or {{"center": [x, y, z], \
-"size": mm}}. Give every location this way, never as pixels.
+Millimetres in the LPS frame of the image headers (x towards the patient's left, y posterior, z superior), never \
+pixels. A view's header gives its plane and slice position, the yellow letters its orientation, the white bar its \
+scale. A box is {{"min": [x, y, z], "max": [x, y, z]}} or {{"center": [x, y, z], "size": mm}}.
 
-## Three kinds of statement, never confused
-- measured_property: a number measured on the case (a volume, a displacement length, an intensity), reported as is.
-- suspected_error: something that looks wrong in a view but is not established by a measurement against a reference.
-- confirmed_error: an error established by a measurement you cite: against a reference (a truth), or one that is an \
-error by definition (a folded displacement field, non-finite values).
-Report the result's defects only: an artefact of the image, an anatomical variant or a flaw of the reference is not \
-one unless the result follows it.
-Without a reference you cannot confirm an error from appearance, you cannot report a metric that needs one (Dice, \
-MAE, TRE...), and you must not claim anatomical certainty or a diagnosis: you judge the result, not the patient. \
-"insufficient_evidence" is a legitimate verdict. Never invent a number: every value you write comes from a tool result. \
-`note` enforces this: an error cites at least one view that shows its box (render a zoom first if none does); a \
-measured_property cites the measurement (`measure` or `region_stats`) that holds its figures, written as returned; a \
-cited measurement covers the box of the observation; a figure that no cited measurement holds is recorded as an \
-estimate read from a view. A refused note says why: fix it and call again.
+## Statements
+- measured_property: a number a tool returned, citing that measurement.
+- suspected_error: seen in a view, not established by a measurement.
+- confirmed_error: established by a cited measurement of its region, against a reference or by definition (a folded \
+field).
+Report the result's defects, not the image's, the anatomy's or the reference's. Without a reference nothing is \
+confirmed from appearance and no reference metric exists. No diagnosis. Every number comes from a tool. `note` \
+refuses what breaks these rules and says why: fix it and call again.
 
 ## Procedure
 {procedure}
-Look before you measure. The evidence is what the images show: where the result's boundary runs against the edges \
-of the image, what the overlays separate, what a zoom reveals. A score summarises; it does not say where or why. \
-Judge the result against the image first, with the reference hidden where you can (a prediction over its image, \
-the warped image against the fixed one), then compare with the reference when there is one, then measure to back \
-what you saw. Describe what you see so that a reader opening the cited view finds it: which structure, which edge, \
-which direction, how far. Record each finding with `note` as soon as it is established, citing the view ids (as \
-printed on each image) and the measurement ids that support it, with a confidence from 0 to 1. Prefer few, \
-decisive views and few observations: one per distinct defect, none for what holds up. Every finding goes through \
-`note`, in 70 words at most. Finish with `conclude`: the verdict and why in 50 words at most, citing the \
-observations by id instead of repeating them. Your budget: {budget}.
+Judge the result against the image first, then against the reference, then measure what you saw. One `note` per \
+distinct defect, none for what holds up, in 70 words at most: what, where (structure, edge, direction), how bad, with \
+the view and measurement ids that show it. Finish with `conclude` in 50 words at most, citing observation ids. \
+Budget: {budget}.
 
-## Severity
-minor: cosmetic, no consequence on a measure or a decision. moderate: a visible local error that changes a measure \
-but not what one would conclude. major: a structure wrong, missing or misplaced over a region. critical: the result \
-is unusable or dangerous (large folding, wrong anatomy, invented pathology).
-The verdict follows: "defective" when, and only when, a major or critical error is noted at confidence 0.5 or more; \
-"acceptable" when the result holds up, minor and moderate errors noted; "insufficient_evidence" when the images do \
-not let you judge, not because no reference is given.
+## Severity and verdict
+minor: cosmetic. moderate: changes a measure, not the conclusion. major: a structure wrong, missing or misplaced over \
+a region. critical: unusable or dangerous. The verdict is "defective" exactly when a major or critical error is noted \
+at confidence 0.5 or more; otherwise "acceptable", or "insufficient_evidence" when the images do not let you judge.
 
-## What to look for in a {task}
+## {task}
 {guidance}
-Defect types: {defects}.
+Defects: {defects}.
 {extra}"""
 
 PROCEDURES = {
-    "active": "Start from the coverage views (one montage per plane) and the leads: regions where a deterministic "
-    "survey found the result most likely wrong, each with why; a lead is not a finding. Look at every lead, then "
-    "explore: slices in other planes, a zoom on anything suspect, modes that separate the image from the result, "
-    "and measurements of regions (KonfAI Eval computes the metrics in the box).",
-    "fixed": "You see a fixed set of views and cannot ask for more. You may measure regions and ask for their "
-    "statistics. Record what these views support and conclude.",
+    "active": "Start from the coverage montages and the leads: regions a deterministic survey flags, each with why; a "
+    "lead is not a finding. Look at every lead through a slice of its box, then explore where needed: other planes, "
+    "zooms, modes that separate the image from the result, `measure` (KonfAI Eval in a box).",
+    "fixed": "You see a fixed set of views and cannot ask for more; you may measure regions. Record what they support.",
 }
 
 GUIDANCE = {
     "segmentation": (
-        "Structures missing or invented compared with the labels expected; under- and over-segmentation; leaks into a "
-        "neighbouring organ or the background; boundary errors at organ interfaces; holes and fragments; left/right "
-        "or label confusion. Mode `prediction` fills the labels over the image, `truth` draws the reference, `both` "
-        "shows the prediction filled with the truth as white contours, `disagreement` colours false positives red "
-        "and false negatives blue. `measure` gives Dice per label in a box when a truth exists."
+        "Look for missing or invented structures, under- and over-segmentation, leaks, boundary errors, holes, "
+        "fragments, left/right or label confusion. Modes: `prediction` fills the labels, `truth` the reference, `both` "
+        "the prediction with the truth as contours, `disagreement` false positives red and false negatives blue."
     ),
     "registration": (
-        "Residual misalignment at edges (vessels, bones, organ boundaries): `checkerboard` and `overlay` show it, "
-        "`before` shows the start. Implausible deformations: `field_magnitude` for large or localised displacements, "
-        "`jacobian` for folds (magenta) and extreme compression or expansion, `grid` for smoothness. `labels` and "
-        "`landmarks` show the references carried by the field when they exist. Missing coverage where the moving "
-        "image's field of view ends. `measure` gives the field's Jacobian statistics and displacement lengths in a "
-        "box without any reference, and Dice, MAE or TRE where references exist."
+        "Look for residual misalignment at edges (`checkerboard`, `overlay`; `before` is the start), implausible "
+        "deformation (`field_magnitude`, `jacobian` with folds in magenta, `grid`), and missing coverage where the "
+        "moving image ends. `labels` and `landmarks` show references carried by the field."
     ),
     "synthesis": (
-        "Intensity bias, global or per tissue; blur (lost texture and edges); structures invented or missing (lesions, "
-        "bones, air, implants); artefacts (stripes, ringing, patches); geometry that does not follow the source. "
-        "`side_by_side`, `checkerboard` and `difference` compare with the real target image when it exists; `source` "
-        "shows the input. `measure` gives MAE, PSNR and SSIM in a box when a target exists."
+        "Look for intensity bias, blur, invented or missing structures (lesions, bone, air), artefacts, and geometry "
+        "that does not follow the source. `side_by_side`, `checkerboard` and `difference` compare with the target; "
+        "`source` shows the input."
     ),
 }
 
@@ -121,7 +94,6 @@ def case_card(
     case: InspectionCase,
     prior: dict[str, object],
     labels_summary: dict[str, object],
-    modes: list[str],
     views_text: str,
     blind: bool,
 ) -> str:
@@ -151,18 +123,7 @@ def case_card(
             "Prior evaluation (KonfAI Eval, whole case): "
             + (", ".join(f"{k} = {value_text(v)}" for k, v in prior.items()) or "none given.")
         )
-    lines.append("View modes available: " + ", ".join(modes))
-    lines.append(
-        "Statement kinds: "
-        + ", ".join(KINDS)
-        + "; severities: "
-        + ", ".join(SEVERITIES)
-        + "; verdicts: "
-        + ", ".join(VERDICTS)
-    )
-    lines.append("")
-    lines.append(views_text)
-    return "\n".join(lines)
+    return "\n".join([*lines, "", views_text])
 
 
 SECOND_READER = """You are the second reader of a {task} result. A first reader flagged a defect in one region. You see \

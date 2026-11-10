@@ -23,7 +23,7 @@ import numpy as np
 
 from .case import InspectionCase
 from .config import ScoutConfig
-from .evaluation import RegionEvaluator, konfai_version, load_prior
+from .evaluation import RegionEvaluator, load_prior
 from .measure import label_stats
 from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
@@ -66,14 +66,11 @@ def scout_version() -> str:
 
 def _versions(provider: Provider) -> dict[str, str]:
     out = {"python": platform.python_version(), "platform": platform.platform()}
-    for name in ("numpy", "SimpleITK", "Pillow", "scipy"):
+    for name in ("numpy", "SimpleITK", "Pillow", "scipy", "konfai"):
         try:
             out[name] = version(name)
         except PackageNotFoundError:
             pass
-    konfai = konfai_version()
-    if konfai:
-        out["konfai"] = konfai
     out[f"{provider.name}_sdk"] = provider.sdk_version()
     out["prompt"] = PROMPT_VERSION
     return out
@@ -100,8 +97,6 @@ class BudgetState:
             return f"{time.time() - self.started:.0f} s (limit {budget.max_seconds:.0f} s)"
         if budget.max_usd is not None and self.usd + self.running_usd >= budget.max_usd:
             return f"${self.usd + self.running_usd:.3f} (limit ${budget.max_usd:.2f})"
-        if budget.max_tokens is not None and self.tokens >= budget.max_tokens:
-            return f"{self.tokens} tokens (limit {budget.max_tokens})"
         return None
 
 
@@ -153,7 +148,6 @@ class Inspector:
             self.case,
             prior,
             self._labels_summary(),
-            self.renderer.modes(),
             f"{views_text}\n\n{survey_text}",
             self.config.blind,
         )
@@ -172,57 +166,43 @@ class Inspector:
             self._second_reading()
         return self._finish()
 
-    def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
-        """Scout drives the loop: each tool call the model makes is run here and its result sent back."""
+    def _start(self, card: str, images: list[ImageContent]) -> Turn:
         turn = self._request(lambda: self.provider.user(card, images))
         self.budget.images += len(images)
         self.toolbox.images_sent += len(images)
-        reminders = 0
-        final = False
-        while self.toolbox.conclusion is None:
-            exhausted = self.budget.exhausted()
-            if turn.stop == "refusal":
-                self.error = f"the model refused: {turn.text}"
-                break
+        return turn
+
+    def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
+        """Scout drives the loop: each call the model makes runs through ``_execute`` and its result goes back. Once
+        the budget is spent the model gets one last turn with `note` and `conclude` only."""
+        turn = self._start(card, images)
+        reminders, final = 0, False
+        while self.toolbox.conclusion is None and turn.stop != "refusal":
             if turn.tool_calls:
-                if exhausted and final:
+                results = [self._execute(call) for call in turn.tool_calls]
+                exhausted = self.budget.exhausted()
+                if self.toolbox.conclusion is not None or (exhausted and final):
                     break
-                if exhausted:
-                    # the budget is spent: only a note or a conclusion still runs, once
-                    final = True
-                    results = [
-                        self._refused(call, exhausted) if call.name not in RECORDING else self.toolbox.call(call)
-                        for call in turn.tool_calls
-                    ]
-                    if self.toolbox.conclusion is not None:
-                        break
-                    final_specs = self.toolbox.specs(exploration, final=True)
-                    turn = self._request(lambda r=results, t=final_specs: self.provider.tool_results(r, t))
-                    continue
-                results = [self.toolbox.call(call) for call in turn.tool_calls]
-                self.budget.calls += sum(call.name not in RECORDING for call in turn.tool_calls)
-                self.budget.images += sum(len(r.images) for r in results)
-                if self.toolbox.conclusion is not None:
-                    break
-                turn = self._request(lambda r=results: self.provider.tool_results(r))
+                final = bool(exhausted)
+                specs = self.toolbox.specs(exploration, final=True) if final else None
+                turn = self._request(lambda r=results, s=specs: self.provider.tool_results(r, s))
                 continue
             if final or reminders >= 2:
                 break
             reminders += 1
-            if exhausted:
-                final = True
-                turn = self._request(lambda e=exhausted: self.provider.user(NOTICE_BUDGET.format(exhausted=e), None))
-                continue
-            turn = self._request(lambda: self.provider.user(NOTICE_SILENT, None))
+            exhausted = self.budget.exhausted()
+            final = bool(exhausted)
+            notice = NOTICE_BUDGET.format(exhausted=exhausted) if exhausted else NOTICE_SILENT
+            turn = self._request(lambda n=notice: self.provider.user(n, None))
+        if turn.stop == "refusal":
+            self.error = f"the model refused: {turn.text}"
 
     def _run_driven(self, card: str, images: list[ImageContent]) -> None:
-        """The provider runs the tool loop itself (the Claude Agent SDK): every call it makes lands in ``_execute``,
-        so the record and the budget are the same; Scout only speaks between its turns."""
+        """The provider runs the tool loop itself (the Claude Agent SDK, Codex): every call it makes lands in
+        ``_execute``, so the record and the budget are the same; Scout only speaks between its turns."""
         self.provider.execute = self._execute  # type: ignore[attr-defined]
         self.provider.on_usage = self._running  # type: ignore[attr-defined]
-        turn = self._request(lambda: self.provider.user(card, images))
-        self.budget.images += len(images)
-        self.toolbox.images_sent += len(images)
+        turn = self._start(card, images)
         reminders = 0
         while self.toolbox.conclusion is None and turn.stop != "refusal" and reminders < 2:
             reminders += 1

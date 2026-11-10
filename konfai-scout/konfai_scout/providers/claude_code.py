@@ -21,32 +21,22 @@ from .base import (
     ToolResult,
     ToolSpec,
     Turn,
-    Usage,
     b64,
+    content,
+    image_block,
+    package_version,
+    usage_of,
     without_image_data,
 )
 
 TRANSIENT = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
-def _message_blocks(text: str, images: list[ImageContent] | None) -> list[dict[str, Any]]:
-    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    for image in images or []:
-        if image.label:
-            content.append({"type": "text", "text": image.label})
-        content.append(
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(image.png)}}
-        )
-    return content
-
-
 def _mcp_result(result: ToolResult) -> dict[str, Any]:
-    content: list[dict[str, Any]] = [{"type": "text", "text": result.text}]
-    for image in result.images:
-        if image.label:
-            content.append({"type": "text", "text": image.label})
-        content.append({"type": "image", "data": b64(image.png), "mimeType": "image/png"})
-    return {"content": content, **({"is_error": True} if result.is_error else {})}
+    blocks = content(
+        result.text, result.images, lambda i: {"type": "image", "data": b64(i.png), "mimeType": "image/png"}
+    )
+    return {"content": blocks, **({"is_error": True} if result.is_error else {})}
 
 
 class ClaudeCodeProvider(ToolDriver):
@@ -68,12 +58,7 @@ class ClaudeCodeProvider(ToolDriver):
         self.session_id: str | None = None
 
     def sdk_version(self) -> str:
-        try:
-            from claude_agent_sdk import __version__
-
-            return str(__version__)
-        except ImportError:  # pragma: no cover
-            return "unknown"
+        return package_version("claude-agent-sdk")
 
     def start(self, system: str, tools: list[ToolSpec]) -> None:
         self.system = (
@@ -86,15 +71,9 @@ class ClaudeCodeProvider(ToolDriver):
         self._calls = 0
 
     def user(self, text: str, images: list[ImageContent] | None = None) -> Turn:
-        content = _message_blocks(text, images)
-        self.messages.append({"role": "user", "content": without_image_data(content)})
-        return _run(self._turn(content))
-
-    def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
-        raise ProviderError("the claude-code provider runs the tool loop itself: results reach it through `execute`")
-
-    def transcript(self) -> list[dict[str, Any]]:
-        return list(self.messages)
+        blocks = content(text, images, image_block)
+        self.messages.append({"role": "user", "content": without_image_data(blocks)})
+        return _run(self._turn(blocks))
 
     # ------------------------------------------------------------------ the SDK session
 
@@ -165,7 +144,7 @@ class ClaudeCodeProvider(ToolDriver):
                     if message.usage and self.on_usage and message.message_id not in counted:
                         if message.message_id:  # without an id, each message counts: a stop too early, not too late
                             counted.add(message.message_id)
-                        self.on_usage(_usage(message.usage))
+                        self.on_usage(usage_of(message.usage))
                     blocks: list[dict[str, Any]] = []
                     for block in message.content:
                         if isinstance(block, TextBlock):
@@ -221,18 +200,9 @@ class ClaudeCodeProvider(ToolDriver):
             text="\n".join(texts).strip(),
             tool_calls=[],  # the calls ran already, through `execute`
             stop={"end_turn": "end_turn", "max_tokens": "max_tokens", "refusal": "refusal"}.get(stop, "other"),
-            usage=_usage(usage),
+            usage=usage_of(usage),
             model=model or self.model,
         )
-
-
-def _usage(usage: dict[str, Any]) -> Usage:
-    return Usage(
-        input_tokens=int(usage.get("input_tokens") or 0),
-        output_tokens=int(usage.get("output_tokens") or 0),
-        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-        cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-    )
 
 
 def _run(coroutine: Any) -> Any:

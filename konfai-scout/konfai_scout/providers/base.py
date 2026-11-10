@@ -8,6 +8,7 @@ import base64
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Protocol
 
 #: The MCP server Scout's tools are served under to a CLI that runs the tool loop itself (Claude Code, Codex).
@@ -103,6 +104,37 @@ def b64(png: bytes) -> str:
     return base64.standard_b64encode(png).decode("ascii")
 
 
+def content(text: str, images: list[ImageContent] | None, block: Callable[[ImageContent], Any]) -> list[Any]:
+    """A text, then each image after its label: the message every provider sends, with its own image block."""
+    out: list[Any] = [{"type": "text", "text": text}]
+    for image in images or []:
+        out += [{"type": "text", "text": image.label}] if image.label else []
+        out.append(block(image))
+    return out
+
+
+def image_block(image: ImageContent) -> dict[str, Any]:
+    """An image as the Claude API takes it."""
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(image.png)}}
+
+
+def usage_of(usage: dict[str, Any]) -> Usage:
+    """A usage record as the Claude API and Claude Code report it."""
+    return Usage(
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+        cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+    )
+
+
+def package_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def without_image_data(content: Any) -> Any:
     """A content list with image bytes replaced by their size: the evidence files hold the images."""
     if not isinstance(content, list):
@@ -122,6 +154,8 @@ class ToolDriver:
     inspector binds, numbered in order (a CLI may call tools in parallel; the toolbox numbers its records)."""
 
     drives_tools = True
+    name: str
+    messages: list[dict[str, Any]]
     #: Whether the CLI reports its usage message by message (through ``on_usage``), so ``max_usd`` can stop it
     #: mid-loop; without it the cost is known only once the whole loop has run.
     running_cost = False
@@ -131,6 +165,12 @@ class ToolDriver:
         self.on_usage: Callable[[Usage], None] | None = None
         self._calls = 0
         self._lock = threading.Lock()
+
+    def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
+        raise ProviderError(f"the {self.name} provider runs the tool loop itself: results reach it through `execute`")
+
+    def transcript(self) -> list[dict[str, Any]]:
+        return list(self.messages)
 
     def _execute(self, name: str, args: dict[str, Any]) -> ToolResult:
         if self.execute is None:

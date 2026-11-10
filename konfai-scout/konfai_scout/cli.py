@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--depth",
         choices=list(DEPTHS),
-        help="quick: a cheap first pass (15 calls, low effort); standard (40 calls); deep: 80 calls, high effort and "
+        help="quick: a cheap first pass (10 calls, low effort); standard (25 calls); deep: 40 calls, high effort and "
         "a blind second reading. The flags below override it.",
     )
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])

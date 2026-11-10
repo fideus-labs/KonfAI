@@ -20,13 +20,9 @@ DEFAULT_MODELS = {
 #: How far an inspection looks and what it may spend: ``quick`` for a cheap first pass, ``deep`` for a case that
 #: matters. A depth changes the defaults only: a field set to anything but its standard value keeps that value.
 DEPTHS: dict[str, dict[str, object]] = {
-    "quick": {"effort": "low", "budget": {"max_tool_calls": 15, "max_images": 24, "max_seconds": 300.0}},
+    "quick": {"effort": "low", "budget": {"max_tool_calls": 10}},
     "standard": {},
-    "deep": {
-        "effort": "high",
-        "second_reading": True,
-        "budget": {"max_tool_calls": 80, "max_images": 120, "max_seconds": 1800.0},
-    },
+    "deep": {"effort": "high", "second_reading": True, "budget": {"max_tool_calls": 40}},
 }
 
 
@@ -35,11 +31,10 @@ class Budget:
     """What one inspection may spend. ``None`` lifts a limit. ``max_tool_calls`` counts the calls that explore
     (views, montages, measurements, statistics): a ``note`` or the ``conclude`` that records them is never refused."""
 
-    max_tool_calls: int = 40
+    max_tool_calls: int = 25
     max_images: int = 60
     max_seconds: float | None = 900.0
     max_usd: float | None = None
-    max_tokens: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

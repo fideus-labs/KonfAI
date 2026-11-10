@@ -10,11 +10,23 @@ import json
 import os
 from typing import Any
 
-from .base import ImageContent, ProviderError, ToolCall, ToolResult, ToolSpec, Turn, Usage, b64, is_loopback
+from .base import (
+    ImageContent,
+    ProviderError,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    Turn,
+    Usage,
+    b64,
+    content,
+    is_loopback,
+    package_version,
+)
 
 
-def _image_part(image: ImageContent, detail: str) -> dict[str, Any]:
-    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(image.png)}", "detail": detail}}
+def _image_part(image: ImageContent) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(image.png)}", "detail": "high"}}
 
 
 class OpenAIProvider:
@@ -28,7 +40,6 @@ class OpenAIProvider:
         api_key_env: str | None = None,
         local: bool = False,
         max_tokens: int = 16000,
-        detail: str = "high",
         client: Any = None,
     ) -> None:
         self.model = model
@@ -37,7 +48,6 @@ class OpenAIProvider:
         # when the caller says so
         self.remote = not (base_url and (local or is_loopback(base_url)))
         self.max_tokens = max_tokens
-        self.detail = detail
         self.messages: list[dict[str, Any]] = []
         self.tools: list[dict[str, Any]] = []
         if client is not None:
@@ -55,12 +65,7 @@ class OpenAIProvider:
             )
 
     def sdk_version(self) -> str:
-        try:
-            import openai
-
-            return str(openai.__version__)
-        except ImportError:  # pragma: no cover
-            return "unknown"
+        return package_version("openai")
 
     def start(self, system: str, tools: list[ToolSpec]) -> None:
         self.messages = [{"role": "system", "content": system}]
@@ -74,12 +79,7 @@ class OpenAIProvider:
         ]
 
     def user(self, text: str, images: list[ImageContent] | None = None) -> Turn:
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        for image in images or []:
-            if image.label:
-                content.append({"type": "text", "text": image.label})
-            content.append(_image_part(image, self.detail))
-        return self._call([{"role": "user", "content": content}])
+        return self._call([{"role": "user", "content": content(text, images, _image_part)}])
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
         pending: list[dict[str, Any]] = []
@@ -91,7 +91,7 @@ class OpenAIProvider:
             pending.append({"role": "tool", "tool_call_id": result.call_id, "content": text})
             for image in result.images:
                 images.append({"type": "text", "text": f"Image for tool call {result.call_id}: {image.label}"})
-                images.append(_image_part(image, self.detail))
+                images.append(_image_part(image))
         if images:
             pending.append({"role": "user", "content": images})
         if tools is not None:

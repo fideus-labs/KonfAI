@@ -55,19 +55,22 @@ class ScriptedProvider:
         return self._next()
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
+        self._log(results, tools)
+        return self._next()
+
+    def _log(self, results: list[ToolResult], tools: list[ToolSpec] | None) -> None:
         if tools is not None:
             self.tools = tools
-        for result in results:
-            self.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": result.call_id,
-                    "content": result.text,
-                    "images": len(result.images),
-                    "is_error": result.is_error,
-                }
-            )
-        return self._next()
+        self.messages += [
+            {
+                "role": "tool",
+                "tool_call_id": r.call_id,
+                "content": r.text,
+                "images": len(r.images),
+                "is_error": r.is_error,
+            }
+            for r in results
+        ]
 
     def transcript(self) -> list[dict[str, Any]]:
         return list(self.messages)
@@ -130,19 +133,9 @@ class HeuristicProvider(ScriptedProvider):
         return self._plan([])
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
-        if tools is not None:
-            self.tools = tools
+        self._log(results, tools)
         parsed = []
         for result in results:
-            self.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": result.call_id,
-                    "content": result.text,
-                    "images": len(result.images),
-                    "is_error": result.is_error,
-                }
-            )
             try:
                 parsed.append(json.loads(result.text))
             except json.JSONDecodeError:
