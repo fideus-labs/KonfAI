@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -369,52 +370,75 @@ def score(bench: Path) -> dict[str, Any]:
                 "second_reading": {o.id: (o.second_reading or {}).get("answer") for o in errors if o.second_reading},
             }
         )
-    scores: dict[str, Any] = {}
-    for (depth, task), rows in sorted(runs.items()):
-        clean = [r for r in rows if not r["planted"]]
-        planted = [r for r in rows if r["planted"]]
-        by_defect: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
-        for r in planted:
-            for name in r["planted"]:
-                by_defect[name][0] += name in r["found"]
-                by_defect[name][1] += name in r["typed"]
-                by_defect[name][2] += 1
-        verdicts = defaultdict(list)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for (depth, task), rows in runs.items():  # the phantoms apart; every real case of a depth pooled as "all"
         for r in rows:
-            verdicts[r["case"]].append(r["verdict"])
-        repeated = [v for v in verdicts.values() if len(v) > 1]
-        known = [r["cost"] for r in rows if r["cost"] is not None]
-        scores[f"{depth}/{task}"] = {
-            "depth": depth,
-            "task": task,
-            "inspections": len(rows),
-            "sensitivity": {k: {"found": f, "typed": t, "planted": n} for k, (f, t, n) in sorted(by_defect.items())},
-            "found": sum(len(r["found"]) for r in planted),
-            "planted": sum(len(r["planted"]) for r in planted),
-            "clean": len(clean),
-            "clean_with_an_error": sum(r["errors"] > 0 for r in clean),
-            "clean_with_a_credible_error": sum(r["credible"] > 0 for r in clean),
-            "clean_with_a_serious_error": sum(r["serious"] > 0 for r in clean),
-            "clean_acceptable": sum(r["verdict"] == "acceptable" for r in clean),
-            "planted_defective": sum(r["verdict"] == "defective" for r in planted),
-            "planted_inspections": len(planted),
-            "unmatched_on_planted": sum(r["unmatched"] for r in planted),
-            "concluded_by_scout": sum(r["by"] == "scout" for r in rows),
-            "repeat_agreement": (sum(len(set(v)) == 1 for v in repeated), len(repeated)),
-            "mean_cost_usd": round(mean(known), 4) if known else None,
-            "mean_seconds": round(mean(r["seconds"] for r in rows), 1),
-            "mean_calls": round(mean(r["calls"] for r in rows), 1),
-            "mean_tokens": round(mean(r["tokens"] for r in rows)),
-            "runs": rows,
-        }
+            phantom = r["case"].startswith("phantom__")
+            groups[(depth, "phantoms" if phantom else task)].append(r)
+            if not phantom:
+                groups[(depth, "all")].append(r)
+    order = {d: n for n, d in enumerate(DEPTHS)}
+    scores = {
+        f"{depth}/{task}": {"depth": depth, "task": task, **summarise(rows)}
+        for (depth, task), rows in sorted(groups.items(), key=lambda g: (order.get(g[0][0], 9), g[0][1]))
+    }
     (bench / "scores.json").write_text(json.dumps(scores, indent=2))
     (bench / "scores.md").write_text(markdown(scores))
     return scores
 
 
+def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """One group's figures, from each case's first inspection; the repeats only for their agreement."""
+    first = [r for r in rows if r["repeat"] == "1"]
+    clean = [r for r in first if not r["planted"]]
+    planted = [r for r in first if r["planted"]]
+    by_defect: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for r in planted:
+        for name in r["planted"]:
+            by_defect[name][0] += name in r["found"]
+            by_defect[name][1] += name in r["typed"]
+            by_defect[name][2] += 1
+    verdicts = defaultdict(list)
+    for r in rows:
+        verdicts[r["case"]].append(r["verdict"])
+    repeated = [v for v in verdicts.values() if len(v) > 1]
+    known = [r["cost"] for r in first if r["cost"] is not None]
+    return {
+        "inspections": len(first),
+        "sensitivity": {k: {"found": f, "typed": t, "planted": n} for k, (f, t, n) in sorted(by_defect.items())},
+        "found": sum(len(r["found"]) for r in planted),
+        "planted": sum(len(r["planted"]) for r in planted),
+        "clean": len(clean),
+        "clean_with_an_error": sum(r["errors"] > 0 for r in clean),
+        "clean_with_a_credible_error": sum(r["credible"] > 0 for r in clean),
+        "clean_with_a_serious_error": sum(r["serious"] > 0 for r in clean),
+        "clean_acceptable": sum(r["verdict"] == "acceptable" for r in clean),
+        "planted_defective": sum(r["verdict"] == "defective" for r in planted),
+        "planted_inspections": len(planted),
+        "unmatched_on_planted": sum(r["unmatched"] for r in planted),
+        "concluded_by_scout": sum(r["by"] == "scout" for r in first),
+        "repeat_agreement": (sum(len(set(v)) == 1 for v in repeated), len(repeated)),
+        "mean_cost_usd": round(mean(known), 4) if known else None,
+        "mean_seconds": round(mean(r["seconds"] for r in first), 1) if first else None,
+        "mean_calls": round(mean(r["calls"] for r in first), 1) if first else None,
+        "mean_tokens": round(mean(r["tokens"] for r in first)) if first else None,
+        "runs": rows,
+    }
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """The 95 % Wilson score interval of a proportion k/n."""
+    p, d = k / n, 1 + z * z / n
+    centre, half = (p + z * z / (2 * n)) / d, z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
 def markdown(scores: dict[str, Any]) -> str:
     def rate(a: int, b: int) -> str:
-        return f"{a}/{b}" + (f" ({100 * a / b:.0f} %)" if b else "")
+        if not b:
+            return "-"
+        low, high = wilson(a, b)
+        return f"{a}/{b} ({100 * a / b:.0f} %, {100 * low:.0f}-{100 * high:.0f})"
 
     lines = [
         "| depth | task | found | clean: no credible error | clean: no serious error | clean: acceptable | "
