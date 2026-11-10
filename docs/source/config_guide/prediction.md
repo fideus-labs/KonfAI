@@ -147,6 +147,8 @@ The key is the model output to save ({doc}`../reference/components/models`).
 | `attributes` | Header values to set, as `key=value` (`key=` removes one). |
 | `patch_combine` | How overlapping patches are blended: `Trim` (default), `Mean`, `Cosinus`, `Gaussian` (`sigma_scale`, default `0.125`; under `placement: monai` a patch's weight is floored at `0.001`, as MONAI's importance map). Label maps take only `Trim`. |
 
+`GaussianFloat16` is a `patch_combine` too: a Gaussian window (`sigma_scale`, default `0.125`) whose patches and windows are summed in float16, one divided by the other at the end; give the model `full_precision_outputs` so nothing rounds before it.
+
 ### Writing a layer as it is
 
 `OutputDataset` writes an output on the grid of an input group (`same_as_group`) and undoes that group's

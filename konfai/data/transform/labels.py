@@ -448,6 +448,61 @@ class SelectLabel(Transform):
         return data
 
 
+class ThresholdLabels(Transform):
+    """A label map from thresholded channels, a sigmoid head's postprocessing: channel ``c`` is on where
+    ``sigmoid(x) >= threshold`` (``x >= threshold`` with ``sigmoid: false``), and a voxel takes ``labels[c]`` of the
+    first channel on in ``priority`` order (channel indices; the channels' own order when unset), else 0. One
+    channel, uint8, so each label lies in [0, 255]. In float32, as torch compares a float tensor with a number;
+    NaN is on nowhere. The BraTS rule on TC, WT, ET logits, 4 where ET is on, else 1 where TC is, else 2 where WT
+    is, is ``labels: [1, 2, 4], priority: [2, 0, 1]``.
+    """
+
+    # Per channel in turn: its sigmoid and the voxels on, beside the map; a one-channel input's worst.
+    working_multiple = 1.5
+
+    locality = LocalityKind.POINTWISE
+
+    def __init__(
+        self,
+        labels: list[int],
+        threshold: float = 0.5,
+        priority: list[int] | None = None,
+        sigmoid: bool = True,
+    ) -> None:
+        super().__init__()
+        self.labels = [int(label) for label in labels]
+        if not self.labels or any(not 0 <= label <= 255 for label in self.labels):
+            raise TransformError(
+                f"'ThresholdLabels' writes labels={list(labels)!r} into a uint8 map.",
+                "Give one label per channel, each in [0, 255].",
+            )
+        self.priority = list(range(len(self.labels))) if priority is None else [int(channel) for channel in priority]
+        if sorted(self.priority) != list(range(len(self.labels))):
+            raise TransformError(
+                f"'ThresholdLabels' was given priority={list(priority or [])!r} for {len(self.labels)} labels.",
+                "priority orders every channel once: a permutation of 0 .. len(labels) - 1.",
+            )
+        self.threshold = float(threshold)
+        self.sigmoid = bool(sigmoid)
+
+    def output_channels(self, channels: int) -> int:
+        return 1
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if tensor.shape[0] != len(self.labels):
+            raise TransformError(
+                f"'ThresholdLabels' names {len(self.labels)} labels, and '{name}' has {tensor.shape[0]} channels.",
+                "Give one label per channel.",
+            )
+        out = torch.zeros(tensor.shape[1:], dtype=torch.uint8, device=tensor.device)
+        # Lowest priority first: the channel written last is the first in priority order that is on.
+        for channel in reversed(self.priority):
+            logits = tensor[channel].float()
+            on = (torch.sigmoid(logits) if self.sigmoid else logits) >= self.threshold
+            out.masked_fill_(on, self.labels[channel])
+        return out.unsqueeze(0)
+
+
 class OneHot(TransformInverse):
     # Half its own wider output, against the larger of input and output.
     working_multiple = 0.5

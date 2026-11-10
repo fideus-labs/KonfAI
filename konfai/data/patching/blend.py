@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from functools import reduce
 
+import numpy as np
 import torch
 
 from konfai.utils.errors import ConfigError
@@ -190,3 +191,46 @@ class Gaussian(PathCombine):
         center = (size - 1) / 2
         coords = torch.arange(size, dtype=torch.float32)
         return torch.exp(-((coords - center) ** 2) / (2.0 * sigma**2))
+
+
+class GaussianFloat16(Gaussian):
+    """A Gaussian window whose sums are kept in ``float16``: each patch times a window that is ``float16``, its sum
+    and the sum of the windows kept in ``float16``, one divided by the other at the end. Near ties between classes
+    are decided by that rounding: a logit near 64 moves by 0.06.
+
+    The window is scipy's ``gaussian_filter`` of the impulse at ``size // 2`` (``sigma_scale`` of each extent, mode
+    constant), scaled to ten at its centre, its zeros raised to its smallest other value. It is not a product of one
+    vector per axis once rounded, so the accumulator takes it whole.
+    """
+
+    #: The accumulator keeps a sum and a sum of weights in float16 (``Accumulator._blend``) instead of shares.
+    float16_sums = True
+    value_scaling = 10.0
+
+    def __init__(self, sigma_scale: float = 0.125) -> None:
+        super().__init__(sigma_scale)
+        self._weights: dict[tuple[int, ...], torch.Tensor] = {}
+
+    def weights(self, shape: list[int]) -> torch.Tensor:
+        """The window of a patch of ``shape``, ``float16``."""
+        key = tuple(shape)
+        if key not in self._weights:
+            self._weights[key] = self._compute_weights(shape)
+        return self._weights[key]
+
+    def _compute_weights(self, shape: list[int]) -> torch.Tensor:
+        # scipy's ``gaussian_filter`` of the centred impulse (mode constant): one product per axis and no sum, so
+        # the outer product of scipy's truncated kernels, cut at the window's edges, is it to the bit.
+        from konfai.data.transform.antialias import _kernel
+
+        window = np.ones(())
+        for size in shape:
+            half = _kernel(size * self.sigma_scale).numpy()
+            kernel, radius, centre = np.concatenate([half[::-1], half[1:]]), half.size - 1, size // 2
+            axis = np.zeros(size)
+            first, last = max(0, centre - radius), min(size, centre + radius + 1)
+            axis[first:last] = kernel[first - centre + radius : last - centre + radius]
+            window = np.multiply.outer(window, axis)
+        rounded = torch.from_numpy(window / np.max(window) * self.value_scaling).to(torch.float16)
+        rounded[rounded == 0] = rounded[rounded != 0].min()
+        return rounded

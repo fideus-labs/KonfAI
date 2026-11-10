@@ -961,9 +961,19 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 #: A value the compilers refuse, naming the parameter: konfai reads it and the portable runtime has no form for it.
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
-    "Standardize": {"lazy": True},
+    "Standardize": {"lazy": True, "nonzero": True},
+    "Canonical": {"resample": False},
+    "Crop": {
+        "source": "OTHER",
+        "labels": [1],
+        "margin_mm": 5.0,
+        "fill": 0.0,
+        "empty": "keep",
+        "nonzero": True,
+        "handed": True,
+    },
     "Normalize": {"lazy": True, "channels": [0]},
-    "Resample": {"transforms": "T"},
+    "Resample": {"transforms": "T", "grid": "faces", "antialias": "gaussian", "inverse_interpolation": "linear"},
     "Write": {"scale_factors": [2]},
     "Save": {"scale_factors": [2]},
     _AUG + "Brightness": {"groups": ["CT"]},

@@ -18,7 +18,8 @@
 """Extent and orientation transforms: padding, cropping, axis permutation, flips, canonical orientation, gradients."""
 
 import itertools
-from typing import Any
+import math
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import torch
@@ -196,21 +197,75 @@ class Squeeze(TransformInverse):
 
 
 class Crop(TransformInverse):
-    """Crop a volume to the bounding box of its foreground.
+    """Crop a volume to the bounding box of a foreground.
 
     The content-dependent box is computed once (``transform_shape``) and kept on the case as ``box``
     margins; cropping is then the translation ``out[o] = volume[o + start]``. Dropped voxels make it
-    a ``LocalityKind.CROP``, the stored volume's statistics not being the output's. The box is
-    measured on the stored volume, so an input a stage before moved onto another grid is refused.
+    a ``LocalityKind.CROP``, the stored volume's statistics not being the output's.
+
+    The foreground is, by default, the stored volume's voxels above its 5th percentile; with ``nonzero``
+    its voxels other than 0; with ``labels`` the voxels holding one of
+    them. With ``source`` the box is measured on another group of the same case (a segmentation, say),
+    its non-zero voxels or its ``labels``, and carried onto the grid this stage is handed through
+    physical space: the voxels whose centres lie in the box's outer faces. On the same grid that is the
+    box itself, index for index. ``margin_mm`` grows the box by ``int(margin_mm / spacing)`` voxels per
+    axis, the spacing read as float32 as a NIfTI header stores it, clipped to the volume. Without ``source`` the box is measured on the stored volume, so an
+    input a stage before moved onto another grid is refused, unless ``handed``: the box is then that of
+    the volume as the stages before this one in its chain leave it, found by replaying them once on the
+    stored volume as the chain is planned (the volume is held whole, on the host, for that replay), as
+    the portable runtime crops the volume it is handed.
 
     Spacing and direction are kept and the origin moves to the box's near corner,
-    ``O + D (start * spacing)`` (ITK's ``RegionOfInterest``); the inverse restores it.
+    ``O + D (start * spacing)`` (ITK's ``RegionOfInterest``); the inverse restores it and pads the
+    dropped voxels back, by replicating the edge or, with ``fill``, with that value.
+
+    A case with no foreground is refused by name, unless ``empty: fill``: the box is then the near corner
+    voxel grown by the margin, on which the stages after it run, and the inverse writes ``fill`` over the
+    whole input grid, dropping what they computed: with ``fill: 0``, an empty segmentation.
     """
 
     working_multiple = 0.0
 
-    def __init__(self, inverse: bool = True) -> None:
+    #: Set by the portable compiler while it builds the workflow: a Crop whose ``source`` no dataset of the build
+    #: holds plans no box. The group is another app's output (app.json ``needs``), staged beside the case at run
+    #: time, where the runtime measures the box; a konfai run keeps refusing the absent group.
+    plan_without_source: ClassVar[bool] = False
+
+    def __init__(
+        self,
+        source: str | None = None,
+        labels: list[int] | None = None,
+        margin_mm: float = 0.0,
+        fill: float | None = None,
+        nonzero: bool = False,
+        handed: bool = False,
+        empty: str = "refuse",
+        inverse: bool = True,
+    ) -> None:
         super().__init__(inverse)
+        if empty not in ("refuse", "fill") or (empty == "fill" and fill is None):
+            raise TransformError(
+                f"'Crop' was given empty: {empty!r} and fill: {fill}.",
+                "empty is refuse (a case with no foreground is refused) or fill (the inverse writes fill"
+                " everywhere), which needs fill to be a value.",
+            )
+        if margin_mm < 0:
+            raise TransformError(
+                f"'Crop' was given margin_mm: {margin_mm}.",
+                "The margin grows the box; give a length in mm of 0 or more.",
+            )
+        if handed and source is not None:
+            raise TransformError(
+                f"'Crop' was given both handed and source: '{source}'.",
+                "handed measures the box on the volume this stage is handed, source on another group: give one.",
+            )
+        self.source = source
+        self.labels = None if labels is None else [int(label) for label in labels]
+        self.margin_mm = float(margin_mm)
+        self.fill = fill
+        self.nonzero = bool(nonzero)
+        self.handed = bool(handed)
+        self.empty = empty
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # ``transform_shape`` puts the box on the case, but a group carries only what its writer stored.
@@ -258,18 +313,175 @@ class Crop(TransformInverse):
         # box already on the case is reused, otherwise it is computed once. It has one row per
         # spatial axis, aligned with the channel-stripped ``shape``.
         if "box" in cache_attribute:
-            box = self._parse_box(cache_attribute["box"])
-            return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
-        source = self.dataset_holding(group_src, name)
-        if source is None:
-            return shape
-        Crop._require_the_stored_grid(source, group_src, name, shape, cache_attribute)
-        box = self._foreground_box(source, group_src, name)
+            known = self._parse_box(cache_attribute["box"])
+            return [int(s - a - b) for (a, b), s in zip(known, shape, strict=False)]
+        box: np.ndarray | None
+        if self.handed:
+            holder = self.dataset_holding(group_src, name)
+            if holder is None:
+                return shape
+            box = self._handed_box(holder, group_src, name, shape)
+            where = f"'{group_src}/{name}' as the stages before 'Crop' leave it"
+        elif self.source is None:
+            holder = self.dataset_holding(group_src, name)
+            if holder is None:
+                return shape
+            Crop._require_the_stored_grid(holder, group_src, name, shape, cache_attribute)
+            box = self._foreground_box(holder, group_src, name, self.labels, nonzero=self.nonzero)
+            where = f"'{group_src}/{name}'"
+        else:
+            holder = self.dataset_holding(self.source, name)
+            if holder is None:
+                if Crop.plan_without_source:
+                    return shape
+                raise TransformError(
+                    f"'Crop' measures its box on the group '{self.source}', and no dataset of the run holds it"
+                    f" for case '{name}'.",
+                    f"Put '{self.source}' next to the case's other groups (the output of the app that makes it).",
+                )
+            box = self._foreground_box(holder, self.source, name, self.labels, nonzero=True)
+            if box is not None:
+                box = Crop._onto_the_handed_grid(box, holder, self.source, name, shape, cache_attribute)
+            where = f"'{self.source}/{name}'"
+        if box is None:
+            self._nothing_to_crop(where)
+            # empty: fill. The near corner voxel, grown as any box: a zoom Resample cannot undo a 1-voxel axis.
+            box = np.zeros((len(shape), 2), dtype=np.int64)
+            cache_attribute["boxempty"] = 1
+        box = self._grown(box, shape, cache_attribute)
         for i, ((_, b), s) in enumerate(zip(box, shape, strict=False)):
             # The scan reports the last foreground index; the box carries the margin after it.
             box[i][1] = max(int(s - b - 1), 0)
         cache_attribute["box"] = box
         return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
+
+    def _handed_box(self, holder: Dataset, group_src: str, name: str, shape: list[int]) -> np.ndarray | None:
+        """The foreground box of the volume as the stages before this one leave it: those stages replayed
+        once, whole, on the stored volume and a scratch copy of its header (``transform_shape`` then the
+        call, as the plan and the whole-volume route run them). Memoised on the dataset by the rule, the
+        stages before it (the chain's own, built once) and the shape they hand, so a chain replays once a case."""
+        if self.preceding is None:
+            raise TransformError(
+                "'Crop' with handed measures its box on the volume it is handed, and this stage was not bound in"
+                " a group's chain, so the stages before it are unknown.",
+                "Put the Crop in a group's transforms, or drop handed.",
+            )
+        memo = holder.case_facts.setdefault((group_src, name), {})
+        rule = f"labels {self.labels}" if self.labels is not None else "nonzero" if self.nonzero else "percentile"
+        # The stages themselves, not their names: two chains of one group (CT_1mm, CT_2mm) name the same classes.
+        key = f"box handed {rule} after {' '.join(str(id(stage)) for stage in self.preceding)} into {list(shape)}"
+        if key not in memo:
+            self._price_replay(holder, group_src, name, shape)
+            array, stored = holder.read_data(group_src, name)
+            tensor, attribute = torch.from_numpy(array), Attribute(stored)
+            for stage in self.preceding:
+                stage.transform_shape(group_src, name, list(tensor.shape[1:]), attribute)
+                tensor = stage(name, tensor, attribute)
+            if [int(extent) for extent in tensor.shape[1:]] != [int(extent) for extent in shape]:
+                raise TransformError(
+                    f"'Crop' replayed the stages before it on '{group_src}/{name}' and got {list(tensor.shape[1:])}"
+                    f" where the plan hands it {list(shape)}.",
+                    "Report this: a stage's transform_shape disagrees with its call.",
+                )
+            memo[key] = self._box_of(tensor)
+        return None if memo[key] is None else np.array(memo[key], copy=True)
+
+    def _price_replay(self, holder: Dataset, group_src: str, name: str, handed: list[int]) -> None:
+        """Refuse a replay whose whole volume, in float32 at the larger of its stored and handed extents (a
+        Resample before it may enlarge it), with the most any stage before it holds, is over this rank's memory
+        budget: it is read before any plan prices it."""
+        from konfai.utils.budget import node_local_ranks, per_rank_budget_bytes, resolve_memory_budget
+
+        stored, _ = holder.get_infos(group_src, name)
+        channels = stored[0] if len(stored) > len(handed) else 1
+        voxels = channels * max(math.prod(stored[-len(handed) :]), math.prod(handed))
+        stages = cast("list[Transform]", self.preceding)
+        needed = voxels * 4 * (1 + max((stage.case_working_multiple(name) for stage in stages), default=1.0))
+        budget = per_rank_budget_bytes() or resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
+        if needed > budget:
+            raise TransformError(
+                f"'Crop' with handed replays the stages before it on '{group_src}/{name}' whole: {needed / 2**30:.1f}"
+                f" GiB, over this rank's memory budget of {budget / 2**30:.1f} GiB.",
+                "Raise the memory budget, measure the box on another group with 'source', or drop handed.",
+            )
+
+    def _box_of(self, tensor: torch.Tensor) -> np.ndarray | None:
+        """First and last foreground index per spatial axis of ``tensor``, every channel voting, by this
+        stage's rule: ``labels``, ``nonzero``, else above its 5th percentile (numpy's quantile, as
+        ``Dataset.read_data_quantile`` reads the stored volume's); ``None`` for none."""
+        values = tensor.detach().cpu().numpy()
+        if self.labels is not None:
+            voxels = np.isin(values, np.asarray(self.labels))
+        elif self.nonzero:
+            voxels = values != 0
+        else:
+            voxels = values > np.quantile(values, 0.05)
+        foreground = np.any(voxels, axis=0)
+        return np.asarray(self._spans(foreground), dtype=np.int64) if foreground.any() else None
+
+    @staticmethod
+    def _spans(foreground: np.ndarray) -> list[list[int]]:
+        """The first and last index of ``foreground`` along each axis (it holds one voxel at least)."""
+        others = [tuple(o for o in range(foreground.ndim) if o != axis) for axis in range(foreground.ndim)]
+        return [[int(hits[0]), int(hits[-1])] for hits in (np.flatnonzero(np.any(foreground, axis=o)) for o in others)]
+
+    def _nothing_to_crop(self, where: str) -> None:
+        """Refuse a case with no foreground in ``where``, by this stage's rule, unless ``empty: fill``."""
+        if self.empty == "fill":
+            return
+        if self.labels is not None:
+            what = f"no voxel holding one of the labels {self.labels}"
+        elif self.nonzero or self.source is not None:
+            what = "no voxel other than 0"
+        else:
+            what = "every voxel is at or under its 5th percentile"
+        raise TransformError(
+            f"'Crop' found no foreground in {where}: {what}.",
+            "There is nothing to crop to: give the Crop empty: fill to write its fill everywhere, drop it for this"
+            " case or crop to another mask.",
+        )
+
+    def _grown(self, box: np.ndarray, shape: list[int], cache_attribute: Attribute) -> np.ndarray:
+        """``box`` (first and last index per array axis) grown by ``margin_mm`` and clipped to ``shape``,
+        by ``int(margin_mm / spacing)`` voxels per axis, the spacing read as float32."""
+        if self.margin_mm > 0:
+            spacing_zyx = (
+                cache_attribute.get_np_array("Spacing")[::-1] if "Spacing" in cache_attribute else np.ones(len(shape))
+            )
+            grow = (self.margin_mm / spacing_zyx.astype(np.float32).astype(np.float64)).astype(np.int64)
+            box = box + np.stack([-grow, grow], axis=1)
+        box[:, 0] = np.maximum(box[:, 0], 0)
+        box[:, 1] = np.minimum(box[:, 1], np.asarray(shape, dtype=np.int64) - 1)
+        if np.any(box[:, 0] > box[:, 1]):
+            raise TransformError(
+                f"'Crop' found the box of '{self.source}' outside the volume it crops.",
+                "The two groups do not overlap in physical space: check that they belong to the same case.",
+            )
+        return box
+
+    @staticmethod
+    def _onto_the_handed_grid(
+        box: np.ndarray, holder: Dataset, source: str, name: str, shape: list[int], cache_attribute: Attribute
+    ) -> np.ndarray:
+        """The source's box (first and last index per array axis, on its own grid) as the first and last
+        voxels of the handed grid whose centres lie within its outer faces. The same grid, the same box."""
+        source_shape, source_attribute = holder.get_infos(source, name)
+        spatial = [int(extent) for extent in source_shape[1:]]
+        if not Grid.readable(source_attribute) and not Grid.readable(cache_attribute):
+            if spatial != [int(extent) for extent in shape]:
+                raise TransformError(
+                    f"'Crop' measures its box on '{source}/{name}', of extent {spatial}, for a volume of"
+                    f" extent {list(shape)}, and neither carries a geometry to relate them.",
+                    "Give both groups their header (mha, nii, h5), or the same extent.",
+                )
+            return box
+        source_grid = Grid.of(spatial, source_attribute, f"'{source}/{name}'")
+        handed = Grid.of([int(extent) for extent in shape], cache_attribute, "the input of 'Crop'")
+        low, high = source_grid.box_on(handed, tuple(slice(int(a), int(b) + 1) for a, b in box))
+        # Centres on a face count in: the tolerance keeps a box on the handed lattice exactly itself.
+        first = np.ceil(low - 1e-6).astype(np.int64)[::-1]
+        last = np.floor(high + 1e-6).astype(np.int64)[::-1]
+        return np.stack([first, last], axis=1)
 
     @staticmethod
     def _require_the_stored_grid(
@@ -295,39 +507,42 @@ class Crop(TransformInverse):
             f"'Crop' measures its box on the stored volume '{group_src}/{name}', but a stage before it moved"
             " the volume onto another grid: the box would cut the wrong region.",
             "Place Crop before the stages that change the grid (Resample, Padding, Canonical),"
-            " or crop the written volume in a second TRANSFORM run.",
+            " measure the box on another group with 'source', or crop the written volume in a second"
+            " TRANSFORM run.",
         )
 
     @staticmethod
-    def _foreground_box(source: Dataset, group_src: str, name: str) -> np.ndarray:
-        """The bounding box of the voxels above the 5th percentile, first and last index per spatial
-        axis, from bounded passes over the stored volume. Memoised on the dataset."""
-        memo = source.case_facts.setdefault((group_src, name), {})
-        if "box" not in memo:
-            threshold = source.read_data_quantile(group_src, name, 0.05)
+    def _foreground_box(
+        source: Dataset, group: str, name: str, labels: list[int] | None = None, nonzero: bool = False
+    ) -> np.ndarray | None:
+        """The bounding box of the foreground of ``group``, first and last index per spatial axis, from
+        bounded passes over the stored volume, every channel voting, ``None`` for none. The foreground is
+        the voxels holding one of ``labels``; without them, the non-zero voxels (``nonzero``) or those
+        above the 5th percentile. Memoised on the dataset."""
+        memo = source.case_facts.setdefault((group, name), {})
+        key = "box" if labels is None and not nonzero else f"box {labels if labels is not None else 'nonzero'}"
+        if key not in memo:
+            if labels is not None:
+                wanted = np.asarray(labels)
+            elif not nonzero:
+                threshold = source.read_data_quantile(group, name, 0.05)
             first: np.ndarray | None = None
             last: np.ndarray | None = None
             offset = 0
-            for block in source.iter_data_blocks(group_src, name)():
-                foreground = np.any(block > threshold, axis=0)  # every channel votes
+            for block in source.iter_data_blocks(group, name)():
+                if labels is not None:
+                    voxels = np.isin(block, wanted)
+                else:
+                    voxels = block != 0 if nonzero else block > threshold
+                foreground = np.any(voxels, axis=0)  # every channel votes
                 if foreground.any():
-                    axes_first, axes_last = [], []
-                    for axis in range(foreground.ndim):
-                        hits = np.flatnonzero(
-                            np.any(foreground, axis=tuple(o for o in range(foreground.ndim) if o != axis))
-                        )
-                        axes_first.append(int(hits[0]) + (offset if axis == 0 else 0))
-                        axes_last.append(int(hits[-1]) + (offset if axis == 0 else 0))
-                    first = np.asarray(axes_first) if first is None else np.minimum(first, axes_first)
-                    last = np.asarray(axes_last) if last is None else np.maximum(last, axes_last)
+                    spans = np.asarray(Crop._spans(foreground))
+                    spans[0] += offset  # the block's first row in the volume
+                    first = spans[:, 0] if first is None else np.minimum(first, spans[:, 0])
+                    last = spans[:, 1] if last is None else np.maximum(last, spans[:, 1])
                 offset += int(block.shape[1])
-            if first is None or last is None:
-                raise TransformError(
-                    f"'Crop' found no foreground in '{group_src}/{name}': every voxel is at or under its 5th percentile.",
-                    "The volume is constant; drop the Crop for this case or crop it to a mask instead.",
-                )
-            memo["box"] = np.stack([first, last], axis=1).astype(np.int64)
-        return np.array(memo["box"], copy=True)
+            memo[key] = None if first is None or last is None else np.stack([first, last], axis=1).astype(np.int64)
+        return None if memo[key] is None else np.array(memo[key], copy=True)
 
     @staticmethod
     def _parse_box(box_str: str) -> np.ndarray:
@@ -349,13 +564,19 @@ class Crop(TransformInverse):
         if "box" not in cache_attribute:
             return tensor
         box = self._parse_box(cache_attribute.pop("box"))
+        # Only an ``empty: fill`` stage records it; another Crop of the chain leaves it to that one.
+        empty = self.empty == "fill" and "boxempty" in cache_attribute
+        if empty:
+            cache_attribute.pop("boxempty")
         if Grid.readable(cache_attribute):  # the forward pushed an origin only on a case with a geometry
             cache_attribute.pop("Origin")
         padding = []
         for b in reversed(box):
             padding.extend([b[0], b[1]])
-        result = F.pad(tensor.unsqueeze(0), tuple(padding), "replicate").squeeze(0)
-        return result
+        if self.fill is not None:
+            padded = F.pad(tensor, tuple(int(p) for p in padding), "constant", float(self.fill))
+            return padded.fill_(float(self.fill)) if empty else padded
+        return F.pad(tensor.unsqueeze(0), tuple(padding), "replicate").squeeze(0)
 
 
 def _has_geometry(cache_attribute: Attribute, rank: int) -> bool:
@@ -549,13 +770,19 @@ class Canonical(TransformInverse):
     extents and spacing from the signed permutation nearest the oblique direction, so a slightly
     oblique sagittal case keeps its field of view. A remap that permutes axes transposes the extents
     it swaps, so ``transform_shape`` folds the patch grid onto the reoriented shape.
+
+    ``resample: false`` never resamples: an oblique case too is permuted and flipped onto the axes
+    nearest RAS, its direction left as oblique as it was (``D @ M``), its centre fixed: nibabel's
+    ``as_closest_canonical``. An index remap
+    always, so it always streams. On an orthogonal case the two are the same remap.
     """
 
     working_multiple = 3.0  # an oblique case: ITK's filter on the host; the device walk slabs itself against its budget
 
-    def __init__(self, inverse: bool = True, fill: float = 0.0) -> None:
+    def __init__(self, inverse: bool = True, fill: float = 0.0, resample: bool = True) -> None:
         super().__init__(inverse)
         self.fill_value = float(fill)
+        self.resample = resample
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
     def _reorientation(self, cache_attribute: Attribute) -> torch.Tensor:
@@ -569,6 +796,8 @@ class Canonical(TransformInverse):
         with no usable direction cosines and an oblique one both answer ``None``."""
         if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
             return None
+        if not self.resample:
+            return self._grid_remap(cache_attribute)
         return signed_permutation(self._reorientation(cache_attribute), SIGNED_PERMUTATION_ATOL_FLOAT64)
 
     def _grid_remap(self, cache_attribute: Attribute) -> AxisRemap | None:
@@ -589,6 +818,15 @@ class Canonical(TransformInverse):
             key=lambda candidate: sum(abs(linear[row, column]) for column, row in enumerate(candidate)),
         )
         return [(2 - rows[column], bool(linear[rows[column], column] < 0)) for column in reversed(range(3))]
+
+    @staticmethod
+    def _nearest_matrix(reorientation: torch.Tensor) -> torch.Tensor:
+        """The signed permutation :meth:`_nearest_remap` picks, as a matrix in ``(x, y, z)``."""
+        remap = Canonical._nearest_remap(reorientation)
+        matrix = torch.zeros((3, 3), dtype=torch.double)
+        for array_column, (array_row, mirrored) in enumerate(remap):
+            matrix[2 - array_row, 2 - array_column] = -1.0 if mirrored else 1.0
+        return matrix
 
     @staticmethod
     def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
@@ -672,12 +910,18 @@ class Canonical(TransformInverse):
         spacing = cache_attribute.get_tensor("Spacing").to(torch.double)
         remap = self._grid_remap(cache_attribute)
         half_extent = Canonical._half_extent(source_spatial_shape, spacing)
-        cache_attribute["Direction"] = self.canonical_direction.flatten()
+        # Unresampled, the axes are the case's own, permuted and flipped: D @ M, oblique as it was.
+        direction = (
+            self.canonical_direction
+            if self.resample
+            else initial_matrix @ self._nearest_matrix(self._reorientation(cache_attribute))
+        )
+        cache_attribute["Direction"] = direction.flatten()
         cache_attribute["Spacing"] = Canonical._carried(spacing, remap)
         # The reorientation fixes the volume's centre, so the new origin is that centre stepped back
         # by the target grid's canonical half-extent. The extent is the volume's, never a patch's.
         center = initial_matrix @ half_extent + initial_origin
-        cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
+        cache_attribute["Origin"] = center - direction @ Canonical._carried(half_extent, remap)
 
     def _inverse_remap(self, cache_attribute: Attribute, grid: bool = False) -> AxisRemap | None:
         """The forward remap judged on the state ``inverse`` runs from, evaluated on a copy since a
@@ -734,7 +978,7 @@ class Canonical(TransformInverse):
         the grid ``off`` describes onto the one ``onto`` does, whose extents are the tensor's carried
         along ``grid``, ``fill`` where ``off`` does not reach. An orthogonal one reproduces the input's
         values bit for bit."""
-        remap = signed_permutation(reorientation, SIGNED_PERMUTATION_ATOL_FLOAT64)
+        remap = signed_permutation(reorientation, SIGNED_PERMUTATION_ATOL_FLOAT64) if self.resample else grid
         if remap is None:
             shape = [int(extent) for extent in tensor.shape[1:]]
             return Canonical._resample(

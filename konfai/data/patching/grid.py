@@ -220,7 +220,10 @@ class Patch(ABC):
         if any(plan.reflect_padding):
             data_sliced = F.pad(data_sliced, plan.reflect_padding, "reflect")
         if any(plan.constant_padding):
-            data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
+            if self.pad_value == "edge":
+                data_sliced = _pad_edge(data_sliced, plan.constant_padding)
+            else:
+                data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
                 data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)

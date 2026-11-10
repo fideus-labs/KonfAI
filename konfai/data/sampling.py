@@ -112,11 +112,18 @@ def default_interpolation(tensor: torch.Tensor) -> str:
     return "nearest" if tensor.dtype in LABEL_DTYPES else "linear"
 
 
-def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
+def nearest_index(coordinate: torch.Tensor, mode: str = "nearest") -> torch.Tensor:
     """ITK's nearest: round half UP on the continuous source index. Not ``torch.round``, which ties
     to the even index, and not ``F.interpolate``'s ``floor(o * scale)``, which is a statement about a
-    size ratio and says nothing once the target grid carries an origin of its own."""
+    size ratio and says nothing once the target grid carries an origin of its own. ``nearest_even``
+    is ``torch.round``'s half to even, as ``grid_sample`` picks."""
+    if mode == "nearest_even":
+        return torch.round(coordinate).to(torch.long)
     return torch.floor(coordinate + 0.5).to(torch.long)
+
+
+#: The interpolations that pick a voxel rather than blend: no working dtype, no float trip.
+PICKS = ("nearest", "nearest_even")
 
 
 def window_index(index: torch.Tensor, n_in: int, region_start: int, window: int) -> torch.Tensor:
@@ -578,14 +585,14 @@ def gather_separable(
         taps_index: tuple[slice | torch.Tensor, ...] = (*[slice(None)] * (array_axis + 1), index)
         return _picked(tensor, taps_index)
 
-    out = source if mode == "nearest" else source.type(sampling_dtype(source))
+    out = source if mode in PICKS else source.type(sampling_dtype(source))
     for array_axis in range(rank) if blend is None else blend:
         # An axis the map leaves alone is read by leaving it alone.
         if is_identity(array_axis):
             continue
         axis = axes[array_axis]
-        if mode == "nearest":
-            out = taps(out, array_axis, local(nearest_index(axis), array_axis))
+        if mode in PICKS:
+            out = taps(out, array_axis, local(nearest_index(axis, mode), array_axis))
             continue
         if mode == "cubic":
             # The same axis-by-axis reduction as the blend below, four taps instead of two. The
@@ -680,7 +687,7 @@ def gather(
         upper = [source_shape_zyx[rank - 1 - axis] - 1 for axis in range(rank)]
         coordinates_xyz = torch.minimum(coordinates_xyz.clamp(min=0), coordinates_xyz.new_tensor(upper))
     inside = torch.ones(extent_zyx, dtype=torch.bool, device=device)
-    for axis in range(rank):
+    for axis in range(0 if edge else rank):
         array_axis = rank - 1 - axis
         coordinate = coordinates_xyz[..., axis]
         inside &= (coordinate >= -0.5) & (coordinate < source_shape_zyx[array_axis] - 0.5)
@@ -698,13 +705,13 @@ def gather(
 
     # A nearest pick copies voxels: no blend, no working dtype, and no float trip for a label, whose
     # values above 2**24 a float32 cannot carry back.
-    work = source if mode == "nearest" else source.type(sampling_dtype(source))
-    if mode == "nearest":
+    work = source if mode in PICKS else source.type(sampling_dtype(source))
+    if mode in PICKS:
         # One gather, on exact index arithmetic: a nearest pick is discontinuous, so the last bit of
         # a coordinate decides which voxel it lands on. There are no eight corners to fuse here.
         flat = torch.zeros(extent_zyx, dtype=torch.long, device=device)
         for array_axis in range(rank):
-            index = nearest_index(coordinates_xyz[..., rank - 1 - array_axis])
+            index = nearest_index(coordinates_xyz[..., rank - 1 - array_axis], mode)
             local = window_index(
                 index, source_shape_zyx[array_axis], source_starts_zyx[array_axis], window_zyx[array_axis]
             )

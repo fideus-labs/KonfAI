@@ -139,7 +139,7 @@ Per command:
 | `pipeline` | those of `infer`, `eval` and `uncertainty` |
 | `fine-tune` | `name`, `-d/--dataset`, `--models` (which checkpoints), `--epochs`, `--it-validation`, `--lr`, `--batch-size`, `--config` |
 
-`bundle NAME` takes `--out`, `--app-json`, `--config` and `--checkpoint`. `download APP [FILES…]` takes
+`bundle NAME` takes `--out`, `--app-json`, `--config` and `--checkpoint` (none for an app without weights). `download APP [FILES…]` takes
 `--no-force-update`. Run `--help` on either for details.
 
 ### Tuning an app without editing it

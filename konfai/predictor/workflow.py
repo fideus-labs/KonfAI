@@ -385,6 +385,14 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 measured = vram.transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
+                moved = [output_dataset.finish_on_host() for output_dataset in self.outputs_dataset.values()]
+                if any(moved):
+                    # The error rose after the forward (the blend, the reduction, the inverses back to the case's own
+                    # grid): those go to the host, and the forward keeps its batch and its members.
+                    vram.reset_peak(device)
+                    print(f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> finishing on the host, restarting.")
+                    dataloader = self._rank_dataloader(world_size, global_rank)
+                    continue
                 if self.model_composite.release_resident():
                     # The resident members give their room back before the batch or the patch shrinks.
                     vram.reset_peak(device)

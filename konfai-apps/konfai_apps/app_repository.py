@@ -574,6 +574,17 @@ def run_overrides(config: Any, output_formats: list[str] | None = None, seed: in
     return overrides
 
 
+def _parse_needs(needs: Any) -> dict[str, str]:
+    """Validate app.json's ``needs``: ``{group: app id}``, the groups another app makes for this one."""
+    if needs is None:
+        return {}
+    if not isinstance(needs, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in needs.items()
+    ):
+        raise AppMetadataError(f"'needs' must map each group to the id of the app that makes it, got {needs!r}.")
+    return dict(needs)
+
+
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
     """Validate an input's ``default`` field from app.json (one of ``INPUT_DEFAULTS`` or omitted).
 
@@ -830,6 +841,7 @@ class LocalAppRepository(AppRepositoryInfo):
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
         self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
         self._published_presets = read_presets(app_repository_metadata.get("presets"), f"the app.json of '{app_name}'")
+        self._needs = _parse_needs(app_repository_metadata.get("needs"))
 
         # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-weight files
         # are all downloaded above, so resolving it here costs nothing.
@@ -854,6 +866,18 @@ class LocalAppRepository(AppRepositoryInfo):
             task=app_repository_metadata.get("task"),
             icon_path=icon_path,
         )
+
+    def get_needs(self) -> dict[str, str]:
+        """The groups this app reads from other apps' outputs (app.json ``needs``), each with the id of the app that
+        makes it: a bare name is a sibling of this app (the same Hub repository, or the same parent folder), a path
+        or a ``repo:app`` stays as it is."""
+        return {
+            group: app_id if ":" in app_id or Path(app_id).name != app_id else self._sibling(app_id)
+            for group, app_id in self._needs.items()
+        }
+
+    def _sibling(self, app_name: str) -> str:
+        raise AppMetadataError(f"'needs' names '{app_name}' without a repository, and this app has no siblings.")
 
     def _get_available_checkpoint_names(self, checkpoints_name: list[str], filenames: list[str]) -> list[str]:
         return [
@@ -1739,6 +1763,9 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
     def get_name(self) -> str:
         return str(self._app_directory / self._app_name)
 
+    def _sibling(self, app_name: str) -> str:
+        return str(self._app_directory / app_name)
+
     def save_default_parameters(self, overrides: list[str] | None, prediction_file: str = "Prediction.yml") -> None:
         """Edit the app-folder config in place so the tuned ``--set`` values become its defaults.
 
@@ -1966,6 +1993,9 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
 
     def get_name(self) -> str:
         return f"{self._repo_id}:{self._app_name}"
+
+    def _sibling(self, app_name: str) -> str:
+        return f"{self._repo_id}:{app_name}"
 
 
 class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):

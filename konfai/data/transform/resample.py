@@ -59,6 +59,9 @@ from konfai.data.sampling import (
     walked_box,
     walked_window,
 )
+from konfai.data.spline import resample_faces, separate_axis, zoom_region
+from konfai.data.spline import zoom as spline_zoom
+from konfai.data.transform.antialias import ANTIALIAS_MODES, gaussian_filter, gaussian_sigmas, triangle_resize
 from konfai.data.transform.base import (
     LocalityKind,
     PatchLocality,
@@ -101,6 +104,10 @@ class _TargetGrid(ABC):
     @abstractmethod
     def describe(self) -> str:
         """The target named as a refusal or a plan line names it."""
+
+    def header(self, source: Grid, name: str) -> Grid:
+        """The grid the case's header records once written: the grid sampled, unless a rule writes another."""
+        return self.of(source, name)
 
 
 class _OwnGrid(_TargetGrid):
@@ -147,6 +154,81 @@ class _DerivedGrid(_TargetGrid):
         if self.spacing is not None:
             return f"a spacing of {[float(value) for value in self.spacing]}"
         return f"a shape of {list(cast('tuple[int, ...]', self.shape))}"
+
+
+#: What ``Resample(interpolation=...)`` takes.
+INTERPOLATIONS = ("linear", "nearest", "cubic", "bspline", "nearest_even")
+#: The grid rules of ``Resample(grid=...)`` other than KonfAI's own.
+GRID_RULES = ("faces", "zoom", "centers")
+
+
+class _RuleGrid(_DerivedGrid):
+    """A ``spacing`` grid placed and counted by a rule of its own (``s`` the case's spacing, ``s'`` the one asked
+    for, ``n`` the case's voxels along an axis):
+
+    - ``faces``: ``round(s / s' * n)`` voxels, the outer faces where the case's are;
+    - ``zoom`` (``scipy.ndimage.zoom`` with its corners aligned): ``round(n * s / s')`` voxels, the first and
+      the last voxel centers where the case's are. The header then records voxel 0 where it was and the spacing
+      ``s / (s / s')``, so a grid placed after it counts from that spacing;
+    - ``centers``: ``round((n - 1) s / s' + 1)`` voxels, voxel 0's center where it was, the spacing ``s'``
+      exactly.
+    """
+
+    def __init__(self, spacing: list[float], rule: str) -> None:
+        super().__init__(spacing, None, "extent")
+        self.rule = rule
+
+    def _wanted(self, source: Grid, name: str) -> np.ndarray:
+        spacing = cast("np.ndarray", self.spacing)
+        if spacing.size != source.rank:
+            where = f"case '{name}'" if name else "the case"
+            raise TransformError(
+                f"'Resample' was given a spacing of {spacing.size} value(s) and {where} has"
+                f" {source.rank} spatial axis/axes."
+            )
+        return np.where(spacing > 0, spacing, source.spacing_xyz)
+
+    def _size(self, source: Grid, name: str) -> tuple[int, ...]:
+        """The count per axis in array order, each in the library's own arithmetic (Python's ``round``: half to
+        even, as numpy's)."""
+        wanted = self._wanted(source, name)
+        sizes = []
+        for n, s, t in zip(source.size_zyx, source.spacing_xyz[::-1], wanted[::-1], strict=True):
+            if self.rule == "faces":
+                count = round(float(s) / float(t) * n)
+            elif self.rule == "zoom":
+                count = round(n * (float(s) / float(t)))
+            else:
+                count = round((n - 1) * float(s) / float(t) + 1.0)
+            sizes.append(max(1, int(count)))
+        return tuple(sizes)
+
+    def of(self, source: Grid, name: str) -> Grid:
+        size = self._size(source, name)
+        if self.rule == "faces":
+            return source.resampled(size_zyx=size, align="extent")
+        if self.rule == "centers":
+            return Grid(size, source.origin_xyz, self._wanted(source, name), source.direction_xyz)
+        n = np.array(source.size_zyx[::-1], dtype=np.float64)
+        m = np.array(size[::-1], dtype=np.float64)
+        if np.any((n == 1) & (m > 1)):
+            where = f"case '{name}'" if name else "the case"
+            raise TransformError(
+                f"'Resample' on grid zoom grows a one-voxel axis of {where}: scipy's zoom copies the voxel along it,"
+                " on a grid with no extent there, which no inverse can undo.",
+                "Keep that axis (a spacing of 0 keeps it), or resample on grid konfai or faces.",
+            )
+        spacing = np.where(m > 1, source.spacing_xyz * (n - 1) / np.maximum(m - 1, 1), source.spacing_xyz)
+        return Grid(size, source.origin_xyz, spacing, source.direction_xyz)
+
+    def header(self, source: Grid, name: str) -> Grid:
+        if self.rule != "zoom":
+            return self.of(source, name)
+        written = source.spacing_xyz / (source.spacing_xyz / self._wanted(source, name))
+        return Grid(self._size(source, name), source.origin_xyz, written, source.direction_xyz)
+
+    def describe(self) -> str:
+        return f"{super().describe()} on {self.rule}'s grid"
 
 
 def coarse_spacing(size_zyx: list[int], spacing_xyz: list[float], max_voxels: int) -> list[float] | None:
@@ -468,8 +550,8 @@ def _resample_with_sitk(
     if payload.dtype in (torch.bool, torch.bfloat16, torch.float16) or fill == "edge":
         return None  # ITK has no pixel type for it, or no border extrapolation: the walk takes it
     interpolator = {"nearest": sitk.sitkNearestNeighbor, "linear": sitk.sitkLinear, "cubic": sitk.sitkBSpline}
-    if mode == "cubic":
-        return None  # ITK's BSpline is not Keys' Catmull-Rom: the walk keeps its own cubic
+    if mode in ("cubic", "nearest_even"):
+        return None  # ITK's BSpline is not Keys' Catmull-Rom, and its nearest ties go up: the walk keeps its own
     rank = source.rank
     # A map that is one field ON the output grid is applied by the filter templated on the field's
     # own type, never by one that casts it to float64 to hold it (:func:`_warp_field_float32`).
@@ -553,6 +635,13 @@ class _StoredMap:
     #: Whether the map holds a BSpline and no dense field: the plan then prices each region by where
     #: the spline actually sends it (:func:`~konfai.data.sampling.region_reach`), not by its whole range.
     spline: bool = False
+
+
+def _host_array(tensor: torch.Tensor) -> np.ndarray:
+    """``tensor``'s values in NumPy on the host, for the routes that compute in NumPy: bfloat16, which NumPy has no
+    type for, is read as float32 and cast back by the caller."""
+    host = tensor.detach().cpu()
+    return (host.float() if host.dtype == torch.bfloat16 else host).numpy()
 
 
 def _stages_bytes(stages: SpatialStages) -> int:
@@ -749,7 +838,19 @@ class Resample(TransformInverse):
     ``interpolation`` is ``nearest``, ``linear`` (the default; a label dtype, ``uint8``, ``int64`` or
     ``bool``, defaults to ``nearest``) or ``cubic``: Keys' cubic convolution (Catmull-Rom, a = -1/2),
     interpolating and patch-local (four taps per axis, one extra voxel of streamed halo). It is NOT a
-    prefiltered B-spline: scipy's ``order=3`` runs a global prefilter this stage does not.
+    prefiltered B-spline: ``bspline`` is, scipy's ``order=3`` (``mode='nearest'``) to the bit, on the
+    whole volume (the prefilter recurses along whole lines), for a change of grid alone.
+    ``inverse_interpolation`` is the one the inverse reads with when it is not the forward's (an image
+    resampled by B-spline whose logits are carried back linearly).
+    ``nearest_even`` is a nearest neighbour whose exact half-voxel ties go to the even voxel, as
+    torch's ``grid_sample`` picks; ``nearest`` takes ITK's, up.
+
+    ``grid`` places a ``spacing`` grid by a rule (:class:`_RuleGrid`): ``konfai`` (the default, ``align``
+    decides), ``faces`` (``round(s / s' * n)`` voxels, extents aligned; ``linear`` and ``bspline`` are
+    scikit-image's ``resize`` orders 1 and 3, clipped to the input's range, and an axis whose spacing is over
+    three times the finest is resampled apart, by nearest neighbour), ``zoom`` (``scipy.ndimage.zoom`` with
+    its corners aligned, the header's spacing ``s / (s / s')``) or ``centers`` (voxel 0
+    kept, ``round((n - 1) s / s' + 1)`` voxels).
 
     IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid or
     affine map is an exact affine. A BSpline and a dense field are values on a grid read through a
@@ -780,6 +881,12 @@ class Resample(TransformInverse):
     PART of the target grid is legal and common (the rest takes ``fill``), and the plan prints how
     much of the grid it covers. ``fill: edge`` gives it the volume's edge voxel instead, as MONAI's
     ``Spacingd`` does (``padding_mode: border``).
+
+    ``antialias`` filters a downsampling as a library does (:mod:`~konfai.data.transform.antialias`):
+    ``triangle`` is torchvision's ``Resize(antialias=True)`` and PIL's bilinear resize (a 2D image onto a
+    ``shape``, linearly, no map), ``gaussian`` is scikit-image's ``resize(anti_aliasing=True)``, a Gaussian
+    run before the resample. Either reads the whole volume (its width follows the scale); the inverse,
+    an enlargement, is not filtered.
     """
 
     working_multiple = 6.5  # the sampling grid, the taps, and the widening a stored integer forces
@@ -799,20 +906,27 @@ class Resample(TransformInverse):
         fill: float | str = 0.0,
         inverse: bool = True,
         precision: str = "exact",
+        grid: str = "konfai",
+        inverse_interpolation: str | None = None,
+        antialias: str | None = None,
     ) -> None:
         super().__init__(inverse)
+        self.antialias = _antialias_mode(antialias, interpolation, shape, transforms, field, field_group, align)
         if isinstance(fill, str) and fill != "edge":
             raise TransformError(
                 f"'Resample' has an unknown fill '{fill}'.",
                 "Give a number, or 'edge' for the volume's edge voxel past it (MONAI's padding_mode: border).",
             )
-        if interpolation is not None and interpolation not in ("linear", "nearest", "cubic"):
-            raise TransformError(
-                f"'Resample' has an unknown interpolation '{interpolation}'.",
-                "Use 'linear' for an image, 'nearest' for a label map, or 'cubic' (Keys/Catmull-Rom)"
-                " for a sharper image blend. Left unset, uint8, int64 and bool are taken for a label map"
-                " and everything else is interpolated linearly.",
-            )
+        for stated in (interpolation, inverse_interpolation):
+            if stated is not None and stated not in INTERPOLATIONS:
+                raise TransformError(
+                    f"'Resample' has an unknown interpolation '{stated}'.",
+                    "Use 'linear' for an image, 'nearest' for a label map, 'cubic' (Keys/Catmull-Rom)"
+                    " for a sharper image blend, 'bspline' for scipy's prefiltered cubic B-spline, or"
+                    " 'nearest_even' for a nearest neighbour whose ties go to the even voxel (torch's"
+                    " grid_sample). Left unset, uint8, int64 and bool are taken for a label map"
+                    " and everything else is interpolated linearly.",
+                )
         if precision not in ("exact", "fast"):
             raise TransformError(
                 f"'Resample' has an unknown precision '{precision}'.",
@@ -827,8 +941,28 @@ class Resample(TransformInverse):
             )
         self.precision = precision
         self.interpolation = interpolation
+        #: The interpolation the inverse reads with, when it is not the forward's: an image resampled by B-spline
+        #: whose logits are carried back linearly.
+        self.inverse_interpolation = inverse_interpolation
         self.fill_value = fill if fill == "edge" else float(fill)
-        self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align)
+        self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align, grid)
+        self.grid = grid
+        mapped = transforms is not None or (field is not None and str(field).strip()) or field_group is not None
+        if mapped and ("bspline" in (interpolation, inverse_interpolation) or grid == "faces"):
+            # Both run through konfai.data.spline (the faces grid resamples an anisotropic axis apart), on the
+            # source's own axes: a map there would be dropped without a word.
+            raise TransformError(
+                "'Resample' resamples through a map with 'bspline' or on the faces grid, whose spline route runs on"
+                " the source's own axes.",
+                "Use either for a change of grid alone (spacing or shape), or grid konfai through a map.",
+            )
+        if "bspline" in (interpolation, inverse_interpolation):
+            placed_by_zoom = grid in ("faces", "zoom") or (grid == "konfai" and align == "extent")
+            if not isinstance(self._target, _DerivedGrid) or not placed_by_zoom:
+                raise TransformError(
+                    "'Resample' interpolates 'bspline' onto a grid scipy's zoom does not place.",
+                    "'bspline' needs a spacing or a shape, with grid konfai (align: extent), faces or zoom.",
+                )
         if transforms is not None and not transforms:
             raise TransformError(
                 "'Resample' was given an empty 'transforms'.",
@@ -910,6 +1044,7 @@ class Resample(TransformInverse):
         reference_group: str | None,
         reference_dataset: str | None,
         align: str,
+        grid: str = "konfai",
     ) -> _TargetGrid:
         named = [name for name, value in (("spacing", spacing), ("shape", shape), ("reference", reference)) if value]
         if len(named) > 1:
@@ -929,6 +1064,18 @@ class Resample(TransformInverse):
                 "Use align: extent to keep the field of view (the outer faces coincide, which is what"
                 " KonfAI has always done) or align: origin to keep voxel zero's centre where it is.",
             )
+        if grid != "konfai":
+            if grid not in GRID_RULES:
+                raise TransformError(
+                    f"'Resample' has an unknown grid '{grid}'.",
+                    "Use grid: konfai (the default: align decides where it sits), faces, zoom or centers.",
+                )
+            if spacing is None:
+                raise TransformError(
+                    f"'Resample' places a grid by {grid}'s rule and names no spacing.",
+                    f"grid: {grid} counts its voxels from a spacing: give one, or leave grid at konfai.",
+                )
+            return _RuleGrid(spacing, grid)
         if reference:
             return _ReferenceGrid(reference, reference_group, reference_dataset)
         if spacing is not None or shape is not None:
@@ -1021,7 +1168,7 @@ class Resample(TransformInverse):
                 if not stored.affine:
                     return True
                 stages = (AffineStage(stored.bound.affine),)
-            walked_as_itk = self.interpolation != "cubic" and scanline_map(target, source, stages)
+            walked_as_itk = self.interpolation not in ("cubic", "nearest_even") and scanline_map(target, source, stages)
             return separable_source_index(target, source, stages, torch.device("cpu")) is None and not walked_as_itk
         except Exception:  # nosec B110 - a map this cannot read is priced as the general path
             return True
@@ -1270,6 +1417,10 @@ class Resample(TransformInverse):
             ) from error
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        if self.antialias is not None:
+            return PatchLocality(
+                LocalityKind.WHOLE_VOLUME, reason=f"a {self.antialias} antialiasing reads the whole image"
+            )
         # The geometry is judged on the attribute in hand, the case's own header: one case of a
         # group may lack an Origin while the rest have one. A config-time probe hands over an empty
         # header, which reads as a case with none.
@@ -1283,6 +1434,9 @@ class Resample(TransformInverse):
                     " (mha, nii, h5, or an OME-Zarr written by KonfAI)"
                 ),
             )
+        spline = self._spline_reason(cache_attribute)
+        if spline is not None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=spline)
         if not self._probed:
             self._probed = True
             self._refusal = self._probe_cohort()
@@ -1481,9 +1635,26 @@ class Resample(TransformInverse):
         # stage's true input (a Canonical upstream, a Resample before this one).
         self._record(name, shape, cache_attribute)
         source, target = self._grids_of(name)
+        if self.antialias == "gaussian":  # before either route: the spline's samples are filtered too
+            tensor = gaussian_filter(tensor, gaussian_sigmas(shape, [int(extent) for extent in target.size_zyx]))
+        by_spline, axis = self._by_spline(self._mode(tensor), source, name, forward=True)
+        if by_spline and target.size_zyx != source.size_zyx:
+            result = self._spline_resample(tensor, target.size_zyx, axis)
+            self.write_stream_cache_attribute(cache_attribute, shape, name)
+            return result
         # The same call the streamed path makes, over one region that happens to be the whole grid:
         # equality between the two paths is then a property of the code, not a claim about it.
         whole = tuple(slice(0, extent) for extent in target.size_zyx)
+        size = [int(extent) for extent in target.size_zyx]
+        if self.antialias == "triangle":
+            if len(size) != 2:
+                raise TransformError(
+                    f"'Resample' antialias: triangle resizes a 2D image, as torchvision does, and case '{name}'"
+                    f" has {len(size)} spatial axes.",
+                    "Use antialias: gaussian (scikit-image's) on a volume.",
+                )
+            self.write_stream_cache_attribute(cache_attribute, shape, name)
+            return triangle_resize(tensor, size)
         try:
             result = self._sample(name, tensor, whole, [0] * source.rank)
         finally:
@@ -1519,6 +1690,12 @@ class Resample(TransformInverse):
         region = target.sub_grid(target_slices)
         stages = self._stages(name, region)
         shape, mode = list(source.size_zyx), self._mode(sub_tensor)
+        if self.grid == "zoom" and mode == "linear" and not stages and target.size_zyx != source.size_zyx:
+            # scipy's sum to the bit, on float64: its rounding is what a cast to integers then truncates.
+            array = _host_array(sub_tensor)
+            read = [zoom_region(c, region_starts, shape, target.size_zyx, target_slices) for c in array]
+            out = np.stack(read).astype(array.dtype, copy=False)
+            return torch.from_numpy(np.ascontiguousarray(out)).to(device=sub_tensor.device, dtype=sub_tensor.dtype)
         # A map that factorises is read one axis at a time, the same arithmetic without the terms
         # that are zero and without a coordinate per voxel, and it is most maps. The general form is
         # what a rotation or a displacement needs; the two are bit-identical wherever both apply.
@@ -1538,7 +1715,7 @@ class Resample(TransformInverse):
         # which moves exact half-voxel ties. With no map between the grids, a region is walked on
         # the whole grid's terms instead, as ITK reads the whole grid (scanline_map).
         # Cubic is Keys' kernel, which ITK does not have: it keeps its own walk.
-        as_itk = mode != "cubic" and scanline_map(target, source, stages)
+        as_itk = mode not in ("cubic", "nearest_even") and scanline_map(target, source, stages)
         whole = region.size_zyx == target.size_zyx and list(sub_tensor.shape[1:]) == shape
         # The whole grid through the filter only where ITK picks the ties the regions' walk picks.
         itk_whole = whole and _itk_picks_as_the_walk()
@@ -1606,19 +1783,84 @@ class Resample(TransformInverse):
             del coordinates
         return out
 
-    def _mode(self, tensor: torch.Tensor) -> str:
+    def _separate_axis(self, case: Grid | np.ndarray, name: str, forward: bool) -> int | None:
+        """The axis the faces grid resamples apart (``grid: faces``), from the case's grid (or its spacing
+        ``(x, y, z)``): judged forward on the case's spacing then the one asked for, back on the one asked for then
+        the case's."""
+        if self.grid != "faces":
+            return None
+        spacing = case.spacing_xyz if isinstance(case, Grid) else np.asarray(case, dtype=np.float64)
+        asked = cast("np.ndarray", cast("_DerivedGrid", self._target).spacing)
+        wanted = np.where(asked > 0, asked, spacing)
+        case_zyx, wanted_zyx = [float(v) for v in spacing[::-1]], [float(v) for v in wanted[::-1]]
+        return separate_axis(case_zyx, wanted_zyx) if forward else separate_axis(wanted_zyx, case_zyx)
+
+    def _by_spline(self, mode: str, case: Grid, name: str, forward: bool) -> tuple[bool, int | None]:
+        """Whether this resample runs through :mod:`konfai.data.spline` (scipy's and scikit-image's arithmetic, on
+        the whole volume), and the axis resampled apart: always for ``bspline``, and for ``linear`` on the faces
+        grid where it resamples an axis apart (ITK's linear is the order 1 everywhere else)."""
+        if mode not in ("bspline", "linear"):
+            return False, None
+        axis = self._separate_axis(case, name, forward)
+        return mode == "bspline" or axis is not None, axis
+
+    def _spline_reason(self, cache_attribute: Attribute, forward: bool = True) -> str | None:
+        """The whole-volume reason of a resample through :mod:`konfai.data.spline`, judged from the header's
+        spacing; None where it streams (no spline, or a case already on the spacing asked for)."""
+        stated = self.inverse_interpolation if not forward and self.inverse_interpolation else self.interpolation
+        mode = stated or "linear"
+        if mode not in ("bspline", "linear") or not isinstance(self._target, _DerivedGrid):
+            return None
+        if "Spacing" not in cache_attribute:
+            return None if mode == "linear" else "a B-spline is prefiltered along whole lines of the volume"
+        spacing = np.asarray(cache_attribute.get_np_array("Spacing"), dtype=np.float64)
+        if self._target.spacing is not None:
+            if spacing.size != self._target.spacing.size:
+                return None  # refused where the grid is built, with the case named
+            wanted = np.where(self._target.spacing > 0, self._target.spacing, spacing)
+            if np.array_equal(wanted, spacing):
+                return None  # the same grid: nothing is resampled
+        if mode == "bspline":
+            return (
+                "a cubic B-spline is prefiltered along whole lines of the volume (scipy's recursion), so"
+                " this resample holds the case whole"
+            )
+        if self._separate_axis(spacing, "", forward) is not None:
+            return (
+                "the faces grid resamples this anisotropic case slice by slice, then picks its coarse axis by nearest"
+                " neighbour, so this resample holds the case whole"
+            )
+        return None
+
+    def _spline_resample(
+        self, tensor: torch.Tensor, shape: tuple[int, ...], axis: int | None, inverse: bool = False
+    ) -> torch.Tensor:
+        """The whole volume onto ``shape`` in :mod:`konfai.data.spline`'s arithmetic, cast back to the input's
+        dtype: scikit-image's resize on the faces grid, ``scipy.ndimage.zoom`` on the others."""
+        order = 3 if self._mode(tensor, inverse=inverse) == "bspline" else 1
+        array = _host_array(tensor)
+        shape = tuple(int(extent) for extent in shape)
+        if self.grid == "faces":
+            out = resample_faces(array, shape, order, axis)
+        else:
+            out = np.stack([spline_zoom(channel, shape, order, corners=self.grid == "zoom") for channel in array])
+        out = np.ascontiguousarray(out.astype(array.dtype, copy=False))
+        return torch.from_numpy(out).to(device=tensor.device, dtype=tensor.dtype)
+
+    def _mode(self, tensor: torch.Tensor, inverse: bool = False) -> str:
         """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.
 
         A dtype cannot settle this on its own, so the heuristic claims the label dtypes and nothing more
         and ``interpolation`` answers for the rest. Getting it wrong is silent: two blended labels give a
         third that was in no input.
         """
-        return self.interpolation or default_interpolation(tensor)
+        stated = self.inverse_interpolation if inverse and self.inverse_interpolation else self.interpolation
+        return stated or default_interpolation(tensor)
 
     @property
     def _tap_margin(self) -> int:
         """Cubic reads four taps per axis (floor-1 .. floor+2): one more voxel of window each way."""
-        return 2 if self.interpolation == "cubic" else 1
+        return 2 if {"cubic", "bspline"} & {self.interpolation, self.inverse_interpolation} else 1
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -1630,7 +1872,7 @@ class Resample(TransformInverse):
         """
         shape = [int(extent) for extent in source_spatial_shape]
         source, missing = Grid.from_header(shape, cache_attribute, f"case '{name}'" if name else "the case")
-        target = self._target.of(source, name)
+        target = self._target.header(source, name)
         native = self._native.get(name) if name else None
         if native is not None:
             # Read off a coarser pyramid level: the grid ``inverse`` pops back to is the level-0 one.
@@ -1819,7 +2061,13 @@ class Resample(TransformInverse):
         """
         held = self._grid_from(cache_attribute, [int(extent) for extent in shape])
         restored_shape = self._inverse_geometry(cache_attribute)
-        return held, self._grid_from(cache_attribute, restored_shape)
+        restored = self._grid_from(cache_attribute, restored_shape)
+        if isinstance(self._target, _RuleGrid) and Grid.readable(cache_attribute):
+            # The grid the forward SAMPLED, which a rule may record otherwise (zoom): rebuilt from the grid restored.
+            sampled = self._target.of(restored, "")
+            if sampled.size_zyx == held.size_zyx:
+                held = sampled
+        return held, restored
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         if self.transforms is not None or self.displacement is not None:
@@ -1831,8 +2079,9 @@ class Resample(TransformInverse):
                     " assembles the volume. The forward direction streams"
                 ),
             )
+        restored = Attribute(cache_attribute)
         try:
-            self._inverse_geometry(Attribute(cache_attribute))
+            self._inverse_geometry(restored)
         except DatasetManagerError:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
@@ -1841,6 +2090,9 @@ class Resample(TransformInverse):
                     " invert, so the shape it restores is unknown here. The forward direction streams"
                 ),
             )
+        spline = self._spline_reason(restored, forward=False)
+        if spline is not None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=spline)
         return PatchLocality(LocalityKind.REGRID)
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -1862,6 +2114,9 @@ class Resample(TransformInverse):
                 " transforms in the chain that needs it.",
             )
         held, restored = self._inverse_grids(cache_attribute, [int(extent) for extent in tensor.shape[1:]])
+        by_spline, axis = self._by_spline(self._mode(tensor, inverse=True), restored, name, forward=False)
+        if by_spline and held.size_zyx != restored.size_zyx:
+            return self._spline_resample(tensor, restored.size_zyx, axis, inverse=True)
         whole = tuple(slice(0, extent) for extent in restored.size_zyx)
         return self._resample_between(restored, held, tensor, whole, [0] * restored.rank)
 
@@ -1891,7 +2146,7 @@ class Resample(TransformInverse):
         region_starts: list[int],
     ) -> torch.Tensor:
         """One region of ``target``, read off ``source`` with no map between them."""
-        shape, mode = list(source.size_zyx), self._mode(tensor)
+        shape, mode = list(source.size_zyx), self._mode(tensor, inverse=True)
         axes = separable_source_index(target, source, (), tensor.device, target_slices)
         if axes is not None:
             order = blend_order(target, source)
@@ -1899,7 +2154,8 @@ class Resample(TransformInverse):
         # ITK's index and blend on the host, as the forward reads a region: a slab holds what the whole
         # holds. A device keeps its fused gather, twice as fast on an oblique or permuted case. Either
         # walks slab by slab under the budget.
-        as_itk = mode != "cubic" and tensor.device.type == "cpu" and scanline_map(target, source, ())
+        own_walk = mode in ("cubic", "nearest_even")
+        as_itk = not own_walk and tensor.device.type == "cpu" and scanline_map(target, source, ())
         return self._walk(tensor, target, source, (), target_slices, region_starts, mode, as_itk, None)
 
     @property
@@ -2090,3 +2346,38 @@ class WorldCoordinates(Transform):
         for c in range(rank):
             world[c] = float(origin[c]) + sum(float(step[c, a]) * indices[rank - 1 - a] for a in range(rank))
         return world
+
+
+def _antialias_mode(
+    antialias: str | None,
+    interpolation: str | None,
+    shape: list[int] | None,
+    transforms: dict[str, bool] | None,
+    field: str | None,
+    field_group: str | None,
+    align: str,
+) -> str | None:
+    """``Resample``'s ``antialias``, refused where it would not be the library's: ``triangle`` IS a linear resize
+    onto a shape with the extents aligned (torchvision's), with no map before it."""
+    if antialias in (None, "None"):
+        return None
+    if antialias not in ANTIALIAS_MODES:
+        raise TransformError(
+            f"'Resample' has an unknown antialias '{antialias}'.",
+            "Use 'triangle' (torchvision's Resize(antialias=True), PIL's bilinear) or 'gaussian' (scikit-image's"
+            " resize(anti_aliasing=True)).",
+        )
+    if antialias == "triangle" and (
+        shape is None
+        or interpolation not in (None, "linear")
+        or transforms
+        or field
+        or field_group
+        or align != "extent"
+    ):
+        raise TransformError(
+            "'Resample' antialias: triangle is torchvision's antialiased bilinear resize, which reads a shape,"
+            " linearly, with the extents aligned and no map.",
+            "Give 'shape', interpolation: linear, align: extent and no transforms or field; or use antialias: gaussian.",
+        )
+    return antialias

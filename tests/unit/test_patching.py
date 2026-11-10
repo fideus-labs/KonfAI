@@ -1357,3 +1357,41 @@ def test_an_edge_pad_repeats_the_edge_voxel_of_any_dtype(dtype):
         patch = DatasetPatch(patch_size=[8, 6], pad_value="edge", placement=placement)
         patch.load([5, 6])
         assert torch.equal(patch.get_data(volume, 0, 0, True), volume[:, index])
+
+
+def test_gaussian_float16_sums_and_divides_in_float16_whole_and_streamed() -> None:
+    scipy_ndimage = pytest.importorskip("scipy.ndimage")
+    from konfai.data.patching import GaussianFloat16
+    from konfai.data.patching.accumulate import Accumulator, StreamingAccumulator
+    from konfai.utils.utils import get_patch_slices_from_shape
+
+    shape, patch = [9, 12, 7], [4, 6, 5]
+    grid = get_patch_slices_from_shape(patch, shape, [2, 3, 2], placement="spread")
+    patches = [40 * torch.rand(1, 3, *patch, generator=torch.Generator().manual_seed(i)) for i in range(len(grid))]
+    # The window and its float16 sums, written out by hand: what the accumulators must write.
+    impulse = np.zeros(patch)
+    impulse[tuple(size // 2 for size in patch)] = 1
+    window = scipy_ndimage.gaussian_filter(impulse, [size / 8 for size in patch], 0, mode="constant", cval=0)
+    window = torch.from_numpy(window / window.max() * 10).to(torch.float16)
+    window[window == 0] = window[window != 0].min()
+    logits, counts = torch.zeros(3, *shape, dtype=torch.half), torch.zeros(shape, dtype=torch.half)
+    for piece, cut in zip(patches, grid, strict=True):
+        logits[(slice(None), *cut)] += piece[0] * window
+        counts[cut] += window
+    expected = torch.div(logits, counts)
+
+    combine = GaussianFloat16()
+    combine.set_patch_config(patch, [2, 3, 2])
+    whole = Accumulator(grid, patch, combine, batch=True)
+    for index, piece in enumerate(patches):
+        whole.add_layer(index, piece)
+    written = whole.assemble()
+    assert written.dtype == torch.float16
+    assert torch.equal(written[0], expected)
+
+    streamed = StreamingAccumulator(grid, patch, combine)
+    rows = []
+    for index, piece in enumerate(patches):
+        rows += [slab for _, slab in streamed.add_layer(index, piece)]
+    rows += [slab for _, slab in streamed.finalize()]
+    assert torch.equal(torch.cat(rows, dim=2)[0], expected)

@@ -80,6 +80,12 @@ The label image is `AppCheck/CT_TWO_CLASSES/Dataset/P000/PRED.mha`. Compare it a
 with the quickstart prediction for CASE_000. Once checked, the `CT_SEG/` folder
 can be shared as a local app or placed in a Hugging Face model repository.
 
+An app can read another app's output. Declare it in `app.json` as `"needs": {"body": "CT_BODY_SEG"}`:
+before it predicts, the app runs the needed app on the same inputs (as many as that app declares) and
+stages its output for each case as the group `body`, beside `Volume_0`. A stage of the config then reads it,
+for example `Crop: {source: body, labels: [10, 11], margin_mm: 20}`. A bare name is a sibling of the app (the
+same folder, or the same Hugging Face repository); `repo_id:app_name` or a path names any other.
+
 ## Fine-tune it
 
 The app includes `Config.yml`, which describes its training inputs and loss.
