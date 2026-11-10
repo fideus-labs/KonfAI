@@ -737,7 +737,7 @@ def run_publish_cli(kwargs: dict[str, Any]) -> None:
     from .app_repository import LocalAppRepositoryFromDirectory, _release_tag
 
     folder = Path(kwargs["app"]).expanduser().resolve()
-    if not folder.is_dir():
+    if not folder.is_dir() or not folder.name:  # a filesystem root has no name to publish the app under
         raise AppRepositoryError(f"No app folder at '{folder}'.")
     app = LocalAppRepositoryFromDirectory(folder.parent, folder.name)
     missing = [name for name in app.get_checkpoints_name() if name not in app.get_checkpoints_name_available()]

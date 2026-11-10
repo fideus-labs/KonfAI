@@ -383,8 +383,8 @@ def test_an_out_of_memory_run_exits_with_its_own_code() -> None:
 def test_publish_checks_the_app_then_uploads_it_under_the_konfai_library(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An app missing a declared weight is refused before anything is sent; a complete one goes to the repository,
-    created when missing, whose card then declares the KonfAI library."""
+    """An app whose app.json does not load or that misses a declared weight is refused before anything is sent; a
+    complete one goes to the repository, created when missing, whose card then declares the KonfAI library."""
     from types import SimpleNamespace
 
     import huggingface_hub
@@ -413,6 +413,12 @@ def test_publish_checks_the_app_then_uploads_it_under_the_konfai_library(
     with pytest.raises(SystemExit):
         apps_cli_module.main_apps()
     assert "CV_0.pt" in capsys.readouterr().err and sent == []
+
+    (app / "app.json").write_text("{not json")  # refused with its reason, not a traceback
+    with pytest.raises(SystemExit):
+        apps_cli_module.main_apps()
+    assert "does not load as JSON" in capsys.readouterr().err and sent == []
+    (app / "app.json").write_text(json.dumps({**manifest, "models": ["CV_0.pt"]}))
 
     (app / "CV_0.safetensors").write_bytes(b"")
     apps_cli_module.main_apps()
