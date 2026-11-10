@@ -81,9 +81,21 @@ def _op_cast(p: dict[str, Any]) -> dict[str, Any]:
     return {"op": "cast", "dtype": str(dtype).removeprefix("torch.")}
 
 
+def _refuse_set(stage: str, p: dict[str, Any], defaults: dict[str, Any]) -> None:
+    """Refuse a parameter set off its default: konfai reads it, and the portable runtime has no form for it yet."""
+    for name, default in defaults.items():
+        value = clean(p.get(name, default))
+        if value != default:
+            raise TransformError(
+                f"'{stage}' sets {name}: {value!r}, which the portable runtime does not carry.",
+                "Run this config with konfai itself.",
+            )
+
+
 def _op_resample(
     p: dict[str, Any], datasets: list[str] | None = None, roots: list[str] | None = None
 ) -> dict[str, Any]:
+    _refuse_set("Resample", p, {"grid": "konfai", "antialias": None, "inverse_interpolation": None})
     # A spacing, a shape or a reference image is portable: the runtime derives the first two from the volume
     # in hand and reads the third's header. So is a displacement field, read beside the case, and a transform
     # stored beside it, looked up in the run's datasets (`roots`).
@@ -224,8 +236,20 @@ def _refuse_lazy(stage: str, p: dict[str, Any]) -> None:
         )
 
 
+def _op_canonical(p: dict[str, Any]) -> dict[str, Any]:
+    _refuse_set("Canonical", p, {"resample": True})
+    return {"op": "canonical"}
+
+
+def _op_crop(p: dict[str, Any]) -> dict[str, Any]:
+    defaults = {"source": None, "labels": None, "margin_mm": 0.0, "fill": None, "empty": "refuse", "nonzero": False}
+    _refuse_set("Crop", p, {**defaults, "handed": False})
+    return {"op": "crop"}
+
+
 def _op_standardize(p: dict[str, Any]) -> dict[str, Any]:
     _refuse_lazy("Standardize", p)
+    _refuse_set("Standardize", p, {"nonzero": False})
     step: dict[str, Any] = {"op": "standardize"}
     for name in ("mean", "std"):
         if clean(p.get(name)) is not None:
@@ -399,8 +423,9 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "Resample": _op_resample,
     "Padding": _op_pad,
     "Dilate": lambda p: {"op": "dilate", "radius": int(p.get("dilate", _default("Dilate", "dilate")))},
-    # Canonical reorients from the volume's own direction cosines at runtime, so it carries no params.
-    "Canonical": lambda _p: {"op": "canonical"},
+    # Canonical reorients from the volume's own direction cosines at runtime: it carries no params, and refuses
+    # resample: false (a reorientation onto the nearest axes alone), which no runtime op reads yet.
+    "Canonical": _op_canonical,
     # Flip and Permute move the voxels and, as konfai's do, leave the geometry untouched.
     "Flip": _op_axes("Flip"),
     "Permute": _op_axes("Permute"),
@@ -414,7 +439,7 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "SelectLabel": _op_select_label,
     "FlatLabel": _op_flat_label,
     "OneHot": lambda p: {"op": "one_hot", "num_classes": int(p["num_classes"])},
-    "Crop": lambda _p: {"op": "crop"},
+    "Crop": _op_crop,
     # konfai's Gradient: the first difference along each spatial axis, per axis or folded into the norm
     # of their sigmoids.
     "Gradient": lambda p: {"op": "gradient", "per_dim": bool(clean(p.get("per_dim", False)))},
