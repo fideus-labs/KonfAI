@@ -556,7 +556,7 @@ def gather_separable(
 
     edge = fill == "edge"
     fill = 0.0 if isinstance(fill, str) else fill  # past the volume an edge sample is inside: no fill lands
-    if edge:  # MONAI's border: a sample clamps to the volume, so a cubic's weights see the edge too
+    if edge:  # a sample clamps to the volume, so a cubic's weights see the edge too
         axes = [axis.clamp(0, source_shape_zyx[array_axis] - 1) for array_axis, axis in enumerate(axes)]
     inside_axes = [(axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5) for array_axis, axis in enumerate(axes)]
     out_shape = [int(source.shape[0]), *extent_zyx]
@@ -654,7 +654,7 @@ def gather(
     ``konfai.data.transform`` obey: a sample is inside while its continuous source index lies in
     ``[-0.5, n - 0.5)``; inside, the interpolation taps clamp to the buffer, so the half-voxel rim
     past the outermost voxel centres reproduces the border value; outside, the sample is ``fill``, or with
-    ``fill: "edge"`` the border value too (MONAI's ``padding_mode: border``): no sample is outside.
+    ``fill: "edge"`` the border value too: no sample is outside.
 
     ``source`` covers ``source_starts_zyx`` onward of a volume of ``source_shape_zyx``; the
     coordinates are GLOBAL indices of that volume.
@@ -683,7 +683,7 @@ def gather(
 
     edge = fill == "edge"
     fill = 0.0 if isinstance(fill, str) else fill  # past the volume an edge sample is inside: no fill lands
-    if edge:  # MONAI's border: a sample clamps to the volume, so a cubic's weights see the edge too
+    if edge:  # a sample clamps to the volume, so a cubic's weights see the edge too
         upper = [source_shape_zyx[rank - 1 - axis] - 1 for axis in range(rank)]
         coordinates_xyz = torch.minimum(coordinates_xyz.clamp(min=0), coordinates_xyz.new_tensor(upper))
     inside = torch.ones(extent_zyx, dtype=torch.bool, device=device)

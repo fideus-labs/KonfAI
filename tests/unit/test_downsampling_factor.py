@@ -27,7 +27,7 @@ from konfai.network.network import Network
 # (id, strides, expected per-axis divisor). The divisor is the product of the encoder strides per axis.
 CONFIGS = [
     ("isotropic_5stage", [1, 2, 2, 2, 2], [16, 16, 16]),
-    ("anisotropic_totalseg", [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]], [4, 8, 8]),
+    ("anisotropic_five_stage", [1, [1, 2, 2], [2, 2, 2], [2, 2, 2]], [4, 8, 8]),
     ("shallow", [1, 2], [2, 2, 2]),
 ]
 

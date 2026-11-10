@@ -133,7 +133,7 @@ def _op_resample(
             step["align"] = align
     step.update(field)
     step.update(stored)
-    # `edge` reads the source's edge pixel past it (MONAI's padding_mode: border), a number fills with it.
+    # `edge` reads the source's edge pixel past it, a number fills with it.
     fill = clean(p.get("fill"))
     if fill == "edge":
         step["fill"] = fill
@@ -1031,7 +1031,7 @@ def derive_overlap(patch: dict[str, Any], patch_size: list[int]) -> list[int] | 
 
 
 def derive_stride(patch: dict[str, Any], patch_size: list[int]) -> list[float]:
-    """The unrounded step between windows on each exported axis, which placements ``monai`` and ``spread`` walk
+    """The unrounded step between windows on each exported axis, which placements ``end`` and ``spread`` walk
     (``get_patch_slices_from_shape``): a fraction's ``patch * (1 - fraction)``, which the integer overlap rounds."""
     from konfai.utils.utils import resolve_overlap
 

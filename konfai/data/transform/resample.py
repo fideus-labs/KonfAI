@@ -879,8 +879,8 @@ class Resample(TransformInverse):
     field group) declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled. One that
     no route can serve refuses as the plan is built, before a byte is written. A case reaching only
     PART of the target grid is legal and common (the rest takes ``fill``), and the plan prints how
-    much of the grid it covers. ``fill: edge`` gives it the volume's edge voxel instead, as MONAI's
-    ``Spacingd`` does (``padding_mode: border``).
+    much of the grid it covers. ``fill: edge`` gives it the volume's edge voxel instead, each sample clamped to
+    the volume.
 
     ``antialias`` filters a downsampling as a library does (:mod:`~konfai.data.transform.antialias`):
     ``triangle`` is torchvision's ``Resize(antialias=True)`` and PIL's bilinear resize (a 2D image onto a
@@ -915,7 +915,7 @@ class Resample(TransformInverse):
         if isinstance(fill, str) and fill != "edge":
             raise TransformError(
                 f"'Resample' has an unknown fill '{fill}'.",
-                "Give a number, or 'edge' for the volume's edge voxel past it (MONAI's padding_mode: border).",
+                "Give a number, or 'edge' for the volume's edge voxel past it.",
             )
         for stated in (interpolation, inverse_interpolation):
             if stated is not None and stated not in INTERPOLATIONS:

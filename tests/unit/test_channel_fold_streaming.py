@@ -14,8 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""A stage that folds the channel axis away (``Sum(dim=0)``, ``MergeLabels``: the 5-task
-TotalSegmentator merge) hands back a block of the spatial rank. The whole-volume write reads that as
+"""A stage that folds the channel axis away (``Sum(dim=0)``, ``MergeLabels``: five disjoint
+tasks merged) hands back a block of the spatial rank. The whole-volume write reads that as
 a single-channel image; the region write reads it the same way, ships the same bytes and the same
 header, and refuses every rank the header does not name."""
 

@@ -425,7 +425,7 @@ def test_an_inverse_of_a_resample_carries_the_fill_its_stage_states() -> None:
 
 
 def test_an_edge_fill_reaches_the_resample_and_its_inverse() -> None:
-    # `fill: edge` reads the source's edge pixel past it (MONAI's padding_mode: border), both ways.
+    # `fill: edge` reads the source's edge pixel past it, both ways.
     manifest = _undone_resample({}, {"fill": "edge"})
     (resample,) = [step for step in manifest["preprocessing"] if step["op"] == "resample"]
     (inverse,) = [step for step in manifest["postprocessing"] if step["op"] == "inverse"]
@@ -1301,7 +1301,7 @@ def test_the_program_stages_a_caller_builds_are_left_to_it() -> None:
 
 
 def _label_merge(resample: dict | None = None) -> dict:
-    """TotalSegmentator's shape: each model decides a uint8 class on the canonical 1.5 mm grid, the models
+    """An ensemble of disjoint tasks: each model decides a uint8 class on the canonical 1.5 mm grid, the models
     concatenate, MergeLabels tiles their classes and the input chain is undone on the merged map."""
     transforms = {
         "Canonical": {"inverse": True},
@@ -1580,7 +1580,7 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     import torch
     from konfai.portable import compile_prediction
 
-    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", "monai")
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", "end")
     from TinySeg import TinySegNet
 
     checkpoints = [tmp_path / f"fold_{index}.pt" for index in range(2)]
@@ -1602,7 +1602,7 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     # konfai blends the folds' float32 outputs in float16, which the runtime is told to do alike.
     assert {step["manifest"]["accumulation_dtype"] for step in steps[:2]} == {"float16"}
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
-    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == ["monai"] * 2
+    assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == ["end"] * 2
     assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
 
 
@@ -2149,7 +2149,7 @@ def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float |
     [
         ({}, "pad"),
         ({"placement": "None"}, "pad"),
-        ({"placement": "monai"}, "monai"),
+        ({"placement": "end"}, "end"),
         ({"placement": "spread"}, "spread"),
     ],
 )
@@ -2170,17 +2170,17 @@ def test_a_placement_konfai_does_not_know_is_refused() -> None:
 @pytest.mark.parametrize(
     ("patch", "exported", "expected"),
     [
-        # Patch 5, overlap 0.25: konfai steps by 3.75 (MONAI truncates it to 3); the integer overlap, 1, would step by 4.
+        # Patch 5, overlap 0.25: konfai steps by 3.75 (`end` truncates it to 3); the integer overlap, 1, would step by 4.
         ({"overlap": 0.25}, [5], [3.75]),
         ({"overlap": "25%"}, [8, 16], [6.0, 12.0]),
         ({"overlap": 2}, [5], [3]),
-        # Left unset, konfai's monai and spread step on the default fraction of the patch: nothing is case-dependent.
+        # Left unset, konfai's end and spread step on the default fraction of the patch: nothing is case-dependent.
         ({}, [5], [4.0]),
         # A 2.5-D axis drops out of the step as it does of the overlap.
         ({"patch_size": [1, 8, 12], "overlap": [0, 0.25, "50%"]}, [8, 12], [6.0, 6.0]),
     ],
 )
-def test_a_monai_or_spread_placement_exports_the_step_konfai_walks(
+def test_an_end_or_spread_placement_exports_the_step_konfai_walks(
     patch: dict[str, object], exported: list[int], expected: list[float]
 ) -> None:
     from konfai.portable import derive_stride

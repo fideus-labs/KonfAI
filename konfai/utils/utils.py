@@ -134,10 +134,9 @@ DEFAULT_OVERLAP_FRACTION = 0.2
 OverlapSpec = int | float | str | list[int | float | str] | None
 
 #: Where the windows of an axis sit (``Patch.placement``): ``pad`` on the stride, the last one cut at the volume's end
-#: and padded; ``monai`` on the stride, the last one moved back to end on the last voxel (MONAI's
-#: ``dense_patch_slices``); ``spread`` evenly from the first voxel to the last (nnU-Net's
-#: ``compute_steps_for_sliding_window``).
-Placement = Literal["pad", "monai", "spread"]
+#: and padded; ``end`` on the truncated step, the last one moved back to end on the last voxel; ``spread`` the fewest
+#: windows the step covers the axis with, evenly from the first voxel to the last.
+Placement = Literal["pad", "end", "spread"]
 
 
 def concretize_patch_size(
@@ -204,8 +203,8 @@ def resolve_overlap(
     Accepted forms: ``None`` -> ``DEFAULT_OVERLAP_FRACTION`` of the patch per axis; an ``int`` ->
     absolute voxels on every axis; a ``float`` in [0,1[ or a ``"20%"`` string -> that fraction of the
     patch; a per-axis list mixing those forms. An axis that is not tiled resolves to 0. ``step`` returns
-    the unrounded step between windows instead, a fraction's ``patch * (1 - fraction)``, as MONAI and
-    nnU-Net step.
+    the unrounded step between windows instead, a fraction's ``patch * (1 - fraction)``, which the ``end`` and
+    ``spread`` placements walk.
     """
 
     def one(spec: int | float | str) -> int | float:
@@ -297,10 +296,10 @@ def resolve_patch(
 
 
 def _spread(extent: int, length: int, stride: float) -> list[int]:
-    """nnU-Net's window starts on one axis (``compute_steps_for_sliding_window``), its step ``stride``:
-    the fewest windows that step covers ``extent`` with, spread evenly from 0 to ``extent - length``, each start
-    rounded as numpy rounds (half to even). One window when the axis is no longer than it; a start that rounds
-    onto its predecessor's (a step under a voxel) is placed once, where nnU-Net runs that window twice."""
+    """The ``spread`` window starts on one axis, its step ``stride``: the fewest windows that step covers ``extent``
+    with, ``ceil((extent - length) / stride) + 1``, spread evenly from 0 to ``extent - length``, each start rounded as
+    numpy rounds (half to even). One window when the axis is no longer than it; a start that rounds onto its
+    predecessor's (a step under a voxel) is placed once."""
     if extent <= length:
         return [0]
     # A fractional stride carries float error (10 * (1 - 0.8) is 1.9999999999999996): a quotient a few ulps off
@@ -364,7 +363,7 @@ def get_patch_slices_from_shape(
                 f" ≥ patch_size={patch_size[dim]} at dim={dim}",
             )
 
-    # MONAI and nnU-Net step on a fraction's unrounded step: MONAI truncates it, nnU-Net counts its windows on it.
+    # ``end`` and ``spread`` step on a fraction's unrounded step: ``end`` truncates it, ``spread`` counts its windows on it.
     steps = resolve_overlap(overlap_tmp, patch_size, shape, step=True) if placement != "pad" else []
     for dim in range(len(shape)):
         slices.append([])
@@ -372,14 +371,14 @@ def get_patch_slices_from_shape(
             length, extent = patch_size[dim], shape[dim]
             slices[dim] = [slice(start, min(start + length, extent)) for start in _spread(extent, length, steps[dim])]
             continue
-        stride = max(int(steps[dim]), 1) if placement == "monai" else patch_size[dim] - overlap[dim]
+        stride = max(int(steps[dim]), 1) if placement == "end" else patch_size[dim] - overlap[dim]
         index = 0
         while True:
             start = stride * index
 
             end = start + patch_size[dim]
             if end >= shape[dim]:
-                if placement == "monai":
+                if placement == "end":
                     start = max(shape[dim] - patch_size[dim], 0)
                 end = shape[dim]
                 slices[dim].append(slice(start, end))

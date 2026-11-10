@@ -151,7 +151,7 @@ schedulers:
 | Name | Purpose | Arguments (defaults) |
 | --- | --- | --- |
 | `Warmup` | Linear warm-up. | `warmup_steps=10`, `nb_step` |
-| `PolyLRScheduler` | nnU-Net polynomial decay. | `initial_lr`, `max_steps` (required), `exponent=0.9`, `nb_step` |
+| `PolyLRScheduler` | Polynomial decay: `initial_lr * (1 - step / max_steps) ** exponent`. | `initial_lr`, `max_steps` (required), `exponent=0.9`, `nb_step` |
 
 ## Next steps
 

@@ -272,8 +272,8 @@ def program_schema() -> dict[str, Any]:
                 "extend_slice": _INTEGER,
                 "pad_value": _PAD,
                 # Where the windows of an axis sit (konfai's Patch.placement).
-                "placement": {"enum": ["pad", "monai", "spread"]},
-                # The unrounded step between windows, per axis, that placements monai and spread walk
+                "placement": {"enum": ["pad", "end", "spread"]},
+                # The unrounded step between windows, per axis, that placements end and spread walk
                 # (`resolve_overlap(step=True)`); absent under pad, whose step is `size - overlap`.
                 "stride": _array(_NUMBER),
                 "batch": _INTEGER,
