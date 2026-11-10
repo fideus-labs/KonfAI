@@ -92,7 +92,7 @@ def test_a_thin_box_drops_ssim_and_an_unknown_metric_names_the_criteria(fixtures
     case, _ = fixtures["synthesis"]
     case.stage(tmp_path / "stage")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path / "work", None)
-    assert evaluator.available() == ["MAE", "PSNR", "SSIM"]
+    assert evaluator.available() == ["MAE", "ME", "PSNR", "SSIM"]
     whole = case.grid.world_box()
     thin = box_from_dict(
         {"min": list(whole.low_xyz), "max": [whole.high_xyz[0], whole.high_xyz[1], whole.low_xyz[2] + 3.0]}
@@ -100,6 +100,6 @@ def test_a_thin_box_drops_ssim_and_an_unknown_metric_names_the_criteria(fixtures
     measurement = evaluator.measure(thin)
     assert "SYN:TARGET:MAE" in measurement.values and not any("SSIM" in k for k in measurement.values)
     assert measurement.request["dropped"] == ["SSIM: the box is thinner than its 7-voxel window"]
-    with pytest.raises(EvaluationError, match="criterion names, for this case: MAE, PSNR, SSIM"):
+    with pytest.raises(EvaluationError, match="criterion names, for this case: MAE, ME, PSNR, SSIM"):
         evaluator.measure(whole, ["SYN:TARGET:Dice"])
     assert "SYN:TARGET:MAE" in evaluator.measure(whole, ["SYN:TARGET:MAE"]).values

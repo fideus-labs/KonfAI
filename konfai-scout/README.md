@@ -95,7 +95,7 @@ for o in report.observations:
 | `view` | one slice: a plane, a position in mm or an index, a mode, a window, a zoom box, one label |
 | `montage` | equally spaced slices of a plane in one image |
 | `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria, named as KonfAI names them or by a result key; SSIM is left out of a box thinner than its 7-voxel window |
-| `region_stats` | labels, volumes, pieces, intensities (inside the case's mask when it has one), displacement lengths, landmarks in a box: no reference needed; a measurement of kind `scout`, citable |
+| `region_stats` | what a box holds, described role by role: labels, volumes, pieces, intensities (inside the case's mask when it has one), landmarks; no comparison (that is `measure`); a measurement of kind `scout`, citable |
 | `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
 | `conclude` | the verdict |
 

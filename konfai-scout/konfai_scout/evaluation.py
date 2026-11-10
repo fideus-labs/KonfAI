@@ -39,7 +39,7 @@ DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
         "Displacement#3": {"statistic": "max"},
     },
     "registration_landmarks": {"TRE": {}},
-    "synthesis": {"MAE": {}, "PSNR": {}, "SSIM": {}},
+    "synthesis": {"MAE": {}, "ME": {}, "PSNR": {}, "SSIM": {}},
 }
 #: When a measured value is an error, by KonfAI's result name (the third part of `PRED:TRUTH:Dice:1`). A criterion
 #: whose scale is the data's (MAE, PSNR, SSIM, displacement lengths) has none: it confirms nothing until

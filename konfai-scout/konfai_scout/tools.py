@@ -20,7 +20,7 @@ from konfai.data.geometry import Grid, WorldBox
 from .case import MASK_ROLES, InspectionCase
 from .config import ScoutConfig
 from .evaluation import DEFAULT_THRESHOLDS, EvaluationError, RegionEvaluator
-from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
+from .measure import intensity_stats, label_stats
 from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import (
@@ -291,19 +291,15 @@ class Toolbox:
             if "truth" in self.case.inputs:
                 truth = read("truth")
                 out["truth_labels"] = label_stats(truth, grid, self.case.labels, lo)
-                out["overlap_voxels_prediction_vs_truth"] = label_overlap(prediction, truth)
         elif task == "registration":
             out["fixed"] = intensity_stats(read("fixed"), mask)
             out["warped"] = intensity_stats(read("warped"), mask)
-            out["displacement"] = displacement_stats(self.renderer.volume("field").region(lo, hi))
             fixed_labels = read("fixed_labels") if "fixed_labels" in self.case.inputs else None
             if fixed_labels is not None:
                 out["fixed_labels"] = label_stats(fixed_labels, grid, self.case.labels, lo)
             if WARPED_LABEL_ROLES & self.case.inputs.keys():
                 warped_labels = read("warped_labels")
                 out["warped_labels"] = label_stats(warped_labels, grid, self.case.labels, lo)
-                if fixed_labels is not None:
-                    out["overlap_voxels_warped_vs_fixed_labels"] = label_overlap(warped_labels, fixed_labels)
             points = self.case.landmarks("fixed_landmarks")
             if points is not None:
                 out["fixed_landmarks_inside"] = int(
@@ -314,16 +310,12 @@ class Toolbox:
             out["synthetic"] = intensity_stats(synthetic, mask)
             out["source"] = intensity_stats(read("source"), mask)
             if "target" in self.case.inputs:
-                target = read("target")
-                out["target"] = intensity_stats(target, mask)
-                out["difference_synthetic_minus_target"] = intensity_stats(
-                    synthetic.astype(np.float64) - target.astype(np.float64), mask
-                )
+                out["target"] = intensity_stats(read("target"), mask)
         # the statistics are a measurement of kind `scout`: a note cites them like one of KonfAI Eval's
         measurement = Measurement(
             id=f"m{len(self.measurements) + 1:03d}",
             kind="scout",
-            reference=any(key.startswith(("overlap_voxels", "difference_")) for key in out),
+            reference=False,  # a description of each role; comparisons are KonfAI Eval's (`measure`)
             box_requested=box_to_dict(box),
             box_measured=out["box_measured"],
             values=_flatten({k: v for k, v in out.items() if k != "box_measured"}),

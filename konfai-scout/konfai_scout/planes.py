@@ -112,6 +112,16 @@ def box_to_dict(value: WorldBox) -> dict[str, list[float]]:
     return {"min": [round(float(v), 3) for v in value.low_xyz], "max": [round(float(v), 3) for v in value.high_xyz]}
 
 
+def box_of(mask: np.ndarray, grid: Grid, offset_zyx: object = (0, 0, 0)) -> dict[str, list[float]]:
+    """The box in mm of a mask's voxels on ``grid``, the mask's array starting at ``offset_zyx`` in it."""
+    from scipy import ndimage
+
+    window = ndimage.find_objects(np.asarray(mask, dtype=np.uint8))[0]
+    return box_to_dict(
+        grid.world_box(tuple(slice(s.start + int(o), s.stop + int(o)) for s, o in zip(window, offset_zyx, strict=True)))
+    )
+
+
 def box_center(value: WorldBox) -> np.ndarray:
     return (value.low_xyz + value.high_xyz) / 2
 

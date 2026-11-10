@@ -13,9 +13,9 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 
 import numpy as np
+from konfai.utils.ITK import field_jacobian_determinant
 from scipy import ndimage
 
-from .measure import jacobian_determinant
 from .planes import box_to_dict
 from .views import Renderer
 
@@ -122,11 +122,12 @@ def _segmentation(r: Renderer) -> list[Found]:
     margin = np.ceil(10.0 / spacing).astype(int)
     components: list[tuple[float, Found]] = []
     edgeless: list[tuple[int, Found]] = []
-    for label in (int(v) for v in np.unique(prediction) if v != 0):
+    for label, extent in enumerate(ndimage.find_objects(prediction.astype(np.int32)), start=1):
+        if extent is None:
+            continue
         name = case.labels.get(label, f"label {label}") if case.labels else f"label {label}"
-        where = np.argwhere(prediction == label)
-        lo = _zyx(np.maximum(where.min(axis=0) - margin, 0))
-        hi = _zyx(np.minimum(where.max(axis=0) + margin + 1, grid.size_zyx))
+        lo = _zyx(np.maximum([s.start for s in extent] - margin, 0))
+        hi = _zyx(np.minimum([s.stop for s in extent] + margin, grid.size_zyx))
         window = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
         image = r.volume(case.image_role).region(lo, hi)[0].astype(np.float32)
         mask, other = prediction[window] == label, (prediction[window] != 0) & (prediction[window] != label)
@@ -245,7 +246,7 @@ def _registration(r: Renderer) -> list[Found]:
     field = r.volume("field")
     folded = np.zeros(size, dtype=bool)
     for (lo, hi), (olo, ohi) in _blocks(size, (BLOCK,) * 3, 1):
-        det = jacobian_determinant(field.region(olo, ohi), grid)
+        det = field_jacobian_determinant(np.asarray(field.region(olo, ohi), np.float64), grid.world_to_index.matrix)
         folded[tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))] = det[_inner(lo, hi, olo)] <= 0
     for count, window in _clusters(folded, 1)[:3]:
         found.append(("folding", window, f"{count} voxels where the field folds (the map's determinant is <= 0)"))

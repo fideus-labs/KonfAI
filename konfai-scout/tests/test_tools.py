@@ -30,7 +30,6 @@ def test_region_stats_see_the_planted_defects(fixtures, tmp_path):
     whole = run(box, "region_stats", box_mm=box_to_dict(case.grid.world_box()))["region"]
     assert whole["prediction_labels"]["1"]["components"] == 2  # the sphere and the spurious blob
     assert "2" not in whole["prediction_labels"] and whole["truth_labels"]["2"]["name"] == "cube"
-    assert whole["overlap_voxels_prediction_vs_truth"]["2"]["only_b"] > 0
     cube = run(box, "region_stats", box_mm=defects["missing_cube"]["box_mm"])["region"]
     assert cube["truth_labels"]["2"]["voxels"] == whole["truth_labels"]["2"]["voxels"]
 
@@ -101,7 +100,7 @@ def test_registration_tools_without_references(fixtures, tmp_path):
     case, _ = fixtures["registration_no_ref"]
     box = toolbox(fixtures, "registration_no_ref", tmp_path)
     stats = run(box, "region_stats", box_mm=box_to_dict(case.grid.world_box()))["region"]
-    assert stats["displacement"]["max_mm"] > 1.0 and "fixed_labels" not in stats
+    assert "fixed" in stats and "warped" in stats and "fixed_labels" not in stats  # a field's lengths are KonfAI Eval's
     view = run(box, "view", plane="sagittal", mode="jacobian")["view"]
     assert "scale" in view and view["scale"]["folded_pixels"] == 0
     specs = {t.name for t in box.specs(exploration=True)}
@@ -244,7 +243,6 @@ def test_a_confirmation_rests_on_a_value_past_its_threshold_and_scout_checks_eve
     assert _past("SYN:TARGET:MAE", float("nan"), thresholds) is None  # an empty mask, not an error
     assert _past("SYN:TARGET:MAE", 500.0, thresholds) is None  # no threshold: the scale is the data's
     assert _past("SYN:TARGET:MAE", 500.0, {"MAE": {"above": 100}}) == "MAE = 500 > 100"
-    assert _past("overlap_voxels_prediction_vs_truth.2.only_b", 120, thresholds) is None
 
 
 def test_a_mask_restricts_the_statistics_and_a_ct_preset_follows_a_stored_offset(fixtures, tmp_path):

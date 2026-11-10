@@ -16,12 +16,12 @@ from pathlib import Path
 
 import numpy as np
 from konfai.data.geometry import Grid, WorldBox
+from konfai.utils.ITK import field_jacobian_determinant
 from PIL import Image, ImageDraw, ImageFont
 
 from .case import InspectionCase, Volume
 from .config import ScoutConfig
 from .derived import Derived
-from .measure import jacobian_determinant
 from .planes import (
     PlaneFrame,
     axis_world_vector,
@@ -556,7 +556,7 @@ class Renderer:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
         block = field.region(tuple(lo), tuple(hi)).astype(np.float64)  # type: ignore[arg-type]
-        determinant = jacobian_determinant(block, self.grid)
+        determinant = field_jacobian_determinant(np.asarray(block, np.float64), self.grid.world_to_index.matrix)
         plane = np.take(determinant, index - lo[frame.array_axis], axis=frame.array_axis)
         folded = plane <= 0
         unit = np.clip(np.log2(np.clip(plane, 1e-9, None)) / 2 + 0.5, 0.0, 1.0)  # det 0.25..4 over the map
