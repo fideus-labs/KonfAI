@@ -227,6 +227,9 @@ def test_a_handed_box_is_its_own_chains_when_two_chains_share_their_stage_names(
         def __init__(self, first: bool) -> None:
             self.first = first
 
+        def __eq__(self, other: object) -> bool:  # both chains' stages equal, and unhashable: the memo goes by identity
+            return isinstance(other, KeepHalf)
+
         def transform_shape(self, group: str, name: str, shape: list[int], attribute: object) -> list[int]:
             return shape
 
