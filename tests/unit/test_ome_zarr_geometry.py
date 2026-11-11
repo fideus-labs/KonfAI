@@ -131,6 +131,21 @@ def test_rfc4_ras_frame_is_converted_to_itk_lps(tmp_path: Path) -> None:
     np.testing.assert_array_equal(attributes.get_np_array("Direction"), np.diag([-1, -1, 1]).ravel())
 
 
+def test_a_non_lps_orientation_reads_as_identity(tmp_path: Path) -> None:
+    """A rodent atlas axis (dorsal-to-ventral) has no LPS direction: ngff-zarr says identity, not a crash."""
+    from ngff_zarr.rfc4 import AnatomicalOrientation, AnatomicalOrientationValues
+
+    image = nz.to_ngff_image(np.zeros((4, 4, 4), np.uint8), dims=["z", "y", "x"])
+    image.axes_orientations = {
+        "x": AnatomicalOrientation(value=AnatomicalOrientationValues.left_to_right),
+        "y": AnatomicalOrientation(value=AnatomicalOrientationValues.dorsal_to_ventral),
+        "z": AnatomicalOrientation(value=AnatomicalOrientationValues.anterior_to_posterior),
+    }
+    nz.to_ngff_zarr(str(tmp_path), nz.to_multiscales(image, scale_factors=[]), version="0.6")
+    attributes = ome_zarr_attributes(get_ome_zarr_info(tmp_path))
+    np.testing.assert_array_equal(attributes.get_np_array("Direction"), np.eye(3).ravel())
+
+
 def test_multiple_physical_mappings_are_not_silently_selected(tmp_path: Path) -> None:
     import dataclasses
 
