@@ -761,10 +761,12 @@ class Flip(TransformInverse):
 
 
 class Canonical(TransformInverse):
-    """Reorient a volume onto RAS, the orientation NIfTI is canonical in.
+    """Reorient a volume onto RAS, the orientation NIfTI is canonical in, or onto ``orientation``.
 
     The pipeline writes direction cosines in the SimpleITK convention, where the identity is LPS, so
     RAS is ``diag(-1, -1, 1)`` there and a volume already in LPS is reoriented by this stage.
+    ``orientation`` names where each array axis (x, y, z) points, as ``sitk.DICOMOrient`` reads it:
+    ``LPS``, the identity, for a model that expects its arrays in DICOM order (MRSegmentator).
 
     An orthogonal reorientation is a signed permutation of the axes, an exact index remap; only an
     oblique direction is resampled, in world space onto the grid it records, ``fill`` where the source
@@ -782,11 +784,23 @@ class Canonical(TransformInverse):
 
     working_multiple = 3.0  # an oblique case: ITK's filter on the host; the device walk slabs itself against its budget
 
-    def __init__(self, inverse: bool = True, fill: float = 0.0, resample: bool = True) -> None:
+    def __init__(
+        self, inverse: bool = True, fill: float = 0.0, resample: bool = True, orientation: str = "RAS"
+    ) -> None:
         super().__init__(inverse)
         self.fill_value = float(fill)
         self.resample = resample
-        self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
+        towards = {"L": (0, 1), "R": (0, -1), "P": (1, 1), "A": (1, -1), "S": (2, 1), "I": (2, -1)}  # world axis, sign
+        code = str(orientation).upper()
+        if len(code) != 3 or not set(code) <= set(towards) or len({towards[letter][0] for letter in code}) != 3:
+            raise TransformError(
+                f"Canonical orientation {orientation!r} is not one of L or R, P or A, S or I, once each.",
+                "Name where each array axis points, as RAS or LPS.",
+            )
+        self.canonical_direction = torch.zeros(3, 3, dtype=torch.double)
+        for column, letter in enumerate(code):
+            axis, sign = towards[letter]
+            self.canonical_direction[axis, column] = sign
 
     def _reorientation(self, cache_attribute: Attribute) -> torch.Tensor:
         """The map taking an output coordinate onto the input it comes from, in (x, y, z): a voxel

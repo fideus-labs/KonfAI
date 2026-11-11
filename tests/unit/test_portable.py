@@ -962,7 +962,7 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
     "Standardize": {"lazy": True, "nonzero": True},
-    "Canonical": {"resample": False},
+    "Canonical": {"resample": False, "orientation": "LPS"},
     "Crop": {
         "source": "OTHER",
         "labels": [1],

@@ -237,7 +237,7 @@ def _refuse_lazy(stage: str, p: dict[str, Any]) -> None:
 
 
 def _op_canonical(p: dict[str, Any]) -> dict[str, Any]:
-    _refuse_set("Canonical", p, {"resample": True})
+    _refuse_set("Canonical", p, {"resample": True, "orientation": "RAS"})
     return {"op": "canonical"}
 
 
@@ -423,8 +423,9 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "Resample": _op_resample,
     "Padding": _op_pad,
     "Dilate": lambda p: {"op": "dilate", "radius": int(p.get("dilate", _default("Dilate", "dilate")))},
-    # Canonical reorients from the volume's own direction cosines at runtime: it carries no params, and refuses
-    # resample: false (a reorientation onto the nearest axes alone), which no runtime op reads yet.
+    # Canonical reorients from the volume's own direction cosines at runtime onto RAS: it carries no params, and
+    # refuses resample: false (a reorientation onto the nearest axes alone) and another orientation, which no runtime
+    # op reads yet.
     "Canonical": _op_canonical,
     # Flip and Permute move the voxels and, as konfai's do, leave the geometry untouched.
     "Flip": _op_axes("Flip"),
