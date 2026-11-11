@@ -19,9 +19,10 @@ reuses it.
    commit is this tree's, so the gate also refuses when the interpreter imports `konfai` from anywhere
    else (an editable install of another checkout, for instance): run from a worktree with that
    worktree on `PYTHONPATH`, or with its own environment.
-3. **Warmup, then a median**, every run kept in the JSON: of the repeats for a run of seconds (three
-   to five), of the steps for a training step (200), of the calls that fit in a second for a call of
-   milliseconds (`steady_ms`). Device timing is synchronized (`cuda_timer`, CUDA events on both ends).
+3. **Warmup, then a median**: of the repeats for a run of seconds (three to five) and of the steps for
+   a training step (200), every one kept in the JSON; of the calls that fit in a second for a call of
+   milliseconds (`steady_ms`), the median alone. Device timing is synchronized (`cuda_timer`, CUDA
+   events on both ends).
    A compiled variant runs on an inductor cache of its own: a process that loads a cached
    compilation steps faster than the one that compiled it (13.1 against 16.5 ms on the 2D example).
    A bench that times one thread (`startup`, `stages`, `reads`) holds the performance cores of a
@@ -97,9 +98,10 @@ pixi run --environment dev python benchmarks/perf/run_all.py            # add --
 pixi run --environment dev python benchmarks/perf/compare.py results/<host>/<baseline>.json results/<host>/<run>.json
 # the release gate: the series, then the comparison to baselines/<host>.json (exit 1 on a regression)
 pixi run perf-check
-# once a release is out, or when a bench joins the series: this run becomes the baseline of its machine class
-# (KONFAI_PERF_MACHINE, else the host name), kept on that machine and out of git: a baseline says only what one
-# machine measured. KONFAI_PERF_BASELINES moves it to a directory outside the checkout, which git then never sees
+# once a release is out, or when a bench joins the series or changes its metrics: this run becomes the
+# baseline of its machine class (KONFAI_PERF_MACHINE, else the host name), kept on that machine and out of
+# git: a baseline says only what one machine measured. KONFAI_PERF_BASELINES moves it to a directory outside
+# the checkout, which git then never sees
 # (a quiet machine and a clean tree; a baseline missing a bench makes every comparison invalid)
 BASELINES="${KONFAI_PERF_BASELINES:-benchmarks/perf/baselines}" MACHINE="${KONFAI_PERF_MACHINE:-$(hostname)}"
 mkdir -p "$BASELINES"
