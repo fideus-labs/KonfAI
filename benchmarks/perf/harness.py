@@ -21,12 +21,13 @@ on the same footing:
 
 - :func:`fingerprint`: the commit (and whether the tree is dirty), the versions, the CPU, the GPU and
   its driver, the power profile, the load average, the thread pin. Written into every result.
-- :func:`machine_gate`: refuses to time on a machine that is not quiet (load, power profile, GPU busy,
-  another process eating a core) unless ``--force``; the refusal names what it saw. The audit that
+- :func:`machine_gate`: refuses to time on a machine that is not quiet (load, power profile, battery,
+  GPU busy, another process eating a core) unless ``--force``; the refusal names what it saw. The audit that
   produced this folder measured a 2x spread on every absolute number from the profile and the load
   alone, so the gate is the first line of every protocol here.
-- :class:`PeakSampler` / :class:`GpuSampler`: whole-process-tree resident set at 50 ms and the GPU's
-  used memory at 250 ms, so children (DataLoader workers, spawned ranks) count.
+- :class:`PeakSampler` / :class:`GpuSampler`: whole-process-tree resident set at 50 ms (the process
+  itself at its kernel high-water mark) and the GPU's used memory at 250 ms, so children (DataLoader
+  workers, spawned ranks) count.
 - :func:`write_result`: one JSON per bench run under ``results/<host>/``, with the fingerprint, and
   one markdown row so the number a page carries can be traced to a file.
 
@@ -118,6 +119,33 @@ def versions() -> dict[str, str]:
     return out
 
 
+def cpu_temperature() -> float | None:
+    """The CPU package temperature in degrees Celsius, where the kernel reports one."""
+    sensors = getattr(psutil, "sensors_temperatures", dict)().get("coretemp") or []
+    return next((sensor.current for sensor in sensors if sensor.label.startswith("Package")), None)
+
+
+def on_battery() -> bool:
+    battery = psutil.sensors_battery()
+    return battery is not None and battery.power_plugged is False
+
+
+def hold_performance_cores() -> None:
+    """Keep this process and what it spawns on the performance cores of a hybrid CPU, where the kernel
+    names them: a single-thread bench that lands on an efficiency core reads 30 to 50 % slower."""
+    try:
+        listed = Path("/sys/devices/cpu_core/cpus").read_text().strip()
+    except OSError:
+        return
+    cores: set[int] = set()
+    for part in filter(None, listed.split(",")):
+        first, _, last = part.partition("-")
+        cores.update(range(int(first), int(last or first) + 1))
+    held = cores & os.sched_getaffinity(0)
+    if held:
+        os.sched_setaffinity(0, held)
+
+
 def machine_class() -> str:
     """The name a baseline is keyed by: ``KONFAI_PERF_MACHINE``, the GitHub runner image (``gha-ubuntu24``)
     on Actions, the host name otherwise. Timings compare within one class only."""
@@ -139,7 +167,12 @@ def fingerprint(*, import_versions: bool = True) -> dict[str, Any]:
         "machine": machine_class(),
         "git": git_revision(),
         "versions": versions() if import_versions else {},
-        "cpu": {"model": cpu_model(), "count": os.cpu_count(), "affinity": len(os.sched_getaffinity(0))},
+        "cpu": {
+            "model": cpu_model(),
+            "count": os.cpu_count(),
+            "affinity": len(os.sched_getaffinity(0)),
+            "temperature_c": cpu_temperature(),
+        },
         "gpu": gpu_info(),
         "power_profile": power_profile(),
         "load_avg": [round(load1, 2), round(load5, 2), round(load15, 2)],
@@ -217,6 +250,8 @@ def machine_gate(*, max_load: float = 3.0, require_performance: bool = True, for
     profile = power_profile()
     if require_performance and profile not in ("performance", "unavailable"):
         report.warnings.append(f"power profile is '{profile}', not 'performance'")
+    if on_battery():
+        report.warnings.append("on battery: the GPU is power-capped (its benches measured 1.3 to 1.8x slower)")
     busy = gpu_busy()
     if busy:
         report.warnings.append(busy)
@@ -251,8 +286,21 @@ def _tree_rss(process: psutil.Process) -> int:
     return total
 
 
+def _high_water(pid: int) -> int:
+    """The kernel's resident high-water mark of one process in bytes, 0 where it reports none: the
+    peak a sample would miss between two readings."""
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 class PeakSampler(threading.Thread):
-    """Whole-tree peak RSS in bytes, sampled at ``interval`` seconds; children count."""
+    """Whole-tree peak RSS in bytes, sampled at ``interval`` seconds; children count. The process
+    itself is read at its kernel high-water mark, so a peak shorter than the interval counts too."""
 
     def __init__(self, pid: int | None = None, interval: float = 0.05) -> None:
         super().__init__(daemon=True)
@@ -265,7 +313,7 @@ class PeakSampler(threading.Thread):
     def run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.peak = max(self.peak, _tree_rss(self._process))
+                self.peak = max(self.peak, _tree_rss(self._process), _high_water(self._process.pid))
             except psutil.Error:
                 break
             time.sleep(self._interval)
@@ -396,6 +444,19 @@ def median_of(fn: Callable[[], float], repeats: int = 3, warmup: int = 1) -> tup
         fn()
     runs = [fn() for _ in range(repeats)]
     return statistics.median(runs), runs
+
+
+def steady_ms(call: Callable[[], object], seconds: float = 1.0, floor: int = 3) -> float:
+    """The median wall of ``call`` in milliseconds, over as many calls as fit in ``seconds`` (``floor``
+    at least) after a warm-up one: a call of a millisecond is sampled hundreds of times."""
+    call()
+    walls: list[float] = []
+    deadline = time.perf_counter() + seconds
+    while len(walls) < floor or time.perf_counter() < deadline:
+        start = time.perf_counter()
+        call()
+        walls.append((time.perf_counter() - start) * 1e3)
+    return statistics.median(walls)
 
 
 @contextlib.contextmanager

@@ -28,7 +28,12 @@ only if it exits 0, writes a checkpoint and prints a finite loss. ``--cprofile``
 of the criteria in host time.
 
 ``cudnn`` and ``compile`` train over autocast with ``cudnn_benchmark`` or ``torch_compile`` set; a compiled
-run's first epoch carries its compilation, so its last epoch is the steady state to compare.
+run's first epoch carries its compilation (on an inductor cache of its own, so it always compiles), and
+its last epoch is the steady state to compare.
+
+The run's wall, each epoch's wall and the peaks are the metrics compared to a baseline. The clock
+prints an epoch's phases to a tenth of a second and the startup only past one second, which is the
+size of most of them here: they are in ``epoch_lines`` and ``startup``.
 """
 
 from __future__ import annotations
@@ -124,7 +129,7 @@ def train_once(copy: Path, scratch: Path, variant: str, *, gpu: bool, cprofile: 
     else:
         argv = [*konfai_executable(), *args]
     # The runtime pins its own threads (rank_cpu_share); an inherited OMP_NUM_THREADS would override it.
-    env = {"OMP_NUM_THREADS": ""}
+    env = {"OMP_NUM_THREADS": "", "TORCHINDUCTOR_CACHE_DIR": str(scratch / "inductor")}
     return run_cli(argv, cwd=copy, env=env, log_path=scratch / f"train_{variant}.log")
 
 
@@ -181,20 +186,11 @@ def main() -> None:
             result["failure"] = f"{variant}: rc {run.returncode}, checkpoints {len(checkpoints)}, loss {loss}"
             write_result("train_epoch", result, fp=fp)
             raise SystemExit(f"[perf] TRAIN ({variant}) did not produce a valid run: {result['failure']}")
+        if variant == variants[0]:
+            phases, startup = (lines[-1] if lines else {}), run.clocks.get("startup", {}).get("wall", 0.0)
         metrics[f"wall_s_{variant}"] = run.wall_s
-        metrics[f"startup_s_{variant}"] = round(run.clocks.get("startup", {}).get("wall", 0.0), 3)
         for i, line in enumerate(lines, 1):
             metrics[f"epoch{i}_wall_s_{variant}"] = line["wall"]
-        last = lines[-1] if lines else {}
-        for phase, key in (
-            ("wait(data)", "wait_data"),
-            ("forward", "forward"),
-            ("criteria", "criteria"),
-            ("backward+step", "backward_step"),
-            ("validation", "validation"),
-            ("telemetry", "telemetry"),
-        ):
-            metrics[f"{key}_s_{variant}"] = last.get(phase, 0.0)
         metrics[f"peak_rss_gib_{variant}"] = run.peak_rss_gib
         metrics[f"gpu_delta_mib_{variant}"] = run.gpu_peak_mib - run.gpu_baseline_mib
         if args.cprofile:
@@ -215,10 +211,10 @@ def main() -> None:
     last_epoch = f"epoch{epochs}_wall_s_{first}"
     result["metrics"] = metrics
     result["headline"] = (
-        f"epoch {first} {metrics.get(last_epoch, 0.0)} s (criteria {metrics[f'criteria_s_{first}']}, validation "
-        f"{metrics[f'validation_s_{first}']}, wait(data) {metrics[f'wait_data_s_{first}']})"
+        f"epoch {first} {metrics.get(last_epoch, 0.0)} s (criteria {phases.get('criteria', 0.0)}, validation "
+        f"{phases.get('validation', 0.0)}, wait(data) {phases.get('wait(data)', 0.0)})"
         + "".join(f" | {v} {metrics.get(f'epoch{epochs}_wall_s_{v}', 0.0)} s" for v in variants[1:])
-        + f" | startup {metrics[f'startup_s_{first}']} s | RSS {metrics[f'peak_rss_gib_{first}']} GiB"
+        + f" | startup {startup} s | RSS {metrics[f'peak_rss_gib_{first}']} GiB"
     )
     path = write_result("train_epoch", result, fp=fp)
     print(json.dumps(metrics, indent=2))

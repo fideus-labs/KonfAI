@@ -21,7 +21,8 @@
 The CLI runs on a scratch copy of ``examples/Segmentation`` that keeps its shipped
 ``Predictions/SEG_BASELINE`` (the input of ``Evaluation.yml``). The ``[KonfAI] startup`` clock is
 parsed; the loop figure is the wall minus that startup, a difference and not a clock. The metric
-JSON the run writes is opened and its numbers checked finite before a time is reported.
+JSON the run writes is opened and its numbers checked finite before a time is reported. The wall and
+the peak are the metrics compared to a baseline: the startup clock prints only past one second.
 
 With a GPU (and without ``--cpu``) the same runs repeat with ``--gpu 0``: the metrics then move to the
 device, and their JSON must match the CPU one number for number before the GPU time counts.
@@ -123,10 +124,9 @@ def main() -> None:
 
     metrics = {
         "wall_s": round(statistics.median(r.wall_s for r in timed), 3),
-        "startup_s": round(statistics.median(r.clocks.get("startup", {}).get("wall", 0.0) for r in timed), 3),
         "peak_rss_gib": round(max(r.peak_rss_gib for r in timed), 3),
     }
-    metrics["loop_s"] = round(metrics["wall_s"] - metrics["startup_s"], 3)
+    startup = round(statistics.median(r.clocks.get("startup", {}).get("wall", 0.0) for r in timed), 3)
 
     import torch
 
@@ -168,13 +168,13 @@ def main() -> None:
         "numbers_seen": seen,
         "non_finite_numbers": bad,
         "sample": sample,
-        "loop_note": "loop_s is wall_s minus the startup clock: a difference, not a clock",
-        "clock_note": "the [KonfAI] startup and loop clocks print only above one second: a 0.0 here means under a second, not zero",
+        "startup_s": startup,
+        "clock_note": "the [KonfAI] startup clock prints only above one second: a 0.0 here means under a second, not zero",
         "gpu": gpu_route,
         "metrics": metrics,
     }
     result["headline"] = (
-        f"evaluation {metrics['wall_s']} s wall, startup {metrics['startup_s']} s, loop about {metrics['loop_s']} s, "
+        f"evaluation {metrics['wall_s']} s wall, startup {startup} s, loop about {round(metrics['wall_s'] - startup, 3)} s, "
         f"RSS {metrics['peak_rss_gib']} GiB; {len(files)} metric files, {seen} numbers, {bad} non-finite"
         + (f" | --gpu 0 {metrics['wall_s_gpu']} s, same metrics" if "wall_s_gpu" in metrics else "")
     )
