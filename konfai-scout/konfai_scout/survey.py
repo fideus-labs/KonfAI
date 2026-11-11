@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where to look: a deterministic survey that hands the model leads, each a region and the reason it stands out.
 A lead is not a finding; the model looks at it and judges. Segmentation: label boundaries that run where the image
-has no edge, components unlike their label's main one, and with a truth the clusters of disagreement. Registration:
-folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters of error
-against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole only when
-it is small, as for the label summary. The figures in a reason rank the lead: they are not measurements."""
+has no edge, components unlike their label's main one, and with a reference the clusters of disagreement.
+Registration: folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters
+of error against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole
+only when it is small, as for the label summary. The figures in a reason rank the lead: they are not measurements."""
 
 from __future__ import annotations
 
@@ -16,10 +16,12 @@ import numpy as np
 from konfai.utils.ITK import field_jacobian_determinant
 from scipy import ndimage
 
+from .case import Volume
 from .planes import box_to_dict
 from .views import Renderer
 
 MAX_LEADS = 8
+LARGEST = 512**3  # voxels of a region read whole (a label's window, a map compared with its truth)
 BLOCK = 64
 CELL_MM = 16.0
 WEAK = 0.55  # a boundary voxel is edgeless below this fraction of the label's median boundary edge
@@ -57,7 +59,8 @@ def leads_text(leads: list[Lead], active: bool) -> str:
     if not leads:
         return "Leads: the survey found nothing that stands out."
     lines = [
-        "Leads, from a deterministic survey of the case: where the result is most likely wrong, not findings."
+        "Leads, from a deterministic survey of the case: where the result, or its reference, is most likely wrong; "
+        "not findings."
         + (" Look at each through a slice of its box (a view zoomed on it) before concluding." if active else "")
     ]
     lines += [f"- {lead.id} {lead.kind}, box {json.dumps(lead.box_mm)}: {lead.reason}" for lead in leads]
@@ -111,33 +114,52 @@ def _offset(window: tuple[slice, ...], lo: tuple[int, ...]) -> tuple[slice, ...]
 # ---------------------------------------------------------------------------------------------- segmentation
 
 
+def _extents(volume: Volume, size: tuple[int, int, int]) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Each label's extent (``lo``, ``hi`` in array order), the map read by slabs of up to ``BLOCK`` planes."""
+    planes = min(BLOCK, LARGEST // (size[1] * size[2]))
+    if planes == 0:
+        raise SurveySkipped("a plane of the label map has more than 512^3 voxels")
+    lo: dict[int, np.ndarray] = {}
+    hi: dict[int, np.ndarray] = {}
+    for z in range(0, size[0], planes):
+        slab = volume.region((z, 0, 0), (z + planes, size[1], size[2]))[0].astype(np.int32)
+        for label, extent in enumerate(ndimage.find_objects(slab), start=1):
+            if extent is not None:
+                a, b = np.array([[s.start + o, s.stop + o] for s, o in zip(extent, (z, 0, 0), strict=True)]).T
+                lo[label], hi[label] = np.minimum(lo.get(label, a), a), np.maximum(hi.get(label, b), b)
+    return {label: (lo[label], hi[label]) for label in sorted(lo)}
+
+
 def _segmentation(r: Renderer) -> list[Found]:
+    """Each label read in its own window (the map is never read whole, but to compare it with a truth)."""
     case, grid = r.case, r.grid
-    if max(grid.size_zyx) > 512:  # the same limit as the label summary: a big map is not read whole
-        raise SurveySkipped("the label map is larger than 512 voxels along an axis")
     size = _zyx(grid.size_zyx)
-    prediction = r.volume("prediction").region((0, 0, 0), size)[0]
-    truth = r.volume("truth").region((0, 0, 0), size)[0] if "truth" in case.inputs else None
+    truth = None
+    if "truth" in case.inputs:
+        if np.prod(size) > LARGEST:
+            raise SurveySkipped("the label map has more than 512^3 voxels: not compared whole with the truth")
+        truth = r.volume("truth").region((0, 0, 0), size)[0]
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
     margin = np.ceil(10.0 / spacing).astype(int)
+    found: list[Found] = []
     components: list[tuple[float, Found]] = []
     edgeless: list[tuple[int, Found]] = []
-    for label, extent in enumerate(ndimage.find_objects(prediction.astype(np.int32)), start=1):
-        if extent is None:
-            continue
+    for label, (start, stop) in _extents(r.volume("prediction"), size).items():
         name = case.labels.get(label, f"label {label}") if case.labels else f"label {label}"
-        lo = _zyx(np.maximum([s.start for s in extent] - margin, 0))
-        hi = _zyx(np.minimum([s.stop for s in extent] + margin, grid.size_zyx))
-        window = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+        lo, hi = _zyx(np.maximum(start - margin, 0)), _zyx(np.minimum(stop + margin, size))
+        if np.prod(np.subtract(hi, lo)) > LARGEST:
+            raise SurveySkipped(f"{name} spans more than 512^3 voxels")
+        labels = r.volume("prediction").region(lo, hi)[0]
         image = r.volume(case.image_role).region(lo, hi)[0].astype(np.float32)
-        mask, other = prediction[window] == label, (prediction[window] != 0) & (prediction[window] != label)
+        mask, other = labels == label, (labels != 0) & (labels != label)
         components += [
             (score, (k, _offset(w, lo), why)) for score, (k, w, why) in _components(image, mask, other, name)
         ]
         edgeless += [(size, (k, _offset(w, lo), why)) for size, (k, w, why) in _edgeless(image, mask, spacing, name)]
-    found = [f for _, f in sorted(components, key=lambda c: -c[0])[:3]]
+    found += [f for _, f in sorted(components, key=lambda c: -c[0])[:3]]
     found += [f for _, f in sorted(edgeless, key=lambda c: -c[0])[:3]]
     if truth is not None:
+        prediction = r.volume("prediction").region((0, 0, 0), size)[0]
         found += _disagreement(prediction, truth, case.labels or {})[: MAX_LEADS - len(found)]
     return found
 
@@ -227,11 +249,11 @@ def _disagreement(prediction: np.ndarray, truth: np.ndarray, names: dict[int, st
         name = names.get(label, f"label {label}")
         reference = int((truth == label).sum())
         for kind, mask, what in (
-            ("false_positive", (prediction == label) & (truth != label), "the prediction adds"),
-            ("false_negative", (truth == label) & (prediction != label), "the prediction misses"),
+            ("result_only", (prediction == label) & (truth != label), "in the result and not in the reference"),
+            ("reference_only", (truth == label) & (prediction != label), "in the reference and not in the result"),
         ):
             for size, window in _clusters(mask, max(10, int(0.01 * reference)))[:3]:
-                out.append((size, (kind, window, f"{size} voxels of {name} {what} against the truth")))
+                out.append((size, (kind, window, f"{size} voxels of {name} {what}: one of the two is wrong there")))
     return [f for _, f in sorted(out, key=lambda c: -c[0])]
 
 

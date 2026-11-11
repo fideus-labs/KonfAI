@@ -122,6 +122,16 @@ keeps the verdict in line with the observations: it is `defective` when, and onl
 or critical is noted at confidence 0.5 or more (Scout's own conclusion, when the model gives none, follows the same
 rule). Minor and moderate errors are recorded and leave the verdict to `acceptable` or `insufficient_evidence`.
 
+### A reference can be wrong
+
+A segmentation given with its reference is surveyed for where the two disagree (leads `result_only` and
+`reference_only`). A model told which contour is the reference tends to side with it, so before the inspection a
+fresh session reads each of these leads blind: the slice of the lead where the two differ most, alone and with the
+two contours drawn as A and B (mode `contours`), which is which drawn from the case and the lead and not told. Its
+answer (the result's contour is the better one, the reference's, or it cannot tell) joins the lead's reason; the
+model still decides, and writes a `reference_error` where the result follows the image and the reference does not.
+These views are not sent to the inspecting model and do not count as its look at the lead.
+
 ### The blind second reading
 
 With `second_reading` (CLI `--second-reading`), a fresh session of the same model re-reads every error observation
@@ -137,9 +147,13 @@ Defect types per task:
 
 | Task | Defects |
 |---|---|
-| segmentation | missing_structure, spurious_structure, under_segmentation, over_segmentation, leak, boundary_error, fragmentation, holes, label_confusion, other |
-| registration | residual_misalignment, folding, implausible_deformation, over_smoothing, boundary_artifact, missing_coverage, intensity_artifact, other |
-| synthesis | intensity_bias, hallucinated_structure, missing_structure, blur, artifact, geometry_error, other |
+| segmentation | missing_structure, spurious_structure, under_segmentation, over_segmentation, leak, boundary_error, fragmentation, holes, label_confusion, reference_error, other |
+| registration | residual_misalignment, folding, implausible_deformation, over_smoothing, boundary_artifact, missing_coverage, intensity_artifact, reference_error, other |
+| synthesis | intensity_bias, hallucinated_structure, missing_structure, blur, artifact, geometry_error, reference_error, other |
+
+`reference_error` is the one type that is not a defect of the result: the result follows the image where the
+reference given with the case does not. It is a `suspected_error` (nothing measured against that reference can
+confirm it), needs a reference, and never makes the verdict `defective`.
 
 Severities: minor, moderate, major, critical. Verdicts: acceptable, defective, insufficient_evidence. A `defective`
 verdict with no confirmed error carries a `reason` saying it rests on suspected errors.

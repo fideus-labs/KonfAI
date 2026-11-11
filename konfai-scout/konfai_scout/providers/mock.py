@@ -93,8 +93,8 @@ class HeuristicProvider(ScriptedProvider):
     DEFECT: ClassVar[dict[str, str]] = {
         "edgeless_boundary": "boundary_error",
         "component": "spurious_structure",
-        "false_positive": "spurious_structure",
-        "false_negative": "under_segmentation",
+        "result_only": "spurious_structure",
+        "reference_only": "under_segmentation",
         "folding": "folding",
         "edge_disagreement": "residual_misalignment",
         "error_cluster": "artifact",

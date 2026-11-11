@@ -4,6 +4,7 @@ the schemas and read-only annotations as served, images in the results, the budg
 
 import asyncio
 import json
+from functools import partial
 
 import pytest
 
@@ -15,6 +16,9 @@ from konfai_scout.config import Budget
 from konfai_scout.providers import ProviderError, check_privacy, make_provider
 from konfai_scout.providers.base import without_image_data
 from konfai_scout.providers.codex import CodexProvider, _model_of
+from test_tools import unsure_reader
+
+inspect = partial(inspect, reader=unsure_reader)  # the blind readings are not sessions of the scripted client
 
 NOTE = {
     "kind": "suspected_error",
@@ -118,13 +122,14 @@ def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path,
     assert report.error is None and report.conclusion.by == "model" and report.conclusion.verdict == "defective"
     assert [c.tool for c in report.tool_calls] == ["view", "view", "note", "conclude"]
     assert report.budget["exhausted"].startswith("2 tool calls") and report.budget["spent"]["tool_calls"] == 2
-    assert report.observations[0].views == [report.views[3].id]
-    assert report.usage.images_sent == 5 and all((tmp_path / v.path).exists() for v in report.views)
+    assert report.observations[0].views == [[v for v in report.views if v.sent][3].id]
+    blind = sum(not v.sent for v in report.views)  # the views of the blind readings, sent to their reader
+    assert report.usage.images_sent == 5 + blind and all((tmp_path / v.path).exists() for v in report.views)
     assert report.provider["name"] == "codex" and report.provider["remote"] and report.provider["model"] == "default"
     assert (
         report.usage.input_tokens == 400 and report.usage.cache_read_tokens == 600 and report.usage.output_tokens == 50
     )
-    assert report.usage.requests == 1 and not report.usage.cost_known
+    assert report.usage.requests == 1 + blind // 2 and not report.usage.cost_known
     # the command the CLI was given
     cmd = fake.commands[0]
     assert cmd[:2] == ["codex", "exec"] and "--ignore-user-config" in cmd and "--json" in cmd and "-m" not in cmd

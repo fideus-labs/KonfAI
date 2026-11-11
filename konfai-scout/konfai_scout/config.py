@@ -88,6 +88,8 @@ class ScoutConfig:
     second_reading: bool = False
     #: The deterministic survey of where to look; off only to measure what it brings.
     survey: bool = True
+    #: The tools that measure a region (`measure`, `region_stats`); off only to measure what they bring.
+    measure: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:

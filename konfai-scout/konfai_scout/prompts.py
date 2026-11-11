@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "2.1"
+PROMPT_VERSION = "2.4"
 
 SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
 it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.
@@ -26,8 +26,10 @@ scale. A box is {{"min": [x, y, z], "max": [x, y, z]}} or {{"center": [x, y, z],
 - suspected_error: seen in a view, not established by a measurement.
 - confirmed_error: established by a cited measurement of its region, against a reference or by definition (a folded \
 field).
-Report the result's defects, not the image's, the anatomy's or the reference's. Without a reference nothing is \
-confirmed from appearance and no reference metric exists. No diagnosis. Every number comes from a tool. `note` \
+Report the result's defects, not the image's or the anatomy's. A reference can be wrong too: where the result \
+follows the image and the reference does not, note a suspected `reference_error`, which is never held against the \
+result. A disagreement with the reference, seen or measured, says that one of the two is wrong, not which: the image \
+decides, and where it cannot, say so at a low confidence. Without a reference nothing is confirmed from appearance and no reference metric exists. No diagnosis. Every number comes from a tool. `note` \
 refuses what breaks these rules and says why: fix it and call again.
 
 ## Procedure
@@ -58,7 +60,8 @@ GUIDANCE = {
     "segmentation": (
         "Look for missing or invented structures, under- and over-segmentation, leaks, boundary errors, holes, "
         "fragments, left/right or label confusion. Modes: `prediction` fills the labels, `truth` the reference, `both` "
-        "the prediction with the truth as contours, `disagreement` false positives red and false negatives blue."
+        "the prediction with the truth as contours, `contours` both as contours over the bare image, `disagreement` "
+        "what only the result has in red and what only the reference has in blue."
     ),
     "registration": (
         "Look for residual misalignment at edges (`checkerboard`, `overlay`; `before` is the start), implausible "
@@ -82,7 +85,8 @@ def system_prompt(case: InspectionCase, config: ScoutConfig) -> str:
         limits.append(f"${budget.max_usd:.2f}")
     return SYSTEM.format(
         task=case.task,
-        procedure=PROCEDURES[config.mode],
+        procedure=PROCEDURES[config.mode]
+        + ("" if config.measure else " No tool measures in this session: nothing can be confirmed."),
         budget=", ".join(limits),
         guidance=GUIDANCE[case.task],
         defects=", ".join(DEFECTS[case.task]),
@@ -137,6 +141,16 @@ crops show the region and the defect is not there), or UNSURE (these crops do no
 line, one sentence naming what you see, with the view ids. A difference of contrast or intensity between two \
 modalities is not a misalignment; a smooth, plausible boundary is not an error; the edge of the field of view is a \
 defect only if the claim is about coverage."""
+
+
+ARBITER = """You compare two contours of the same structure, A in cyan and B in orange, drawn over one slice of a \
+medical image; a second view shows the slice alone. They differ somewhere in the view. You are not told where either \
+contour comes from. Judge from the image alone which one follows the structure better where they differ. Where only \
+one contour is drawn, the other holds that the structure is not there: the drawn one is the better if the image \
+shows the structure inside it, the other one if it does not.
+
+Answer on the first line with exactly one word: A, B, or UNSURE (the image does not decide). On the second line, one \
+sentence naming what you see."""
 
 
 def second_reader_prompt(case: InspectionCase) -> str:

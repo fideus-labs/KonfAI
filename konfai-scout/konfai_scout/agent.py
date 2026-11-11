@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import platform
+import random
 import re
 import sys
 import time
@@ -24,8 +25,17 @@ from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import RegionEvaluator, load_prior
 from .measure import label_stats
-from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid, native_plane
-from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
+from .planes import (
+    box_around,
+    box_center,
+    box_from_dict,
+    box_intersection,
+    box_size,
+    describe_grid,
+    native_plane,
+    plane_frame,
+)
+from .prompts import ARBITER, PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers import Usage as TokenUsage
 from .providers.base import package_version
@@ -137,6 +147,8 @@ class Inspector:
         self.provider.start(system, tools)
         images, views_text = self._coverage()
         self.toolbox.leads, survey_text = self._survey(exploration)
+        if self._arbitrate(self.toolbox.leads):
+            survey_text = leads_text(self.toolbox.leads, exploration)
         card = case_card(
             self.case,
             prior,
@@ -360,6 +372,55 @@ class Inspector:
         except Exception as error:
             return [], f"Leads: the survey failed ({type(error).__name__}: {error})."
         return leads, leads_text(leads, active)
+
+    def _arbitrate(self, leads: list[Lead]) -> bool:
+        """Where the result and its reference disagree, a fresh session judges the two contours without being told
+        which is which (drawn as A and B, the order drawn from the case and the lead): it cannot defer to the
+        reference. Its answer joins the lead's reason; the model still decides. True when a lead was read."""
+        disagreements = [lead for lead in leads if lead.kind in ("result_only", "reference_only")]
+        spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
+        for lead in disagreements:
+            box = box_from_dict(lead.box_mm)
+            zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, np.maximum(12.0 * spacing, 64.0)))
+            swap = random.Random(f"{self.case.name}{lead.id}").random() < 0.5
+            plane = native_plane(self.case.grid)
+            axis = plane_frame(self.case.grid, plane).array_axis
+            try:
+                # the slice of the lead where the two differ most, windowed on the region: its centre slice may hold
+                # one contour only, and the window of the whole image may leave the structure grey on grey
+                inner = self.case.grid.index_window(box, 0)
+                lo, hi = tuple(s.start for s in inner), tuple(s.stop for s in inner)
+                differ = self.case.volume("prediction").region(lo, hi)[0] != self.case.volume("truth").region(lo, hi)[0]
+                index = lo[axis] + int(np.argmax(differ.sum(axis=tuple(a for a in range(3) if a != axis))))
+                outer = self.case.grid.index_window(zoom, 0)
+                region = self.case.volume("image").region(
+                    *(tuple(getattr(s, k) for s in outer) for k in ("start", "stop"))
+                )
+                window = [float(v) for v in np.percentile(region[0], [1, 99])]
+                shown = {"index": index, "zoom": zoom, "window": window, "sent": False}
+                views = [  # not sent to the model that inspects: they do not count as its look at the lead
+                    self.renderer.render(plane, "image", **shown),
+                    self.renderer.render(plane, "contours", swap=swap, **shown),
+                ]
+                images = [ImageContent(png, f"[{view.id}]") for png, view in views]
+                self.toolbox.images_sent += len(images)
+                reader = self.reader()
+                reader.start(ARBITER, [])
+                labels = list((self.case.labels or {}).values())
+                card = f"Structure: {labels[0] if len(labels) == 1 else 'see the label map'}. The slice alone, then "
+                turn = self._request(lambda r=reader, c=card + "with the two contours.", i=images: r.user(c, i))
+                word = ((turn.text or "").strip().split() or [""])[0].strip(".,:").upper()
+            except (ViewError, ProviderError):
+                word = ""
+            better = {"A": "reference" if swap else "result", "B": "result" if swap else "reference"}.get(word)
+            lead.reason += (
+                f" A blind reading of the two contours, not told which is the reference, judged the {better}'s the "
+                "better one there."
+                if better
+                else " A blind reading of the two contours, not told which is the reference, could not tell which is "
+                "the better one there."
+            )
+        return bool(disagreements)
 
     def _labels_summary(self) -> dict[str, object]:
         role = {"segmentation": "prediction", "registration": "fixed_labels", "synthesis": None}[self.case.task]

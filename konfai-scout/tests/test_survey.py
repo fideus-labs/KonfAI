@@ -22,6 +22,21 @@ def test_the_leads_cover_the_planted_defects_and_spare_a_clean_case(task, tmp_pa
     assert survey(toolbox(fixtures, "clean", tmp_path / "c").renderer) == []
 
 
+def test_a_map_of_more_than_512_slices_is_surveyed_label_by_label(tmp_path):
+    import numpy as np
+    from konfai_scout.survey import _extents
+    from konfai_scout.synthetic import segmentation_case
+
+    case, planted = segmentation_case(tmp_path / "long", shape=(520, 48, 48), with_truth=False)
+    renderer = toolbox({"long": (case, planted)}, "long", tmp_path / "l").renderer
+    whole = renderer.volume("prediction").region((0, 0, 0), (520, 48, 48))[0]
+    for label, (lo, hi) in _extents(renderer.volume("prediction"), (520, 48, 48)).items():  # the sphere spans 2 slabs
+        where = np.argwhere(whole == label)
+        assert lo.tolist() == where.min(0).tolist() and hi.tolist() == (where.max(0) + 1).tolist()
+    blob = box_from_dict(planted["spurious_blob"]["box_mm"])
+    assert any(box_intersection(box_from_dict(lead.box_mm), blob) for lead in survey(renderer))
+
+
 def test_conclude_waits_for_the_leads_and_follows_the_observations(fixtures, tmp_path):
     box = toolbox(fixtures, "segmentation", tmp_path)
     box.leads = survey(box.renderer)

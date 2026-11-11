@@ -16,6 +16,8 @@ SCHEMA_VERSION = "1.1"
 KINDS = ("measured_property", "suspected_error", "confirmed_error")
 SEVERITIES = ("minor", "moderate", "major", "critical")
 VERDICTS = ("acceptable", "defective", "insufficient_evidence")
+#: Not a defect of the result: the result follows the image where the reference given with the case does not.
+REFERENCE_ERROR = "reference_error"
 DEFECTS: dict[str, tuple[str, ...]] = {
     "segmentation": (
         "missing_structure",
@@ -27,6 +29,7 @@ DEFECTS: dict[str, tuple[str, ...]] = {
         "fragmentation",
         "holes",
         "label_confusion",
+        REFERENCE_ERROR,
         "other",
     ),
     "registration": (
@@ -37,6 +40,7 @@ DEFECTS: dict[str, tuple[str, ...]] = {
         "boundary_artifact",
         "missing_coverage",
         "intensity_artifact",
+        REFERENCE_ERROR,
         "other",
     ),
     "synthesis": (
@@ -46,6 +50,7 @@ DEFECTS: dict[str, tuple[str, ...]] = {
         "blur",
         "artifact",
         "geometry_error",
+        REFERENCE_ERROR,
         "other",
     ),
 }

@@ -65,7 +65,7 @@ WINDOW_PRESETS: dict[str, tuple[float, float]] = {
     "ct_full": (-1000.0, 1000.0),
 }
 MODES: dict[str, tuple[str, ...]] = {
-    "segmentation": ("image", "prediction", "truth", "both", "disagreement"),
+    "segmentation": ("image", "prediction", "truth", "both", "contours", "disagreement"),
     "registration": (
         "fixed",
         "moving",
@@ -213,7 +213,7 @@ class Renderer:
     def modes(self) -> list[str]:
         available = list(MODES[self.case.task])
         if self.case.task == "segmentation" and "truth" not in self.case.inputs:
-            available = [m for m in available if m not in ("truth", "both", "disagreement")]
+            available = [m for m in available if m not in ("truth", "both", "contours", "disagreement")]
         if self.case.task == "registration":
             if not ({"fixed_labels"} | WARPED_LABEL_ROLES) & self.case.inputs.keys():
                 available.remove("labels")
@@ -287,8 +287,10 @@ class Renderer:
         zoom: WorldBox | None = None,
         label: int | None = None,
         sent: bool = True,
+        swap: bool = False,
     ) -> tuple[bytes, View]:
-        """One slice: by index, by the world position it passes through, or the centre of the zoom box."""
+        """One slice: by index, by the world position it passes through, or the centre of the zoom box. `swap` draws
+        the `contours` mode with the reference as A and the result as B, for a reader who is not told which is which."""
         mode = mode or DEFAULT_MODE[self.case.task]
         if mode not in self.modes():
             raise ViewError(f"mode {mode!r} is not available for this case; modes: {', '.join(self.modes())}")
@@ -305,7 +307,7 @@ class Renderer:
         if not 0 <= index < self.grid.size_zyx[axis]:
             raise ViewError(f"slice {index} is outside the {plane} range 0..{self.grid.size_zyx[axis] - 1}")
         crop = self._crop(zoom, frame) if zoom is not None else None
-        rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop)
+        rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop, swap)
         self._count += 1
         view_id = f"v{self._count:03d}"  # on the image before anything else: a model cites what it reads there
         header = self._header_text(frame, index, mode, resolved_window, extra, crop).format(id=view_id)
@@ -430,6 +432,7 @@ class Renderer:
         window: object,
         label: int | None,
         crop: tuple[slice, slice] | None,
+        swap: bool = False,
     ) -> tuple[np.ndarray, dict[str, object], list[float] | None]:
         task = self.case.task
         extra: dict[str, object] = {}
@@ -458,6 +461,12 @@ class Renderer:
                 truth = self._plane("truth", frame, index, crop)
                 rgb = draw_contours(fill_labels(rgb, pred, 0.35, label), truth, label, color=(1.0, 1.0, 1.0))
                 extra["legend"] = "prediction filled in the label's colour, truth as white contours"
+            elif mode == "contours":  # the image left bare under both: neither is filled, neither is "the" contour
+                first, second = ("truth", "prediction") if swap else ("prediction", "truth")
+                rgb = draw_contours(rgb, self._plane(first, frame, index, crop), label, color=(0.0, 0.86, 1.0))
+                rgb = draw_contours(rgb, self._plane(second, frame, index, crop), label, color=(1.0, 0.59, 0.0))
+                names = {"prediction": "result", "truth": "reference"}
+                extra["legend"] = f"{names[first]} as contour A (cyan), {names[second]} as contour B (orange)"
             elif mode == "disagreement":
                 pred = self._plane("prediction", frame, index, crop)
                 truth = self._plane("truth", frame, index, crop)
