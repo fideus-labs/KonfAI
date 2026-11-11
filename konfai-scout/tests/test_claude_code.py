@@ -5,6 +5,7 @@ images, the record and the budget the same as with the API providers, the sessio
 import base64
 import json
 from functools import partial
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +176,8 @@ def test_the_session_drives_the_tools_under_the_budget_and_the_record_is_complet
     # what the session was given
     options = fake.options[0]
     assert options.tools == [] and options.permission_mode == "dontAsk" and options.resume is None
+    # nothing of where Scout is run from reaches the model: no settings, and a working directory of Scout's own
+    assert options.setting_sources == [] and Path(options.cwd).resolve() != Path.cwd().resolve()
     assert options.allowed_tools == [
         f"mcp__scout__{t}" for t in ("view", "montage", "measure", "region_stats", "note", "conclude")
     ]
