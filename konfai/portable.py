@@ -2392,7 +2392,9 @@ def export_checkpoints(
         from konfai.data.transform import CaseStatistic
         from konfai.export import export_case_statistic
 
-        statistic = CaseStatistic(str(clean(params["statistic"]))).statistic
+        # Built with the mapping's other keys, as konfai binds them.
+        arguments = {key: clean(value) for key, value in params.items() if key != "statistic"}
+        statistic = CaseStatistic(str(clean(params["statistic"]))).factory(**arguments)
         stem = f"{ids[0]}_statistic_{statistics}"
         statistics += 1
         partial, finish = f"{stem}_partial.onnx", f"{stem}_finish.onnx"

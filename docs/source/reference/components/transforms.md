@@ -35,7 +35,7 @@ loaded whole.
 | `UnNormalize` | Map `[-1, 1]` to `[min, max]`. | `min_value=-1024, max_value=3071` | no | no | yes |
 | `Standardize` | Zero mean, unit standard deviation, from the volume, a mask, or given values. `nonzero` standardizes each channel over its voxels that are not 0 (population deviation, 0 read as 1), the zeros kept, in float32; it takes `inverse: false`. | `mean=None, std=None, mask=None, nonzero=False, lazy=False, inverse=True` | no | yes (not with `nonzero`) | yes |
 | `HistogramMatching` | Match the histogram of a reference group. | `reference_group` | no | no | no |
-| `CaseStatistic` | One float32 channel holding a whole-volume statistic the class `statistic` names (`model:NoiseSigma`) folds: `partial` of each region read with `halo` neighbours (the edge replicated past the border), summed in float64, then `finish`. Streamed, it is folded over bounded slabs of the stored volume first. | `statistic` | channels | no | yes |
+| `CaseStatistic` | One float32 channel holding a whole-volume statistic the class `statistic` names (`model:NoiseSigma`) folds: `partial` of each region read with `halo` neighbours (the edge replicated past the border), summed in float64, then `finish`. Streamed, it is folded over bounded slabs of the stored volume first. Its other keys go to the class (`coils: 0`). | `statistic` | channels | no | yes |
 
 ## Geometry
 

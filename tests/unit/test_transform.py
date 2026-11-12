@@ -1542,6 +1542,21 @@ def test_a_repeated_stage_binds_by_occurrence(tmp_path, monkeypatch: pytest.Monk
     assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip", "Clip#2")] == [(-1024, 5000), (0, 10)]
 
 
+def test_a_case_statistic_gives_its_other_keys_to_the_class(write_config) -> None:
+    # The class reads the keys the stage does not: one neither reads is still reported.
+    from konfai.data.transform import TransformLoader
+    from konfai.utils.config import strict_config
+    from konfai.utils.errors import ConfigError
+
+    stage = "T:\n  transforms:\n    CaseStatistic: {{statistic: 'oracle_support:ScaledRoughness', {}: 0.9}}\n"
+    write_config(stage.format("scale"))
+    with strict_config("T"):
+        assert TransformLoader().get_transform("CaseStatistic", "T.transforms").statistic.scale == 0.9
+    write_config(stage.format("scal"))
+    with pytest.raises(ConfigError, match=r"'T\.transforms\.CaseStatistic\.scal'"), strict_config("T"):
+        TransformLoader().get_transform("CaseStatistic", "T.transforms")
+
+
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mask draw is PlacedMask: `Mask` names one class, so its bare name resolves without an
     ambiguity warning, before an Expand marker and past it."""

@@ -17,6 +17,7 @@
 
 """Value transforms: clipping, normalization, casting, histogram matching, statistics."""
 
+import inspect
 import warnings
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -32,6 +33,7 @@ from konfai.data.transform.base import (
     TransformInverse,
     sitk,
 )
+from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
@@ -700,7 +702,8 @@ class CaseStatistic(Transform):
     """One float32 channel on the input's grid, every voxel the case's statistic the class ``statistic`` names (a
     classpath, ``model:NoiseSigma``). That class reads ``halo`` voxels past a region, edge-replicated past the volume's
     border, maps the float64 block to a 1-D ``partial`` of the region's own voxels, and turns the float64 sum of the
-    partials into the 0-d statistic with ``finish``. Streamed, the stored volume is folded by bounded slabs first."""
+    partials into the 0-d statistic with ``finish``. Streamed, the stored volume is folded by bounded slabs first.
+    Every other key of the stage's mapping is an argument of the class (``statistic: model:NoiseSigma, coils: 0``)."""
 
     # A float64 copy of the volume padded by the halo, and what the class's partial makes of it in float64 (a
     # Laplacian residual and its square hold three volumes more).
@@ -709,8 +712,25 @@ class CaseStatistic(Transform):
     def __init__(self, statistic: str) -> None:
         super().__init__()
         module, name = get_module(statistic, "konfai.data.transform")
-        self.statistic = module_attribute(module, name)()
+        self.factory = module_attribute(module, name)
+        if "statistic" in inspect.signature(self.factory).parameters:
+            raise TransformError(
+                f"'{statistic}' has a parameter 'statistic', which the CaseStatistic stage reads for itself.",
+                "Rename it: every other key of the CaseStatistic mapping is the class's.",
+            )
+        self._statistic: Any = None
         self.key = f"Statistic:{statistic}"
+
+    def prepare(self, konfai_args: str) -> None:
+        # Bound here, not lazily: a strict read of the config counts a key only if something read it.
+        self._statistic = apply_config(konfai_args)(self.factory)()
+
+    @property
+    def statistic(self) -> Any:
+        """The bound class; a stage built in Python, never prepared, builds it from its defaults."""
+        if self._statistic is None:
+            self._statistic = self.factory()
+        return self._statistic
 
     def output_channels(self, channels: int) -> int:
         return 1

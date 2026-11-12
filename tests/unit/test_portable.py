@@ -1756,7 +1756,8 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The model reads the image and its CaseStatistic: the second read names the two graphs beside the model, which
-    # onnxruntime runs on a block of another shape to what the statistic's own functions give, its 0.95 exactly.
+    # onnxruntime runs on a block of another shape to what the statistic's own functions give: the class built with
+    # the mapping's scale, which a float32 constant would move.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
     ort = pytest.importorskip("onnxruntime")
@@ -1766,7 +1767,10 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
 
     config = _tiny_prediction(tmp_path, monkeypatch, "TwoInputs:TwoInputNet", "Head:Softmax")
     resolved = json.loads(config.read_text())
-    statistic = {"transforms": {"CaseStatistic": {"statistic": "oracle_support:ScaledRoughness"}}, "is_input": True}
+    statistic = {
+        "transforms": {"CaseStatistic": {"statistic": "oracle_support:ScaledRoughness", "scale": 0.9}},
+        "is_input": True,
+    }
     resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["SIGMA"] = statistic
     config.write_text(json.dumps(resolved))
     program = compile_prediction(config, [], tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
@@ -1785,7 +1789,7 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     total = partial.run(None, {"block": block.numpy()})[0]
     np.testing.assert_allclose(total, ScaledRoughness().partial(block).numpy(), rtol=1e-12)
     value = finish.run(None, {"total": total})[0]
-    assert value.shape == () and value == ScaledRoughness().finish(torch.from_numpy(total)).item()
+    assert value.shape == () and value == ScaledRoughness(0.9).finish(torch.from_numpy(total)).item()
 
 
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
