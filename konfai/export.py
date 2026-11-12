@@ -195,6 +195,18 @@ def select_inference_head(model: torch.nn.Module, *example_input: torch.Tensor) 
     return head
 
 
+def _scalar_tensor(s: float, dtype: int = 1, layout: str = "", device: str = "", pin_memory: bool = False) -> Any:
+    """``aten.scalar_tensor``, the Python scalar of an op, as a constant of its own dtype. The exporter's own makes a
+    float a float32 constant cast to that dtype: a float64 graph would hold ``x * 0.95`` as 0.949999988. A float32
+    graph comes out the same either way."""
+    # ponytail: torch.full's fill value takes the same float32 path; translate aten.full too once a graph needs it.
+    import onnx_ir as ir
+    from onnxscript import opset18 as op
+
+    # The stub names a TensorProto; the exporter's tracer takes an ir tensor.
+    return op.Constant(value=ir.tensor(s, dtype=ir.DataType(dtype)))  # type: ignore[arg-type]
+
+
 def _write_onnx(
     module: torch.nn.Module,
     examples: tuple[torch.Tensor, ...],
@@ -226,6 +238,7 @@ def _write_onnx(
                 output_names=output_names,
                 dynamo=True,
                 dynamic_shapes=free if dynamic else None,
+                custom_translation_table={torch.ops.aten.scalar_tensor.default: _scalar_tensor},
             ),
         )
     ClearMetadataAndDocStringPass()(program.model)

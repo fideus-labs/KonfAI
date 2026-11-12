@@ -168,6 +168,25 @@ def test_any_module_exposing_named_forward_exports(tmp_path):
         np.testing.assert_allclose(produced, torch.tanh(model.conv(example)).numpy(), atol=1e-5)
 
 
+@pytest.mark.parametrize(("dtype", "constant"), [(torch.float64, np.float64(0.95)), (torch.float32, np.float32(0.95))])
+def test_a_python_float_is_a_constant_of_the_graph_s_own_precision(tmp_path, dtype, constant):
+    # The exporter's own scalar_tensor makes 0.95 a float32 constant cast to float64: 0.949999988.
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    from konfai.export import export_to_onnx
+    from onnx import numpy_helper
+
+    class Scale(torch.nn.Module):
+        def named_forward(self, x):
+            yield "scaled", x * 0.95
+
+    export_to_onnx(Scale(), tmp_path, torch.rand(1, 1, 8, 8, dtype=dtype), "scaled")
+    graph = onnx.load(str(tmp_path / "model.onnx")).graph
+    assert [node.op_type for node in graph.node] == ["Mul"]
+    [initializer] = [numpy_helper.to_array(tensor) for tensor in graph.initializer]
+    assert initializer.dtype == constant.dtype and initializer == constant
+
+
 @pytest.mark.parametrize(("blend", "version"), [("Gaussian", 5), ("GaussianFloat16", 6)])
 def test_a_float16_blend_is_written_at_the_manifest_version_that_carries_it(tmp_path, blend, version):
     # A runtime reading version 5 alone refuses a GaussianFloat16 blend rather than blend it as Cosinus.

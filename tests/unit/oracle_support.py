@@ -497,6 +497,16 @@ class Roughness:
         return torch.sqrt(total[0] / total[1])
 
 
+class ScaledRoughness(Roughness):
+    """``Roughness`` times ``scale``, a float that a float32 constant would move (0.95 is 0.949999988 there)."""
+
+    def __init__(self, scale: float = 0.95) -> None:
+        self.scale = scale
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return super().finish(total) * self.scale
+
+
 @dataclass(frozen=True)
 class StageCase:
     """One representative configuration of a transform, and the fixture group it consumes."""

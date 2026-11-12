@@ -1756,7 +1756,7 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The model reads the image and its CaseStatistic: the second read names the two graphs beside the model, which
-    # onnxruntime runs on a block of another shape to what the statistic's own functions give.
+    # onnxruntime runs on a block of another shape to what the statistic's own functions give, its 0.95 exactly.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
     ort = pytest.importorskip("onnxruntime")
@@ -1766,7 +1766,7 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
 
     config = _tiny_prediction(tmp_path, monkeypatch, "TwoInputs:TwoInputNet", "Head:Softmax")
     resolved = json.loads(config.read_text())
-    statistic = {"transforms": {"CaseStatistic": {"statistic": "oracle_support:Roughness"}}, "is_input": True}
+    statistic = {"transforms": {"CaseStatistic": {"statistic": "oracle_support:ScaledRoughness"}}, "is_input": True}
     resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["SIGMA"] = statistic
     config.write_text(json.dumps(resolved))
     program = compile_prediction(config, [], tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
@@ -1775,7 +1775,7 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     assert reads == [
         {"group": "MR", "channels": 1, "preprocessing": [step | {"finish": "model_statistic_0_finish.onnx"}]}
     ]
-    from oracle_support import Roughness
+    from oracle_support import ScaledRoughness
 
     partial = ort.InferenceSession(str(tmp_path / "out" / step["partial"]), providers=["CPUExecutionProvider"])
     finish = ort.InferenceSession(str(tmp_path / "out" / "model_statistic_0_finish.onnx"))
@@ -1783,9 +1783,9 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     assert [(i.name, i.type) for i in finish.get_outputs()] == [("statistic", "tensor(double)")]
     block = torch.from_numpy(np.random.default_rng(0).random((1, 7, 12, 9)))
     total = partial.run(None, {"block": block.numpy()})[0]
-    np.testing.assert_allclose(total, Roughness().partial(block).numpy(), rtol=1e-12)
+    np.testing.assert_allclose(total, ScaledRoughness().partial(block).numpy(), rtol=1e-12)
     value = finish.run(None, {"total": total})[0]
-    assert value.shape == () and value == Roughness().finish(torch.from_numpy(total)).item()
+    assert value.shape == () and value == ScaledRoughness().finish(torch.from_numpy(total)).item()
 
 
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
