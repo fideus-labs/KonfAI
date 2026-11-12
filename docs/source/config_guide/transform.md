@@ -414,6 +414,11 @@ borders. Without a declaration the transform takes the whole volume, which is al
 | a whole-volume statistic | `GLOBAL_STAT`, with `stat_keys` | nothing |
 | really the whole volume | nothing | nothing |
 
+A statistic none of these keys name (a noise estimate) needs no transform of its own:
+`CaseStatistic: {statistic: model:NoiseSigma}` names a class with a `halo`, a `partial(block)` and a
+`finish(total)`. KonfAI folds the stored volume by bounded slabs, each read with `halo` neighbour voxels, sums the
+partials and hands on one channel holding `finish` of that sum.
+
 ## Python API
 
 ```python

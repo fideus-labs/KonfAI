@@ -46,6 +46,7 @@ from konfai.data.patching import DatasetManager, DatasetPatch, SweepSegment
 from konfai.data.transform import (
     Argmax,
     Canonical,
+    CaseStatistic,
     Clip,
     Crop,
     Dilate,
@@ -478,6 +479,34 @@ def build_case(root: Path, geometry: Geometry, dtype: np.dtype = np.dtype(np.flo
 # --------------------------------------------------------------------------------------
 
 
+class Roughness:
+    """A ``CaseStatistic`` class: the RMS of the 6-neighbour Laplacian residual over the volume."""
+
+    halo = 1
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        inner = [slice(None)] + [slice(1, -1)] * (block.dim() - 1)
+        centre = block[tuple(inner)]
+        residual = 2 * (block.dim() - 1) * centre
+        for axis in range(1, block.dim()):
+            for side in (slice(None, -2), slice(2, None)):
+                residual = residual - block[(*inner[:axis], side, *inner[axis + 1 :])]
+        return torch.stack([(residual**2).sum(), torch.ones_like(centre).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(total[0] / total[1])
+
+
+class ScaledRoughness(Roughness):
+    """``Roughness`` times ``scale``, a float that a float32 constant would move (0.95 is 0.949999988 there)."""
+
+    def __init__(self, scale: float = 0.95) -> None:
+        self.scale = scale
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return super().finish(total) * self.scale
+
+
 @dataclass(frozen=True)
 class StageCase:
     """One representative configuration of a transform, and the fixture group it consumes."""
@@ -513,6 +542,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         # grid the source volume does not have, so its source region is a permuted slice tuple rather
         # than the target's own. Both must stream, and a sagittal or coronal acquisition is the second.
         "Canonical": [StageCase(Canonical()), StageCase(Canonical(), group="Permuting")],
+        "CaseStatistic": [StageCase(CaseStatistic("oracle_support:Roughness"))],
         "Clip": [
             StageCase(Clip(-200.0, 300.0)),  # fixed bounds: POINTWISE (the default range does not clip)
             StageCase(Clip("min", "max")),  # data-dependent bounds: GLOBAL_STAT

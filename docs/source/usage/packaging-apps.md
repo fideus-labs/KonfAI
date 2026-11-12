@@ -86,6 +86,13 @@ stages its output for each case as the group `body`, beside `Volume_0`. A stage 
 for example `Crop: {source: body, labels: [10, 11], margin_mm: 20}`. A bare name is a sibling of the app (the
 same folder, or the same Hugging Face repository); `repo_id:app_name` or a path names any other.
 
+`--set NAME=VALUE` reaches the model's parameters by name. To expose another key of the prediction config, such as
+an argument of a transform stage, map a name to its dotted path from the config root in `app.json`:
+`"parameters": {"crop_shape": "Predictor.Dataset.groups_src.Volume_0.groups_dest.Volume.transforms.model:CentreCrop.shape"}`.
+`konfai-apps show` and a UI's parameters dialog then list `crop_shape` with its value and the constraints the
+stage's types declare, and `--set crop_shape=[160,192,160]` writes that key. A name the model already takes, or a
+path the config does not have, is refused.
+
 ## Fine-tune it
 
 The app includes `Config.yml`, which describes its training inputs and loss.

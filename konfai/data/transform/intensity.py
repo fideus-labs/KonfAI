@@ -17,17 +17,28 @@
 
 """Value transforms: clipping, normalization, casting, histogram matching, statistics."""
 
+import inspect
 import warnings
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import numpy as np
 import torch
 
-from konfai.data.transform.base import LocalityKind, PatchLocality, Transform, TransformInverse, sitk
+from konfai.data.transform.base import (
+    MEASURING_STATISTICS,
+    LocalityKind,
+    PatchLocality,
+    Transform,
+    TransformInverse,
+    sitk,
+)
+from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
 from konfai.utils.ITK import _require_simpleitk
+from konfai.utils.utils import get_module, module_attribute
 
 
 def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
@@ -77,6 +88,12 @@ def _dataset_holding(datasets: list[Dataset], group: str, name: str) -> Dataset:
         f"No dataset holds '{group}' for case '{name}'.",
         "Check the group name against the datasets the run reads.",
     )
+
+
+def percentile_key(percentile: float) -> str:
+    """The statistic a ``percentile:<p>`` bound of ``Clip`` is, as a scope and a seed name it: ``p`` to the last
+    digit, so two percentiles never share a name."""
+    return f"Percentile:{percentile!r}"
 
 
 def _percentile_of(bound: str, statistic: str, argument: str) -> float | None:
@@ -187,26 +204,50 @@ class Clip(Transform):
         return shape
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A percentile bound needs the whole histogram. A 'min'/'max' bound needs a global statistic:
-        # a seeded disk one, or under a mask a masked disk scan the stage seeds itself (GLOBAL_STAT
-        # with no key). Fixed float bounds are POINTWISE.
+        # A 'min'/'max' bound needs a global statistic: a seeded disk one, or under a mask a masked disk scan the
+        # stage seeds itself (GLOBAL_STAT with no key). A percentile is one too, the stored volume's read exactly
+        # by bounded passes; under a mask it needs the whole histogram. Fixed float bounds are POINTWISE. A bound
+        # is recorded, under its statistic's name, only when it is saved.
         stat_keys: set[str] = set()
-        for bound, key in ((self.min_value, "Min"), (self.max_value, "Max")):
+        percentiles: set[str] = set()
+        saved = {key for key, save in (("Min", self.save_clip_min), ("Max", self.save_clip_max)) if save}
+        bounds = ((self.min_value, "Min", "min_value"), (self.max_value, "Max", "max_value"))
+        for bound, key, argument in bounds:
             if isinstance(bound, str):
-                if bound == key.lower():  # exactly as __call__ matches it; "MIN" is refused there
+                percentile = _percentile_of(bound, key.lower(), argument)
+                if percentile is None:
                     stat_keys.add(key)
-                else:
+                elif self.mask is not None:
                     return PatchLocality(
                         LocalityKind.WHOLE_VOLUME,
-                        reason=f"a '{bound}' bound needs the whole histogram; fixed values or"
-                        " 'min'/'max' (a seeded statistic) stream",
+                        reason=f"a '{bound}' bound under a mask needs the whole histogram; fixed values,"
+                        " 'min'/'max' or a percentile without a mask stream",
                     )
-        if not stat_keys:
+                else:
+                    percentiles.add(percentile_key(percentile))
+                    if key in saved:
+                        saved.add(percentile_key(percentile))
+        if not stat_keys and not percentiles:
             return PatchLocality(LocalityKind.POINTWISE)
         if self.mask is not None:
             return PatchLocality(LocalityKind.GLOBAL_STAT)
-        saved = {key for key, save in (("Min", self.save_clip_min), ("Max", self.save_clip_max)) if save}
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), records=frozenset(saved))
+        return PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys | percentiles), records=frozenset(saved)
+        )
+
+    def _percentile(
+        self, values: Callable[[], torch.Tensor], percentile: float, cache_attribute: Attribute, save: bool
+    ) -> float:
+        """The ``percentile`` of the volume: seeded on a streamed region, else measured (``np.percentile``), and
+        recorded when the bound is saved or a pass over the whole volume measures it for the regions."""
+        key = percentile_key(percentile)
+        if self.mask is None and "StatisticsSeeded" in cache_attribute and key in cache_attribute:
+            return _seeded_scalar(cache_attribute, key)
+        # ``np.percentile`` cannot coerce a CUDA tensor; ``.cpu()`` is a no-op on a host one.
+        value = float(np.percentile(values().detach().cpu(), percentile))
+        if save or MEASURING_STATISTICS in cache_attribute:
+            cache_attribute[key] = value
+        return value
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         seeded_masked = self.mask is not None and "StatisticsSeeded" in cache_attribute
@@ -230,8 +271,7 @@ class Clip(Transform):
                 else:
                     min_value = torch.min(values())
             else:
-                # ``np.percentile`` cannot coerce a CUDA tensor; ``.cpu()`` is a no-op on a host one.
-                min_value = np.percentile(values().detach().cpu(), percentile)
+                min_value = self._percentile(values, percentile, cache_attribute, self.save_clip_min)
         else:
             min_value = self.min_value
 
@@ -245,7 +285,7 @@ class Clip(Transform):
                 else:
                     max_value = torch.max(values())
             else:
-                max_value = np.percentile(values().detach().cpu(), percentile)
+                max_value = self._percentile(values, percentile, cache_attribute, self.save_clip_max)
         else:
             max_value = self.max_value
 
@@ -559,19 +599,24 @@ class TensorCast(TransformInverse):
     # Wide enough to hold every dtype a volume is read as (int8/int16/uint8/float32) with no value moved.
     _VALUE_PRESERVING_DTYPES = frozenset({torch.float32, torch.float64})
 
-    def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
+    def __init__(self, dtype: str = "float32", inverse: bool = True, round: bool = False) -> None:
         super().__init__(inverse)
         self.dtype: torch.dtype = TensorCast.safe_dtype_cast(dtype)
+        #: Round to the nearest integer first, half to even (numpy's ``rint``), where a cast truncates.
+        self.round = round
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The stored volume's statistics stay a later GLOBAL_STAT's input only where the cast keeps
         # every value: float32 holds an int16 exactly, float16 runs out of mantissa at 2048.
         return PatchLocality(
-            LocalityKind.POINTWISE, preserves_statistics=self.dtype in TensorCast._VALUE_PRESERVING_DTYPES
+            LocalityKind.POINTWISE,
+            preserves_statistics=self.dtype in TensorCast._VALUE_PRESERVING_DTYPES and not self.round,
         )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         cache_attribute["dtype"] = str(tensor.dtype).replace("torch.", "")
+        if self.round and tensor.is_floating_point():
+            tensor = torch.round(tensor)
         return tensor.type(self.dtype)
 
     @staticmethod
@@ -651,3 +696,64 @@ class Statistics(Transform):
                 continue
             cache_attribute[recorded] = _seeded_scalar(cache_attribute, seeded)
         return tensors
+
+
+class CaseStatistic(Transform):
+    """One float32 channel on the input's grid, every voxel the case's statistic the class ``statistic`` names (a
+    classpath, ``model:NoiseSigma``). That class reads ``halo`` voxels past a region, edge-replicated past the volume's
+    border, maps the float64 block to a 1-D ``partial`` of the region's own voxels, and turns the float64 sum of the
+    partials into the 0-d statistic with ``finish``. Streamed, the stored volume is folded by bounded slabs first.
+    Every other key of the stage's mapping is an argument of the class (``statistic: model:NoiseSigma, coils: 0``)."""
+
+    # A float64 copy of the volume padded by the halo, and what the class's partial makes of it in float64 (a
+    # Laplacian residual and its square hold three volumes more).
+    working_multiple = 6.0
+
+    def __init__(self, statistic: str) -> None:
+        super().__init__()
+        module, name = get_module(statistic, "konfai.data.transform")
+        self.factory = module_attribute(module, name)
+        if "statistic" in inspect.signature(self.factory).parameters:
+            raise TransformError(
+                f"'{statistic}' has a parameter 'statistic', which the CaseStatistic stage reads for itself.",
+                "Rename it: every other key of the CaseStatistic mapping is the class's.",
+            )
+        self._statistic: Any = None
+        self.key = f"Statistic:{statistic}"
+
+    def prepare(self, konfai_args: str) -> None:
+        # Bound here, not lazily: a strict read of the config counts a key only if something read it.
+        self._statistic = apply_config(konfai_args)(self.factory)()
+
+    @property
+    def statistic(self) -> Any:
+        """The bound class; a stage built in Python, never prepared, builds it from its defaults."""
+        if self._statistic is None:
+            self._statistic = self.factory()
+        return self._statistic
+
+    def output_channels(self, channels: int) -> int:
+        return 1
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset({self.key}), records=frozenset(), measure=self._measure
+        )
+
+    def _fold(self, blocks: Iterable[Any]) -> float:
+        partials = (self.statistic.partial(torch.as_tensor(block, dtype=torch.float64)) for block in blocks)
+        return float(self.statistic.finish(sum(partials)))
+
+    def _measure(self, dataset: Dataset, group: str, entry: str) -> float:
+        return self._fold(dataset.iter_data_blocks(group, entry, int(self.statistic.halo))())
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "StatisticsSeeded" in cache_attribute and self.key in cache_attribute:
+            value = float(cache_attribute[self.key])
+        else:
+            halo = int(self.statistic.halo)
+            padded = torch.nn.functional.pad(tensor[None].double(), (halo, halo) * (tensor.dim() - 1), "replicate")
+            value = self._fold([padded[0]])
+            if MEASURING_STATISTICS in cache_attribute:
+                cache_attribute[self.key] = value
+        return torch.full((1, *tensor.shape[1:]), value, dtype=torch.float32, device=tensor.device)

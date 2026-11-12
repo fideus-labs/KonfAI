@@ -886,7 +886,7 @@ class Resample(TransformInverse):
     ``triangle`` is torchvision's ``Resize(antialias=True)`` and PIL's bilinear resize (a 2D image onto a
     ``shape``, linearly, no map), ``gaussian`` is scikit-image's ``resize(anti_aliasing=True)``, a Gaussian
     run before the resample. Either reads the whole volume (its width follows the scale); the inverse,
-    an enlargement, is not filtered.
+    an enlargement, is not filtered, and reads outside the grid ``inverse_fill`` when it is not ``fill``.
     """
 
     working_multiple = 6.5  # the sampling grid, the taps, and the widening a stored integer forces
@@ -909,14 +909,16 @@ class Resample(TransformInverse):
         grid: str = "konfai",
         inverse_interpolation: str | None = None,
         antialias: str | None = None,
+        inverse_fill: float | str | None = None,
     ) -> None:
         super().__init__(inverse)
         self.antialias = _antialias_mode(antialias, interpolation, shape, transforms, field, field_group, align)
-        if isinstance(fill, str) and fill != "edge":
-            raise TransformError(
-                f"'Resample' has an unknown fill '{fill}'.",
-                "Give a number, or 'edge' for the volume's edge voxel past it.",
-            )
+        for stated in (fill, inverse_fill):
+            if isinstance(stated, str) and stated != "edge":
+                raise TransformError(
+                    f"'Resample' has an unknown fill '{stated}'.",
+                    "Give a number, or 'edge' for the volume's edge voxel past it.",
+                )
         for stated in (interpolation, inverse_interpolation):
             if stated is not None and stated not in INTERPOLATIONS:
                 raise TransformError(
@@ -945,6 +947,8 @@ class Resample(TransformInverse):
         #: whose logits are carried back linearly.
         self.inverse_interpolation = inverse_interpolation
         self.fill_value = fill if fill == "edge" else float(fill)
+        #: What the inverse reads outside the grid: ``fill`` unless ``inverse_fill`` says otherwise.
+        self.inverse_fill = self.fill_value if inverse_fill is None else _fill_value(inverse_fill)
         self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align, grid)
         self.grid = grid
         mapped = transforms is not None or (field is not None and str(field).strip()) or field_group is not None
@@ -1730,9 +1734,29 @@ class Resample(TransformInverse):
             # the precision: 'fast' is a trade the device walk makes.
             with coordinate_precision(torch.float64):
                 return self._walk(
-                    sub_tensor, target, source, stages, target_slices, region_starts, mode, True, budget_bytes
+                    sub_tensor,
+                    target,
+                    source,
+                    stages,
+                    target_slices,
+                    region_starts,
+                    mode,
+                    True,
+                    budget_bytes,
+                    self.fill_value,
                 )
-        return self._walk(sub_tensor, target, source, stages, target_slices, region_starts, mode, as_itk, budget_bytes)
+        return self._walk(
+            sub_tensor,
+            target,
+            source,
+            stages,
+            target_slices,
+            region_starts,
+            mode,
+            as_itk,
+            budget_bytes,
+            self.fill_value,
+        )
 
     def _walk(
         self,
@@ -1745,10 +1769,11 @@ class Resample(TransformInverse):
         mode: str,
         as_itk: bool,
         budget_bytes: float | None,
+        fill: float | str,
     ) -> torch.Tensor:
         """One region through the torch walk: the device's route, and the host's where ITK's filter
         cannot answer as it answers for the whole grid. ``as_itk`` walks ITK's own index and blend
-        (:func:`~konfai.data.sampling.scanline_index`)."""
+        (:func:`~konfai.data.sampling.scanline_index`), ``fill`` outside the source."""
         region = target.sub_grid(target_slices)
         shape = list(source.size_zyx)
         # The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
@@ -1768,7 +1793,7 @@ class Resample(TransformInverse):
 
         if rows >= rows_total:
             coordinates = walk(0, rows_total) if as_itk else source_index(region, source, stages, sub_tensor.device)
-            return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value, as_itk)
+            return gather(sub_tensor, coordinates, region_starts, shape, mode, fill, as_itk)
         # Each slab lands in the one output as it is gathered. Slabs held for a cat were a second
         # output resident at the join, on exactly the regions that are large against the budget.
         out = torch.empty(
@@ -1779,7 +1804,7 @@ class Resample(TransformInverse):
         for start in range(0, rows_total, rows):
             stop = min(rows_total, start + rows)
             coordinates = walk(start, stop)
-            out[:, start:stop] = gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value, as_itk)
+            out[:, start:stop] = gather(sub_tensor, coordinates, region_starts, shape, mode, fill, as_itk)
             del coordinates
         return out
 
@@ -2145,18 +2170,20 @@ class Resample(TransformInverse):
         target_slices: tuple[slice, ...],
         region_starts: list[int],
     ) -> torch.Tensor:
-        """One region of ``target``, read off ``source`` with no map between them."""
+        """One region of ``target``, read off ``source`` with no map between them, ``inverse_fill`` outside it."""
         shape, mode = list(source.size_zyx), self._mode(tensor, inverse=True)
         axes = separable_source_index(target, source, (), tensor.device, target_slices)
         if axes is not None:
             order = blend_order(target, source)
-            return gather_separable(tensor, axes, region_starts, shape, mode, self.fill_value, order)
+            return gather_separable(tensor, axes, region_starts, shape, mode, self.inverse_fill, order)
         # ITK's index and blend on the host, as the forward reads a region: a slab holds what the whole
         # holds. A device keeps its fused gather, twice as fast on an oblique or permuted case. Either
         # walks slab by slab under the budget.
         own_walk = mode in ("cubic", "nearest_even")
         as_itk = not own_walk and tensor.device.type == "cpu" and scanline_map(target, source, ())
-        return self._walk(tensor, target, source, (), target_slices, region_starts, mode, as_itk, None)
+        return self._walk(
+            tensor, target, source, (), target_slices, region_starts, mode, as_itk, None, self.inverse_fill
+        )
 
     @property
     def _target_is_own(self) -> bool:
@@ -2346,6 +2373,11 @@ class WorldCoordinates(Transform):
         for c in range(rank):
             world[c] = float(origin[c]) + sum(float(step[c, a]) * indices[rank - 1 - a] for a in range(rank))
         return world
+
+
+def _fill_value(fill: float | str) -> float | str:
+    """A fill as the samplers read it: ``edge``, or a number."""
+    return fill if fill == "edge" else float(fill)
 
 
 def _antialias_mode(

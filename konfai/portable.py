@@ -43,6 +43,13 @@ from ruamel.yaml import YAML
 
 from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning, TransformError
 
+#: konfai's ``Resample`` interpolations (``resample.INTERPOLATIONS``) and those that pick a voxel (``sampling.PICKS``),
+#: named here so the compiler imports no torch.
+INTERPOLATIONS = ("linear", "nearest", "cubic", "bspline", "nearest_even")
+PICKS = ("nearest", "nearest_even")
+#: Those a program's own ``resample_<interpolation>`` op, which puts one buffer on another's grid, carries.
+BODY_INTERPOLATIONS = ("linear", "nearest", "cubic")
+
 if TYPE_CHECKING:
     from konfai.utils.utils import Placement
 
@@ -78,7 +85,12 @@ def _op_cast(p: dict[str, Any]) -> dict[str, Any]:
     # konfai's TensorCast resolves the name through torch, so an alias ("float", "long") is spelled the
     # way the runtime names the dtype.
     dtype = getattr(torch, str(p.get("dtype", "float32")))
-    return {"op": "cast", "dtype": str(dtype).removeprefix("torch.")}
+    # round: a float rounded half to even before the cast.
+    return {
+        "op": "cast",
+        "dtype": str(dtype).removeprefix("torch."),
+        **({"round": True} if clean(p.get("round")) else {}),
+    }
 
 
 def _refuse_set(stage: str, p: dict[str, Any], defaults: dict[str, Any]) -> None:
@@ -95,7 +107,6 @@ def _refuse_set(stage: str, p: dict[str, Any], defaults: dict[str, Any]) -> None
 def _op_resample(
     p: dict[str, Any], datasets: list[str] | None = None, roots: list[str] | None = None
 ) -> dict[str, Any]:
-    _refuse_set("Resample", p, {"grid": "konfai", "antialias": None, "inverse_interpolation": None})
     # A spacing, a shape or a reference image is portable: the runtime derives the first two from the volume
     # in hand and reads the third's header. So is a displacement field, read beside the case, and a transform
     # stored beside it, looked up in the run's datasets (`roots`).
@@ -129,7 +140,11 @@ def _op_resample(
                 f"'Resample' aligns on '{align}', which konfai does not place a grid by.",
                 "Use align: extent or align: origin.",
             )
-        if align != "extent" and (spacing is not None or shape is not None):
+        # Another library's grid rule (konfai's `Resample.grid`) counts and places the pixels itself, align aside.
+        grid = str(clean(p.get("grid")) or "konfai")
+        if grid != "konfai":
+            step["grid"] = grid
+        elif align != "extent" and (spacing is not None or shape is not None):
             step["align"] = align
     step.update(field)
     step.update(stored)
@@ -139,16 +154,28 @@ def _op_resample(
         step["fill"] = fill
     elif float(fill or 0.0):
         step["fill"] = float(fill)
-    interpolation = clean(p.get("interpolation"))
-    if interpolation is not None:
-        if interpolation not in ("nearest", "linear", "cubic"):
+    if (antialias := clean(p.get("antialias"))) is not None:
+        step["antialias"] = str(antialias)
+    for key in ("interpolation", "inverse_interpolation"):
+        interpolation = clean(p.get(key))
+        if interpolation is not None and interpolation not in INTERPOLATIONS:
             raise TransformError(
                 f"'Resample' interpolates '{interpolation}', which has no portable runtime op.",
-                "A portable Resample interpolates 'nearest', 'linear' or 'cubic'.",
+                f"A portable Resample's {key} is one of {', '.join(map(repr, INTERPOLATIONS))}.",
             )
+    interpolation = clean(p.get("interpolation"))
+    if interpolation is not None:
         step["interpolation"] = interpolation
     # Left unset, konfai picks from the dtype the volume arrives in: resolve_interpolation decides it.
     return step
+
+
+def _fill(stated: Any, forward: Any) -> Any:
+    """The fill an inverse writes: ``stated`` (``edge`` or a number) when given, else the forward's; ``None`` for
+    konfai's 0, which the program leaves unsaid."""
+    if stated is None:
+        return forward
+    return stated if stated == "edge" else (float(stated) or None)
 
 
 def _field(p: dict[str, Any], datasets: list[str] | None) -> dict[str, Any]:
@@ -237,23 +264,46 @@ def _refuse_lazy(stage: str, p: dict[str, Any]) -> None:
 
 
 def _op_canonical(p: dict[str, Any]) -> dict[str, Any]:
-    _refuse_set("Canonical", p, {"resample": True})
-    return {"op": "canonical"}
+    # resample: false permutes and flips an oblique case onto its nearest axes rather than resample it.
+    return {"op": "canonical", **({"resample": False} if clean(p.get("resample", True)) is False else {})}
 
 
 def _op_crop(p: dict[str, Any]) -> dict[str, Any]:
-    defaults = {"source": None, "labels": None, "margin_mm": 0.0, "fill": None, "empty": "refuse", "nonzero": False}
-    _refuse_set("Crop", p, {**defaults, "handed": False})
-    return {"op": "crop"}
+    """konfai's ``Crop``, each parameter written off its default: the box of the group ``source_group`` read
+    beside the case or of the volume in hand, its ``labels`` or ``nonzero`` voxels, grown by ``margin_mm``; the
+    inverse pads back with ``fill``, over the whole grid for a case with no foreground under ``empty: fill``; or the
+    volume in hand made exactly ``shape`` voxels per axis, cropped to its centre or padded with ``fill``."""
+    step: dict[str, Any] = {"op": "crop"}
+    if (shape := clean(p.get("shape"))) is not None:
+        step["shape"] = [int(extent) for extent in shape]
+    if (source := clean(p.get("source"))) is not None:
+        step["source_group"] = _literal_group(str(source), TransformError)
+    if (labels := clean(p.get("labels"))) is not None:
+        step["labels"] = [int(label) for label in labels]
+    if margin := float(clean(p.get("margin_mm")) or 0.0):
+        step["margin_mm"] = margin
+    if (fill := clean(p.get("fill"))) is not None:
+        step["fill"] = float(fill)
+    if clean(p.get("empty")) == "fill":
+        step["empty"] = "fill"
+    if clean(p.get("nonzero")):
+        step["nonzero"] = True
+    return step
 
 
 def _op_standardize(p: dict[str, Any]) -> dict[str, Any]:
     _refuse_lazy("Standardize", p)
-    _refuse_set("Standardize", p, {"nonzero": False})
     step: dict[str, Any] = {"op": "standardize"}
     for name in ("mean", "std"):
         if clean(p.get(name)) is not None:
             step[name] = _one_per_channel(p[name], name)
+    if clean(p.get("nonzero")):
+        from konfai.data.transform import Standardize
+
+        # konfai's own refusals: the inverse is not defined, the mask is the non-zero voxels.
+        stated = {key: clean(p.get(key)) for key in ("mask", "inverse")}
+        Standardize(nonzero=True, **{key: value for key, value in stated.items() if value is not None})
+        step["nonzero"] = True
     return _masked(step, p, measures="mean" not in step or "std" not in step)
 
 
@@ -371,6 +421,21 @@ def _op_flat_label(p: dict[str, Any]) -> dict[str, Any]:
     return {"op": "relabel", "pairs": [[int(label), 1] for label in labels]}
 
 
+def _op_threshold_labels(p: dict[str, Any]) -> dict[str, Any]:
+    from konfai.data.transform import ThresholdLabels
+
+    # konfai's own reading, which refuses a label outside uint8 and a priority that is no order of the channels.
+    stated = {key: clean(p.get(key)) for key in ("threshold", "priority", "sigmoid")}
+    stage = ThresholdLabels(clean(p.get("labels")) or [], **{k: v for k, v in stated.items() if v is not None})
+    return {
+        "op": "threshold_labels",
+        "threshold": stage.threshold,
+        "labels": stage.labels,
+        "priority": stage.priority,
+        "sigmoid": stage.sigmoid,
+    }
+
+
 def _op_brightness(p: dict[str, Any]) -> dict[str, Any]:
     # konfai draws the groups the draw names and leaves the others as they are; the runtime draws the chain
     # it is written in.
@@ -414,6 +479,13 @@ def _admitted(step: dict[str, Any]) -> dict[str, Any]:
     return step
 
 
+#: Exports a run of pointwise output transforms, handed the post steps before it, as one graph: the step that runs it.
+FoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]]], dict[str, Any]]
+#: A ``FoldOut`` handed, past the steps, the dtype konfai hands the run.
+TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]], str], dict[str, Any]]
+#: Exports the two graphs of a ``CaseStatistic``, handed its parameters: the step that runs them.
+StatisticOut = Callable[[dict[str, Any]], dict[str, Any]]
+
 #: KonfAI transform name -> the runtime op it compiles to. A stage outside this map has no portable
 #: form; each compiler refuses it by name. Either workflow's program reads the companion group a stage
 #: names beside its case, into a buffer of its own.
@@ -423,8 +495,7 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "Resample": _op_resample,
     "Padding": _op_pad,
     "Dilate": lambda p: {"op": "dilate", "radius": int(p.get("dilate", _default("Dilate", "dilate")))},
-    # Canonical reorients from the volume's own direction cosines at runtime: it carries no params, and refuses
-    # resample: false (a reorientation onto the nearest axes alone), which no runtime op reads yet.
+    # Canonical reorients from the volume's own direction cosines at runtime.
     "Canonical": _op_canonical,
     # Flip and Permute move the voxels and, as konfai's do, leave the geometry untouched.
     "Flip": _op_axes("Flip"),
@@ -438,6 +509,8 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     # a cast's puts the volume back in the dtype it was stored in, which the runtime's reader recorded.
     "SelectLabel": _op_select_label,
     "FlatLabel": _op_flat_label,
+    # A sigmoid head's label rule, one uint8 channel.
+    "ThresholdLabels": _op_threshold_labels,
     "OneHot": lambda p: {"op": "one_hot", "num_classes": int(p["num_classes"])},
     "Crop": _op_crop,
     # konfai's Gradient: the first difference along each spatial axis, per axis or folded into the norm
@@ -450,6 +523,12 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     # ITK's HistogramMatchingImageFilter at konfai's settings, onto a group read as stored beside the case.
     "HistogramMatching": lambda p: {"op": "histogram_match", "reference_group": str(p["reference_group"])},
     "Percentage": lambda p: {"op": "percentage", "baseline": float(p["baseline"])},
+    # The largest component of the foreground, its voxels face to face, the rest set to 0; the foreground is the
+    # channel `mask` names, which the output drops, else any channel's non-zero voxels.
+    "KeepLargestComponent": lambda p: {
+        "op": "keep_largest_component",
+        **({"mask": int(p["mask"])} if clean(p.get("mask")) is not None else {}),
+    },
 }
 # A prediction's Mask is a program step over a nested model's buffer (PROGRAM_TRANSFORMS). A Crop finds its box
 # at run time (`compile_chain` says where it may); a prediction refuses it, konfai undoing it by a replicate pad.
@@ -467,15 +546,26 @@ def moves_the_volume(step: dict[str, Any]) -> bool:
     return not (step["op"] == "cast" and str(step.get("dtype", "")).startswith("float"))
 
 
-def refuse_a_late_crop(name: str, moved: str | None, error: type[KonfAIError], run: str = _PREDICT) -> None:
+def refuse_a_late_crop(
+    name: str, moved: str | None, error: type[KonfAIError], run: str = _PREDICT, params: Any = None
+) -> None:
     """konfai's ``Crop`` keeps the box of the group as stored and the runtime the box of the volume it is
-    handed: one box only while no stage before it moved the grid or the values."""
-    if base_name(name) != "Crop" or moved is None:
+    handed: one box only while no stage before it moved the grid or the values. A crop to a ``shape`` finds
+    no box: both take the centre of the volume handed; a ``handed`` one measures its box there too."""
+    stated = _mapping(params)
+    if (
+        base_name(name) != "Crop"
+        or moved is None
+        or clean(stated.get("shape")) is not None
+        or clean(stated.get("handed"))
+    ):
         return
     raise error(
         f"'{name}' follows '{moved}', and konfai crops to the box it finds in the group as stored, whatever"
         f" '{moved}' did to the volume, where the portable runtime finds the box in the volume it is handed.",
-        _or_konfai("Put the Crop first in the chain, or run what precedes it as a chain of its own", run),
+        _or_konfai(
+            "Give the Crop handed: true, put it first in the chain, or run what precedes it as a chain of its own", run
+        ),
     )
 
 
@@ -483,10 +573,12 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
     op = step["op"]
-    if op == "cast":
+    if op in ("cast", "onnx"):
         return str(step["dtype"])
     if op == "argmax":
         return "int64"
+    if op == "threshold_labels":
+        return "uint8"
     if op in ("one_hot", "brightness", "norm"):
         return "float32"
     if op in ("standardize", "normalize", "unnormalize", "softmax") and dtype not in (None, "float64"):
@@ -523,6 +615,13 @@ def resolve_interpolation(
             elif dtype is not None:
                 step["interpolation"] = _default_interpolation(dtype)
         dtype = None if step["op"] == "inverse" and step.get("of") in restored else _result_dtype(step, dtype)
+    return dtype
+
+
+def _dtype_after(steps: list[dict[str, Any]], dtype: str | None) -> str | None:
+    """The dtype konfai's stages of ``steps`` leave of ``dtype``."""
+    for step in steps:
+        dtype = _result_dtype(step, dtype)
     return dtype
 
 
@@ -747,6 +846,19 @@ def _built(config_file: str | Path, build: Callable[[Path], Any]) -> Iterator[tu
 
 
 @contextmanager
+def _sources_staged_at_run_time() -> Iterator[None]:
+    """A ``Crop`` measuring its box on a group no dataset of the build holds plans no box: that group is a needed
+    app's output (app.json ``needs``), staged beside the case at run time, where the runtime measures the box."""
+    from konfai.data.transform import Crop
+
+    previous, Crop.plan_without_source = Crop.plan_without_source, True
+    try:
+        yield
+    finally:
+        Crop.plan_without_source = previous
+
+
+@contextmanager
 def config_environment(config_file: Path, *, root: str | None = None, state: str | None = None) -> Iterator[Path]:
     """Read a KonfAI config with the environment its builders need, the config's directory on ``sys.path`` so
     a classpath beside it resolves, and restore every ``KONFAI_*`` variable afterwards. Reading rewrites a config,
@@ -832,7 +944,7 @@ def compile_chain(
                 f"Transform '{name}' has no portable runtime op, so this chain cannot run outside Python.",
                 f"Portable stages are: {', '.join(sorted(_CHAIN_OPS))}.",
             )
-        refuse_a_late_crop(name, moved, TransformError)
+        refuse_a_late_crop(name, moved, TransformError, params=params)
         step = _op_resample(params, datasets, datasets) if stage == "Resample" else _CHAIN_OPS[stage](params)
         moved = moved or (name if moves_the_volume(step) else None)
         steps.append(step)
@@ -1068,10 +1180,19 @@ def derive_blend(config: dict[str, Any], root: str, output: str | None = None) -
     return str(clean(spec["patch_combine"]) or "Overwrite") if "patch_combine" in spec else None
 
 
+#: The manifest ``blend`` values the runtime runs.
+RUNTIME_BLENDS = ("Cosinus", "Mean", "Gaussian", "GaussianFloat16", "Overwrite", "Trim")
+
+
 def check_blend(overlap: list[int] | None, blend: str | None) -> None:
-    """Refuse an overlap no ``patch_combine`` owns: konfai then keeps each voxel from the patch holding it most
-    centrally (``Trim``), which no portable runtime op does, where the export's ``Overwrite`` keeps the last
-    patch at an intersection."""
+    """Refuse a ``patch_combine`` the runtime has no blend for, and an overlap none owns: konfai then keeps each
+    voxel from the patch holding it most centrally (``Trim``), which no portable runtime op does, where the export's
+    ``Overwrite`` keeps the last patch at an intersection."""
+    if blend is not None and blend not in RUNTIME_BLENDS:
+        raise ConfigError(
+            f"the output's patch_combine '{blend}' is no blend the portable runtime runs.",
+            _or_konfai(f"Use one of {', '.join(RUNTIME_BLENDS)}", _PREDICT),
+        )
     if overlap and any(int(o) > 0 for o in overlap) and blend in (None, "Overwrite"):
         raise ConfigError(
             "the output declares an overlap and no patch_combine: konfai assembles it with Trim, each voxel from the"
@@ -1104,10 +1225,14 @@ def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | N
         raw = patch.get("patch_size")
         if isinstance(raw, list):
             dims = [int(d) for d in raw]
+            if all(d <= 0 for d in dims):
+                # Every axis free: the whole case is one window, which the graph takes at any shape.
+                return [0] * len(dims), _in_channels(config, root), 0, _pad_value(patch)
             if any(d <= 0 for d in dims):
                 raise ConfigError(
-                    f"patch_size {dims} contains a free axis; ONNX export requires fixed spatial dimensions.",
-                    "Set an explicit positive patch_size before compiling the portable program.",
+                    f"patch_size {dims} frees some axes and fixes others; the export fixes every axis, or frees"
+                    " them all (one window per case).",
+                    "Set every axis of patch_size, or every axis to 0.",
                 )
             patch_size = [d for d in dims if d > 1] or dims
         raw_extend = patch.get("extend_slice", 0)
@@ -1115,13 +1240,20 @@ def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | N
             extend_slice = raw_extend
         elif isinstance(raw_extend, str) and raw_extend.lstrip("-").isdigit():
             extend_slice = int(raw_extend)
-        raw_pad = clean(patch.get("pad_value"))
-        if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool):
-            pad_value = float(raw_pad)
-        elif raw_pad == "edge":
-            pad_value = raw_pad
+        pad_value = _pad_value(patch)
+    return patch_size, _in_channels(config, root), extend_slice, pad_value
 
-    in_channels: int | None = None
+
+def _pad_value(patch: dict[str, Any]) -> float | str:
+    """What pads a patch past the volume: the number or ``edge`` the config pins, else ``min``."""
+    raw_pad = clean(patch.get("pad_value"))
+    if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool):
+        return float(raw_pad)
+    return "edge" if raw_pad == "edge" else "min"
+
+
+def _in_channels(config: dict[str, Any], root: str) -> int | None:
+    """The model's ``nb_channel``, else its ``in_channels``, else its first ``channels``; ``None`` when unstated."""
     for model in map(_mapping, _mapping(_mapping(config.get(root)).get("Model")).values()):
         channels = model.get("channels")
         first = channels[0] if isinstance(channels, list) and channels else None
@@ -1129,8 +1261,8 @@ def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | N
             (n for n in (model.get("nb_channel"), model.get("in_channels"), first) if isinstance(n, int)), None
         )
         if in_channels is not None:
-            break
-    return patch_size, in_channels, extend_slice, pad_value
+            return in_channels
+    return None
 
 
 # Transforms compiled into PROGRAM steps (cross-buffer, or a buffer produced by a nested model), never
@@ -1286,16 +1418,28 @@ def compile_pipeline(
     invertible: bool = False,
     consumed: Collection[str] = (),
     roots: list[str] | None = None,
+    fold_out: FoldOut | None = None,
+    case_statistic: StatisticOut | None = None,
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``fold``, a POINTWISE transform with no op is
     baked into the ONNX graph, and the folds must end the chain. With ``invertible`` (the input chain, the only
     one the predictor undoes) a step the chain undoes is named, and its name returned, for the post chain to
     place its inverse. ``consumed`` names the program stages the caller builds a step for; any other is refused.
-    ``roots`` are the run's ``dataset_filenames``, where a ``Resample`` looks its stored transforms up."""
+    ``roots`` are the run's ``dataset_filenames``, where a ``Resample`` looks its stored transforms up. With
+    ``fold_out`` (an output chain), each run of POINTWISE transforms with no op is one step, which ``fold_out``
+    makes of them and the steps before them, where it stands in the chain. With ``case_statistic`` (the chain of a
+    group the model reads past its first), a ``CaseStatistic`` is the step it makes."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
     moved: str | None = None
+    pending: list[Callable[[Any], Any]] = []
+
+    def flush() -> None:
+        if pending:
+            steps.append(cast(FoldOut, fold_out)(list(pending), list(steps)))
+            pending.clear()
+
     # A chain is a mapping (konfai rewrites the list spelling into one under occurrence keys as it binds)
     # or konfai's `None`, in either spelling, for a group that prepares nothing.
     for name, params in chain_items(clean(transforms)):
@@ -1315,8 +1459,12 @@ def compile_pipeline(
                 " after_reduction_transforms stage; a Mask over a nested model's group is applied by the konfai-apps"
                 " bundle export. Otherwise predict this config with konfai itself.",
             )
+        if base == "CaseStatistic" and case_statistic is not None:
+            steps.append(_admitted(case_statistic(params)))
+            continue
         if base in OP_MAP:
-            refuse_a_late_crop(name, moved, ConfigError)
+            flush()
+            refuse_a_late_crop(name, moved, ConfigError, params=params)
             if folds:
                 raise ConfigError(
                     f"transform '{name}' is a runtime op but follows a folded transform; move folded "
@@ -1329,14 +1477,19 @@ def compile_pipeline(
                 inverted.append(name)
             steps.append(step)
             continue
-        folded = try_fold(name, params) if fold else None
+        folded = try_fold(name, params) if fold or fold_out is not None else None
         if folded is None:
             raise ConfigError(
                 f"transform '{name}' has no portable runtime op and is not a foldable pointwise transform; "
                 "the ONNX bundle is not deployable in a Python-free runtime. Remove it from the inference "
                 "config or extend the runtime op registry."
             )
+        if fold_out is not None:
+            moved = moved or name  # a Crop past it finds its box in the values this one changed
+            pending.append(folded)
+            continue
         folds.append(folded)
+    flush()
     return steps, folds, inverted
 
 
@@ -1373,11 +1526,13 @@ def _split_stack(
 REGRIDS = ("resample", "pad", "crop", "canonical", "permute")
 
 
-def _group_chain(group_src: str, group: dict[str, Any], channels: int) -> dict[str, Any]:
+def _group_chain(
+    group_src: str, group: dict[str, Any], channels: int, case_statistic: StatisticOut | None = None
+) -> dict[str, Any]:
     """One more group the model reads: its name on disk, what it holds per voxel, and the chain that
     prepares it. konfai patches every group of a case on the first one's grid, so a chain moving this
     group off that grid is refused by name rather than discovered as a shape mismatch at run time."""
-    steps, _folds, _inverted = compile_pipeline(group.get("transforms"))
+    steps, _folds, _inverted = compile_pipeline(group.get("transforms"), case_statistic=case_statistic)
     if (moved := next((step for step in steps if step["op"] in REGRIDS), None)) is not None:
         raise ConfigError(
             f"the chain of group '{group_src}' runs a '{moved['op']}', which moves it off the grid the"
@@ -1400,21 +1555,25 @@ def transform_manifest(
     masked: bool = False,
     output: str | None = None,
     others: list[int] | None = None,
+    fold_out: TypedFoldOut | None = None,
+    case_statistic: StatisticOut | None = None,
 ) -> tuple[dict[str, Any], list[Callable[[Any], Any]], int]:
     """The pre/post op pipeline the portable runtime applies around the tiled forward, the ``fold_pre``
     callables (POINTWISE preprocessing transforms baked into the ONNX graph), and how many post ops the
     predictor runs per copy, before any reduction. ``masked``: the caller applies the before-reduction
     ``Mask`` stages as program steps of its own. ``others`` is what each group past the first holds per
-    voxel, in the order the model reads them."""
+    voxel, in the order the model reads them. ``fold_out`` exports a run of pointwise output transforms with no op
+    to one graph, handed the transforms and the post steps before them; without it they are refused. ``case_statistic``
+    exports a ``CaseStatistic`` of a group past the first; without it, it is refused."""
     _refuse_another_mirror(config, root, output)
     roots = [str(entry) for entry in ((config.get(root) or {}).get("Dataset") or {}).get("dataset_filenames") or []]
     pre, folds, inverted = compile_pipeline(
         input_group_transforms(config, root), fold=True, invertible=True, roots=roots
     )
     folds += _patch_folds(config, root)
-    post, per_copy = _post_chain(config, root, output_spec(config, root, output), pre, inverted, masked)
+    post, per_copy = _post_chain(config, root, output_spec(config, root, output), pre, inverted, masked, fold_out)
     manifest = {"preprocessing": pre, "postprocessing": post}
-    reads = _reads_of(config, root, pre, others)
+    reads = _reads_of(config, root, pre, others, case_statistic)
     if reads:
         manifest["reads"] = reads
     return manifest, folds, per_copy
@@ -1463,18 +1622,55 @@ def _post_chain(
     pre: list[dict[str, Any]],
     inverted: list[str],
     masked: bool,
+    fold_out: TypedFoldOut | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """The post chain in the predictor's own order, and how many of its ops run per copy: the per-copy
     transforms, then the ones that follow the reduction, then the inverses of the input chain in reverse, then
     the final transforms. Softmax and argmax after the inverses decide a class on the output grid; before them,
-    a resample of a label map would move every class boundary by a voxel."""
+    a resample of a label map would move every class boundary by a voxel. A run of pointwise transforms with no op is
+    one graph ``fold_out`` exports, while the copies hold what the model gives each voxel: not past a concatenation of
+    models or copies, which changes what a voxel holds."""
+    done: list[dict[str, Any]] = []
+
+    def folding(concatenated: bool, dtype: str | None) -> FoldOut | None:
+        """``fold_out`` in a phase konfai hands ``dtype`` (``None``: the stored one)."""
+        if fold_out is None or concatenated:
+            return None
+
+        def fold(folds: list[Callable[[Any], Any]], steps: list[dict[str, Any]]) -> dict[str, Any]:
+            held = _dtype_after(steps, dtype)
+            if held is None:
+                raise ConfigError(
+                    "An output transform folded into a graph past the inverse of a cast reads the stored dtype,"
+                    " which only the run knows.",
+                    "Move the transform before the inverses, or set inverse: false on the cast.",
+                )
+            return fold_out(folds, [*done, *steps], held)
+
+        return fold
+
+    copies = str(clean(spec.get("reduction")) or "Mean")
+    concat = "Concat" in (_class_name(str(clean(config.get(root, {}).get("combine")) or "Mean")), _class_name(copies))
     before, _, _ = compile_pipeline(
-        bound_chain(spec.get("before_reduction_transforms")), consumed=("Mask",) if masked else ()
+        bound_chain(spec.get("before_reduction_transforms")),
+        consumed=("Mask",) if masked else (),
+        fold_out=folding(False, "float32"),
     )
+    done += before
+    # The model hands the post chain a floating tensor, and the reduction between the per-copy ops and
+    # the rest settles the dtype the rest reads.
+    dtype = resolve_interpolation(before, "float32") or "float32"
+    folded = _reduced_dtype(dtype, copies)
+    restored = [step["id"] for step in pre if step["op"] == "cast" and "id" in step]
     # The stack or the label merge that opens the chain is the reduce op `derive_reduction` names.
     stack, after_stack = _split_stack(config, root, spec)
-    after, _, _ = compile_pipeline(after_stack)
-    final, _, _ = compile_pipeline(bound_chain(spec.get("final_transforms")))
+    after, _, _ = compile_pipeline(after_stack, fold_out=folding(concat, folded))
+    done += after
+    undone_cast = set(inverted) & set(restored)
+    final, _, _ = compile_pipeline(
+        bound_chain(spec.get("final_transforms")),
+        fold_out=folding(concat, None if undone_cast else _dtype_after(after, folded)),
+    )
     op_of = _op_of(pre)
     for name in inverted:
         if op_of[name] not in INVERTIBLE_OPS:
@@ -1491,19 +1687,32 @@ def _post_chain(
                 " backwards.",
                 "Set inverse: false on it.",
             )
-    # The interpolations each resample states, before the input chain's own are resolved.
-    undone = {step["id"]: step.get("interpolation") for step in pre if step["op"] == "resample" and "id" in step}
-    restored = [step["id"] for step in pre if step["op"] == "cast" and "id" in step]
+    # The interpolations each resample states for its inverse (its inverse_interpolation, else its own), before
+    # the input chain's own are resolved.
+    stated = {name: _mapping(params) for name, params in chain_items(clean(input_group_transforms(config, root)))}
+    resamples = [step for step in pre if step["op"] == "resample" and "id" in step]
+    undone = {
+        step["id"]: clean(stated[step["id"]].get("inverse_interpolation")) or step.get("interpolation")
+        for step in resamples
+    }
     resolve_interpolation(pre, None)
-    # konfai undoes a resample with the fill its stage states.
-    fills = {step["id"]: step["fill"] for step in pre if step["op"] == "resample" and "id" in step and "fill" in step}
+    # konfai undoes a resample with the fill its stage states, or its inverse_fill.
+    fills = {
+        step["id"]: fill
+        for step in resamples
+        if (fill := _fill(clean(stated[step["id"]].get("inverse_fill")), step.get("fill"))) is not None
+    }
+    # A resample placed by another library's rule is undone by that library's resampling, which reads the rule and
+    # the spacing it asked for (the faces rule decides its axis apart from them).
+    rules = {
+        step["id"]: {key: step[key] for key in ("grid", "spacing") if key in step}
+        for step in resamples
+        if "grid" in step
+    }
     inverses = [
-        {"op": "inverse", "of": name, **({"fill": fills[name]} if name in fills else {})} for name in reversed(inverted)
+        {"op": "inverse", "of": name, **rules.get(name, {}), **({"fill": fills[name]} if name in fills else {})}
+        for name in reversed(inverted)
     ]
-    # The model hands the post chain a floating tensor, and the reduction between the per-copy ops and
-    # the rest settles the dtype the inverses read.
-    dtype = resolve_interpolation(before, "float32") or "float32"
-    folded = _reduced_dtype(dtype, str(clean(spec.get("reduction")) or "Mean"))
     rest = after + inverses + final
     resolve_interpolation(rest, folded, undone, restored)
     post = before + rest
@@ -1516,14 +1725,18 @@ def _post_chain(
 
 
 def _reads_of(
-    config: dict[str, Any], root: str, pre: list[dict[str, Any]], others: list[int] | None
+    config: dict[str, Any],
+    root: str,
+    pre: list[dict[str, Any]],
+    others: list[int] | None,
+    case_statistic: StatisticOut | None = None,
 ) -> list[dict[str, Any]]:
     """Every group the model reads past the first, with the chain that prepares it, in the order konfai hands
     them to the network; then the groups the input chain's own stages read beside the case (a masked bound or
-    statistic, a histogram reference, a displacement field), which konfai hands them as stored, so the program
-    runs nothing on them."""
+    statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them as stored, so
+    the program runs nothing on them."""
     reads = [
-        _group_chain(group_src, group, channels)
+        _group_chain(group_src, group, channels, case_statistic)
         for (group_src, group), channels in zip(
             input_groups(config, root)[1:], chain(others or [], repeat(1)), strict=False
         )
@@ -1531,7 +1744,7 @@ def _reads_of(
     named = {read["group"] for read in reads}
     companions: dict[str, int] = {}
     for step in pre:
-        if group := step.get("mask_group") or step.get("reference_group"):
+        if group := step.get("mask_group") or step.get("reference_group") or step.get("source_group"):
             companions.setdefault(group, 1)
         elif group := step.get("field_group"):
             # A displacement field holds one component per spatial axis of the case the patch cuts.
@@ -1567,6 +1780,17 @@ def split_post(post: list[dict[str, Any]], preprocessing: list[dict[str, Any]], 
     return split
 
 
+def _body_resample(interpolation: str, resampled: str) -> str:
+    """The program op that resamples a buffer by ``interpolation``; ``resampled`` names the stage in a refusal."""
+    if interpolation not in BODY_INTERPOLATIONS:
+        raise ConfigError(
+            f"assemble_program: {resampled} interpolates '{interpolation}', and a program resamples a buffer"
+            f" onto another's grid by {', '.join(map(repr, BODY_INTERPOLATIONS))} only.",
+            _or_konfai("Use one of those on that Resample", _PREDICT),
+        )
+    return f"resample_{interpolation}"
+
+
 def hoist_ensemble_tail(
     manifests: list[dict[str, Any]], per_copy: int, stacked: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1584,7 +1808,7 @@ def hoist_ensemble_tail(
         op = step["op"]
         if op == "cast":
             # A cast sets the dtype the rest of the tail reads and the output is written in.
-            tail.append({"op": "cast", "dtype": step["dtype"]})
+            tail.append({k: step[k] for k in ("op", "dtype", "round") if k in step})
             continue
         if op == "inverse":
             of = step.get("of")
@@ -1613,10 +1837,17 @@ def hoist_ensemble_tail(
             # op carries that align and the spacing it named, which an extent alone does not give back, and
             # the fill the input's voxels past the buffer's far face read, which an extent never leaves.
             forward = undone[of]
+            if "grid" in forward:
+                raise ConfigError(
+                    f"assemble_program: the inverse of '{of}' places its grid by the {forward['grid']} rule, and a"
+                    " resample hoisted past the reduction lands on the caller's grid by konfai's.",
+                    _or_konfai("Undo that Resample in each model (no ensemble), or use grid: konfai", _PREDICT),
+                )
             placed = {key: forward[key] for key in ("align", "spacing") if "align" in forward and key in forward}
             if "align" in forward and "fill" in step:
                 placed["fill"] = step["fill"]
-            tail.append({"op": f"resample_{step['interpolation']}", **placed, "extra": ["input"]})
+            resample = _body_resample(step["interpolation"], f"the inverse of '{of}'")
+            tail.append({"op": resample, **placed, "extra": ["input"]})
             continue
         if op not in ("softmax", "argmax"):
             raise ConfigError(
@@ -1641,7 +1872,7 @@ def _refuse_values_past_the_merge(manifest: dict[str, Any], per_copy: int) -> No
     op_of = _op_of(manifest.get("preprocessing", []))
     for step in manifest.get("postprocessing", [])[per_copy:]:
         undone = op_of.get(step.get("of")) if step["op"] == "inverse" else None
-        if undone in INDEX_SELECTIONS or (undone == "resample" and step.get("interpolation") == "nearest"):
+        if undone in INDEX_SELECTIONS or (undone == "resample" and step.get("interpolation") in PICKS):
             continue
         name = step.get("of") if step["op"] == "inverse" else step["op"]
         raise ConfigError(
@@ -1817,7 +2048,7 @@ def _fold_op(step: dict[str, Any]) -> dict[str, Any]:
     konfai runs the stage on the average, so the models cannot each run it in their own manifest."""
     op = step["op"]
     if op == "cast":
-        return {"op": "cast", "dtype": step["dtype"]}
+        return {k: step[k] for k in ("op", "dtype", "round") if k in step}
     if op in ("softmax", "argmax") and int(step.get("dim", 0)) == 0:
         return {"op": op}
     raise ConfigError(
@@ -1916,11 +2147,12 @@ def _mask_buffers(aux: dict[str, dict[str, Any]], grid: str, steps: list[dict[st
                         " program puts a nested model's volume on the copies' grid by the two extents alone.",
                         _or_konfai("Drop the field from that Resample", _PREDICT),
                     )
-                if "align" in step:
+                if placed := [f"{key}: {step[key]}" for key in ("align", "grid", "antialias") if key in step]:
                     raise ConfigError(
-                        f"'Resample' on group '{name}' aligns on '{step['align']}', and the program puts a nested"
-                        " model's volume on the copies' grid the way align: extent places it.",
-                        _or_konfai("Align that Resample on extent", _PREDICT),
+                        f"'Resample' on group '{name}' sets {', '.join(placed)}, and the program puts a nested"
+                        " model's volume on the copies' grid the way konfai's own grid aligned on extent places it,"
+                        " with no antialias.",
+                        _or_konfai("Drop that from the Resample", _PREDICT),
                     )
                 if "interpolation" not in step:
                     raise ConfigError(
@@ -1928,7 +2160,8 @@ def _mask_buffers(aux: dict[str, dict[str, Any]], grid: str, steps: list[dict[st
                         " dtype the nested app writes, which the program reads only from a cast its chain ends on.",
                         "State interpolation on that Resample.",
                     )
-                steps.append({"op": f"resample_{step['interpolation']}", "in": [cursor, grid], "out": out})
+                op = _body_resample(step["interpolation"], f"'Resample' on group '{name}'")
+                steps.append({"op": op, "in": [cursor, grid], "out": out})
             else:
                 steps.append({**step, "in": [cursor], "out": out})
             cursor = out
@@ -2128,6 +2361,8 @@ def export_checkpoints(
     patch_size = patch_size or derived_patch
     if not patch_size:
         raise ConfigError("could not derive patch_size from the config; pass --patch-size")
+    # Every axis free: the graph is traced on a 64-voxel cube and keeps its spatial axes free.
+    whole = all(size <= 0 for size in patch_size)
     # One count per group the model reads, in the order its graph takes them. A group past the first
     # holds one value per voxel unless the caller states otherwise.
     stated = [in_channels] if isinstance(in_channels, int) else list(in_channels or [])
@@ -2135,10 +2370,49 @@ def export_checkpoints(
     channels = stated[0] if stated else derived_channels
     others = list(islice(chain(stated[1:], repeat(1)), max(len(inputs), 1) - 1))
     patch = inference_patch(config, root)
-    overlap = derive_overlap(patch, patch_size) if patch else None
+    overlap = [0] * len(patch_size) if whole else derive_overlap(patch, patch_size) if patch else None
     placement = derive_placement(patch)
-    stride = None if placement == "pad" else derive_stride(patch, patch_size)
-    extra, folds, per_copy = transform_manifest(config, root, masked=masked, output=output, others=others)
+    stride = None if placement == "pad" or whole else derive_stride(patch, patch_size)
+    classpath = config[root]["Model"]["classpath"]
+    traced = [64] * len(patch_size) if whole else patch_size
+    folded = statistics = 0
+
+    def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
+        """A run of pointwise output transforms as one graph beside the model's, on what the post steps before it
+        leave of the head's channels, in the ``dtype`` konfai hands it."""
+        nonlocal folded
+        from konfai.export import export_folds, list_output_modules
+
+        model = _loaded_model(classpath, checkpoints[0])
+        count = channels or getattr(model, "in_channels", None) or 1
+        examples = tuple(torch.randn(1, n, *traced) for n in [count, *others])
+        name = head or select_inference_head(model, *examples)
+        held = int(dict(list_output_modules(model, *examples))[name][1])
+        for step in before:
+            held = _channels_after(step, held)
+        filename = f"{ids[0]}_post_{folded}.onnx"
+        folded += 1
+        out_channels, out_dtype = export_folds(steps, out_dir / filename, held, len(traced), dtype)
+        return {"op": "onnx", "model": filename, "channels": out_channels, "dtype": out_dtype}
+
+    def case_statistic(params: dict[str, Any]) -> dict[str, Any]:
+        """A ``CaseStatistic`` of a group the model reads, as its two float64 graphs beside the model's."""
+        nonlocal statistics
+        from konfai.data.transform import CaseStatistic
+        from konfai.export import export_case_statistic
+
+        # Built with the mapping's other keys, as konfai binds them.
+        arguments = {key: clean(value) for key, value in params.items() if key != "statistic"}
+        statistic = CaseStatistic(str(clean(params["statistic"]))).factory(**arguments)
+        stem = f"{ids[0]}_statistic_{statistics}"
+        statistics += 1
+        partial, finish = f"{stem}_partial.onnx", f"{stem}_finish.onnx"
+        export_case_statistic(statistic, out_dir / partial, out_dir / finish, _spatial_rank(config, root))
+        return {"op": "case_statistic", "halo": int(statistic.halo), "partial": partial, "finish": finish}
+
+    extra, folds, per_copy = transform_manifest(
+        config, root, masked=masked, output=output, others=others, fold_out=fold_out, case_statistic=case_statistic
+    )
     blend = derive_blend(config, root, output)
     check_blend(overlap, blend)
     if blend is not None:
@@ -2147,7 +2421,6 @@ def export_checkpoints(
     # device holds them.
     batch = int(clean((config.get(root, {}).get("Dataset") or {}).get("batch_size")) or 1)
 
-    classpath = config[root]["Model"]["classpath"]
     models: list[dict[str, Any]] = []
     written: list[Path] = []
     for checkpoint, model_id in zip(checkpoints, ids, strict=True):
@@ -2156,7 +2429,7 @@ def export_checkpoints(
         channels = channels or getattr(model, "in_channels", None)
         if not channels:
             raise ConfigError("could not derive in_channels from the config or model; pass --in-channels")
-        examples = tuple(torch.randn(1, count, *patch_size) for count in [channels, *others])
+        examples = tuple(torch.randn(1, count, *traced) for count in [channels, *others])
         # konfai blends a float32 output in float16 unless the model keeps it full (`full_precision_outputs`).
         precision = "float32" if getattr(model, "full_precision_outputs", False) else "float16"
         # Default to the terminal float head; the graph's last output is often an integer Argmax.
@@ -2165,7 +2438,7 @@ def export_checkpoints(
             out_dir,
             examples,
             head or select_inference_head(model, *examples),
-            input_group=inputs[0][0] if inputs else "Volume_0",
+            input_group=[group for group, _ in inputs] or "Volume_0",
             patch_overlap=overlap,
             extend_slice=extend_slice,
             pad_value=pad_value,
@@ -2175,11 +2448,24 @@ def export_checkpoints(
             fold_pre=folds,
             model_filename=f"{model_id}.onnx",
             write_manifest=write_manifest,
+            dynamic=whole,
         )
         manifest["patch"]["batch"] = batch
         models.append({"id": model_id, "manifest": manifest})
         written.append(path)
     return models, written, per_copy
+
+
+def _channels_after(step: dict[str, Any], held: int) -> int:
+    """The channels a post step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
+    channel taken off by ``keep_largest_component`` one fewer, a gradient per axis three each, a folded graph its own."""
+    if step["op"] in ("argmax", "magnitude", "threshold_labels"):
+        return 1
+    if step["op"] == "gradient" and step["per_dim"]:
+        return held * 3
+    if step["op"] == "keep_largest_component" and "mask" in step:
+        return held - 1
+    return int(step.get("num_classes", step.get("channels", held)))
 
 
 def _loaded_model(classpath: str, checkpoint: Path | None) -> Any:
@@ -2389,10 +2675,13 @@ def compile_prediction(
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoints = [Path(model).resolve() for model in models or []]
 
-    with _built(
-        prediction_file,
-        lambda file: build_predict(models=checkpoints, prediction_file=file, predictions_dir=Path(predictions_dir)),
-    ) as (built, resolved):
+    with (
+        _sources_staged_at_run_time(),
+        _built(
+            prediction_file,
+            lambda file: build_predict(models=checkpoints, prediction_file=file, predictions_dir=Path(predictions_dir)),
+        ) as (built, resolved),
+    ):
         predictor = cast(Predictor, built)
         # A module reading the case's attributes (its geometry) runs Python on the case, which an exported graph,
         # handed tensors alone, cannot carry: refused before anything runs.

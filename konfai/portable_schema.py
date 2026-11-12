@@ -31,7 +31,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from konfai.export import MANIFEST_VERSION
+from konfai.data.transform.resample import GRID_RULES
+from konfai.export import FLOAT16_BLEND_VERSION, MANIFEST_VERSION
 from konfai.portable import PREDICTION_PROGRAM_VERSION, TRANSFORM_PROGRAM_VERSION
 from konfai.portable_evaluation import EVALUATION_PROGRAM_VERSION
 
@@ -45,7 +46,7 @@ _FILL: dict[str, Any] = {"oneOf": [_NUMBER, {"const": "edge"}]}
 _PAD: dict[str, Any] = {"oneOf": [_NUMBER, {"enum": ["edge", "min"]}]}
 #: A clip bound: a number, or "min", "max" or "percentile:<q>", resolved against the volume in hand.
 _BOUND: dict[str, Any] = {"type": ["number", "string"]}
-_INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear", "cubic"]}
+_INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear", "cubic", "bspline", "nearest_even"]}
 _ALIGN: dict[str, Any] = {"enum": ["extent", "origin"]}
 _AXES: dict[str, Any] = {"type": "array", "items": {"type": "integer", "minimum": 0}}
 #: The name a post chain undoes the step by; written on the ops konfai's predictor can undo.
@@ -67,7 +68,7 @@ def _ref(name: str) -> dict[str, Any]:
 #: Op name -> (the keys a chain step of it may carry, the ones it must). A chain is a manifest's preprocessing,
 #: postprocessing or reads, a TRANSFORM chain's steps, a Reduce's or an Expand's post.
 CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
-    "cast": ({"dtype": _STRING, **_ID}, ["dtype"]),
+    "cast": ({"dtype": _STRING, "round": _BOOLEAN, **_ID}, ["dtype"]),
     "clip": ({"min_value": _BOUND, "max_value": _BOUND, "mask_group": _STRING}, ["min_value", "max_value"]),
     "resample": (
         {
@@ -77,6 +78,10 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
             "align": _ALIGN,
             "fill": _FILL,
             "interpolation": _INTERPOLATION,
+            # Another library's grid rule, under a spacing: it counts and places the pixels, align aside.
+            "grid": {"enum": list(GRID_RULES)},
+            # A Gaussian before the read (scikit-image's), or torchvision's triangle.
+            "antialias": {"enum": ["triangle", "gaussian"]},
             # The group holding the displacement field, one entry per case; beside the case, or in the store
             # field_dataset names.
             "field_group": _STRING,
@@ -90,10 +95,11 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     ),
     "pad": ({"padding": _array(_INTEGER), "mode": _STRING, **_ID}, ["padding", "mode"]),
     "dilate": ({"radius": _INTEGER}, ["radius"]),
-    "canonical": (dict(_ID), []),
+    # false: permuted and flipped onto the nearest axes, an oblique case left oblique.
+    "canonical": ({"resample": _BOOLEAN, **_ID}, []),
     "flip": ({"axes": _AXES, "vector_field": _BOOLEAN, **_ID}, ["axes"]),
     "permute": ({"axes": _AXES, **_ID}, ["axes"]),
-    "standardize": ({"mean": _NUMBER, "std": _NUMBER, "mask_group": _STRING, **_ID}, []),
+    "standardize": ({"mean": _NUMBER, "std": _NUMBER, "mask_group": _STRING, "nonzero": _BOOLEAN, **_ID}, []),
     "normalize": ({"min_value": _NUMBER, "max_value": _NUMBER, **_ID}, ["min_value", "max_value"]),
     "unnormalize": ({"min_value": _NUMBER, "max_value": _NUMBER}, ["min_value", "max_value"]),
     "softmax": ({"dim": {"const": 0}}, ["dim"]),
@@ -102,20 +108,63 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
         {"pairs": _array({"type": "array", "items": _INTEGER, "minItems": 2, "maxItems": 2}), "positive": _INTEGER},
         [],
     ),
+    "threshold_labels": (
+        {"threshold": _NUMBER, "labels": _array(_INTEGER), "priority": _array(_INTEGER), "sigmoid": _BOOLEAN},
+        ["labels"],
+    ),
     "one_hot": ({"num_classes": _INTEGER, **_ID}, ["num_classes"]),
-    "crop": (dict(_ID), []),
+    "crop": (
+        {
+            # The group whose box the volume is cropped to, read beside the case; absent, the volume's own.
+            "source_group": _STRING,
+            "labels": _array(_INTEGER),
+            # The volume made exactly this many pixels per axis in array order (an axis at 0 or below whole): its
+            # centre where it is larger, padded with fill (the edge without) where it is smaller.
+            "shape": _array(_INTEGER),
+            "nonzero": _BOOLEAN,
+            "margin_mm": _NUMBER,
+            # What the inverse pads the dropped pixels back with; absent, the nearest pixel.
+            "fill": _NUMBER,
+            # A case with no foreground keeps its near corner pixel, and the inverse writes fill everywhere.
+            "empty": {"const": "fill"},
+            **_ID,
+        },
+        [],
+    ),
     "gradient": ({"per_dim": _BOOLEAN}, ["per_dim"]),
     "norm": ({}, []),
     "magnitude": ({}, []),
     "histogram_match": ({"reference_group": _STRING}, ["reference_group"]),
     "percentage": ({"baseline": _NUMBER}, ["baseline"]),
+    "keep_largest_component": ({"mask": _INTEGER}, []),
     "variance": ({}, []),
     "standard_deviation": ({}, []),
     "segmentation_disagreement": ({}, []),
     "mask": ({"mask_group": _STRING, "value_outside": _NUMBER}, ["mask_group", "value_outside"]),
     "brightness": ({"b_std": _NUMBER}, ["b_std"]),
     "save": ({"destination": _ref("destination")}, ["destination"]),
-    "inverse": ({"of": _STRING, "interpolation": _INTERPOLATION, "vector_field": _BOOLEAN, "fill": _FILL}, ["of"]),
+    # Pointwise transforms of an output chain, exported as one graph beside the model's: its file, the channels it
+    # hands back, and the dtype konfai's transforms do (the program holds it as float32).
+    "onnx": ({"model": _STRING, "channels": _INTEGER, "dtype": _STRING}, ["model", "channels", "dtype"]),
+    # A whole-volume statistic as one float32 channel: `partial` (float64 `block` [C, *spatial], the region plus `halo`
+    # edge-replicated pixels per side of every spatial axis, to `partial` [K]) summed over the regions in float64, then
+    # `finish` (`total` [K] to the 0-d `statistic`), two graphs beside the program.
+    "case_statistic": (
+        {"halo": {"type": "integer", "minimum": 0}, "partial": _STRING, "finish": _STRING},
+        ["halo", "partial", "finish"],
+    ),
+    "inverse": (
+        {
+            "of": _STRING,
+            "interpolation": _INTERPOLATION,
+            "vector_field": _BOOLEAN,
+            "fill": _FILL,
+            # The grid rule of the resample undone and the spacing it asked for.
+            "grid": {"enum": list(GRID_RULES)},
+            "spacing": _array(_NUMBER),
+        },
+        ["of"],
+    ),
 }
 
 #: Op name -> (the keys a program step of it carries beside ``in`` and ``out``, the ones it must). A program
@@ -133,7 +182,7 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "resample_cubic": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
     "softmax": ({}, []),
     "argmax": ({}, []),
-    "cast": ({"dtype": _STRING}, ["dtype"]),
+    "cast": ({"dtype": _STRING, "round": _BOOLEAN}, ["dtype"]),
     "mask": ({"value_outside": _NUMBER}, ["value_outside"]),
     "dilate": ({"radius": _INTEGER}, ["radius"]),
     # A copy's Padding undone past the reduction, its margins taken back: the one program op that moves the grid.
@@ -286,7 +335,7 @@ def program_schema() -> dict[str, Any]:
         ),
         "manifest": _object(
             {
-                "konfai_edge_manifest": {"const": MANIFEST_VERSION},
+                "konfai_edge_manifest": {"enum": [MANIFEST_VERSION, FLOAT16_BLEND_VERSION]},
                 "model": _STRING,
                 "opset": _INTEGER,
                 "output_module": _STRING,

@@ -21,7 +21,7 @@ import contextlib
 import copy
 import queue
 import warnings
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from itertools import pairwise
 from typing import Any, cast
 
@@ -82,6 +82,7 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
+from konfai.data.transform.base import MEASURING_STATISTICS
 from konfai.utils.dataset import Attribute, Dataset, decompressed
 from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
@@ -240,7 +241,7 @@ class DatasetManager:
         #: key can be reused (:meth:`SegmentSizer.block_reads`).
         self._block_reads: dict[tuple, tuple[tuple, BlockReads]] = {}
         self._chain_device: torch.device | None = None
-        self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None, bool], dict[str, float]] = {}
+        self._disk_statistics: dict[tuple[Any, ...], dict[str, Any]] = {}
         #: What a whole-volume pass measured for a ``GLOBAL_STAT`` stage whose seed the store cannot
         #: give, keyed by (copy, stage object). Taken as the stage records it, before a later stage
         #: records the same keys over it, and kept past the load, which rebuilds the live attribute:
@@ -477,8 +478,18 @@ class DatasetManager:
             wanted = self._wanted_measurements.get(id(transform_function), {}) if record else {}
             scopes = dict.fromkeys(wanted, attribute)
             depths = self._measurement_depths(transform_function, scopes)
+            # What a measurement reads and the stage's whole-volume call does not leave: asked for, then taken back.
+            transient = {key for locality in wanted.values() for key in locality.stat_keys - locality.recorded}
+            if transient:
+                attribute[MEASURING_STATISTICS] = 1.0
             tensor = transform_function(self.name, tensor, attribute)
             self._keep_measurements(transform_function, scopes, depths)
+            if transient:
+                attribute.pop(MEASURING_STATISTICS)
+                before = next(iter(depths.values()), {})
+                for key in transient:
+                    while attribute._count_key(key) > before.get(key, 0):
+                        attribute.pop(key)
             if isinstance(transform_function, Save):
                 dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
                 dataset.write(group_dest, entry, tensor.cpu().numpy(), attribute)
@@ -662,11 +673,27 @@ class DatasetManager:
         missing = sorted(key for key in loc.stat_keys if not loc.takes_present or key not in cache_attribute)
         if not missing:
             return ()
-        stats = self._read_disk_statistics(
-            source_dataset, source_group, source_entry, loc.stat_channels, [_STREAM_STATS[key] for key in missing]
-        )
         seed = Attribute()
-        for key in missing:
+        # A percentile, numpy's to the value, or the stage's own statistic, by bounded passes over the stored volume.
+        for key in [key for key in missing if key.startswith(("Percentile:", "Statistic:"))]:
+            memo = (source_dataset, source_group, source_entry, key)
+            if memo not in self._disk_statistics:
+                if key.startswith("Statistic:"):
+                    value = cast(Callable, loc.measure)(source_dataset, source_group, source_entry)
+                else:
+                    quantile = float(key.partition(":")[2]) / 100
+                    value = source_dataset.read_data_quantile(source_group, source_entry, quantile)
+                self._disk_statistics[memo] = {key: value}
+            seed[key] = float(self._disk_statistics[memo][key])
+        moments = [key for key in missing if key not in seed]
+        stats = (
+            self._read_disk_statistics(
+                source_dataset, source_group, source_entry, loc.stat_channels, [_STREAM_STATS[key] for key in moments]
+            )
+            if moments
+            else {}
+        )
+        for key in moments:
             value = stats.get(_STREAM_STATS[key])
             if value is None:
                 continue
@@ -776,16 +803,22 @@ class DatasetManager:
                         # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
                         # and every stage waiting on a pass is asked for at once.
                         waiting.append(label)
-                unknown = sorted(set(loc.stat_keys) - _STREAM_STAT_KEYS)
+                unknown = sorted(
+                    key
+                    for key in loc.stat_keys - _STREAM_STAT_KEYS
+                    if not key.startswith(("Percentile:", "Statistic:"))
+                )
                 if unknown:
                     return refuse(f"{label} needs statistics {unknown} that no source can provide.")
                 if measured is not None:
                     # On the stage's own plan, pushed right before it runs, and onto the case state a Save
-                    # sweep writes as its header. Taken over the store's statistic too: the stages after it
-                    # were measured by a pass that ran with this number.
+                    # sweep writes as its header where the whole-volume route records it. Taken over the store's
+                    # statistic too: the stages after it were measured by a pass that ran with this number.
                     seed = tuple(measured.items())
+                    kept = loc.recorded
                     for stat_key, value in seed:
-                        evolved[stat_key] = value
+                        if stat_key in kept:
+                            evolved[stat_key] = value
                 elif store_seeds and seed_statistics and self._statistics_seeded:
                     # The store's numbers, on the stage's own plan and nowhere else: the case attribute,
                     # the backup a whole-volume load starts from and a Save header carry what the stage

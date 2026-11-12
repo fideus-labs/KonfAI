@@ -309,7 +309,14 @@ class Dice(Criterion):
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return output, targets[0]
-        return output * mask, targets[0] * mask
+        return Dice._times(output, mask), Dice._times(targets[0], mask)
+
+    @staticmethod
+    def _times(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """``tensor * mask``. torch promotes a bool with every dtype but uint16, uint32 and uint64, which take the
+        mask in their own dtype (a label map written as uint16)."""
+        unpromoted = tensor.dtype in (torch.uint16, torch.uint32, torch.uint64)
+        return tensor * (mask.to(tensor.dtype) if unpromoted else mask)
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         self._check_probabilities(output)

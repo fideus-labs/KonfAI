@@ -624,12 +624,14 @@ class Dataset:
         with contextlib.suppress(DatasetManagerError):
             self._resolve_entry(groups, name, lambda file, _group, entry: file.plan_region_reads(entry, windows))
 
-    def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
+    def iter_data_blocks(self, groups: str, name: str, halo: int = 0) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
         quantile scan iterate. A store that cannot serve bounded region reads (GIPL) is read whole
         once and kept for every pass: the declared whole-volume route, which the plan names LOAD and
-        refuses when the volume does not fit the budget."""
+        refuses when the volume does not fit the budget. With ``halo``, each block carries ``halo``
+        voxels more on both sides of every spatial axis: its neighbours where the volume has them, its
+        edge replicated past the volume's border."""
         shape, _ = self.get_infos(groups, name)
         if len(shape) < 2 or not self.bounded_region_reads(groups, name):
             resident: list[np.ndarray] = []
@@ -637,7 +639,8 @@ class Dataset:
             def whole() -> Iterator[np.ndarray]:
                 if not resident:
                     resident.append(self.read_data(groups, name)[0])
-                yield resident[0]
+                widths = [(0, 0)] + [(halo, halo)] * (len(shape) - 1)
+                yield np.pad(resident[0], widths, mode="edge") if halo else resident[0]
 
             return whole
         # A whole number of update pieces: the fold sees the same pieces in the same order whatever
@@ -648,12 +651,12 @@ class Dataset:
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
-                slices = (
-                    slice(None),
-                    slice(start, min(int(shape[1]), start + rows)),
-                    *(slice(None) for _ in shape[2:]),
-                )
-                yield self.read_data_slice(groups, name, slices)[0]
+                stop = min(int(shape[1]), start + rows)
+                low, high = max(0, start - halo), min(int(shape[1]), stop + halo)
+                slices = (slice(None), slice(low, high), *(slice(None) for _ in shape[2:]))
+                block = self.read_data_slice(groups, name, slices)[0]
+                widths = [(0, 0), (halo - start + low, halo - high + stop)] + [(halo, halo)] * (len(shape) - 2)
+                yield np.pad(block, widths, mode="edge") if halo else block
 
         return slabs
 

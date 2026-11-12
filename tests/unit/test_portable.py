@@ -287,7 +287,7 @@ def test_a_write_naming_no_dataset_is_refused() -> None:
         ({"spacing": [1.5, 1.5, 1.5], "align": "center"}, "center"),
         ({}, "neither"),
         ({"spacing": [1.5, 1.5, 1.5], "shape": [64, 64, 64]}, "both"),
-        ({"spacing": [1.5, 1.5, 1.5], "interpolation": "bspline"}, "bspline"),
+        ({"spacing": [1.5, 1.5, 1.5], "interpolation": "lanczos"}, "lanczos"),
     ],
 )
 def test_a_resample_the_runtime_cannot_place_is_refused(params: dict, expected: str) -> None:
@@ -468,6 +468,10 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
         {"op": "cast", "dtype": "int64", "in": ["t1"], "out": "t2"},
         {"op": "cast", "dtype": "float32", "in": ["t2"], "out": "output"},
     ]
+    # A grid rule's inverse places the grid by that rule, which the hoisted resample does not carry.
+    manifest["preprocessing"][0]["grid"] = "faces"
+    with pytest.raises(ConfigError, match="faces rule"):
+        assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
 
 
 def test_a_padding_the_runtime_cannot_fill_is_refused() -> None:
@@ -552,6 +556,34 @@ def test_a_tensor_cast_the_predictor_undoes_carries_its_id() -> None:
     # refused rather than hoisted as a cast the compiler would have to guess.
     with pytest.raises(ConfigError, match="the inverse of 'TensorCast'"):
         assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+
+
+def test_a_chain_of_threshold_labels_bspline_nearest_even_and_nonzero_compiles() -> None:
+    # The resample on a grid rule is undone by that rule at the spacing it asked for.
+    chain = {
+        "Resample": {"spacing": [1.5, 1.5, 3.0], "grid": "faces", "interpolation": "bspline"},
+        "Standardize": {"nonzero": True, "inverse": False},
+    }
+    outputs = {"final_transforms": {"ThresholdLabels": {"labels": [3, 7], "priority": [1, 0]}}}
+    config = _prediction(chain, outputs)
+    config["Predictor"]["Dataset"]["groups_src"]["g"]["groups_dest"]["g"]["transforms"]["Resample"][
+        "inverse_interpolation"
+    ] = "nearest_even"
+    manifest, _, _ = transform_manifest(config, "Predictor")
+    assert manifest["preprocessing"][1:] == [
+        {"op": "resample", "spacing": [1.5, 1.5, 3.0], "grid": "faces", "interpolation": "bspline", "id": "Resample"},
+        {"op": "standardize", "nonzero": True},
+    ]
+    assert manifest["postprocessing"] == [
+        {
+            "op": "inverse",
+            "of": "Resample",
+            "grid": "faces",
+            "spacing": [1.5, 1.5, 3.0],
+            "interpolation": "nearest_even",
+        },
+        {"op": "threshold_labels", "threshold": 0.5, "labels": [3, 7], "priority": [1, 0], "sigmoid": True},
+    ]
 
 
 def test_a_one_hot_the_predictor_undoes_is_refused_by_name() -> None:
@@ -724,6 +756,14 @@ def test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_nam
     # konfai crops to the box of the group as stored, the runtime to the box of the volume in hand.
     with pytest.raises(ConfigError, match="'Crop' follows 'Resample'"):
         transform_manifest(_prediction({"Resample": {"spacing": [1, 1, 1]}, "Crop": {}}, {}), "Predictor")
+    # A crop to a shape finds no box: both engines keep the centre of the volume they are handed.
+    centred = {"Resample": {"spacing": [1, 1, 1]}, "Crop": {"shape": [4, 4, 4]}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction(centred, {}), "Predictor")
+    assert {"op": "crop", "shape": [4, 4, 4], "id": "Crop"} in manifest["preprocessing"]
+    # A handed crop measures its box on the volume in hand, as the runtime always does: the step is a plain crop.
+    handed = {"Resample": {"spacing": [1, 1, 1]}, "Crop": {"handed": True, "nonzero": True}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction(handed, {}), "Predictor")
+    assert {"op": "crop", "nonzero": True, "id": "Crop"} in manifest["preprocessing"]
 
 
 @pytest.mark.parametrize(
@@ -907,6 +947,31 @@ def test_every_konfai_stage_and_draw_is_carried_or_refused_by_name() -> None:
             compile_pipeline({stage: {}}, fold=False)
 
 
+def test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse() -> None:
+    # The inverse reads with the interpolation and the fill the stage states for it, not the forward's.
+    resample = {
+        "spacing": [1.0, 1.0, 1.0],
+        "grid": "faces",
+        "antialias": "gaussian",
+        "fill": "edge",
+        "interpolation": "linear",
+        "inverse_interpolation": "nearest",
+        "inverse_fill": 0.0,
+    }
+    manifest, _folds, _per_copy = transform_manifest(_prediction({"Resample": resample}, {}), "Predictor")
+    assert {
+        "op": "resample",
+        "spacing": [1.0, 1.0, 1.0],
+        "grid": "faces",
+        "antialias": "gaussian",
+        "fill": "edge",
+        "interpolation": "linear",
+        "id": "Resample",
+    } in manifest["preprocessing"]
+    inverse = {"op": "inverse", "of": "Resample", "grid": "faces", "spacing": [1.0, 1.0, 1.0]}
+    assert {**inverse, "interpolation": "nearest"} in manifest["postprocessing"]
+
+
 _AUG = "konfai.data.augmentation:"
 
 #: What a resolved config spells for the stages the compilers read through `_CHAIN_OPS`, a `Write`, a `Save`,
@@ -919,10 +984,20 @@ _AUG = "konfai.data.augmentation:"
 CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
     "Argmax": {"dim": 1},
     "Softmax": {"dim": 1},
-    "Canonical": {"inverse": False},
-    "Crop": {"inverse": False},
+    "Canonical": {"inverse": False, "resample": False},
+    "Crop": {
+        "inverse": False,
+        "source": "OTHER",
+        "labels": [1],
+        "margin_mm": 5.0,
+        "fill": 0.0,
+        "empty": "fill",
+        "nonzero": True,
+        "shape": [4, 4, 4],
+        "handed": test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_name,
+    },
     "Clip": {"min_value": 3.0, "max_value": "max", "mask": "MASK"},
-    "TensorCast": {"dtype": "int16", "inverse": False},
+    "TensorCast": {"dtype": "int16", "inverse": False, "round": True},
     "Resample": {
         "spacing": [3.0, 3.0, 3.0],
         "shape": [4, 4, 4],
@@ -935,20 +1010,26 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
         "inverse": False,
         "field": "F",
         "field_group": "G",
+        "grid": "zoom",
+        "antialias": "gaussian",
+        "inverse_interpolation": test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse,
+        "inverse_fill": test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse,
     },
     "Padding": {"padding": [2, 2, 2, 2, 2, 2], "mode": "constant:3", "inverse": False},
     "Dilate": {"dilate": 3},
     "Flip": {"dims": "0", "inverse": False},
     "Permute": {"dims": "2|0|1", "inverse": False},
-    "Standardize": {"mean": 3.0, "std": 2.0, "mask": "MASK", "inverse": False},
+    "Standardize": {"mean": 3.0, "std": 2.0, "mask": "MASK", "inverse": False, "nonzero": True},
     "Normalize": {"min_value": 0.0, "max_value": 2.0, "inverse": False},
     "UnNormalize": {"min_value": 0.0, "max_value": 2.0},
     "SelectLabel": {"labels": ["(1,2)"]},
     "FlatLabel": {"labels": [1]},
+    "ThresholdLabels": {"labels": [4, 5], "threshold": 0.3, "priority": [1, 0], "sigmoid": False},
     "OneHot": {"num_classes": 3, "inverse": False},
     "Gradient": {"per_dim": True},
     "HistogramMatching": {"reference_group": "S"},
     "Percentage": {"baseline": 2.0},
+    "KeepLargestComponent": {"mask": 1},
     "Mask": {"path": "OTHER", "value_outside": 5.0},
     "Write": {"dataset": "./Other:mha", "group": "G2"},
     "Save": {"dataset": "./Other:mha", "group": "G2"},
@@ -961,19 +1042,9 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 #: A value the compilers refuse, naming the parameter: konfai reads it and the portable runtime has no form for it.
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
-    "Standardize": {"lazy": True, "nonzero": True},
-    "Canonical": {"resample": False},
-    "Crop": {
-        "source": "OTHER",
-        "labels": [1],
-        "margin_mm": 5.0,
-        "fill": 0.0,
-        "empty": "keep",
-        "nonzero": True,
-        "handed": True,
-    },
+    "Standardize": {"lazy": True},
     "Normalize": {"lazy": True, "channels": [0]},
-    "Resample": {"transforms": "T", "grid": "faces", "antialias": "gaussian", "inverse_interpolation": "linear"},
+    "Resample": {"transforms": "T"},
     "Write": {"scale_factors": [2]},
     "Save": {"scale_factors": [2]},
     _AUG + "Brightness": {"groups": ["CT"]},
@@ -981,6 +1052,7 @@ REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
 
 #: A value that leaves the compiled step as it is, and why konfai's own values do not depend on it here.
 IGNORED_PARAMETERS: dict[str, dict[str, tuple[object, str]]] = {
+    "KeepLargestComponent": {"rows": (8, "it sizes the slabs the components are found by, not which are kept.")},
     "Canonical": {
         "fill": (
             -1024.0,
@@ -1019,6 +1091,7 @@ _BASELINE: dict[str, dict[str, object]] = {
     "Padding": {"padding": [1, 1, 1, 1, 1, 1]},
     "UnNormalize": {"min_value": -1.0, "max_value": 1.0},
     "OneHot": {"num_classes": 2},
+    "ThresholdLabels": {"labels": [1, 2]},
     "HistogramMatching": {"reference_group": "R"},
     "Percentage": {"baseline": 1.0},
     "Mask": {"path": "MASK"},
@@ -1606,6 +1679,119 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
 
 
+def test_a_crop_on_a_needed_apps_group_compiles_to_a_read_beside_the_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The box comes from another app's output, which no dataset of the compile holds: the plan measures no box,
+    # and the program reads that group beside the case, where the runtime measures it.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.data.transform import Crop
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    crop = {"source": "BODY", "labels": [2, 7], "margin_mm": 10.0, "fill": 0.0, "empty": "fill"}
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = {"Crop": crop}
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "model.pt")
+    program = compile_prediction(
+        config, [tmp_path / "model.pt"], tmp_path / "Predictions", tmp_path / "out" / "prediction.json"
+    )
+    manifest = program["outputs"][0]["program"]["steps"][0]["manifest"]
+    step = {"op": "crop", "source_group": "BODY", "labels": [2, 7], "margin_mm": 10.0, "fill": 0.0, "empty": "fill"}
+    assert manifest["preprocessing"] == [step | {"id": "Crop"}]
+    assert manifest["reads"] == [{"group": "BODY", "channels": 1, "preprocessing": []}]
+    assert program["input_group"] == ["MR", "BODY"]
+    assert Crop.plan_without_source is False
+
+
+def test_a_pointwise_output_transform_with_no_op_compiles_to_a_graph_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A transform of the app's own, per voxel, after the blend: exported beside the model as one graph, which the
+    # program runs where the chain places it, on the channels the steps before it leave.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "Post.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Hottest(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return (tensor * 10).floor().to(tensor.dtype)[:1]\n"
+    )
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["after_reduction_transforms"] = {
+        "KeepLargestComponent": {"mask": 1},
+        "Post:Hottest": {},
+    }
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "model.pt")
+    program = compile_prediction(
+        config, [tmp_path / "model.pt"], tmp_path / "Predictions", tmp_path / "out" / "prediction.json"
+    )
+    post = program["outputs"][0]["program"]["steps"][0]["manifest"]["postprocessing"]
+    # keep_largest_component drops its mask channel: the graph after it takes one channel of the head's two.
+    assert post[0] == {"op": "keep_largest_component", "mask": 1}
+    assert post[1] == {"op": "onnx", "model": "model_post_0.onnx", "channels": 1, "dtype": "float32"}
+    assert [step["op"] for step in post[2:]] == ["argmax", "cast"]
+    session = ort.InferenceSession(str(tmp_path / "out" / "model_post_0.onnx"), providers=["CPUExecutionProvider"])
+    assert session.get_inputs()[0].shape[1] == 1
+    blended = np.random.default_rng(0).random((1, 1, 5, 7), dtype=np.float32)
+    np.testing.assert_array_equal(session.run(None, {"input": blended})[0], np.floor(blended[:, :1] * 10))
+
+
+def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model reads the image and its CaseStatistic: the second read names the two graphs beside the model, which
+    # onnxruntime runs on a block of another shape to what the statistic's own functions give: the class built with
+    # the mapping's scale, which a float32 constant would move.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TwoInputs:TwoInputNet", "Head:Softmax")
+    resolved = json.loads(config.read_text())
+    statistic = {
+        "transforms": {"CaseStatistic": {"statistic": "oracle_support:ScaledRoughness", "scale": 0.9}},
+        "is_input": True,
+    }
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["SIGMA"] = statistic
+    config.write_text(json.dumps(resolved))
+    program = compile_prediction(config, [], tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
+    reads = program["outputs"][0]["program"]["steps"][0]["manifest"]["reads"]
+    step = {"op": "case_statistic", "halo": 1, "partial": "model_statistic_0_partial.onnx"}
+    assert reads == [
+        {"group": "MR", "channels": 1, "preprocessing": [step | {"finish": "model_statistic_0_finish.onnx"}]}
+    ]
+    from oracle_support import ScaledRoughness
+
+    partial = ort.InferenceSession(str(tmp_path / "out" / step["partial"]), providers=["CPUExecutionProvider"])
+    finish = ort.InferenceSession(str(tmp_path / "out" / "model_statistic_0_finish.onnx"))
+    assert [(i.name, i.type) for i in partial.get_inputs()] == [("block", "tensor(double)")]
+    assert [(i.name, i.type) for i in finish.get_outputs()] == [("statistic", "tensor(double)")]
+    block = torch.from_numpy(np.random.default_rng(0).random((1, 7, 12, 9)))
+    total = partial.run(None, {"block": block.numpy()})[0]
+    np.testing.assert_allclose(total, ScaledRoughness().partial(block).numpy(), rtol=1e-12)
+    value = finish.run(None, {"total": total})[0]
+    assert value.shape == () and value == ScaledRoughness(0.9).finish(torch.from_numpy(total)).item()
+
+
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Only a parameter-free model compiles without checkpoints: another would export its random weights.
     from konfai.portable import compile_prediction
@@ -2069,6 +2255,8 @@ def test_an_overlap_without_a_patch_combine_is_refused_by_name() -> None:
     check_blend([0, 0, 0], None)
     check_blend(None, "Overwrite")
     check_blend([16, 16, 16], "Gaussian")
+    with pytest.raises(KonfAIError, match="patch_combine 'mypkg:MyBlend' is no blend the portable runtime runs"):
+        check_blend([16, 16, 16], "mypkg:MyBlend")
 
 
 def test_an_output_mirroring_another_group_than_the_first_input_is_refused_by_name() -> None:
@@ -2189,12 +2377,15 @@ def test_an_end_or_spread_placement_exports_the_step_konfai_walks(
 
 
 @pytest.mark.parametrize("size", [[0, 16, 16], [16, 0, 16], [16, 16, -1]])
-def test_an_onnx_export_refuses_free_patch_axes_instead_of_dropping_them(size: list[int]) -> None:
+def test_an_onnx_export_refuses_some_free_patch_axes_instead_of_dropping_them(size: list[int]) -> None:
     from konfai.portable import derive_onnx_params
 
     config = {"Predictor": {"Dataset": {"Patch": {"patch_size": size}}}}
-    with pytest.raises(ConfigError, match=r"patch_size.*free axis"):
+    with pytest.raises(ConfigError, match=r"patch_size.*frees some axes"):
         derive_onnx_params(config, "Predictor")
+    # Every axis free is one window per case, exported with its axes free.
+    config["Predictor"]["Dataset"]["Patch"]["patch_size"] = [0, 0, 0]
+    assert derive_onnx_params(config, "Predictor")[0] == [0, 0, 0]
 
 
 @pytest.mark.parametrize(("prob", "copies"), [(0.0, [[], []]), (1.0, [[0], [2]])])

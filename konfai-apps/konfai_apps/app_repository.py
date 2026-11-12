@@ -44,7 +44,7 @@ import requests
 from huggingface_hub import HfApi, constants, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
-from konfai.utils.config import Choices, Range, _coerce_config_value
+from konfai.utils.config import Choices, Range, _coerce_config_value, _unescape_key_component
 from konfai.utils.errors import ConfigError
 from konfai.utils.utils import SUPPORTED_FORMATS, is_windows_absolute_path, split_format_level, split_path_spec
 from packaging.requirements import InvalidRequirement, Requirement
@@ -466,7 +466,49 @@ def check_overrides(data: Any, overrides: list[str]) -> None:
     apply_overrides(copy.deepcopy(data), overrides, model_class)
 
 
-def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], type | None]) -> None:
+def _parse_parameters(parameters: Any) -> dict[str, str]:
+    """Validate app.json's ``parameters``: ``{name: path}``, the config keys outside the model block ``--set NAME``
+    sets, each at its dotted path from the config root."""
+    if parameters is None:
+        return {}
+    if not isinstance(parameters, dict) or not all(
+        isinstance(name, str) and PRESET_NAME.fullmatch(name) and isinstance(path, str) and "." in path
+        for name, path in parameters.items()
+    ):
+        raise AppMetadataError(
+            "'parameters' must map each name (letters, digits, '_' and '-') to the dotted path of a config key from"
+            f" its root, got {parameters!r}."
+        )
+    return dict(parameters)
+
+
+def _declared_parameter(
+    data: Any, name: str, path: str, model: type | None, stage_class: Callable[[str], type | None]
+) -> tuple[Any, Any]:
+    """The value of the key app.json's ``parameters`` declares as ``name`` at ``path``, and the annotation the stage
+    holding it gives it (None when unknown). A name the model takes too, or a path ``data`` lacks, is refused."""
+    _, block = LocalAppRepository._model_param_block(data)
+    if name in (block or {}) or name in _fields(model):
+        raise AppMetadataError(f"app.json declares parameter '{name}', which the model takes too.", "Rename it.")
+    *parents, leaf = (_unescape_key_component(key) for key in path.split("."))
+    node = functools.reduce(lambda node, key: node.get(key) if isinstance(node, dict) else None, parents, data)
+    if not isinstance(node, dict) or leaf not in node:
+        raise AppMetadataError(
+            f"app.json declares parameter '{name}' as '{path}', a key the config does not have.",
+            "Give the dotted path of an existing key from the config root, through mappings only (a chain written as"
+            " a list is not reached), a '.' in a key written %2E.",
+        )
+    field = _fields(stage_class(parents[-1])).get(leaf)
+    return node[leaf], field.annotation if field else None
+
+
+def apply_overrides(
+    data: Any,
+    overrides: list[str],
+    model_class: Callable[[], type | None],
+    parameters: dict[str, str] | None = None,
+    stage_class: Callable[[str], type | None] = lambda key: None,
+) -> None:
     """Apply ``--set NAME=VALUE`` overrides to the loaded config ``data``, in place: the one resolver of every
     ``--set``, which :meth:`LocalAppRepository._apply_config_overrides` writes into a config file.
 
@@ -475,13 +517,15 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
     (``models.0.feature_normalization``), a new entry (``models.2={ref: ..}``); its value is checked against the
     declared type (``_check_value``). Any other key must exist. ``model_class`` returns the class the ``classpath``
     names, or None when it names none or does not import (then only the config's own keys are known); it is called
-    once, and only when a path enters the model block. ``check_overrides`` applies them to a copy, to refuse before a run
-    what the run would refuse.
+    once, and only when a path enters the model block. A name of ``parameters`` (app.json's) sets the key at its path,
+    its value checked against the type the stage holding the key declares (``stage_class`` resolves its class).
+    ``check_overrides`` applies them to a copy, to refuse before a run what the run would refuse.
     """
     value_parser = YAML(typ="safe")
     class_name, model_params = LocalAppRepository._model_param_block(data)
     model_path = ["Predictor" if (data or {}).get("Predictor") else "Trainer", "Model", class_name or ""]
     resolved = functools.cache(model_class)
+    parameters = parameters or {}
     for override in overrides:
         key_path, sep, raw_value = override.partition("=")
         if not sep:
@@ -490,7 +534,11 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         if not key_path:
             raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
         first = key_path.split(".", 1)[0]
-        if "." in key_path and (model_params is None or first in (data or {})):
+        annotation = None
+        if key_path in parameters:
+            _, annotation = _declared_parameter(data, key_path, parameters[key_path], resolved(), stage_class)
+            keys = [_unescape_key_component(key) for key in parameters[key_path].split(".")]
+        elif "." in key_path and (model_params is None or first in (data or {})):
             # A dotted path from the config root (Predictor.Dataset.batch_size): any key, for advanced overrides.
             keys = [key for key in key_path.split(".") if key]
         elif model_params is None:
@@ -510,12 +558,12 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
             node = node[key]
         leaf, inside = keys[-1], keys[3:] if keys[:3] == model_path else []
         model = resolved() if inside else None
-        declared = _declared(model, inside) if model is not None else None
+        declared = _declared(model, inside) if model is not None else annotation
         # Predictor and Trainer take manual_seed and a config may omit it: the one root key --seed may add.
         settable = keys == [model_path[0], "manual_seed"]
         if not isinstance(node, dict) or (leaf not in node and declared is None and not settable):
             parent = _declared(model, inside[:-1]) if model is not None else None
-            known = [*node, *_fields(parent)] if isinstance(node, dict) else []
+            known = [*node, *_fields(parent), *parameters] if isinstance(node, dict) else []
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
                 + did_you_mean(leaf, known),
@@ -842,6 +890,7 @@ class LocalAppRepository(AppRepositoryInfo):
         self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
         self._published_presets = read_presets(app_repository_metadata.get("presets"), f"the app.json of '{app_name}'")
         self._needs = _parse_needs(app_repository_metadata.get("needs"))
+        self._parameters = _parse_parameters(app_repository_metadata.get("parameters"))
 
         # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-weight files
         # are all downloaded above, so resolving it here costs nothing.
@@ -1081,7 +1130,13 @@ class LocalAppRepository(AppRepositoryInfo):
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
-        apply_overrides(data, overrides, (lambda: self._model_class(data)) if read_model else (lambda: None))
+        apply_overrides(
+            data,
+            overrides,
+            (lambda: self._model_class(data)) if read_model else (lambda: None),
+            self._parameters,
+            self._stage_class if read_model else (lambda key: None),
+        )
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
 
@@ -1129,7 +1184,8 @@ class LocalAppRepository(AppRepositoryInfo):
             data = YAML().load(file)
         root = "Predictor" if (data or {}).get("Predictor") else "Trainer"
         for name in (override.partition("=")[0].strip() for override in overrides):
-            keys = [key for key in name.split(".") if key]  # as apply_overrides reads Predictor..Dataset
+            # as apply_overrides reads Predictor..Dataset, a declared name as the path it sets
+            keys = [key for key in self._parameters.get(name, name).split(".") if key]
             # the root itself (Predictor.={...}) replaces the seed, the data and the outputs with the rest
             if keys[:1] == [root] and (len(keys) == 1 or keys[1] in ("manual_seed", "Dataset", "outputs_dataset")):
                 raise AppRepositoryError(
@@ -1140,7 +1196,13 @@ class LocalAppRepository(AppRepositoryInfo):
         if not read_model:
             return
         try:
-            apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
+            apply_overrides(
+                data,
+                list(overrides),
+                lambda: self._model_class(data, filenames),
+                self._parameters,
+                functools.partial(self._stage_class, filenames=filenames),
+            )
         except AppRepositoryError as error:
             raise AppRepositoryError(f"The {what} of app '{self.get_name()}' does not apply: {error}") from error
 
@@ -1178,7 +1240,8 @@ class LocalAppRepository(AppRepositoryInfo):
         TYPES: ``Literal`` / ``Annotated[.., Choices]`` -> ``{"choices"}`` (a ``Choices`` resolver is run by
         the app, so nothing is fetched here), ``Annotated[.., Range]`` -> ``{"min","max"}``. It mirrors
         ``values``; ``"*"`` holds the per-entry constraints of a ``dict[str, <@config>]``. Interpreting the
-        structure (widgets, add/remove) is the UI's job; the meaning of any field is never assumed here.
+        structure (widgets, add/remove) is the UI's job; the meaning of any field is never assumed here. The keys
+        app.json's ``parameters`` declares outside the model block follow, by name, constrained by their stage's types.
         """
         filenames = self._all_repo_filenames()
         config_filename = self._find_repo_filename(prediction_file, filenames)
@@ -1186,8 +1249,15 @@ class LocalAppRepository(AppRepositoryInfo):
             return {"values": {}, "constraints": {}}
         with open(self._download(config_filename), encoding="utf-8") as file:
             data = YAML().load(file)
+        stage_class = functools.partial(self._stage_class, filenames=filenames)
         if self._preset is not None:  # the values the run starts from: a UI compares its edits against these
-            apply_overrides(data, list(self._preset.overrides), lambda: self._model_class(data, filenames))
+            apply_overrides(
+                data,
+                list(self._preset.overrides),
+                lambda: self._model_class(data, filenames),
+                self._parameters,
+                stage_class,
+            )
         _, params = self._model_param_block(data)
         structural = {"outputs_criterions", "optimizer", "schedulers", "engine", "parameter_maps", "classpath"}
         values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
@@ -1203,7 +1273,30 @@ class LocalAppRepository(AppRepositoryInfo):
             for name, default in _defaults_of_class(model_class).items():
                 if name not in structural and name not in values and _is_plain(default):
                     values[name] = default
+        for name, path in self._parameters.items():
+            value, annotation = _declared_parameter(data, name, path, model_class, stage_class)
+            values[name] = _plain(value)
+            try:
+                constraint = _constraint_of_annotation(annotation)
+            except Exception:  # an optional UI hint, as the model's: a failing Choices resolver omits it
+                constraint = None
+            if constraint:
+                constraints[name] = constraint
         return {"values": values, "constraints": constraints}
+
+    def _stage_class(self, key: str, filenames: list[str] | None = None) -> type | None:
+        """The class a chain key names as the chain resolves it (``Clip``, ``Clip#2``, ``model:Crop`` from the app's
+        ``model.py``); None when it names none or does not import."""
+        from konfai.utils.utils import get_module
+
+        try:
+            if ":" not in key:
+                module, name = get_module(key, "konfai.data.transform")
+                return getattr(module, name, None)
+            stem, name = key.split("#", 1)[0].split(":", 1)
+            return self._import_model_class(stem, name, self._all_repo_filenames() if filenames is None else filenames)
+        except Exception:
+            return None
 
     def _model_class(self, data: Any, filenames: list[str] | None = None) -> type | None:
         """The class a config's model ``classpath`` names, imported without instantiating it; None when the
@@ -1714,6 +1807,8 @@ class LocalAppRepository(AppRepositoryInfo):
 
         app_repository_metadata["display_name"] = display_name
         app_repository_metadata["models"] = [basename for basename, _ in models]
+        if self._needs:  # the tuned app lives elsewhere: name the apps this one needs where they are
+            app_repository_metadata["needs"] = self.get_needs()
 
         with open(metadata_file, "w", encoding="utf-8") as file:
             json.dump(app_repository_metadata, file, indent=2, ensure_ascii=False)
@@ -1746,7 +1841,8 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
     """KonfAI app repository loaded from a local folder."""
 
     def __init__(self, app_directory: Path, app_name: str):
-        self._app_directory = app_directory
+        # Absolute: a fine-tuned app records its siblings' paths (``needs``) and is opened from anywhere.
+        self._app_directory = app_directory.absolute()
         super().__init__(app_name)
 
     @staticmethod

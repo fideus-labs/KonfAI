@@ -40,6 +40,7 @@ from konfai.data.transform.ensemble import Percentage as Percentage
 from konfai.data.transform.ensemble import SegmentationDisagreement as SegmentationDisagreement
 from konfai.data.transform.ensemble import StandardDeviation as StandardDeviation
 from konfai.data.transform.ensemble import Variance as Variance
+from konfai.data.transform.intensity import CaseStatistic as CaseStatistic
 from konfai.data.transform.intensity import Clip as Clip
 from konfai.data.transform.intensity import Fill as Fill
 from konfai.data.transform.intensity import HistogramMatching as HistogramMatching
@@ -54,6 +55,7 @@ from konfai.data.transform.labels import Argmax as Argmax
 from konfai.data.transform.labels import Dilate as Dilate
 from konfai.data.transform.labels import FlatLabel as FlatLabel
 from konfai.data.transform.labels import KeepLabels as KeepLabels
+from konfai.data.transform.labels import KeepLargestComponent as KeepLargestComponent
 from konfai.data.transform.labels import Mask as Mask
 from konfai.data.transform.labels import MergeLabels as MergeLabels
 from konfai.data.transform.labels import OneHot as OneHot
@@ -79,6 +81,7 @@ from konfai.data.transform.shape import Squeeze as Squeeze
 __all__ = [
     "Argmax",
     "Canonical",
+    "CaseStatistic",
     "Clip",
     "Crop",
     "Dilate",
@@ -93,6 +96,7 @@ __all__ = [
     "HistogramMatching",
     "InferenceStack",
     "KeepLabels",
+    "KeepLargestComponent",
     "LocalityKind",
     "Magnitude",
     "Mask",
