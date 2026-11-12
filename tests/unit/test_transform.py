@@ -1648,6 +1648,8 @@ def test_keep_largest_component_keeps_scipys_largest_label_whatever_the_slabs(
     kept = KeepLargestComponent(mask=1, rows=rows)("case", tensor, Attribute())
 
     assert torch.equal(kept, torch.where(torch.from_numpy(wanted), labels, 0))
+    with pytest.raises(TransformError, match="from -2 to 1"):  # never wrapped onto channel 0
+        KeepLargestComponent(mask=2, rows=rows)("case", tensor, Attribute())
     pair = np.zeros((1, 2, 2), dtype=bool)
     pair[0, 0, 0] = pair[0, 1, 1] = True  # two one-voxel components: the first in scan order
     assert KeepLargestComponent(rows=rows)("case", torch.from_numpy(pair), Attribute()).numpy()[0, 0].tolist() == [

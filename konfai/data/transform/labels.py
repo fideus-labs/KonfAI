@@ -330,38 +330,39 @@ def largest_component(foreground: np.ndarray, rows: int) -> np.ndarray:
     the first numbers each slab's components, joins them across the slab's face with the slab before (a
     union-find whose root is the lowest number, the first in scan order) and sums their sizes; the second numbers
     each slab again and keeps the voxels of the largest root. Memory: one slab's numbers beside the answer."""
-    parent = np.zeros(1, dtype=np.int64)
-    sizes = np.zeros(1, dtype=np.int64)
+    parent = [0]
+    sizes = [np.zeros(1, dtype=np.int64)]
     offsets, face = [], None
 
     def root(label: int) -> int:
         while parent[label] != label:
             parent[label] = parent[parent[label]]
-            label = int(parent[label])
+            label = parent[label]
         return label
 
     for start in range(0, foreground.shape[0], rows):
         local = _components(foreground[start : start + rows])
         offset, count = len(parent) - 1, int(local.max())
         offsets.append(offset)
-        parent = np.concatenate([parent, np.arange(offset + 1, offset + count + 1)])
-        sizes = np.concatenate([sizes, np.bincount(local.ravel(), minlength=count + 1)[1:]])
-        numbered = np.where(local > 0, local + offset, 0)
+        parent.extend(range(offset + 1, offset + count + 1))
+        sizes.append(np.bincount(local.ravel(), minlength=count + 1)[1:])
+        np.add(local, offset, out=local, where=local > 0)  # numbered across the volume, in place
         if face is not None:
-            touching = (face > 0) & (numbered[0] > 0)
-            for a, b in {(int(x), int(y)) for x, y in zip(face[touching], numbered[0][touching], strict=True)}:
+            touching = (face > 0) & (local[0] > 0)
+            for a, b in {(int(x), int(y)) for x, y in zip(face[touching], local[0][touching], strict=True)}:
                 low, high = sorted((root(a), root(b)))
                 parent[high] = low
-        face = numbered[-1]
+        face = local[-1].copy()  # a view would hold the whole slab past it
     roots = np.array([root(label) for label in range(len(parent))])
-    totals = np.bincount(roots[1:], weights=sizes[1:], minlength=len(parent))
+    totals = np.bincount(roots[1:], weights=np.concatenate(sizes)[1:], minlength=len(parent))
     kept = np.zeros(foreground.shape, dtype=bool)
     if not totals.any():
         return kept
     largest = int(np.argmax(totals))
     for start, offset in zip(range(0, foreground.shape[0], rows), offsets, strict=True):
         local = _components(foreground[start : start + rows])
-        kept[start : start + rows] = (local > 0) & (roots[np.where(local > 0, local + offset, 0)] == largest)
+        np.add(local, offset, out=local, where=local > 0)
+        kept[start : start + rows] = roots[local] == largest  # roots[0] is 0, never the largest
     return kept
 
 
@@ -373,7 +374,9 @@ class KeepLargestComponent(Transform):
     is found by slabs of ``rows`` planes (:func:`largest_component`), but which component is largest is known once
     the last slab is read: the stage needs the whole volume."""
 
-    working_multiple = 1.5  # the foreground, one slab's numbers and the kept voxels, beside the output
+    # The foreground, the kept voxels and a slab's int64 numbers, two slabs' worth with ITK's while one is read:
+    # measured 5.3 for a case of ``rows`` planes or fewer, one slab.
+    working_multiple = 5.5
 
     def __init__(self, mask: int | None = None, rows: int = 64) -> None:
         super().__init__()
@@ -392,7 +395,14 @@ class KeepLargestComponent(Transform):
         if self.mask is None:
             values, foreground = tensor, (tensor != 0).any(0)
         else:
-            mask = self.mask % tensor.shape[0]
+            channels = tensor.shape[0]
+            if not -channels <= self.mask < channels:
+                raise TransformError(
+                    f"'KeepLargestComponent' reads its foreground from channel {self.mask} of case '{name}', which"
+                    f" has {channels}.",
+                    f"Give mask a channel from {-channels} to {channels - 1}.",
+                )
+            mask = self.mask % channels
             values = torch.cat([tensor[:mask], tensor[mask + 1 :]])
             foreground = tensor[mask] != 0
         kept = torch.from_numpy(largest_component(foreground.cpu().numpy(), self.rows)).to(values.device)
