@@ -436,6 +436,24 @@ def _op_threshold_labels(p: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _op_keep_largest_component(p: dict[str, Any]) -> dict[str, Any]:
+    # The largest component of the foreground (of each label, per_label), the rest set to 0; the foreground is the
+    # channel `mask` names, which the output drops, else any channel's non-zero voxels.
+    connectivity = int(p.get("connectivity", 6))
+    if connectivity not in (4, 6, 8, 26):
+        raise TransformError(
+            f"'KeepLargestComponent' joins voxels by connectivity {connectivity}, which the portable runtime has no"
+            " form for.",
+            "Give 6 (4 in 2-D) to join voxels face to face, 26 (8 in 2-D) to join every touching voxel.",
+        )
+    return {
+        "op": "keep_largest_component",
+        **({"mask": int(p["mask"])} if clean(p.get("mask")) is not None else {}),
+        **({"per_label": True} if p.get("per_label") else {}),
+        **({"connectivity": connectivity} if connectivity != 6 else {}),
+    }
+
+
 def _op_brightness(p: dict[str, Any]) -> dict[str, Any]:
     # konfai draws the groups the draw names and leaves the others as they are; the runtime draws the chain
     # it is written in.
@@ -523,12 +541,7 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     # ITK's HistogramMatchingImageFilter at konfai's settings, onto a group read as stored beside the case.
     "HistogramMatching": lambda p: {"op": "histogram_match", "reference_group": str(p["reference_group"])},
     "Percentage": lambda p: {"op": "percentage", "baseline": float(p["baseline"])},
-    # The largest component of the foreground, its voxels face to face, the rest set to 0; the foreground is the
-    # channel `mask` names, which the output drops, else any channel's non-zero voxels.
-    "KeepLargestComponent": lambda p: {
-        "op": "keep_largest_component",
-        **({"mask": int(p["mask"])} if clean(p.get("mask")) is not None else {}),
-    },
+    "KeepLargestComponent": _op_keep_largest_component,
 }
 # A prediction's Mask is a program step over a nested model's buffer (PROGRAM_TRANSFORMS). A Crop finds its box
 # at run time (`compile_chain` says where it may); a prediction refuses it, konfai undoing it by a replicate pad.

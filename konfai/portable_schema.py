@@ -136,7 +136,7 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "magnitude": ({}, []),
     "histogram_match": ({"reference_group": _STRING}, ["reference_group"]),
     "percentage": ({"baseline": _NUMBER}, ["baseline"]),
-    "keep_largest_component": ({"mask": _INTEGER}, []),
+    "keep_largest_component": ({"mask": _INTEGER, "per_label": _BOOLEAN, "connectivity": {"enum": [4, 6, 8, 26]}}, []),
     "variance": ({}, []),
     "standard_deviation": ({}, []),
     "segmentation_disagreement": ({}, []),

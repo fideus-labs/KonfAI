@@ -1677,6 +1677,45 @@ def test_keep_largest_component_keeps_scipys_largest_label_whatever_the_slabs(
         KeepLargestComponent()("case", torch.from_numpy(pair), Attribute())
 
 
+@pytest.mark.parametrize("rows", [1, 4, 64])
+@pytest.mark.parametrize("seed", [0, 2, 3])
+def test_keep_largest_component_per_label_is_monais_keep_largest_connected_component(rows: int, seed: int) -> None:
+    # Touching islands of five labels, joined only to their own label, across the slabs' faces; at 26 a corner
+    # joins them too. MONAI keeps whichever of two of one size its sort lands on: these seeds have none.
+    transforms = pytest.importorskip("monai.transforms")
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    rng = np.random.default_rng(seed)
+    labels = torch.from_numpy(rng.integers(1, 6, (1, 11, 9, 10)) * (rng.random((1, 11, 9, 10)) < 0.6))
+    for connectivity, hops in ((26, None), (6, 1)):
+        wanted = torch.as_tensor(transforms.KeepLargestConnectedComponent(connectivity=hops)(labels.clone()))
+        stage = KeepLargestComponent(rows=rows, per_label=True, connectivity=connectivity)
+        assert torch.equal(stage("case", labels.clone(), Attribute()), wanted)
+        # The labels read from the channel mask names, the values from the others.
+        pair = torch.cat([labels * 10, labels])
+        stage = KeepLargestComponent(mask=1, rows=rows, per_label=True, connectivity=connectivity)
+        assert torch.equal(stage("case", pair, Attribute()), wanted * 10)
+
+
+@pytest.mark.parametrize("rows", [1, 64])
+def test_keep_largest_component_per_label_keeps_the_first_of_two_of_one_size(rows: int) -> None:
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    labels = torch.zeros((1, 4, 3, 3), dtype=torch.int16)
+    labels[0, 0, 0, 0] = labels[0, 1, 1, 1] = labels[0, 3, 2, 2] = 2  # the first two by a corner, across a face
+    labels[0, 1, 1, 2] = labels[0, 3, 0, 0] = 5  # the first beside a 2, which it does not join
+    full = KeepLargestComponent(rows=rows, per_label=True, connectivity=26)("case", labels, Attribute())
+    face = KeepLargestComponent(rows=rows, per_label=True)("case", labels, Attribute())
+    assert full.nonzero().tolist() == [[0, 0, 0, 0], [0, 1, 1, 1], [0, 1, 1, 2]]
+    assert face.nonzero().tolist() == [[0, 0, 0, 0], [0, 1, 1, 2]]
+    with pytest.raises(TransformError, match="per_label reads its labels from one channel"):
+        KeepLargestComponent(per_label=True)("case", labels.expand(2, -1, -1, -1), Attribute())
+    with pytest.raises(TransformError, match="connectivity=18"):
+        KeepLargestComponent(connectivity=18)
+
+
 def test_a_rounding_cast_is_numpys_rint() -> None:
     # Half to even, where a plain cast truncates; the values it moves are no statistic a later stage may reuse.
     values = torch.tensor([[-1.5, -0.5, 0.5, 1.5, 2.5, 2.6]])

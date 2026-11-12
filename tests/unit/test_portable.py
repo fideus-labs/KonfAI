@@ -1029,7 +1029,7 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
     "Gradient": {"per_dim": True},
     "HistogramMatching": {"reference_group": "S"},
     "Percentage": {"baseline": 2.0},
-    "KeepLargestComponent": {"mask": 1},
+    "KeepLargestComponent": {"mask": 1, "per_label": True, "connectivity": 26},
     "Mask": {"path": "OTHER", "value_outside": 5.0},
     "Write": {"dataset": "./Other:mha", "group": "G2"},
     "Save": {"dataset": "./Other:mha", "group": "G2"},
@@ -2443,6 +2443,17 @@ def test_a_normalize_over_some_channels_is_refused_by_name() -> None:
         compile_pipeline({"Normalize": {"channels": [0], "inverse": False}}, fold=False)
     steps, _folds, _inverted = compile_pipeline({"Normalize": {"channels": None, "inverse": False}}, fold=False)
     assert steps == [{"op": "normalize", "min_value": -1.0, "max_value": 1.0}]
+
+
+def test_a_keep_largest_component_carries_its_labels_and_connectivity_and_refuses_another() -> None:
+    from konfai.portable import compile_pipeline
+
+    with pytest.raises(KonfAIError, match="connectivity 18"):
+        compile_pipeline({"KeepLargestComponent": {"connectivity": 18}}, fold=False)
+    steps, _folds, _inverted = compile_pipeline(
+        {"KeepLargestComponent": {"per_label": True, "connectivity": 26}}, fold=False
+    )
+    assert steps == [{"op": "keep_largest_component", "per_label": True, "connectivity": 26}]
 
 
 def test_an_in_plane_quarter_turn_turns_about_the_slice_axis_alone() -> None:
