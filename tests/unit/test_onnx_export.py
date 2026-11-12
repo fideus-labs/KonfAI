@@ -202,9 +202,9 @@ def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_r
         def named_forward(self, x):
             yield "head", self.conv(x)
 
-    class Fixed(Free):
+    class Fixed(Free):  # reads the middle axis as a number
         def named_forward(self, x):
-            yield "head", self.conv(x)[..., : int(x.shape[-1]) // 2]
+            yield "head", self.conv(x)[..., : int(x.shape[-2]) // 2, :]
 
     class Decided(Free):  # a hard decision between two networks, as SynthSeg takes one
         def named_forward(self, x):

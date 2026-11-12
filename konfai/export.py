@@ -246,8 +246,8 @@ def _check_free_axes(
     module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str]
 ) -> None:
     """Refuse a graph exported with free axes that answers for the example's shape alone: on a smooth input of
-    another shape (32 voxels more along the first axis, 16 along the last) it must give torch's shape, and torch's
-    values as closely as on a smooth input of the example's own shape."""
+    another shape (16 voxels more along the last axis, 32 along the one before, and so on) it must give torch's
+    shape, and torch's values as closely as on a smooth input of the example's own shape."""
     ort = _require("onnxruntime")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
@@ -267,8 +267,7 @@ def _check_free_axes(
     other = []
     for example in examples:
         shape = list(example.shape)
-        shape[2] += 32
-        shape[-1] += 16
+        shape[2:] = [extent + 16 * (len(shape) - axis) for axis, extent in enumerate(shape[2:], 2)]
         other.append(_smooth(shape, example.dtype))
     there, shape, answer = gap(other)
     own = 0.0 if own is None else own
