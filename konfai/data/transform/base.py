@@ -116,6 +116,10 @@ _FOREIGN_LOCALITY = (
     " wrapping it can declare its locality to let its patches stream"
 )
 
+#: On a case's scope while a whole-volume pass measures a statistic for the streamed route: a stage that records its
+#: statistic only when it keeps it (a Clip bound it does not save) records it then too, and the pass takes it back.
+MEASURING_STATISTICS = "MeasuringStatistics"
+
 #: Why a stage that changes the tensor's rank needs the whole volume.
 _RANK_CHANGE = "it changes the tensor's rank, and regions are cut on the grid of the source"
 

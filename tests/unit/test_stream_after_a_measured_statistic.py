@@ -521,3 +521,30 @@ def test_a_free_rotation_or_scale_streams_bit_for_bit(streaming_dataset_stub):
 
         assert case.stream_refusal(1, True) is None, dtype
         assert _same(_patches(case, 1, True), _whole(case, 1, True)), dtype
+
+
+@pytest.mark.parametrize(
+    ("before", "save"),
+    [
+        ([], False),
+        ([Resample(spacing=[2.0, 2.0, 2.0], interpolation="linear")], False),
+        ([Resample(spacing=[2.0, 2.0, 2.0], interpolation="linear")], True),
+    ],
+    ids=["stored", "resampled", "resampled-saved"],
+)
+def test_a_percentile_bound_streams_on_the_number_the_whole_volume_gives(tmp_path, before, save):
+    # On the stored volume, numpy's percentile read by bounded passes seeds the Clip; after a resample, a pass over
+    # the whole volume measures it. Either way the regions land where the whole volume does, and a bound reaches the
+    # header only when it is saved.
+    _source(tmp_path)
+    clip = Clip(min_value="percentile:0.5", max_value="percentile:99.5", save_clip_min=save, save_clip_max=save)
+    chain = [*before, clip, Normalize(min_value=0, max_value=1)]
+    case = manager(Dataset(tmp_path / "src", "omezarr"), chain)
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region(tuple(slice(0, extent) for extent in case.spatial_shape), 0, False)
+
+    case.load(chain, [], load_augmentations=False)
+    assert torch.equal(region, case.data[0])
+    assert ("Percentile:0.5" in case.cache_attributes[0]) is save
+    assert ("Percentile:0.5" in case.landed_attributes(0)) is save

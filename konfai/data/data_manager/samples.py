@@ -350,6 +350,14 @@ class DatasetIter(data.Dataset):
                 f"[KonfAI] {label}: {len(read_whole)} case(s) read whole once before streaming: a stage wants a"
                 " statistic of an input an earlier stage changes, which only the whole volume gives."
             )
+        windows = {
+            case for case, manager, _drawn in work if all(int(size) <= 0 for size in manager.patch.patch_size or [0])
+        }
+        if windows:
+            print(
+                f"[KonfAI] {label}: {len(windows)} case(s) are one window each (patch_size 0 on every axis): the model"
+                " reads each case whole."
+            )
 
     def _on_fill_threads(
         self, what: str, work: list[Any], run: Callable[[Any], object], describe: Callable[[int], str]

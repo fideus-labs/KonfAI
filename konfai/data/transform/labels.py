@@ -316,6 +316,89 @@ class Softmax(Transform):
         return torch.softmax(tensor if tensor.is_floating_point() else tensor.float(), dim=self.dim)
 
 
+def _components(foreground: np.ndarray) -> np.ndarray:
+    """``foreground``'s components, face to face, numbered from 1 in the order of their first voxel in scan order,
+    0 outside (ITK's ``ConnectedComponentImageFilter``)."""
+    _require_simpleitk()
+    labels = sitk.ConnectedComponent(sitk.GetImageFromArray(foreground.astype(np.uint8)), False)
+    return sitk.GetArrayViewFromImage(labels).astype(np.int64)
+
+
+def largest_component(foreground: np.ndarray, rows: int) -> np.ndarray:
+    """Where ``foreground``'s largest component lies, its voxels face to face; of two of one size, the first in scan
+    order, as ``scipy.ndimage.label`` numbers them. Two passes over slabs of ``rows`` planes along the first axis:
+    the first numbers each slab's components, joins them across the slab's face with the slab before (a
+    union-find whose root is the lowest number, the first in scan order) and sums their sizes; the second numbers
+    each slab again and keeps the voxels of the largest root. Memory: one slab's numbers beside the answer."""
+    parent = np.zeros(1, dtype=np.int64)
+    sizes = np.zeros(1, dtype=np.int64)
+    offsets, face = [], None
+
+    def root(label: int) -> int:
+        while parent[label] != label:
+            parent[label] = parent[parent[label]]
+            label = int(parent[label])
+        return label
+
+    for start in range(0, foreground.shape[0], rows):
+        local = _components(foreground[start : start + rows])
+        offset, count = len(parent) - 1, int(local.max())
+        offsets.append(offset)
+        parent = np.concatenate([parent, np.arange(offset + 1, offset + count + 1)])
+        sizes = np.concatenate([sizes, np.bincount(local.ravel(), minlength=count + 1)[1:]])
+        numbered = np.where(local > 0, local + offset, 0)
+        if face is not None:
+            touching = (face > 0) & (numbered[0] > 0)
+            for a, b in {(int(x), int(y)) for x, y in zip(face[touching], numbered[0][touching], strict=True)}:
+                low, high = sorted((root(a), root(b)))
+                parent[high] = low
+        face = numbered[-1]
+    roots = np.array([root(label) for label in range(len(parent))])
+    totals = np.bincount(roots[1:], weights=sizes[1:], minlength=len(parent))
+    kept = np.zeros(foreground.shape, dtype=bool)
+    if not totals.any():
+        return kept
+    largest = int(np.argmax(totals))
+    for start, offset in zip(range(0, foreground.shape[0], rows), offsets, strict=True):
+        local = _components(foreground[start : start + rows])
+        kept[start : start + rows] = (local > 0) & (roots[np.where(local > 0, local + offset, 0)] == largest)
+    return kept
+
+
+class KeepLargestComponent(Transform):
+    """Set every voxel outside the largest component of a foreground to 0, the component's voxels face to face; of
+    two of one size, the first in scan order is kept.
+
+    The foreground is the non-zero voxels of the channel ``mask``, which the output drops, else of any channel. It
+    is found by slabs of ``rows`` planes (:func:`largest_component`), but which component is largest is known once
+    the last slab is read: the stage needs the whole volume."""
+
+    working_multiple = 1.5  # the foreground, one slab's numbers and the kept voxels, beside the output
+
+    def __init__(self, mask: int | None = None, rows: int = 64) -> None:
+        super().__init__()
+        self.mask = mask
+        self.rows = int(rows)
+
+    def output_channels(self, channels: int) -> int:
+        return channels - 1 if self.mask is not None else channels
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME, reason="which component is largest is known once every slab is read"
+        )
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if self.mask is None:
+            values, foreground = tensor, (tensor != 0).any(0)
+        else:
+            mask = self.mask % tensor.shape[0]
+            values = torch.cat([tensor[:mask], tensor[mask + 1 :]])
+            foreground = tensor[mask] != 0
+        kept = torch.from_numpy(largest_component(foreground.cpu().numpy(), self.rows)).to(values.device)
+        return torch.where(kept, values, torch.zeros((), dtype=values.dtype, device=values.device))
+
+
 class Otsu(Transform):
     """A body mask: 1 where the image is above Otsu's threshold, 0 elsewhere, one ``uint8`` channel.
 

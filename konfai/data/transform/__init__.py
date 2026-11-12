@@ -54,6 +54,7 @@ from konfai.data.transform.labels import Argmax as Argmax
 from konfai.data.transform.labels import Dilate as Dilate
 from konfai.data.transform.labels import FlatLabel as FlatLabel
 from konfai.data.transform.labels import KeepLabels as KeepLabels
+from konfai.data.transform.labels import KeepLargestComponent as KeepLargestComponent
 from konfai.data.transform.labels import Mask as Mask
 from konfai.data.transform.labels import MergeLabels as MergeLabels
 from konfai.data.transform.labels import OneHot as OneHot
@@ -93,6 +94,7 @@ __all__ = [
     "HistogramMatching",
     "InferenceStack",
     "KeepLabels",
+    "KeepLargestComponent",
     "LocalityKind",
     "Magnitude",
     "Mask",

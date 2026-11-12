@@ -791,6 +791,21 @@ def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
     assert config["Trainer"]["it_validation"] == 5
 
 
+def test_install_fine_tune_keeps_what_the_app_needs_reachable(tmp_path: Path) -> None:
+    """The tuned app is written elsewhere: a need named as a sibling becomes the source app's sibling."""
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    metadata = json.loads((app_root / "app.json").read_text(encoding="utf-8"))
+    metadata["needs"] = {"total": "total_app", "other": "org/apps:other_app"}
+    (app_root / "app.json").write_text(json.dumps(metadata), encoding="utf-8")
+    workspace = tmp_path / "workspace"
+
+    _install_fine_tune(app_root, workspace, [])
+
+    needs = json.loads((workspace / "app.json").read_text(encoding="utf-8"))["needs"]
+    assert needs == {"total": str(tmp_path / "repo" / "total_app"), "other": "org/apps:other_app"}
+
+
 def test_install_fine_tune_applies_model_and_dotted_overrides(tmp_path: Path) -> None:
     """A bare ``--set`` resolves into ``Trainer.Model.<Class>``; a dotted one hits the config root."""
     from ruamel.yaml import YAML
@@ -1320,6 +1335,75 @@ def test_get_parameters_constraints_read_from_model_types(tmp_path: Path) -> Non
         "spatial_samples": {"min": 0, "max": 100000},
         "ref": {"choices": ["a:x.pt", "b:y.pt"]},
     }
+
+
+_STAGE_MODEL_PY = (
+    "from typing import Annotated\n"
+    "from konfai.utils.config import Range\n"
+    "\n\n"
+    "class Net:\n"
+    "    def __init__(self, iterations: int = 10) -> None:\n"
+    "        pass\n"
+    "\n\n"
+    "class CentreCrop:\n"
+    "    def __init__(self, shape: Annotated[list[int], Range(1, 512)] = [192, 192, 192], fill: float = 0.0) -> None:\n"
+    "        pass\n"
+)
+
+_STAGE_CONFIG = (
+    "Predictor:\n"
+    "  Model:\n"
+    "    classpath: Model:Net\n"
+    "    Net:\n"
+    "      iterations: 10\n"
+    "  Dataset:\n"
+    "    groups_src:\n"
+    "      Volume_0:\n"
+    "        groups_dest:\n"
+    "          Volume:\n"
+    "            transforms:\n"
+    "              Model:CentreCrop:\n"
+    "                shape: [160, 192, 160]\n"
+)
+
+_CROP_PATH = "Predictor.Dataset.groups_src.Volume_0.groups_dest.Volume.transforms.Model:CentreCrop.shape"
+
+
+def _stage_repo(tmp_path: Path, parameters: dict[str, str]) -> tuple[object, Path]:
+    _, prediction = _local_repo_with_config(tmp_path, _STAGE_CONFIG)
+    (prediction.parent / "Model.py").write_text(_STAGE_MODEL_PY, encoding="utf-8")
+    manifest = json.loads((prediction.parent / "app.json").read_text())
+    (prediction.parent / "app.json").write_text(json.dumps({**manifest, "parameters": parameters}), encoding="utf-8")
+    return app_repository_module.LocalAppRepositoryFromDirectory(prediction.parent.parent, "demo_app"), prediction
+
+
+def test_a_declared_transform_stage_parameter_is_listed_constrained_and_set(tmp_path: Path) -> None:
+    repo, prediction = _stage_repo(tmp_path, {"crop_shape": _CROP_PATH})
+    assert repo.get_parameters() == {
+        "values": {"iterations": 10, "crop_shape": [160, 192, 160]},
+        "constraints": {"crop_shape": {"min": 1, "max": 512}},
+    }
+    repo._apply_config_overrides(str(prediction), ["crop_shape=[192, 224, 192]"])
+    stage = YAML().load(prediction.read_text())["Predictor"]["Dataset"]["groups_src"]["Volume_0"]["groups_dest"]
+    assert stage["Volume"]["transforms"]["Model:CentreCrop"]["shape"] == [192, 224, 192]
+    with pytest.raises(AppRepositoryError, match="outside its range"):
+        repo._apply_config_overrides(str(prediction), ["crop_shape=[0, 224, 192]"])
+    # SlicerKonfAI's round trip: the value it read, edited and spelled as --set, saved as a local app and read back.
+    repo.export_app(tmp_path / "saved" / "Tuned", config_overrides=["crop_shape=[128, 128, 128]"])
+    saved = app_repository_module.LocalAppRepositoryFromDirectory(tmp_path / "saved", "Tuned")
+    assert saved.get_parameters()["values"]["crop_shape"] == [128, 128, 128]
+
+
+@pytest.mark.parametrize(
+    "parameters, refusal",
+    [({"iterations": _CROP_PATH}, "the model takes too"), ({"crop_shape": _CROP_PATH + "s"}, "does not have")],
+)
+def test_a_declared_parameter_clashing_or_missing_is_refused(tmp_path: Path, parameters: dict, refusal: str) -> None:
+    repo, prediction = _stage_repo(tmp_path, parameters)
+    with pytest.raises(AppMetadataError, match=refusal):
+        repo.get_parameters()
+    with pytest.raises(AppMetadataError, match=refusal):
+        repo._apply_config_overrides(str(prediction), [f"{next(iter(parameters))}=[1, 1, 1]"])
 
 
 def test_apply_config_overrides_refuses_a_value_outside_its_range(tmp_path: Path) -> None:

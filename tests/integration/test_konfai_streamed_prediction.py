@@ -183,8 +183,8 @@ _VARIANT_USES_STREAMED_WRITER = {
     "ResampleFloat": True,
     "GeometryPair": True,
     "GeometryStack": True,
-    # Crop declares no streamed inverse, so its inverse is assembled; the forward streams.
-    "Crop": False,
+    # Crop's inverse pads the box back region by region, as its forward crops.
+    "Crop": True,
     "CropForward": True,
     "TTA": True,
     "TTAZ": False,

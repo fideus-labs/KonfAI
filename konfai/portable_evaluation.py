@@ -231,7 +231,7 @@ def _group_steps(
                     f"Transform '{name}' of group '{group_dest}' has no portable runtime op.",
                     f"Portable stages are: {', '.join(sorted(_CHAIN_OPS))}. {_or_konfai('Run it', _EVALUATE)}",
                 )
-            refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE)
+            refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE, params)
             step = _admitted(_CHAIN_OPS[stage](params))
             moved = moved or (name if moves_the_volume(step) else None)
             steps.append(step)

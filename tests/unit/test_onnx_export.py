@@ -168,6 +168,59 @@ def test_any_module_exposing_named_forward_exports(tmp_path):
         np.testing.assert_allclose(produced, torch.tanh(model.conv(example)).numpy(), atol=1e-5)
 
 
+@pytest.mark.parametrize(("blend", "version"), [("Gaussian", 5), ("GaussianFloat16", 6)])
+def test_a_float16_blend_is_written_at_the_manifest_version_that_carries_it(tmp_path, blend, version):
+    # A runtime reading version 5 alone refuses a GaussianFloat16 blend rather than blend it as Cosinus.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+
+    from konfai.export import export_to_onnx
+
+    class Head(torch.nn.Module):
+        def named_forward(self, x):
+            yield "head", torch.tanh(x)
+
+    _, manifest = export_to_onnx(Head(), tmp_path, torch.randn(1, 1, 16, 16), "head", extra_manifest={"blend": blend})
+    assert manifest["konfai_edge_manifest"] == version
+
+
+def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_refused(tmp_path):
+    # One window per case: the manifest's patch is zeros and the graph runs at any shape; a forward that reads
+    # its input's shape as a number answers for the example alone, which the export finds and refuses.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Free(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = torch.nn.Conv3d(1, 2, 3, padding=1)
+
+        def named_forward(self, x):
+            yield "head", self.conv(x)
+
+    class Fixed(Free):
+        def named_forward(self, x):
+            yield "head", self.conv(x)[..., : int(x.shape[-1]) // 2]
+
+    class Decided(Free):  # a hard decision between two networks, as SynthSeg takes one
+        def named_forward(self, x):
+            yield "head", self.conv(self.conv(x)[:, :1].tanh() * (self.conv(x).argmax(1, keepdim=True) == 1))
+
+    example = torch.randn(1, 1, 8, 10, 12)
+    path, manifest = export_to_onnx(Free().eval(), tmp_path / "free", example, "head", dynamic=True)
+    assert manifest["patch"]["size"] == [0, 0, 0]
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    assert session.run(None, {"input": np.zeros((1, 1, 5, 7, 9), np.float32)})[0].shape == (1, 2, 5, 7, 9)
+    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_to_onnx(Fixed().eval(), tmp_path / "fixed", example, "head", dynamic=True)
+    # Checked on a smooth input, against the gap at the example's own shape: a hard decision is not a fixed shape.
+    export_to_onnx(Decided().eval(), tmp_path / "decided", example, "head", dynamic=True)
+
+
 def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_stated_blend(tmp_path):
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")

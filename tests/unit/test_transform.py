@@ -451,6 +451,44 @@ def test_crop_moves_the_origin_along_a_sheared_direction() -> None:
     np.testing.assert_allclose(attribute.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
 
 
+def _crop_then_pad(volume: np.ndarray, shape: list[int]) -> np.ndarray:
+    """mri_synthseg's ``crop_volume(cropping_shape=shape)`` (mode center) then ``pad_volume(padding_shape=shape)``,
+    padding 0: the oracle of ``Crop(shape, fill=0)``."""
+    low = np.maximum([int((volume.shape[i] - shape[i]) / 2) for i in range(3)], 0)
+    high = np.minimum([low[i] + shape[i] for i in range(3)], np.array(volume.shape))
+    cropped = volume[low[0] : high[0], low[1] : high[1], low[2] : high[2]]
+    before = np.maximum(np.int32(np.floor((np.array(shape) - np.array(cropped.shape)) / 2)), 0)
+    after = np.maximum(np.int32(np.ceil((np.array(shape) - np.array(cropped.shape)) / 2)), 0)
+    return np.pad(cropped, tuple(zip(before, after, strict=True)), mode="constant", constant_values=0)
+
+
+def test_a_crop_to_a_shape_is_mri_synthsegs_crop_then_pad_from_the_header_alone() -> None:
+    # No dataset holds the case: the centre where the volume is larger, a pad of fill where it is smaller, odd
+    # differences split as mri_synthseg splits them; streamed region by region, and undone by the inverse.
+    volume = torch.arange(7 * 5 * 6, dtype=torch.float32).reshape(1, 7, 5, 6) + 1
+    crop = Crop(shape=[4, 0, 9], fill=0.0)
+    attribute = Attribute()
+
+    assert crop.transform_shape("CT", "case", [7, 5, 6], attribute) == [4, 5, 9]
+    assert crop.patch_locality(attribute).kind is LocalityKind.REGRID
+    cropped = crop("case", volume.clone(), Attribute(attribute))
+    assert np.array_equal(cropped[0].numpy(), _crop_then_pad(volume[0].numpy(), [4, 5, 9]))
+    for target in ((slice(0, 2), slice(0, 5), slice(0, 9)), (slice(1, 4), slice(2, 4), slice(5, 9))):
+        source = crop.stream_region_source("case", target, [7, 5, 6], attribute)
+        context = RegionContext(tuple(source), target, (7, 5, 6))
+        region = crop.stream_region("case", volume[(slice(None), *source)], context, attribute)
+        assert torch.equal(region, cropped[(slice(None), *target)])
+    back = crop.inverse("case", cropped, Attribute(attribute))
+    assert torch.equal(back[:, 1:5], volume[:, 1:5]) and not back[:, [0, 5, 6]].any()
+    with pytest.raises(TransformError, match="shape"):
+        Crop(shape=[4, 4, 4], source="BODY")
+    # A second crop of the chain would read the first's box.
+    again = Crop(shape=[2, 0, 0])
+    again.preceding = [crop]
+    with pytest.raises(TransformError, match="earlier 'Crop'"):
+        again.transform_shape("CT", "case", [4, 5, 9], Attribute())
+
+
 def test_crop_inverse_pads_back_a_case_without_geometry() -> None:
     attribute = Attribute()
     attribute["box"] = np.array([[1, 2], [0, 1], [3, 0]])
@@ -1586,3 +1624,45 @@ def test_the_three_axis_default_is_refused_by_name_on_a_2d_case(stage) -> None:
         stage.transform_shape("CT", "P0", [5, 6], Attribute())
     with pytest.raises(TransformError, match="axes"):
         stage("P0", torch.zeros(1, 5, 6), Attribute())
+
+
+@pytest.mark.parametrize("rows", [1, 3, 64])
+def test_keep_largest_component_keeps_scipys_largest_label_whatever_the_slabs(
+    rows: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Joined across the slabs' faces, the components are scipy's (face connectivity), and of two of one size the
+    # first in scan order is kept, as numbering them and taking the first maximum does.
+    ndi = pytest.importorskip("scipy.ndimage")
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    rng = np.random.default_rng(3)
+    foreground = rng.random((12, 9, 11)) > 0.55
+    foreground[:, 4, 5] = True  # a column through every slab
+    foreground[0, 0, :2] = foreground[11, 8, -2:] = True  # two components of one size
+    components, _count = ndi.label(foreground)
+    wanted = components == np.argmax(np.bincount(components.ravel())[1:]) + 1
+    labels = torch.from_numpy(rng.integers(1, 9, size=(1, *foreground.shape)).astype(np.int32))
+    tensor = torch.cat([labels, torch.from_numpy(foreground[None].astype(np.int32))])
+
+    kept = KeepLargestComponent(mask=1, rows=rows)("case", tensor, Attribute())
+
+    assert torch.equal(kept, torch.where(torch.from_numpy(wanted), labels, 0))
+    pair = np.zeros((1, 2, 2), dtype=bool)
+    pair[0, 0, 0] = pair[0, 1, 1] = True  # two one-voxel components: the first in scan order
+    assert KeepLargestComponent(rows=rows)("case", torch.from_numpy(pair), Attribute()).numpy()[0, 0].tolist() == [
+        True,
+        False,
+    ]
+    # SimpleITK numbers the slabs: without it the stage says how to install it when it runs, not on import.
+    monkeypatch.setattr("konfai.utils.ITK.sitk", None)
+    with pytest.raises(TransformError, match=r"konfai\[itk\]"):
+        KeepLargestComponent()("case", torch.from_numpy(pair), Attribute())
+
+
+def test_a_rounding_cast_is_numpys_rint() -> None:
+    # Half to even, where a plain cast truncates; the values it moves are no statistic a later stage may reuse.
+    values = torch.tensor([[-1.5, -0.5, 0.5, 1.5, 2.5, 2.6]])
+    cast = TensorCast("int16", round=True, inverse=False)
+    assert np.array_equal(cast("case", values, Attribute()).numpy(), np.rint(values.numpy()).astype(np.int16))
+    assert not cast.patch_locality(Attribute()).preserves_statistics

@@ -37,6 +37,7 @@ from konfai.data.patching.stage import _halo_radii
 from konfai.data.reduction import Mean, Reduction
 from konfai.data.transform import (
     Canonical,
+    Crop,
     Dilate,
     Flip,
     LocalityKind,
@@ -216,6 +217,41 @@ def test_stream_crop_padding_inverse_matches_whole_volume(seed: int) -> None:
         _partitions(in_shape[0], rng),
     )
     assert torch.equal(got, reference)
+
+
+@pytest.mark.parametrize(
+    ("seed", "fill", "empty"), [(0, None, False), (1, 0.0, False), (2, 7.0, False), (3, 5.0, True)]
+)
+def test_stream_a_crop_inverse_pads_the_box_back_as_the_whole_volume_does(seed: int, fill, empty: bool) -> None:
+    # Crop's inverse is Padding's forward: a region pulls the rows of the box it covers, and the edge (no
+    # fill) or the fill covers the rest; a case with no foreground is the fill everywhere.
+    rng = np.random.default_rng(seed)
+    box = np.array([[3, 2], [0, 1], [2, 0]])
+    in_shape = [Z, Y, X]
+    volume = torch.from_numpy(rng.integers(0, 9, size=(C, *in_shape)).astype(np.uint8))
+    crop = Crop(fill=fill, empty="fill" if empty else "refuse")
+    attribute = Attribute()
+    attribute["box"] = box
+    if empty:
+        attribute["boxempty"] = 1
+    assert crop.inverse_patch_locality(attribute).kind is LocalityKind.REGRID
+    out_shape = crop.inverse_transform_shape(in_shape, attribute)
+    reference = crop.inverse("case", volume.clone(), Attribute(attribute))
+    assert list(reference.shape[1:]) == out_shape == [Z + 5, Y + 1, X + 2]
+    got = _run_stream(
+        lambda target: crop.stream_region_target("case", target, in_shape, Attribute(attribute)),
+        lambda window, target, source: crop.stream_region_inverse(
+            "case", window, RegionContext(tuple(source), tuple(target), tuple(in_shape)), Attribute(attribute)
+        ),
+        in_shape,
+        out_shape,
+        volume,
+        _partitions(Z, rng),
+    )
+    assert torch.equal(got, reference)
+    walked = Attribute(attribute)
+    crop.inverse_stream_cache_attribute(walked, in_shape)
+    assert "box" not in walked and "boxempty" not in walked
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -493,12 +529,12 @@ def test_plan_non_region_writable_format_buffers_and_writes_classically() -> Non
 # --------------------------------------------------------------------------------------
 
 
-def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, before=(), final=()):
+def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, before=(), final=(), sweep_axis=0):
     """Push a whole case patch by patch through add_layer against an h5 sink and read the entry back.
 
     The forward ``transforms`` run once on ``volume`` (chained, stacking the attribute exactly as the
     input pipeline would), and the transformed volume plays the model output: the finalize chain must
-    invert it back.
+    invert it back. The patches are the planes along ``sweep_axis``, the axis the grid is swept along.
     """
     from konfai.utils.dataset import Dataset
 
@@ -512,13 +548,15 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     model_volume = volume.clone()
     for transform in transforms:
         model_volume = transform("CASE_000", model_volume, attribute)
-    z = model_volume.shape[1]
+    spatial = list(model_volume.shape[1:])
+    rows = spatial[sweep_axis]
     patch_slices = [
-        (slice(k, k + 1), slice(0, model_volume.shape[2]), slice(0, model_volume.shape[3])) for k in range(z)
+        tuple(slice(k, k + 1) if axis == sweep_axis else slice(0, extent) for axis, extent in enumerate(spatial))
+        for k in range(rows)
     ]
 
     class DummyPatch:
-        patch_size: ClassVar[list[int]] = [1, model_volume.shape[2], model_volume.shape[3]]
+        patch_size: ClassVar[list[int]] = [1 if axis == sweep_axis else extent for axis, extent in enumerate(spatial)]
         placement = "pad"
 
         @staticmethod
@@ -528,9 +566,8 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
 
         @staticmethod
         def get_sweep_axis(index_augmentation: int) -> int:
-            # These grids are cut along axis 0, as the dispatcher's slab contract expects.
             del index_augmentation
-            return 0
+            return sweep_axis
 
     class DummyManager:
         name = "CASE_000"
@@ -559,10 +596,15 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     output_dataset.before_reduction_transforms = list(before)
     output_dataset.final_transforms = list(final)
 
-    for k in range(z):
+    for k in range(rows):
         # Patch.get_data squeezes size-1 patch axes, so a [1, Y, X] patch reaches add_layer as [C, Y, X].
         output_dataset.add_layer(
-            0, 0, k, model_volume[:, k].clone(), cast(DatasetIter, DummyDatasetIter()), Attribute(attribute)
+            0,
+            0,
+            k,
+            model_volume.select(sweep_axis + 1, k).clone(),
+            cast(DatasetIter, DummyDatasetIter()),
+            Attribute(attribute),
         )
         if output_dataset.is_done(0):
             result = output_dataset.get_output(0, [volume.shape[0]], cast(DatasetIter, DummyDatasetIter()))
@@ -604,11 +646,14 @@ def test_add_layer_streams_a_forward_region_final_transform(tmp_path, monkeypatc
     assert torch.equal(streamed, volume.flip(1))
 
 
-def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("sweep_axis", [0, 2])
+def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(
+    tmp_path, monkeypatch, capsys, sweep_axis: int
+) -> None:
     # The general case the composition exists for: Canonical + Resample + Padding forward,
     # so the finalize chain carries CROP + REGRID + ORIENTATION in sequence. With the labelmap cast
     # to uint8 before the reduction, the whole stack streams to the sink and must match the
-    # whole-volume path bit for bit.
+    # whole-volume path bit for bit, along whichever axis the grid is swept.
     volume = (torch.arange(1 * 6 * 4 * 3).reshape(1, 6, 4, 3) % 5).to(torch.float32)
     transforms = [
         Canonical(inverse=True),
@@ -616,9 +661,12 @@ def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_p
         Padding([0, 0, 0, 0, 2, 1], inverse=True),
     ]
     before = [TensorCast("uint8", inverse=False)]
-    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True, before=before)
+    streamed = _drive_prediction(
+        tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True, before=before, sweep_axis=sweep_axis
+    )
+    assert "streaming:" not in capsys.readouterr().out, "the case left the streamed path"
     reference = _drive_prediction(
-        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, before=before
+        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, before=before, sweep_axis=sweep_axis
     )
     assert streamed.dtype == reference.dtype
     assert torch.equal(streamed, reference)

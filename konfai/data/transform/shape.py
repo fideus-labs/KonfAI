@@ -19,7 +19,7 @@
 
 import itertools
 import math
-from typing import Any, ClassVar, cast
+from typing import Annotated, Any, ClassVar, cast
 
 import numpy as np
 import torch
@@ -46,6 +46,7 @@ from konfai.data.transform.base import (
     sitk,
 )
 from konfai.data.transform.resample import _resample_with_sitk
+from konfai.utils.config import Range
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 
@@ -127,18 +128,8 @@ class Padding(TransformInverse):
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
         del name, cache_attribute
-        pads: list[tuple[int, int]] = []
-        crops: list[slice] = []
-        for target, source, (before, _after) in zip(
-            context.target, context.source, self._pairs(len(context.target)), strict=True
-        ):
-            start, stop = source.start + before, source.stop + before  # where the block sits in the output
-            low, high = max(0, start - target.start), max(0, target.stop - stop)
-            pads.append((low, high))
-            crops.append(slice(target.start - (start - low), target.stop - (start - low)))
         mode, value = self._mode()
-        padded = F.pad(tensor.unsqueeze(0), tuple(x for pair in reversed(pads) for x in pair), mode, value).squeeze(0)
-        return padded[(slice(None), *crops)]
+        return _pad_region(tensor, context, [before for before, _ in self._pairs(len(context.target))], mode, value)
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The inverse drops the padded border and keeps what remains: a CROP.
@@ -169,6 +160,46 @@ class Padding(TransformInverse):
             for extent, (before, after) in zip(spatial, self._pairs(len(spatial)), strict=True)
         ]
         return tensor[(slice(None), *crops)]
+
+
+def _pad_region(
+    tensor: torch.Tensor, context: RegionContext, before: list[int], mode: str, value: float
+) -> torch.Tensor:
+    """The region ``context.target`` of a padded volume, from the block ``tensor`` its input holds at
+    ``context.source``: input index ``i`` lands at ``i + before`` on each axis, and ``mode`` fills what the
+    block does not reach."""
+    pads: list[tuple[int, int]] = []
+    crops: list[slice] = []
+    for target, source, shift in zip(context.target, context.source, before, strict=True):
+        start, stop = source.start + shift, source.stop + shift  # where the block sits in the output
+        low, high = max(0, start - target.start), max(0, target.stop - stop)
+        pads.append((low, high))
+        crops.append(slice(target.start - (start - low), target.stop - (start - low)))
+    padded = F.pad(tensor.unsqueeze(0), tuple(x for pair in reversed(pads) for x in pair), mode, value).squeeze(0)
+    return padded[(slice(None), *crops)]
+
+
+def _pulled(target_slices: tuple[slice, ...], shifts: list[int], extents: list[int]) -> list[slice]:
+    """The rows of a volume of ``extents`` that a region of a shifted copy pulls, input index ``i`` landing at
+    ``i + shift``: past the volume, its nearest row, which an edge repeats."""
+    pull = []
+    for target, shift, extent in zip(target_slices, shifts, extents, strict=False):
+        low = min(max(target.start - int(shift), 0), int(extent) - 1)
+        pull.append(slice(low, max(min(target.stop - int(shift), int(extent)), low + 1)))
+    return pull
+
+
+def _margined(tensor: torch.Tensor, box: np.ndarray, border: tuple[str, float]) -> torch.Tensor:
+    """``tensor`` with ``box``'s margins (before, after per spatial axis) taken off, a margin below zero added with
+    ``border`` (``F.pad``'s mode and value; ``F.pad`` takes a negative pad as a crop). A crop alone is a view."""
+    if (box >= 0).all():
+        crops = [
+            slice(int(near), extent - int(far)) for (near, far), extent in zip(box, tensor.shape[1:], strict=False)
+        ]
+        return tensor[(slice(None), *crops)]
+    mode, value = border
+    pads = tuple(-int(margin) for margins in reversed(box) for margin in margins)
+    return F.pad(tensor.unsqueeze(0), pads, mode, value).squeeze(0)
 
 
 class Squeeze(TransformInverse):
@@ -222,6 +253,12 @@ class Crop(TransformInverse):
     A case with no foreground is refused by name, unless ``empty: fill``: the box is then the near corner
     voxel grown by the margin, on which the stages after it run, and the inverse writes ``fill`` over the
     whole input grid, dropping what they computed: with ``fill: 0``, an empty segmentation.
+
+    With ``shape`` there is no foreground to find: the volume becomes exactly ``shape`` voxels per axis in array order
+    (an axis at 0 or below kept whole), read off the header: its centre where it is larger, the first ``(n - c) // 2``
+    dropped, and padded with ``fill`` (its edge without) where it is smaller, ``(c - n) // 2`` before. A margin of
+    the box below zero is such a pad: the crop then streams as a REGRID, as ``Padding`` does, and the inverse takes
+    the pad back as it puts the dropped voxels back.
     """
 
     working_multiple = 0.0
@@ -241,8 +278,19 @@ class Crop(TransformInverse):
         handed: bool = False,
         empty: str = "refuse",
         inverse: bool = True,
+        shape: Annotated[
+            list[int] | None,
+            Range(0, 4096),
+            "The volume's centre, cropped and padded to exactly this many voxels per axis in array order (an axis at 0"
+            " kept whole); None crops to a foreground instead.",
+        ] = None,
     ) -> None:
         super().__init__(inverse)
+        if shape is not None and (source is not None or labels is not None or nonzero or handed or margin_mm):
+            raise TransformError(
+                f"'Crop' was given shape: {shape} and a foreground to find its box in.",
+                "A shape crops the volume's centre: give it without source, labels, nonzero, handed or margin_mm.",
+            )
         if empty not in ("refuse", "fill") or (empty == "fill" and fill is None):
             raise TransformError(
                 f"'Crop' was given empty: {empty!r} and fill: {fill}.",
@@ -266,6 +314,7 @@ class Crop(TransformInverse):
         self.nonzero = bool(nonzero)
         self.handed = bool(handed)
         self.empty = empty
+        self.shape = None if shape is None else [int(extent) for extent in shape]
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # ``transform_shape`` puts the box on the case, but a group carries only what its writer stored.
@@ -275,7 +324,15 @@ class Crop(TransformInverse):
                 reason="the case carries no 'box' yet; the foreground box is computed and recorded"
                 " as the chain is planned, and only a read can find it",
             )
-        return PatchLocality(LocalityKind.CROP)
+        # A margin below zero pads: the region pulls what of the volume it covers and fills the rest.
+        return PatchLocality(LocalityKind.REGRID if self._pads(cache_attribute) else LocalityKind.CROP)
+
+    def _pads(self, cache_attribute: Attribute) -> bool:
+        return bool((self._parse_box(cache_attribute["box"]) < 0).any())
+
+    def _border(self) -> tuple[str, float]:
+        """How a pad fills: with ``fill``, else with the edge."""
+        return ("replicate", 0.0) if self.fill is None else ("constant", float(self.fill))
 
     def stream_region_source(
         self,
@@ -284,12 +341,23 @@ class Crop(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Output index o holds source index o + start.
+        # Output index o holds source index o + start; a pad pulls only what of the volume the region covers.
         box = Crop._parse_box(cache_attribute["box"])
+        if self._pads(cache_attribute):
+            return _pulled(target_slices, [-int(start) for start, _ in box], source_spatial_shape)
         return [
             slice(target.start + int(start), target.stop + int(start))
             for target, (start, _) in zip(target_slices, box, strict=False)
         ]
+
+    def stream_region(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        if "box" not in cache_attribute or not self._pads(cache_attribute):
+            return self(name, tensor, cache_attribute)
+        mode, value = self._border()
+        box = Crop._parse_box(cache_attribute["box"])
+        return _pad_region(tensor, context, [-int(start) for start, _ in box], mode, value)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -312,10 +380,20 @@ class Crop(TransformInverse):
         # The crop box is the foreground bounding box, so the output shape needs the pixel data: a
         # box already on the case is reused, otherwise it is computed once. It has one row per
         # spatial axis, aligned with the channel-stripped ``shape``.
+        if any(isinstance(stage, Crop) for stage in self.preceding or ()):
+            raise TransformError(
+                "'Crop' keeps its box under 'box', where an earlier 'Crop' of the chain keeps its own.",
+                "Crop once.",
+            )
         if "box" in cache_attribute:
             known = self._parse_box(cache_attribute["box"])
             return [int(s - a - b) for (a, b), s in zip(known, shape, strict=False)]
         box: np.ndarray | None
+        if self.shape is not None:
+            # Margins, not a box: a margin below zero is a pad.
+            margins = self._centre(shape)
+            cache_attribute["box"] = margins
+            return [int(s - a - b) for (a, b), s in zip(margins, shape, strict=True)]
         if self.handed:
             holder = self.dataset_holding(group_src, name)
             if holder is None:
@@ -354,6 +432,17 @@ class Crop(TransformInverse):
             box[i][1] = max(int(s - b - 1), 0)
         cache_attribute["box"] = box
         return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
+
+    def _centre(self, shape: list[int]) -> np.ndarray:
+        """The margins per axis that make a volume of ``shape`` exactly ``self.shape``, mri_synthseg's ``crop_volume``
+        then ``pad_volume``: ``(n - c) // 2`` dropped before where it is larger, ``(c - n) // 2`` added before (a
+        margin below zero) where it is smaller, the rest after."""
+        rows = []
+        for extent, wanted in zip(shape, cast("list[int]", self.shape), strict=True):
+            wanted = extent if wanted <= 0 else wanted
+            before = (extent - wanted) // 2 if extent >= wanted else -((wanted - extent) // 2)
+            rows.append([before, extent - wanted - before])
+        return np.asarray(rows, dtype=np.int64)
 
     def _handed_box(self, holder: Dataset, group_src: str, name: str, shape: list[int]) -> np.ndarray | None:
         """The foreground box of the volume as the stages before this one leave it: those stages replayed
@@ -557,15 +646,10 @@ class Crop(TransformInverse):
             return tensor
         box = self._parse_box(cache_attribute["box"])
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
-        # The box carries the far margin, so the extent in hand decides the stop it crops at.
-        crops = [
-            slice(int(near), extent - int(far)) for (near, far), extent in zip(box, tensor.shape[1:], strict=False)
-        ]
-        return tensor[(slice(None), *crops)]
+        return _margined(tensor, box, self._border())
 
-    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if "box" not in cache_attribute:
-            return tensor
+    def _pop_box(self, cache_attribute: Attribute) -> tuple[np.ndarray, bool]:
+        """Take back what the forward recorded: the box, and whether the case had no foreground."""
         box = self._parse_box(cache_attribute.pop("box"))
         # Only an ``empty: fill`` stage records it; another Crop of the chain leaves it to that one.
         empty = self.empty == "fill" and "boxempty" in cache_attribute
@@ -573,13 +657,48 @@ class Crop(TransformInverse):
             cache_attribute.pop("boxempty")
         if Grid.readable(cache_attribute):  # the forward pushed an origin only on a case with a geometry
             cache_attribute.pop("Origin")
-        padding = []
-        for b in reversed(box):
-            padding.extend([b[0], b[1]])
-        if self.fill is not None:
-            padded = F.pad(tensor, tuple(int(p) for p in padding), "constant", float(self.fill))
-            return padded.fill_(float(self.fill)) if empty else padded
-        return F.pad(tensor.unsqueeze(0), tuple(padding), "replicate").squeeze(0)
+        return box, empty
+
+    def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "box" not in cache_attribute:
+            return tensor
+        box, empty = self._pop_box(cache_attribute)
+        mode, value = self._border()
+        restored = _margined(tensor, -box, (mode, value))
+        return restored.fill_(value) if empty else restored
+
+    def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # Padding the box back is Padding's forward: a REGRID pulling the rows of the box a region covers and
+        # filling the rest. With no box the inverse hands its input back.
+        return PatchLocality(LocalityKind.REGRID if "box" in cache_attribute else LocalityKind.POINTWISE)
+
+    def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        if "box" not in cache_attribute:
+            return shape
+        box = self._parse_box(cache_attribute["box"])
+        return [int(extent + near + far) for extent, (near, far) in zip(shape, box, strict=False)]
+
+    def inverse_stream_cache_attribute(self, cache_attribute: Attribute, source_spatial_shape: list[int]) -> None:
+        del source_spatial_shape
+        if "box" in cache_attribute:
+            self._pop_box(cache_attribute)
+
+    def stream_region_target(
+        self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
+    ) -> list[slice]:
+        # Output index o holds input index o - start; past the box, the box's nearest row, which the edge repeats.
+        del name
+        box = self._parse_box(cache_attribute["box"])
+        return _pulled(target_slices, [int(start) for start, _ in box], source_spatial_shape)
+
+    def stream_region_inverse(
+        self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        del name
+        box, empty = self._pop_box(Attribute(cache_attribute))
+        mode, value = self._border()
+        region = _pad_region(tensor, context, [int(start) for start, _ in box], mode, value)
+        return region.fill_(value) if empty else region
 
 
 def _has_geometry(cache_attribute: Attribute, rank: int) -> bool:

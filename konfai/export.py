@@ -32,6 +32,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast, get_args
 
+import numpy as np
 import torch
 
 from konfai.utils.errors import PredictorError
@@ -41,6 +42,8 @@ if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
 
 MANIFEST_VERSION = 5  # 5: patch.stride under the end and spread placements
+#: A manifest blending by GaussianFloat16: a runtime reading version 5 alone refuses it rather than blend it as Cosinus.
+FLOAT16_BLEND_VERSION = 6
 
 
 def _require(module: str) -> ModuleType:
@@ -199,23 +202,122 @@ def _write_onnx(
     input_names: list[str],
     output_names: list[str],
     opset: int = 18,
+    dynamic: bool = False,
 ) -> None:
     """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
     inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
-    which a model handed to others does not carry."""
+    which a model handed to others does not carry. ``dynamic``: every spatial axis of every input is left free."""
     _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
     from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
 
+    # ``module`` takes its inputs as ``*inputs``: one free shape per example, under that one argument.
+    free = (tuple(dict.fromkeys(range(2, example.dim()), torch.export.Dim.AUTO) for example in examples),)
     with torch.no_grad():
         program = cast(
             "torch.onnx.ONNXProgram",
             torch.onnx.export(
-                module, examples, opset_version=opset, input_names=input_names, output_names=output_names, dynamo=True
+                module,
+                examples,
+                opset_version=opset,
+                input_names=input_names,
+                output_names=output_names,
+                dynamo=True,
+                dynamic_shapes=free if dynamic else None,
             ),
         )
     ClearMetadataAndDocStringPass()(program.model)
     program.save(onnx_path, external_data=False)
+
+
+def _smooth(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
+    """An input of ``shape`` that varies slowly: a product of cosines along the spatial axes, on every channel. A model
+    with hard decisions (an argmax between networks) gives ONNX and torch the same answer on it, as on an image."""
+    value = torch.ones(())
+    for axis, extent in enumerate(shape[2:]):
+        line = torch.cos(torch.arange(extent, dtype=torch.float64) / (7.0 + 3.0 * axis))
+        value = value.unsqueeze(-1) * line
+    return value.expand(shape).to(dtype).contiguous()
+
+
+def _check_free_axes(
+    module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str]
+) -> None:
+    """Refuse a graph exported with free axes that answers for the example's shape alone: on a smooth input of
+    another shape (32 voxels more along the first axis, 16 along the last) it must give torch's shape, and torch's
+    values as closely as on a smooth input of the example's own shape."""
+    ort = _require("onnxruntime")
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+
+    def gap(inputs: list[torch.Tensor]) -> tuple[float | None, list[int], str]:
+        """How far ONNX lands from torch on ``inputs``, ``None`` when it gives another shape or fails."""
+        with torch.no_grad():
+            want = module(*inputs).numpy()
+        try:
+            got = session.run(None, {name: tensor.numpy() for name, tensor in zip(names, inputs, strict=True)})[0]
+        except Exception as error:  # a graph that fixed an axis refuses the other shape outright
+            return None, list(want.shape), f"fails ({type(error).__name__})"
+        if got.shape != want.shape:
+            return None, list(want.shape), f"gives {list(got.shape)}"
+        return float(np.abs(got.astype(np.float64) - want).max(initial=0.0)), list(want.shape), ""
+
+    own, _, _ = gap([_smooth(list(example.shape), example.dtype) for example in examples])
+    other = []
+    for example in examples:
+        shape = list(example.shape)
+        shape[2] += 32
+        shape[-1] += 16
+        other.append(_smooth(shape, example.dtype))
+    there, shape, answer = gap(other)
+    own = 0.0 if own is None else own
+    if there is None or there > max(1e-4, 10.0 * own):
+        answer = answer or f"lands {there:.3g} from torch where it lands {own:.3g} at the example's shape"
+        raise PredictorError(
+            f"The model exported with free spatial axes {answer} on inputs of {list(other[0].shape)}, where torch"
+            f" gives {shape}: the forward answers for the example's shape alone.",
+            "Compute what depends on the input's shape with symbolic sizes (torch.sym_max, no int()), or give the"
+            " model a fixed patch_size.",
+        )
+
+
+class _Folds(torch.nn.Module):
+    """Pointwise transforms of an output chain, in order, on ``[1, C, ...]`` in the ``dtype`` konfai hands them:
+    what the last hands back, as the float32 the program holds every buffer in."""
+
+    def __init__(self, folds: list[Callable[[torch.Tensor], torch.Tensor]], dtype: torch.dtype) -> None:
+        super().__init__()
+        self.folds = list(folds)
+        self.dtype = dtype
+
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
+        # Taken as ``*inputs``, as every graph ``_write_onnx`` frees the axes of.
+        out = inputs[0][0].to(self.dtype)
+        for fold in self.folds:
+            out = fold(out)
+        return out[None].to(torch.float32)
+
+
+def export_folds(
+    folds: list[Callable[[torch.Tensor], torch.Tensor]],
+    onnx_path: Path,
+    channels: int,
+    rank: int,
+    dtype: str = "float32",
+    opset: int = 18,
+) -> tuple[int, str]:
+    """Export pointwise transforms of an output chain to one ONNX graph at ``onnx_path``, its input ``C =
+    channels`` in the ``dtype`` konfai hands them and its ``rank`` spatial axes free; return the channel count and
+    the dtype konfai's transforms hand back."""
+    example = torch.randn(1, channels, *([8] * rank))
+    with torch.no_grad():
+        out = example[0].to(getattr(torch, dtype))
+        for fold in folds:
+            out = fold(out)
+    module = _Folds(folds, getattr(torch, dtype)).eval()
+    onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_onnx(module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True)
+    _check_free_axes(module, (example,), onnx_path, ["input"])
+    return int(out.shape[0]), str(out.dtype).removeprefix("torch.")
 
 
 def export_to_onnx(
@@ -238,6 +340,7 @@ def export_to_onnx(
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
     write_manifest: bool = True,
+    dynamic: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Export ``model`` to ``output_dir/model.onnx`` (+ ``manifest.json``).
 
@@ -273,6 +376,9 @@ def export_to_onnx(
     write_manifest:
         Write ``manifest.json`` beside the ONNX. Off for a multi-model bundle, whose
         per-fold manifests are embedded in a single ``program.json`` instead.
+    dynamic:
+        Leave every spatial axis free: the graph takes the whole case as one window, which the manifest's
+        ``patch.size`` of zeros says. The graph is checked on inputs of another shape before it is kept.
 
     Returns
     -------
@@ -308,7 +414,9 @@ def export_to_onnx(
 
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
     names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
-    _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset)
+    _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset, dynamic)
+    if dynamic:
+        _check_free_axes(wrapper, examples, onnx_path, names)
 
     input_shape = tuple(int(s) for s in examples[0].shape)
     spatial = list(input_shape[2:])
@@ -321,7 +429,8 @@ def export_to_onnx(
         "input": {"name": input_name, "group": groups[0], "channels": input_shape[1], "dtype": "f32"},
         "output": {"name": output_name, "group": output_group, "channels": int(output_shape[1]), "dtype": "f32"},
         "patch": {
-            "size": spatial,
+            # Zeros: one window per case, the whole of it.
+            "size": [0] * len(spatial) if dynamic else spatial,
             "overlap": patch_overlap,
             "dim": dim,
             "extend_slice": extend_slice,
@@ -346,6 +455,8 @@ def export_to_onnx(
         manifest.update(extra_manifest)
     if patch_overlap is None:
         manifest.setdefault("blend", "Overwrite")
+    if manifest.get("blend") == "GaussianFloat16":
+        manifest["konfai_edge_manifest"] = FLOAT16_BLEND_VERSION
     if write_manifest:
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return onnx_path, manifest

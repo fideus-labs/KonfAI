@@ -25,7 +25,7 @@ import threading
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from types import EllipsisType
 from typing import Any, cast
@@ -135,11 +135,15 @@ def _corner_context(shape: list[int]) -> RegionContext:
     return RegionContext(corner, corner, tuple(int(extent) for extent in shape))
 
 
-def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
-    """Where one z-slab of the accumulator grid sits: the same region as source and target."""
-    slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
-    shape = tuple(int(extent) for extent in spatial)
-    return RegionContext(slices, slices, shape)
+def _slab(region: slice, spatial: list[int], axis: int) -> tuple[slice, ...]:
+    """The slab ``region`` of the accumulator grid along ``axis``, whole on every other axis."""
+    return tuple(region if dim == axis else slice(0, int(extent)) for dim, extent in enumerate(spatial))
+
+
+def _slab_context(region: slice, spatial: list[int], axis: int) -> RegionContext:
+    """Where one slab of the accumulator grid sits: the same region as source and target."""
+    slices = _slab(region, spatial, axis)
+    return RegionContext(slices, slices, tuple(int(extent) for extent in spatial))
 
 
 @dataclass(frozen=True)
@@ -186,6 +190,8 @@ class _StreamPlan:
     to_sink: bool
     # Prefix stages declared SLAB: run through ``Transform.stream_slab`` so they learn where each slab sits.
     slab_stages: frozenset[int] = frozenset()
+    #: The spatial axis the slabs are cut along: the one the case's patch grid is swept along.
+    axis: int = 0
 
     @property
     def boundary(self) -> int:
@@ -544,22 +550,21 @@ class OutputDataset(Dataset, NeedDevice):
             self.output_layer_accumulator[index_dataset] = {}
             self.attributes[index_dataset] = {}
             self.names[index_dataset] = input_dataset.name
-            # The streamed consumers index their slabs on the first spatial axis: a grid swept along
-            # another axis takes the whole-volume path. max(1, ...): the count is set by load().
-            sweeps_first_axis = all(
-                input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
-            )
+            # The slabs are cut along the axis the patch grids are swept along, one for every copy: the aligner
+            # joins their rows. max(1, ...): the count is set by load().
+            axes = {input_dataset.patch.get_sweep_axis(a) for a in range(max(1, self.nb_data_augmentation))}
+            axis = min(axes)
             plan = (
-                self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
-                if self._streaming_enabled and sweeps_first_axis
+                self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model, axis)
+                if self._streaming_enabled and len(axes) == 1
                 else None
             )
             self._stream_plans[index_dataset] = plan
             if self._streaming_enabled and plan is None:
                 reason = (
-                    self._stream_refusal(dataset, index_dataset, source_attribute, layer)
-                    if sweeps_first_axis
-                    else "its patch grid is swept along another axis than the first, the one slabs are written along"
+                    self._stream_refusal(dataset, index_dataset, source_attribute, layer, axis)
+                    if len(axes) == 1
+                    else "its copies' patch grids are swept along different axes, and their slabs are joined along one"
                 )
                 self._report_once(
                     f"whole-volume: {reason}",
@@ -641,7 +646,8 @@ class OutputDataset(Dataset, NeedDevice):
         if copy_finished:
             slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
         try:
-            aligner = self._aligners.setdefault(index_dataset, SlabAligner(self.nb_data_augmentation))
+            axis = cast(_StreamPlan, self._stream_plans[index_dataset]).axis
+            aligner = self._aligners.setdefault(index_dataset, SlabAligner(self.nb_data_augmentation, axis=axis))
             joint = aligner.push(index_augmentation, slabs, copy_finished)
             self._consume_slabs(index_dataset, joint, number_of_channels_per_model, dataset)
             finished = aligner.complete
@@ -703,9 +709,10 @@ class OutputDataset(Dataset, NeedDevice):
         return resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
 
     def _stream_refusal(
-        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None
+        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None, axis: int = 0
     ) -> str | None:
-        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it."""
+        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it. ``axis``: the one its
+        slabs are cut along."""
         if self.nb_data_augmentation < 1:
             return "no copy of the case is planned"
         if not self.reduction.voxel_local:
@@ -717,16 +724,22 @@ class OutputDataset(Dataset, NeedDevice):
             )
         if self.nb_data_augmentation != 1:
             try:
-                streamable = self._tta_streamable(dataset, index, attribute)
+                streamable = self._tta_streamable(dataset, index, attribute, axis)
             except Exception as error:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
                 return f"a TTA copy's un-augment could not be probed ({type(error).__name__}: {error})"
             if not streamable:
                 return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform streams through ``stream_slab``; any other
-            # non-voxel-local one refuses outright.
-            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
+            # A SLAB before-reduction transform streams through ``stream_slab``, which hands it slabs of the first
+            # axis; any other non-voxel-local one refuses outright.
+            if locality.kind is LocalityKind.SLAB:
+                if axis != 0:
+                    return (
+                        f"the before-reduction transform {type(transform).__name__} takes slabs of the first axis, and"
+                        f" the case's patch grid is swept along axis {axis}"
+                    )
+            elif not self._voxel_local(locality, attribute):
                 return f"the before-reduction transform {type(transform).__name__} is not voxel-local"
         return None
 
@@ -737,8 +750,9 @@ class OutputDataset(Dataset, NeedDevice):
         attribute: Attribute,
         layer: torch.Tensor | None = None,
         number_of_channels_per_model: list[int] | None = None,
+        axis: int = 0,
     ) -> _StreamPlan | None:
-        """The streaming plan for this case, or ``None`` for the whole-volume path.
+        """The streaming plan for this case, its slabs cut along ``axis``, or ``None`` for the whole-volume path.
 
         The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``. What
         streaming cannot honour becomes a whole-volume TAIL run once on a post-reduction buffer, as does
@@ -747,7 +761,7 @@ class OutputDataset(Dataset, NeedDevice):
         act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``): see
         ``_stream_refusal``.
         """
-        if self._stream_refusal(dataset, index, attribute, layer) is not None:
+        if self._stream_refusal(dataset, index, attribute, layer, axis) is not None:
             return None
         stages = [
             *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
@@ -765,8 +779,8 @@ class OutputDataset(Dataset, NeedDevice):
             locality = stage.locality(Attribute(attribute))
             if self._voxel_local(locality, attribute):
                 continue
-            if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None:
-                # A SLAB stage streams through ``stream_slab`` only on the accumulator grid.
+            if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None and axis == 0:
+                # A SLAB stage streams through ``stream_slab``, slabs of the first axis, only on the accumulator grid.
                 slab_stages.add(position)
                 continue
             if locality.kind.is_region:
@@ -779,8 +793,8 @@ class OutputDataset(Dataset, NeedDevice):
             # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator grid.
             if pipe_start is not None:
                 tail_start = min(tail_start, pipe_start)
-            return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages))
-        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True, slab_stages=frozenset(slab_stages))
+            return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages), axis=axis)
+        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True, slab_stages=frozenset(slab_stages), axis=axis)
 
     @staticmethod
     def _copy_draw(dataset: DatasetIter, index_augmentation: int) -> tuple[list[DataAugmentation], int] | None:
@@ -808,8 +822,8 @@ class OutputDataset(Dataset, NeedDevice):
             tensor = data_augmentation.inverse(case, a, tensor)
         return tensor
 
-    def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute) -> bool:
-        """Whether every copy's un-augment acts slab by slab, read from the declarations alone.
+    def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute, axis: int = 0) -> bool:
+        """Whether every copy's un-augment acts slab by slab along ``axis``, read from the declarations alone.
 
         A POINTWISE draw does; an ORIENTATION draw does when its declared region remap fixes the slab
         axis row for row and its shape fold keeps the slab extent. Any other kind refuses outright.
@@ -829,12 +843,12 @@ class OutputDataset(Dataset, NeedDevice):
                 if locality.kind is not LocalityKind.ORIENTATION:
                     return False
                 out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
-                if out_shape[0] != shape[0]:
+                if out_shape[axis] != shape[axis]:
                     return False
-                plane = tuple(slice(0, extent) for extent in out_shape[1:])
-                for row in range(out_shape[0]):
-                    source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
-                    if (source[0].start, source[0].stop) != (row, row + 1):
+                for row in range(out_shape[axis]):
+                    target = _slab(slice(row, row + 1), out_shape, axis)
+                    source = augmentation.stream_region_source(case, a, target, shape)
+                    if (source[axis].start, source[axis].stop) != (row, row + 1):
                         return False
                 shape = out_shape
         return True
@@ -858,13 +872,13 @@ class OutputDataset(Dataset, NeedDevice):
                 for target, emitted in cast(SlabRegionStream, state.stream).push(region, block):
                     self._write_stream_block(index, target, emitted, cast(Attribute, state.attribute))
             elif plan.to_sink:
-                spatial = self.output_layer_accumulator[index][0].shape
-                target = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
+                target = _slab(region, self.output_layer_accumulator[index][0].shape, plan.axis)
                 self._write_stream_block(index, target, block, attribute)
             else:
                 buffer = self._stream_buffers[index]
-                lead = (slice(None),) * (block.dim() - len(self.output_layer_accumulator[index][0].shape))
-                buffer[(*lead, region)] = block.to(buffer.device)
+                spatial = self.output_layer_accumulator[index][0].shape
+                lead = (slice(None),) * (block.dim() - len(spatial))
+                buffer[(*lead, *_slab(region, spatial, plan.axis))] = block.to(buffer.device)
 
     def _init_stream_state(
         self, index: int, plan: _StreamPlan, block: torch.Tensor, attribute: Attribute
@@ -875,7 +889,7 @@ class OutputDataset(Dataset, NeedDevice):
         if plan.pipe_start is not None:
             state = self._make_pipe_state(index, plan, spatial, block)
             if state is None:
-                plan = _StreamPlan(plan.stages, None, plan.pipe_start, to_sink=False, slab_stages=plan.slab_stages)
+                plan = replace(plan, pipe_start=None, tail_start=plan.pipe_start, to_sink=False)
                 self._stream_plans[index] = plan
             else:
                 self._region_states[index] = state
@@ -987,7 +1001,7 @@ class OutputDataset(Dataset, NeedDevice):
             state.attribute = attribute
             return block
 
-        state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1])
+        state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1], plan.axis)
         return state
 
     def _apply_pipe_stage(
@@ -1093,6 +1107,7 @@ class OutputDataset(Dataset, NeedDevice):
         dataset: DatasetIter,
         region: slice,
         spatial: list[int],
+        axis: int,
     ) -> torch.Tensor:
         """One copy's slab through the per-copy head of ``_get_output``: un-augment it, split the model
         chunks, run before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A
@@ -1101,7 +1116,7 @@ class OutputDataset(Dataset, NeedDevice):
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
         chunks = self._split_model_chunks(layer, number_of_channels_per_model, attribute)
-        context = _slab_context(region, spatial)
+        context = _slab_context(region, spatial, axis)
         results = []
         for chunk in chunks:
             for transform in self.before_reduction_transforms:
@@ -1126,7 +1141,7 @@ class OutputDataset(Dataset, NeedDevice):
         dataset: DatasetIter,
         region: slice,
     ) -> tuple[torch.Tensor, Attribute]:
-        """The finalize chain of ``_get_output``/``get_output``, on one z-slab of every copy, up to
+        """The finalize chain of ``_get_output``/``get_output``, on one slab of every copy, up to
         the plan's prefix boundary.
 
         Each step is the whole-volume computation restricted to the slab (same ops, same order, same
@@ -1135,14 +1150,14 @@ class OutputDataset(Dataset, NeedDevice):
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         blocks = [
             self._prepare_copy_slab(
-                index, index_augmentation, layer, number_of_channels_per_model, dataset, region, spatial
+                index, index_augmentation, layer, number_of_channels_per_model, dataset, region, spatial, plan.axis
             )
             for index_augmentation, layer in copies.items()
         ]
         result = self._reduce_copies(blocks)
         attribute = Attribute(self.attributes[index][0][0])
         self._split_model_chunks(next(iter(copies.values())), number_of_channels_per_model, attribute)
-        context = _slab_context(region, spatial)
+        context = _slab_context(region, spatial, plan.axis)
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
