@@ -1841,7 +1841,8 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
     """KonfAI app repository loaded from a local folder."""
 
     def __init__(self, app_directory: Path, app_name: str):
-        self._app_directory = app_directory
+        # Absolute: a fine-tuned app records its siblings' paths (``needs``) and is opened from anywhere.
+        self._app_directory = app_directory.absolute()
         super().__init__(app_name)
 
     @staticmethod
