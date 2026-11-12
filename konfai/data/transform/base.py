@@ -20,7 +20,7 @@
 import importlib
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -49,8 +49,9 @@ class LocalityKind(Enum):
     - ``ORIENTATION``: flip/permute: the index-remapped source region.
     - ``CROP``: the source region is the target region translated, so the stage is not re-applied
       to it. It drops voxels, so the stored volume's statistics are not its output's.
-    - ``GLOBAL_STAT``: needs whole-volume statistics (``stat_keys``, a subset of Min/Max/Mean/Std or their PerChannel forms),
-      read once from disk and cached: the exact patch plus the cached statistic.
+    - ``GLOBAL_STAT``: needs whole-volume statistics (``stat_keys``, a subset of Min/Max/Mean/Std or their PerChannel forms,
+      a ``Percentile:<p>``, or a ``Statistic:`` key the stage measures itself), read once from disk and cached: the
+      exact patch plus the cached statistic.
     - ``REGRID``: resample onto another grid, possibly through a map. The stage owns both halves:
       the source region a target region pulls (:meth:`Transform.stream_region_source`) and the
       interpolation (:meth:`Transform.stream_region`).
@@ -130,7 +131,8 @@ class PatchLocality:
 
     ``halo`` is the per-spatial-axis neighbourhood radius in array order (Z, Y, X); a length-1
     tuple broadcasts to every axis. ``stat_keys`` are the ``Attribute`` keys a ``GLOBAL_STAT``
-    transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``, or their ``PerChannel`` forms). ``stat_channels``
+    transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``, or their ``PerChannel`` forms, a
+    ``Percentile:<p>``, or a ``Statistic:`` key with its :attr:`measure`). ``stat_channels``
     restricts the statistic to those channels (``Normalize.channels``). ``reason`` is why a
     ``WHOLE_VOLUME`` declaration needs the whole volume; the plan prints it.
     """
@@ -154,6 +156,9 @@ class PatchLocality:
     #: Whether the whole-volume call takes a statistic already in the scope over measuring its own
     #: (``Normalize``, ``Standardize``): behind a stage that records it, the streamed route needs no seed.
     takes_present: bool = False
+    #: How the stage's own ``Statistic:`` key is measured on the stored volume by bounded passes,
+    #: ``(dataset, group, entry) -> value`` (``CaseStatistic``): what the store seeding calls for it.
+    measure: Callable[[Dataset, str, str], float] | None = None
 
     @property
     def recorded(self) -> frozenset[str]:

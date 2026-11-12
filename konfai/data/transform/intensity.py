@@ -18,7 +18,7 @@
 """Value transforms: clipping, normalization, casting, histogram matching, statistics."""
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import numpy as np
@@ -36,6 +36,7 @@ from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_dat
 from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
 from konfai.utils.ITK import _require_simpleitk
+from konfai.utils.utils import get_module, module_attribute
 
 
 def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
@@ -693,3 +694,46 @@ class Statistics(Transform):
                 continue
             cache_attribute[recorded] = _seeded_scalar(cache_attribute, seeded)
         return tensors
+
+
+class CaseStatistic(Transform):
+    """One float32 channel on the input's grid, every voxel the case's statistic the class ``statistic`` names (a
+    classpath, ``model:NoiseSigma``). That class reads ``halo`` voxels past a region, edge-replicated past the volume's
+    border, maps the float64 block to a 1-D ``partial`` of the region's own voxels, and turns the float64 sum of the
+    partials into the 0-d statistic with ``finish``. Streamed, the stored volume is folded by bounded slabs first."""
+
+    # A float64 copy of the volume padded by the halo, and what the class's partial makes of it in float64 (a
+    # Laplacian residual and its square hold three volumes more).
+    working_multiple = 6.0
+
+    def __init__(self, statistic: str) -> None:
+        super().__init__()
+        module, name = get_module(statistic, "konfai.data.transform")
+        self.statistic = module_attribute(module, name)()
+        self.key = f"Statistic:{statistic}"
+
+    def output_channels(self, channels: int) -> int:
+        return 1
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset({self.key}), records=frozenset(), measure=self._measure
+        )
+
+    def _fold(self, blocks: Iterable[Any]) -> float:
+        partials = (self.statistic.partial(torch.as_tensor(block, dtype=torch.float64)) for block in blocks)
+        return float(self.statistic.finish(sum(partials)))
+
+    def _measure(self, dataset: Dataset, group: str, entry: str) -> float:
+        return self._fold(dataset.iter_data_blocks(group, entry, int(self.statistic.halo))())
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if "StatisticsSeeded" in cache_attribute and self.key in cache_attribute:
+            value = float(cache_attribute[self.key])
+        else:
+            halo = int(self.statistic.halo)
+            padded = torch.nn.functional.pad(tensor[None].double(), (halo, halo) * (tensor.dim() - 1), "replicate")
+            value = self._fold([padded[0]])
+            if MEASURING_STATISTICS in cache_attribute:
+                cache_attribute[self.key] = value
+        return torch.full((1, *tensor.shape[1:]), value, dtype=torch.float32, device=tensor.device)

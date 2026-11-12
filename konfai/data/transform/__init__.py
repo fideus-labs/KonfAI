@@ -40,6 +40,7 @@ from konfai.data.transform.ensemble import Percentage as Percentage
 from konfai.data.transform.ensemble import SegmentationDisagreement as SegmentationDisagreement
 from konfai.data.transform.ensemble import StandardDeviation as StandardDeviation
 from konfai.data.transform.ensemble import Variance as Variance
+from konfai.data.transform.intensity import CaseStatistic as CaseStatistic
 from konfai.data.transform.intensity import Clip as Clip
 from konfai.data.transform.intensity import Fill as Fill
 from konfai.data.transform.intensity import HistogramMatching as HistogramMatching
@@ -80,6 +81,7 @@ from konfai.data.transform.shape import Squeeze as Squeeze
 __all__ = [
     "Argmax",
     "Canonical",
+    "CaseStatistic",
     "Clip",
     "Crop",
     "Dilate",

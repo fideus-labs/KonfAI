@@ -33,11 +33,11 @@ import torch
 from konfai.data.augmentation import ContrastAroundMean, Gamma
 from konfai.data.augmentation.base import DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import Clip, Normalize, Resample, Standardize, Statistics, Transform
+from konfai.data.transform import CaseStatistic, Clip, Normalize, Resample, Standardize, Statistics, Transform
 from konfai.data.transform.base import LocalityKind, PatchLocality
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.ome_zarr import write_ome_zarr
-from oracle_support import manager
+from oracle_support import CASE_NAME, geometry, manager
 
 
 def _source(tmp_path):
@@ -548,3 +548,32 @@ def test_a_percentile_bound_streams_on_the_number_the_whole_volume_gives(tmp_pat
     assert torch.equal(region, case.data[0])
     assert ("Percentile:0.5" in case.cache_attributes[0]) is save
     assert ("Percentile:0.5" in case.landed_attributes(0)) is save
+
+
+def test_a_case_statistic_is_folded_by_slabs_of_the_store_to_the_whole_volume_s_value(tmp_path, monkeypatch):
+    # A statistic of the app's own, read with a halo: bounded slabs of the stored volume, each read with its neighbour
+    # rows, fold to the value the whole volume gives, and every region is that one float32.
+    import konfai.utils.dataset.statistics as statistics
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 8 * 32 * 32)
+    monkeypatch.setattr(statistics, "_STATISTICS_CHUNK_ELEMENTS", 8 * 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    stage = CaseStatistic("oracle_support:Roughness")
+    case = manager(dataset, [stage])
+    rows: list[range] = []
+    read = Dataset.read_data_slice
+    monkeypatch.setattr(Dataset, "read_data", lambda *_: pytest.fail("the statistic must not read the whole volume"))
+    monkeypatch.setattr(
+        Dataset, "read_data_slice", lambda self, g, n, s: rows.append(range(*s[1].indices(40))) or read(self, g, n, s)
+    )
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region((slice(3, 9), slice(0, 32), slice(0, 32)), 0, False)
+
+    assert len(set(rows)) > 3 and max(map(len, rows)) < 40
+    whole = stage(CASE_NAME, torch.from_numpy(volume), Attribute())
+    assert whole.dtype == torch.float32 and whole.shape == (1, 40, 32, 32)
+    assert torch.equal(region, whole[:, 3:9])

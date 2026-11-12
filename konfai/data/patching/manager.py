@@ -21,7 +21,7 @@ import contextlib
 import copy
 import queue
 import warnings
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from itertools import pairwise
 from typing import Any, cast
 
@@ -674,14 +674,16 @@ class DatasetManager:
         if not missing:
             return ()
         seed = Attribute()
-        # A percentile, numpy's to the value, by bounded passes over the stored volume.
-        for key in [key for key in missing if key.startswith("Percentile:")]:
+        # A percentile, numpy's to the value, or the stage's own statistic, by bounded passes over the stored volume.
+        for key in [key for key in missing if key.startswith(("Percentile:", "Statistic:"))]:
             memo = (source_dataset, source_group, source_entry, key)
             if memo not in self._disk_statistics:
-                quantile = float(key.partition(":")[2]) / 100
-                self._disk_statistics[memo] = {
-                    key: source_dataset.read_data_quantile(source_group, source_entry, quantile)
-                }
+                if key.startswith("Statistic:"):
+                    value = cast(Callable, loc.measure)(source_dataset, source_group, source_entry)
+                else:
+                    quantile = float(key.partition(":")[2]) / 100
+                    value = source_dataset.read_data_quantile(source_group, source_entry, quantile)
+                self._disk_statistics[memo] = {key: value}
             seed[key] = float(self._disk_statistics[memo][key])
         moments = [key for key in missing if key not in seed]
         stats = (
@@ -801,7 +803,11 @@ class DatasetManager:
                         # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
                         # and every stage waiting on a pass is asked for at once.
                         waiting.append(label)
-                unknown = sorted(key for key in loc.stat_keys - _STREAM_STAT_KEYS if not key.startswith("Percentile:"))
+                unknown = sorted(
+                    key
+                    for key in loc.stat_keys - _STREAM_STAT_KEYS
+                    if not key.startswith(("Percentile:", "Statistic:"))
+                )
                 if unknown:
                     return refuse(f"{label} needs statistics {unknown} that no source can provide.")
                 if measured is not None:
