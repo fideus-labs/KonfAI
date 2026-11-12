@@ -1752,6 +1752,42 @@ def test_a_pointwise_output_transform_with_no_op_compiles_to_a_graph_of_its_own(
     np.testing.assert_array_equal(session.run(None, {"input": blended})[0], np.floor(blended[:, :1] * 10))
 
 
+def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model reads the image and its CaseStatistic: the second read names the two graphs beside the model, which
+    # onnxruntime runs on a block of another shape to what the statistic's own functions give.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TwoInputs:TwoInputNet", "Head:Softmax")
+    resolved = json.loads(config.read_text())
+    statistic = {"transforms": {"CaseStatistic": {"statistic": "oracle_support:Roughness"}}, "is_input": True}
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["SIGMA"] = statistic
+    config.write_text(json.dumps(resolved))
+    program = compile_prediction(config, [], tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
+    reads = program["outputs"][0]["program"]["steps"][0]["manifest"]["reads"]
+    step = {"op": "case_statistic", "halo": 1, "partial": "model_statistic_0_partial.onnx"}
+    assert reads == [
+        {"group": "MR", "channels": 1, "preprocessing": [step | {"finish": "model_statistic_0_finish.onnx"}]}
+    ]
+    from oracle_support import Roughness
+
+    partial = ort.InferenceSession(str(tmp_path / "out" / step["partial"]), providers=["CPUExecutionProvider"])
+    finish = ort.InferenceSession(str(tmp_path / "out" / "model_statistic_0_finish.onnx"))
+    assert [(i.name, i.type) for i in partial.get_inputs()] == [("block", "tensor(double)")]
+    assert [(i.name, i.type) for i in finish.get_outputs()] == [("statistic", "tensor(double)")]
+    block = torch.from_numpy(np.random.default_rng(0).random((1, 7, 12, 9)))
+    total = partial.run(None, {"block": block.numpy()})[0]
+    np.testing.assert_allclose(total, Roughness().partial(block).numpy(), rtol=1e-12)
+    value = finish.run(None, {"total": total})[0]
+    assert value.shape == () and value == Roughness().finish(torch.from_numpy(total)).item()
+
+
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Only a parameter-free model compiles without checkpoints: another would export its random weights.
     from konfai.portable import compile_prediction

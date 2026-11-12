@@ -203,16 +203,18 @@ def _write_onnx(
     output_names: list[str],
     opset: int = 18,
     dynamic: bool = False,
+    free_from: int = 2,
 ) -> None:
     """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
     inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
-    which a model handed to others does not carry. ``dynamic``: every spatial axis of every input is left free."""
+    which a model handed to others does not carry. ``dynamic``: every axis of every input from ``free_from`` on (the
+    spatial axes of ``[N, C, ...]``) is left free."""
     _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
     from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
 
     # ``module`` takes its inputs as ``*inputs``: one free shape per example, under that one argument.
-    free = (tuple(dict.fromkeys(range(2, example.dim()), torch.export.Dim.AUTO) for example in examples),)
+    free = (tuple(dict.fromkeys(range(free_from, example.dim()), torch.export.Dim.AUTO) for example in examples),)
     with torch.no_grad():
         program = cast(
             "torch.onnx.ONNXProgram",
@@ -318,6 +320,32 @@ def export_folds(
     _write_onnx(module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True)
     _check_free_axes(module, (example,), onnx_path, ["input"])
     return int(out.shape[0]), str(out.dtype).removeprefix("torch.")
+
+
+class _Function(torch.nn.Module):
+    """A function of tensors as a module, its inputs taken as ``*inputs``, as every graph ``_write_onnx`` frees."""
+
+    def __init__(self, function: Callable[..., torch.Tensor]) -> None:
+        super().__init__()
+        self.function = function
+
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
+        return self.function(*inputs)
+
+
+def export_case_statistic(statistic: Any, partial_path: Path, finish_path: Path, rank: int, opset: int = 18) -> None:
+    """Export the class a ``CaseStatistic`` names as two float64 graphs: ``partial_path`` takes ``block`` ``[1,
+    *spatial]``, its ``rank`` spatial axes free, to ``partial`` ``[K]``; ``finish_path`` takes ``total`` ``[K]`` to
+    the 0-d ``statistic``."""
+    # ponytail: traced on one channel, a stored scalar volume; a multichannel group needs its stored count here.
+    block = torch.rand(1, *([8] * rank), dtype=torch.float64)
+    partial = _Function(statistic.partial).eval()
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_onnx(partial, (block,), partial_path, ["block"], ["partial"], opset, dynamic=True, free_from=1)
+    _check_free_axes(partial, (block,), partial_path, ["block"])
+    with torch.no_grad():
+        total = partial(block)
+    _write_onnx(_Function(statistic.finish).eval(), (total,), finish_path, ["total"], ["statistic"], opset)
 
 
 def export_to_onnx(

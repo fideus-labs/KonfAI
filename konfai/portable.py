@@ -481,6 +481,8 @@ def _admitted(step: dict[str, Any]) -> dict[str, Any]:
 FoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]]], dict[str, Any]]
 #: A ``FoldOut`` handed, past the steps, the dtype konfai hands the run.
 TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]], str], dict[str, Any]]
+#: Exports the two graphs of a ``CaseStatistic``, handed its parameters: the step that runs them.
+StatisticOut = Callable[[dict[str, Any]], dict[str, Any]]
 
 #: KonfAI transform name -> the runtime op it compiles to. A stage outside this map has no portable
 #: form; each compiler refuses it by name. Either workflow's program reads the companion group a stage
@@ -1406,6 +1408,7 @@ def compile_pipeline(
     consumed: Collection[str] = (),
     roots: list[str] | None = None,
     fold_out: FoldOut | None = None,
+    case_statistic: StatisticOut | None = None,
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``fold``, a POINTWISE transform with no op is
     baked into the ONNX graph, and the folds must end the chain. With ``invertible`` (the input chain, the only
@@ -1413,7 +1416,8 @@ def compile_pipeline(
     place its inverse. ``consumed`` names the program stages the caller builds a step for; any other is refused.
     ``roots`` are the run's ``dataset_filenames``, where a ``Resample`` looks its stored transforms up. With
     ``fold_out`` (an output chain), each run of POINTWISE transforms with no op is one step, which ``fold_out``
-    makes of them and the steps before them, where it stands in the chain."""
+    makes of them and the steps before them, where it stands in the chain. With ``case_statistic`` (the chain of a
+    group the model reads past its first), a ``CaseStatistic`` is the step it makes."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
@@ -1444,6 +1448,9 @@ def compile_pipeline(
                 " after_reduction_transforms stage; a Mask over a nested model's group is applied by the konfai-apps"
                 " bundle export. Otherwise predict this config with konfai itself.",
             )
+        if base == "CaseStatistic" and case_statistic is not None:
+            steps.append(_admitted(case_statistic(params)))
+            continue
         if base in OP_MAP:
             flush()
             refuse_a_late_crop(name, moved, ConfigError, params=params)
@@ -1507,11 +1514,13 @@ def _split_stack(
 REGRIDS = ("resample", "pad", "crop", "canonical", "permute")
 
 
-def _group_chain(group_src: str, group: dict[str, Any], channels: int) -> dict[str, Any]:
+def _group_chain(
+    group_src: str, group: dict[str, Any], channels: int, case_statistic: StatisticOut | None = None
+) -> dict[str, Any]:
     """One more group the model reads: its name on disk, what it holds per voxel, and the chain that
     prepares it. konfai patches every group of a case on the first one's grid, so a chain moving this
     group off that grid is refused by name rather than discovered as a shape mismatch at run time."""
-    steps, _folds, _inverted = compile_pipeline(group.get("transforms"))
+    steps, _folds, _inverted = compile_pipeline(group.get("transforms"), case_statistic=case_statistic)
     if (moved := next((step for step in steps if step["op"] in REGRIDS), None)) is not None:
         raise ConfigError(
             f"the chain of group '{group_src}' runs a '{moved['op']}', which moves it off the grid the"
@@ -1535,13 +1544,15 @@ def transform_manifest(
     output: str | None = None,
     others: list[int] | None = None,
     fold_out: TypedFoldOut | None = None,
+    case_statistic: StatisticOut | None = None,
 ) -> tuple[dict[str, Any], list[Callable[[Any], Any]], int]:
     """The pre/post op pipeline the portable runtime applies around the tiled forward, the ``fold_pre``
     callables (POINTWISE preprocessing transforms baked into the ONNX graph), and how many post ops the
     predictor runs per copy, before any reduction. ``masked``: the caller applies the before-reduction
     ``Mask`` stages as program steps of its own. ``others`` is what each group past the first holds per
     voxel, in the order the model reads them. ``fold_out`` exports a run of pointwise output transforms with no op
-    to one graph, handed the transforms and the post steps before them; without it they are refused."""
+    to one graph, handed the transforms and the post steps before them; without it they are refused. ``case_statistic``
+    exports a ``CaseStatistic`` of a group past the first; without it, it is refused."""
     _refuse_another_mirror(config, root, output)
     roots = [str(entry) for entry in ((config.get(root) or {}).get("Dataset") or {}).get("dataset_filenames") or []]
     pre, folds, inverted = compile_pipeline(
@@ -1550,7 +1561,7 @@ def transform_manifest(
     folds += _patch_folds(config, root)
     post, per_copy = _post_chain(config, root, output_spec(config, root, output), pre, inverted, masked, fold_out)
     manifest = {"preprocessing": pre, "postprocessing": post}
-    reads = _reads_of(config, root, pre, others)
+    reads = _reads_of(config, root, pre, others, case_statistic)
     if reads:
         manifest["reads"] = reads
     return manifest, folds, per_copy
@@ -1702,14 +1713,18 @@ def _post_chain(
 
 
 def _reads_of(
-    config: dict[str, Any], root: str, pre: list[dict[str, Any]], others: list[int] | None
+    config: dict[str, Any],
+    root: str,
+    pre: list[dict[str, Any]],
+    others: list[int] | None,
+    case_statistic: StatisticOut | None = None,
 ) -> list[dict[str, Any]]:
     """Every group the model reads past the first, with the chain that prepares it, in the order konfai hands
     them to the network; then the groups the input chain's own stages read beside the case (a masked bound or
     statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them as stored, so
     the program runs nothing on them."""
     reads = [
-        _group_chain(group_src, group, channels)
+        _group_chain(group_src, group, channels, case_statistic)
         for (group_src, group), channels in zip(
             input_groups(config, root)[1:], chain(others or [], repeat(1)), strict=False
         )
@@ -2334,7 +2349,7 @@ def export_checkpoints(
     stride = None if placement == "pad" or whole else derive_stride(patch, patch_size)
     classpath = config[root]["Model"]["classpath"]
     traced = [64] * len(patch_size) if whole else patch_size
-    folded = 0
+    folded = statistics = 0
 
     def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
         """A run of pointwise output transforms as one graph beside the model's, on what the post steps before it
@@ -2354,8 +2369,21 @@ def export_checkpoints(
         out_channels, out_dtype = export_folds(steps, out_dir / filename, held, len(traced), dtype)
         return {"op": "onnx", "model": filename, "channels": out_channels, "dtype": out_dtype}
 
+    def case_statistic(params: dict[str, Any]) -> dict[str, Any]:
+        """A ``CaseStatistic`` of a group the model reads, as its two float64 graphs beside the model's."""
+        nonlocal statistics
+        from konfai.data.transform import CaseStatistic
+        from konfai.export import export_case_statistic
+
+        statistic = CaseStatistic(str(clean(params["statistic"]))).statistic
+        stem = f"{ids[0]}_statistic_{statistics}"
+        statistics += 1
+        partial, finish = f"{stem}_partial.onnx", f"{stem}_finish.onnx"
+        export_case_statistic(statistic, out_dir / partial, out_dir / finish, _spatial_rank(config, root))
+        return {"op": "case_statistic", "halo": int(statistic.halo), "partial": partial, "finish": finish}
+
     extra, folds, per_copy = transform_manifest(
-        config, root, masked=masked, output=output, others=others, fold_out=fold_out
+        config, root, masked=masked, output=output, others=others, fold_out=fold_out, case_statistic=case_statistic
     )
     blend = derive_blend(config, root, output)
     check_blend(overlap, blend)
@@ -2382,7 +2410,7 @@ def export_checkpoints(
             out_dir,
             examples,
             head or select_inference_head(model, *examples),
-            input_group=inputs[0][0] if inputs else "Volume_0",
+            input_group=[group for group, _ in inputs] or "Volume_0",
             patch_overlap=overlap,
             extend_slice=extend_slice,
             pad_value=pad_value,

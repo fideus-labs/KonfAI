@@ -162,6 +162,7 @@ refused by name. The tables list every stage konfai ships.
 |---|---|
 | `Argmax` | `argmax`; `dim` must be 0 |
 | `Canonical` | `canonical`, onto the nearest axes with `resample: false`; undone after the forward when `inverse` |
+| `CaseStatistic` | `case_statistic`, in the chain of a group the model reads past its first: `halo`, and its class's `partial` (float64 `block` `[C, *spatial]` to `[K]`) and `finish` (`total` `[K]` to a 0-d `statistic`) as two float64 graphs beside the model |
 | `Clip` | `clip`; a data-dependent bound reads the `mask` group beside the case |
 | `Crop` | `crop`, its `source` group read beside the case; refused after a stage that moves the grid or the values, unless `handed` |
 | `Dilate` | `dilate` in a TRANSFORM chain or on a nested model's group; refused elsewhere in a prediction |

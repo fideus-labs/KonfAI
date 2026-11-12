@@ -146,6 +146,13 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     # Pointwise transforms of an output chain, exported as one graph beside the model's: its file, the channels it
     # hands back, and the dtype konfai's transforms do (the program holds it as float32).
     "onnx": ({"model": _STRING, "channels": _INTEGER, "dtype": _STRING}, ["model", "channels", "dtype"]),
+    # A whole-volume statistic as one float32 channel: `partial` (float64 `block` [C, *spatial], the region plus `halo`
+    # edge-replicated pixels per side of every spatial axis, to `partial` [K]) summed over the regions in float64, then
+    # `finish` (`total` [K] to the 0-d `statistic`), two graphs beside the program.
+    "case_statistic": (
+        {"halo": {"type": "integer", "minimum": 0}, "partial": _STRING, "finish": _STRING},
+        ["halo", "partial", "finish"],
+    ),
     "inverse": (
         {
             "of": _STRING,
