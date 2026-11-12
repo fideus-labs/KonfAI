@@ -1180,10 +1180,19 @@ def derive_blend(config: dict[str, Any], root: str, output: str | None = None) -
     return str(clean(spec["patch_combine"]) or "Overwrite") if "patch_combine" in spec else None
 
 
+#: The manifest ``blend`` values the runtime runs.
+RUNTIME_BLENDS = ("Cosinus", "Mean", "Gaussian", "GaussianFloat16", "Overwrite", "Trim")
+
+
 def check_blend(overlap: list[int] | None, blend: str | None) -> None:
-    """Refuse an overlap no ``patch_combine`` owns: konfai then keeps each voxel from the patch holding it most
-    centrally (``Trim``), which no portable runtime op does, where the export's ``Overwrite`` keeps the last
-    patch at an intersection."""
+    """Refuse a ``patch_combine`` the runtime has no blend for, and an overlap none owns: konfai then keeps each
+    voxel from the patch holding it most centrally (``Trim``), which no portable runtime op does, where the export's
+    ``Overwrite`` keeps the last patch at an intersection."""
+    if blend is not None and blend not in RUNTIME_BLENDS:
+        raise ConfigError(
+            f"the output's patch_combine '{blend}' is no blend the portable runtime runs.",
+            _or_konfai(f"Use one of {', '.join(RUNTIME_BLENDS)}", _PREDICT),
+        )
     if overlap and any(int(o) > 0 for o in overlap) and blend in (None, "Overwrite"):
         raise ConfigError(
             "the output declares an overlap and no patch_combine: konfai assembles it with Trim, each voxel from the"

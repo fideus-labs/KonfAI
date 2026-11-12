@@ -2255,6 +2255,8 @@ def test_an_overlap_without_a_patch_combine_is_refused_by_name() -> None:
     check_blend([0, 0, 0], None)
     check_blend(None, "Overwrite")
     check_blend([16, 16, 16], "Gaussian")
+    with pytest.raises(KonfAIError, match="patch_combine 'mypkg:MyBlend' is no blend the portable runtime runs"):
+        check_blend([16, 16, 16], "mypkg:MyBlend")
 
 
 def test_an_output_mirroring_another_group_than_the_first_input_is_refused_by_name() -> None:
