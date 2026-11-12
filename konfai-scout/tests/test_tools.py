@@ -313,3 +313,7 @@ def test_the_measuring_tools_can_be_taken_away(fixtures, tmp_path):
     assert {"measure", "region_stats"} <= {tool.name for tool in box.specs(True)}
     box.config = ScoutConfig(max_px=200, measure=False)
     assert {tool.name for tool in box.specs(True)} == {"view", "montage", "note", "conclude"}
+    view = run(box, "view", plane="axial", mode="both")["view"]["id"]
+    note = {"defect": "spurious_structure", "severity": "minor", "confidence": 0.5, "description": "a blob"}
+    run(box, "note", kind="suspected_error", views=[view], box_mm={"center": [4, 34, 29], "size": 8}, **note)
+    assert len(box.observations) == 1 and box.measurements == []  # Scout's own check of the box is a measure too

@@ -434,7 +434,7 @@ class Toolbox:
             notes.append("measurement(s) taken outside this box, cited as context: " + ", ".join(outside))
         observation_id = f"o{len(self.observations) + 1:03d}"
         support = _support(inside, self.thresholds)
-        if kind != "measured_property" and box is not None:
+        if kind != "measured_property" and box is not None and self.config.measure:
             # Scout's own check of the box: every criterion this case allows, recorded on the observation
             try:
                 check = self.evaluator.measure(box, None, measurement_id=f"m{len(self.measurements) + 1:03d}")

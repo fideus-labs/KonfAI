@@ -160,9 +160,7 @@ def _segmentation(r: Renderer) -> list[Found]:
     case, grid = r.case, r.grid
     size = _zyx(grid.size_zyx)
     truth = None
-    if "truth" in case.inputs:
-        if np.prod(size) > LARGEST:
-            raise SurveySkipped("the label map has more than 512^3 voxels: not compared whole with the truth")
+    if "truth" in case.inputs and np.prod(size) <= LARGEST:  # a larger map keeps its leads label by label
         truth = r.volume("truth").region((0, 0, 0), size)[0]
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
     margin = np.ceil(10.0 / spacing).astype(int)
@@ -420,6 +418,12 @@ def _displacements(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> l
     says which, where its edges overlay a CT's well enough to tell."""
     synthetic, target, source = r.volume("synthetic"), r.volume("target"), r.volume("source")
     mask = r.volume("mask") if "mask" in r.case.inputs else None
+
+    def made(lo: tuple[int, ...], hi: tuple[int, ...]) -> np.ndarray:
+        """The synthetic image, the target's values outside the mask: it need not be anything there, so no edge."""
+        image = synthetic.region(lo, hi)[0]
+        return image if mask is None else np.where(mask.region(lo, hi)[0] > 0, image, target.region(lo, hi)[0])
+
     cell = tuple(int(min(n, max(8, round(SHIFT_MM / s)))) for s, n in zip(spacing, size, strict=True))
     apart = np.zeros(tuple(-(-n // c) for n, c in zip(size, cell, strict=True)), dtype=np.float32)
     for index in np.ndindex(*apart.shape):
@@ -429,10 +433,7 @@ def _displacements(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> l
             mask is not None and (mask.region(lo, hi)[0] > 0).mean() < 0.5
         ):
             continue
-        aim, made = target.region(lo, hi)[0], synthetic.region(lo, hi)[0]
-        if mask is not None:  # outside the mask the synthetic need not be anything: the target's values, no edge
-            made = np.where(mask.region(lo, hi)[0] > 0, made, aim)
-        mm, overlay = _shift(aim, made, spacing)
+        mm, overlay = _shift(target.region(lo, hi)[0], made(lo, hi), spacing)
         if mm > 0 and overlay >= 0.7:  # the same edges, elsewhere: a blur or a change of content overlays less
             apart[index] = mm
     out = []
@@ -444,7 +445,7 @@ def _displacements(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> l
         )  # the cell furthest apart
         hi = tuple(min(a + c, n) for a, c, n in zip(lo, cell, size, strict=True))
         seen = source.region(lo, hi)[0]
-        moved, overlay = _shift(seen, synthetic.region(lo, hi)[0], spacing)
+        moved, overlay = _shift(seen, made(lo, hi), spacing)
         off, fit = _shift(seen, target.region(lo, hi)[0], spacing)
         if min(overlay, fit) < 0.5:
             which = "the source's edges are too unlike a CT's there to say which of the two moved"

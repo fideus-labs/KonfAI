@@ -390,10 +390,13 @@ class Inspector:
                 # one contour only, and the window of the whole image may leave the structure grey on grey
                 inner = self.case.grid.index_window(box, 0)
                 lo, hi = tuple(s.start for s in inner), tuple(s.stop for s in inner)
-                differ = self.case.volume("prediction").region(lo, hi)[0] != self.case.volume("truth").region(lo, hi)[0]
+                differ = (
+                    self.renderer.volume("prediction").region(lo, hi)[0]
+                    != self.renderer.volume("truth").region(lo, hi)[0]
+                )
                 index = lo[axis] + int(np.argmax(differ.sum(axis=tuple(a for a in range(3) if a != axis))))
                 outer = self.case.grid.index_window(zoom, 0)
-                region = self.case.volume("image").region(
+                region = self.renderer.volume("image").region(
                     *(tuple(getattr(s, k) for s in outer) for k in ("start", "stop"))
                 )
                 window = [float(v) for v in np.percentile(region[0], [1, 99])]
