@@ -89,3 +89,21 @@ def test_a_survey_that_cannot_run_says_so_rather_than_finding_nothing(tmp_path):
     inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "out")
     card = json.loads((tmp_path / "out" / "transcript.json").read_text())[1]
     assert "no survey was run (a synthesis without a target" in json.dumps(card)
+
+
+@pytest.mark.parametrize("role", ["synthetic", "target"])
+def test_a_displaced_edge_is_a_lead_and_the_source_says_which_image_moved(role, tmp_path):
+    import numpy as np
+    import SimpleITK as sitk
+    from konfai_scout.synthetic import synthesis_case
+
+    case, _ = synthesis_case(tmp_path / "moved", clean=True)
+    target = sitk.ReadImage(str(case.inputs["target"]))
+    source = -target  # another contrast, the same edges: a source that can tell
+    sitk.WriteImage(source, str(case.inputs["source"]))
+    image = sitk.ReadImage(str(case.inputs[role]))
+    moved = sitk.GetImageFromArray(np.roll(sitk.GetArrayFromImage(image), 3, axis=2))  # 3 mm along x
+    moved.CopyInformation(image)
+    sitk.WriteImage(moved, str(case.inputs[role]))
+    leads = survey(toolbox({"moved": (case, {})}, "moved", tmp_path / "m").renderer)
+    assert any(lead.kind == "displacement" and f"points at the {role}" in lead.reason for lead in leads)

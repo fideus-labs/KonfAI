@@ -24,6 +24,9 @@ MAX_LEADS = 8
 LARGEST = 512**3  # voxels of a region read whole (a label's window, a map compared with its truth)
 BLOCK = 64
 CELL_MM = 16.0
+SHIFT_MM = 32.0  # the side of a cell in which a displacement is estimated: room for an edge and where it went
+REACH_MM = 8.0  # the longest displacement looked for
+GAIN = 0.02  # what a displaced overlay must gain in correlation over the overlay in place
 WEAK = 0.55  # a boundary voxel is edgeless below this fraction of the label's median boundary edge
 _FULL = np.ones((3, 3, 3), dtype=bool)
 
@@ -90,6 +93,28 @@ def _edges(image: np.ndarray, spacing_zyx: np.ndarray) -> np.ndarray:
     """Edge strength: the gradient magnitude, per millimetre, of the image smoothed over one voxel."""
     smooth = ndimage.gaussian_filter(image.astype(np.float32), 1.0)
     return np.sqrt(sum(g**2 for g in np.gradient(smooth, *spacing_zyx)))
+
+
+def _shift(a: np.ndarray, b: np.ndarray, spacing_zyx: np.ndarray) -> tuple[float, float]:
+    """How far the edges of ``b`` lie from those of ``a``, in millimetres, and how well they overlay once moved back
+    (a correlation): the peak of the cross-correlation of the two edge maps within ``REACH_MM``. Edges, not
+    intensities, so that two modalities compare; a low correlation says the two do not show the same edges. A peak
+    that beats the correlation in place by less than ``GAIN`` is noise: the edges are where they were."""
+    ea, eb = _edges(a, spacing_zyx), _edges(b, spacing_zyx)
+    ea, eb = ea - ea.mean(), eb - eb.mean()
+    norm = float(np.sqrt((ea**2).sum() * (eb**2).sum()))
+    if norm == 0:
+        return 0.0, 0.0
+    axes = (0, 1, 2)
+    cross = np.fft.irfftn(np.fft.rfftn(ea, axes=axes).conj() * np.fft.rfftn(eb, axes=axes), ea.shape, axes)
+    reach = [min(int(REACH_MM / s), n // 2 - 1) for s, n in zip(spacing_zyx, ea.shape, strict=True)]
+    near = np.fft.fftshift(cross)[
+        tuple(slice(n // 2 - k, n // 2 + k + 1) for n, k in zip(ea.shape, reach, strict=True))
+    ]
+    at = np.asarray(np.unravel_index(int(np.argmax(near)), near.shape)) - reach
+    if near.max() - near[tuple(reach)] < GAIN * norm:
+        return 0.0, float(near[tuple(reach)] / norm)
+    return float(np.linalg.norm(at * spacing_zyx)), float(near.max() / norm)
 
 
 def _clusters(mask: np.ndarray, minimum: int) -> list[tuple[int, tuple[slice, ...]]]:
@@ -375,7 +400,7 @@ def _synthesis(r: Renderer) -> list[Found]:
         hot[window] = ((np.abs(e) > threshold) & (_edges(t, spacing) < strong) & inside)[inner]
         signed[window] = e[inner]
     hot = ndimage.binary_opening(hot, structure=_FULL)  # a seam one voxel thick is not a cluster
-    out = []
+    out = _displacements(r, spacing, size)
     for count, window in _clusters(hot, 30)[:5]:
         mean = float(signed[window][hot[window]].astype(np.float32).mean())
         out.append(
@@ -384,6 +409,58 @@ def _synthesis(r: Renderer) -> list[Found]:
                 window,
                 f"{count} voxels where the synthetic is {'brighter' if mean > 0 else 'darker'} than the target by "
                 f"{abs(mean):.3g} on average (smoothed inside the mask), away from the target's strongest edges",
+            )
+        )
+    return out
+
+
+def _displacements(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> list[Found]:
+    """Cells of about 32 mm where the synthetic image and the target, two CTs, lie apart: an edge moved in one of
+    them. The target is another acquisition registered to the source and may be the one that is off; the source
+    says which, where its edges overlay a CT's well enough to tell."""
+    synthetic, target, source = r.volume("synthetic"), r.volume("target"), r.volume("source")
+    mask = r.volume("mask") if "mask" in r.case.inputs else None
+    cell = tuple(int(min(n, max(8, round(SHIFT_MM / s)))) for s, n in zip(spacing, size, strict=True))
+    apart = np.zeros(tuple(-(-n // c) for n, c in zip(size, cell, strict=True)), dtype=np.float32)
+    for index in np.ndindex(*apart.shape):
+        lo = tuple(i * c for i, c in zip(index, cell, strict=True))
+        hi = tuple(min(a + c, n) for a, c, n in zip(lo, cell, size, strict=True))
+        if min(b - a for a, b in zip(lo, hi, strict=True)) < 4 or (
+            mask is not None and (mask.region(lo, hi)[0] > 0).mean() < 0.5
+        ):
+            continue
+        aim, made = target.region(lo, hi)[0], synthetic.region(lo, hi)[0]
+        if mask is not None:  # outside the mask the synthetic need not be anything: the target's values, no edge
+            made = np.where(mask.region(lo, hi)[0] > 0, made, aim)
+        mm, overlay = _shift(aim, made, spacing)
+        if mm > 0 and overlay >= 0.7:  # the same edges, elsewhere: a blur or a change of content overlays less
+            apart[index] = mm
+    out = []
+    for count, window in _clusters(apart > 0, 1)[:3]:
+        region = tuple(slice(w.start * c, min(w.stop * c, n)) for w, c, n in zip(window, cell, size, strict=True))
+        worst = np.asarray(np.unravel_index(int(np.argmax(apart[window])), apart[window].shape))
+        lo = tuple(
+            int((w.start + k) * c) for w, k, c in zip(window, worst, cell, strict=True)
+        )  # the cell furthest apart
+        hi = tuple(min(a + c, n) for a, c, n in zip(lo, cell, size, strict=True))
+        seen = source.region(lo, hi)[0]
+        moved, overlay = _shift(seen, synthetic.region(lo, hi)[0], spacing)
+        off, fit = _shift(seen, target.region(lo, hi)[0], spacing)
+        if min(overlay, fit) < 0.5:
+            which = "the source's edges are too unlike a CT's there to say which of the two moved"
+        elif abs(moved - off) < 0.5:  # the same place, to less than a voxel
+            which = "the source's edges do not say which of the two moved"
+        else:
+            which = (
+                f"from the source's edges the synthetic lies {moved:.1f} mm and the target {off:.1f} mm, which "
+                f"points at the {'synthetic' if moved > off else 'target'}"
+            )
+        out.append(
+            (
+                "displacement",
+                region,
+                f"{count} cell(s) of about {SHIFT_MM:.0f} mm where the edges of the synthetic and of the target lie "
+                f"{float(apart[window].max()):.1f} mm apart; {which}",
             )
         )
     return out

@@ -81,7 +81,7 @@ MODES: dict[str, tuple[str, ...]] = {
         "labels",
         "landmarks",
     ),
-    "synthesis": ("synthetic", "target", "source", "difference", "side_by_side", "checkerboard"),
+    "synthesis": ("synthetic", "target", "source", "source_checkerboard", "difference", "side_by_side", "checkerboard"),
 }
 DEFAULT_MODE = {"segmentation": "prediction", "registration": "checkerboard", "synthesis": "synthetic"}
 _VIRIDIS = np.array(
@@ -542,6 +542,9 @@ class Renderer:
             elif mode == "checkerboard":  # one window, the target's: the comparison is of intensities
                 rgb = np.repeat(checkerboard(unit("synthetic", "target"), unit("target"))[..., None], 3, axis=-1)
                 extra["legend"] = "alternating tiles of the synthetic and the real target image"
+            elif mode == "source_checkerboard":  # each in its own window: the comparison is of anatomy
+                rgb = np.repeat(checkerboard(unit("source"), unit("synthetic"))[..., None], 3, axis=-1)
+                extra["legend"] = "alternating tiles of the source and the synthetic image: an edge that breaks moved"
             elif mode == "side_by_side":
                 left, right = gray("synthetic", "target"), gray("target")
                 rgb = np.concatenate([left, np.ones((left.shape[0], 2, 3)), right], axis=1)

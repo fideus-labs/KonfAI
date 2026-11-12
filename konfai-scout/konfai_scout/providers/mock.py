@@ -98,6 +98,7 @@ class HeuristicProvider(ScriptedProvider):
         "folding": "folding",
         "edge_disagreement": "residual_misalignment",
         "error_cluster": "artifact",
+        "displacement": "geometry_error",
     }
 
     def __init__(self, model: str = "heuristic") -> None:

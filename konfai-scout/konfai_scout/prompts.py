@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "2.4"
+PROMPT_VERSION = "2.5"
 
 SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
 it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.
@@ -70,8 +70,13 @@ GUIDANCE = {
     ),
     "synthesis": (
         "Look for intensity bias, blur, invented or missing structures (lesions, bone, air), artefacts, and geometry "
-        "that does not follow the source. `side_by_side`, `checkerboard` and `difference` compare with the target; "
-        "`source` shows the input."
+        "that does not follow the source. The source is the judge of anatomy: the synthetic image keeps every "
+        "structure where the source has it, and one that moved, changed shape, appeared or vanished is a defect "
+        "whatever the target shows. The target is the judge of intensities only: it is another acquisition "
+        "registered to the source, off by millimetres in places, and the body may have changed between the two. A "
+        "difference with the target where the synthetic follows the source is a suspected `reference_error`, not a "
+        "defect. `source_checkerboard` alternates the source and the synthetic to check the anatomy; `side_by_side`, "
+        "`checkerboard` and `difference` compare with the target; `source` shows the input."
     ),
 }
 
