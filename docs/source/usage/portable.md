@@ -280,7 +280,8 @@ In either workflow:
   only between grids whose axes keep their own (no permuted or oblique
   direction) and refuses it otherwise.
 - A `Crop` after any stage that moves the grid or the values (`Clip`, a cast to
-  an integer, `Mask`, `Flip`, `Permute`, `Resample`, `Padding`, another `Crop`):
+  an integer, `Mask`, `Flip`, `Permute`, `Resample`, `Padding`, another `Crop`,
+  a pointwise transform compiled to a graph):
   konfai crops to the box of the group as stored, the runtime to the box of the
   volume in hand. A cast to a float, a `Statistics` and a `Save` move nothing;
   `handed: true` has konfai measure the box on the volume in hand too.
@@ -339,13 +340,15 @@ In a PREDICTION:
 - A `MergeLabels` with test-time passes, or, with several models, followed by a
   stage other than undoing an index selection or a nearest resample: the
   program merges each model's finished label map.
-- A same-class ensemble whose run-once tail undoes anything but one resample,
-  or runs an op other than `softmax`, `argmax` or `cast` past the reduction.
+- A same-class ensemble whose run-once tail undoes anything but one resample
+  (by `nearest`, `linear` or `cubic`), or runs an op other than `softmax`,
+  `argmax` or `cast` past the reduction.
 - A nested model's group with a stage other than `KonfAIInference`, `Resample`,
   `Dilate` or `Save`; a `Mask` reading a group no nested model builds; a nested
-  `Resample` stating no interpolation when the nested chain does not end on a
-  cast; a nested model with several checkpoints; an ensemble export with no
-  declared reduction (both through `konfai-apps`).
+  `Resample` with `align`, `grid` or `antialias`, interpolating other than by
+  `nearest`, `linear` or `cubic`, or stating no interpolation when the nested
+  chain does not end on a cast; a nested model with several checkpoints; an
+  ensemble export with no declared reduction (both through `konfai-apps`).
 
 A `Save` in a prediction's input chain compiles to no step: konfai writes what
 reaches it and, on a later run, reads that entry in place of the stages before

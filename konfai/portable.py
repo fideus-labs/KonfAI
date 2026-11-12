@@ -47,6 +47,8 @@ from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning, Transfo
 #: named here so the compiler imports no torch.
 INTERPOLATIONS = ("linear", "nearest", "cubic", "bspline", "nearest_even")
 PICKS = ("nearest", "nearest_even")
+#: Those a program's own ``resample_<interpolation>`` op, which puts one buffer on another's grid, carries.
+BODY_INTERPOLATIONS = ("linear", "nearest", "cubic")
 
 if TYPE_CHECKING:
     from konfai.utils.utils import Placement
@@ -1474,6 +1476,7 @@ def compile_pipeline(
                 "config or extend the runtime op registry."
             )
         if fold_out is not None:
+            moved = moved or name  # a Crop past it finds its box in the values this one changed
             pending.append(folded)
             continue
         folds.append(folded)
@@ -1768,6 +1771,17 @@ def split_post(post: list[dict[str, Any]], preprocessing: list[dict[str, Any]], 
     return split
 
 
+def _body_resample(interpolation: str, resampled: str) -> str:
+    """The program op that resamples a buffer by ``interpolation``; ``resampled`` names the stage in a refusal."""
+    if interpolation not in BODY_INTERPOLATIONS:
+        raise ConfigError(
+            f"assemble_program: {resampled} interpolates '{interpolation}', and a program resamples a buffer"
+            f" onto another's grid by {', '.join(map(repr, BODY_INTERPOLATIONS))} only.",
+            _or_konfai("Use one of those on that Resample", _PREDICT),
+        )
+    return f"resample_{interpolation}"
+
+
 def hoist_ensemble_tail(
     manifests: list[dict[str, Any]], per_copy: int, stacked: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1823,7 +1837,8 @@ def hoist_ensemble_tail(
             placed = {key: forward[key] for key in ("align", "spacing") if "align" in forward and key in forward}
             if "align" in forward and "fill" in step:
                 placed["fill"] = step["fill"]
-            tail.append({"op": f"resample_{step['interpolation']}", **placed, "extra": ["input"]})
+            resample = _body_resample(step["interpolation"], f"the inverse of '{of}'")
+            tail.append({"op": resample, **placed, "extra": ["input"]})
             continue
         if op not in ("softmax", "argmax"):
             raise ConfigError(
@@ -2123,11 +2138,12 @@ def _mask_buffers(aux: dict[str, dict[str, Any]], grid: str, steps: list[dict[st
                         " program puts a nested model's volume on the copies' grid by the two extents alone.",
                         _or_konfai("Drop the field from that Resample", _PREDICT),
                     )
-                if "align" in step:
+                if placed := [f"{key}: {step[key]}" for key in ("align", "grid", "antialias") if key in step]:
                     raise ConfigError(
-                        f"'Resample' on group '{name}' aligns on '{step['align']}', and the program puts a nested"
-                        " model's volume on the copies' grid the way align: extent places it.",
-                        _or_konfai("Align that Resample on extent", _PREDICT),
+                        f"'Resample' on group '{name}' sets {', '.join(placed)}, and the program puts a nested"
+                        " model's volume on the copies' grid the way konfai's own grid aligned on extent places it,"
+                        " with no antialias.",
+                        _or_konfai("Drop that from the Resample", _PREDICT),
                     )
                 if "interpolation" not in step:
                     raise ConfigError(
@@ -2135,7 +2151,8 @@ def _mask_buffers(aux: dict[str, dict[str, Any]], grid: str, steps: list[dict[st
                         " dtype the nested app writes, which the program reads only from a cast its chain ends on.",
                         "State interpolation on that Resample.",
                     )
-                steps.append({"op": f"resample_{step['interpolation']}", "in": [cursor, grid], "out": out})
+                op = _body_resample(step["interpolation"], f"'Resample' on group '{name}'")
+                steps.append({"op": op, "in": [cursor, grid], "out": out})
             else:
                 steps.append({**step, "in": [cursor], "out": out})
             cursor = out

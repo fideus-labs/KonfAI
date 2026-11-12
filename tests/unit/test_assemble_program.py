@@ -220,11 +220,21 @@ def test_a_hoisted_inverse_carries_the_fill_only_an_origin_alignment_reads(align
     assert program["steps"][3] == {"op": "resample_linear", **placed, "in": ["r", "input"], "out": "t0"}
 
 
-def test_a_nested_resample_aligned_on_the_origin_is_refused_by_name():
-    # The program puts a nested model's volume on the copies' grid from the two extents alone.
-    resample = {"op": "resample", "spacing": [1.5, 1.5], "align": "origin", "interpolation": "nearest"}
+@pytest.mark.parametrize(
+    ("stated", "refusal"),
+    [
+        ({"align": "origin"}, "sets align: origin"),
+        ({"grid": "faces"}, "sets grid: faces"),
+        ({"antialias": "gaussian"}, "sets antialias: gaussian"),
+        ({"interpolation": "bspline"}, "interpolates 'bspline'"),
+    ],
+)
+def test_a_nested_resample_the_program_cannot_place_is_refused_by_name(stated, refusal):
+    # The program puts a nested model's volume on the copies' grid from the two extents alone, by its own
+    # resample ops: konfai's grid aligned on extent, no antialias, three interpolations.
+    resample = {"op": "resample", "spacing": [1.5, 1.5], "interpolation": "nearest", **stated}
     nested = {"id": "aux", "manifest": M, "ops": [resample]}
-    with pytest.raises(ConfigError, match="aligns on 'origin'"):
+    with pytest.raises(ConfigError, match=refusal):
         assemble_program(
             [{"id": "m", "manifest": M}],
             reduce="mean",
