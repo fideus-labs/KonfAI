@@ -962,7 +962,7 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
     "Standardize": {"lazy": True, "nonzero": True},
-    "Canonical": {"resample": False},
+    "Canonical": {"resample": False, "orientation": "LPS"},
     "Crop": {
         "source": "OTHER",
         "labels": [1],
@@ -1050,6 +1050,10 @@ def _compile_stage(key: str, params: dict[str, object]) -> object:
     if name in OP_MAP and name not in PROGRAM_TRANSFORMS:
         return compile_pipeline({name: params}, invertible=True)[0]
     return steps([{"Expand": {"nb": 2}}, {name: params}, _WRITE], "G")[0]
+
+
+def test_canonical_reads_its_orientation_in_any_case() -> None:
+    assert _compile_stage("Canonical", {"orientation": "ras"}) == _compile_stage("Canonical", {})
 
 
 def _outcome(key: str, params: dict[str, object]) -> object:
