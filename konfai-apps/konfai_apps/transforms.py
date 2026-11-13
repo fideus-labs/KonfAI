@@ -66,7 +66,8 @@ class KonfAIInference(Transform):
         self.per_channel = per_channel
         # Generic 'NAME=VALUE' overrides for the nested run's own config (the --set mechanism), so a caller
         # can tune it without editing the bundle, not a memory workaround (never shrink a trained
-        # segmentation's patch_size: it degrades the result; the allocator hint below keeps memory in check).
+        # segmentation's patch_size: it degrades the result; the predictor's expandable CUDA segments keep
+        # memory in check).
         self.config_overrides = config_overrides
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
@@ -82,11 +83,6 @@ class KonfAIInference(Transform):
         )
 
     def infer_entry(self, dataset_path: Path, output_path: Path, gpu: list[int]):
-        # Defragment the nested run's CUDA allocator: a heavy model (e.g. a 3D segmentation a metric relies
-        # on) can OOM on a large volume purely from reserved-but-unallocated blocks even though the live
-        # footprint fits, so it runs at its trained patch_size, not a shrunk one. setdefault so an
-        # explicit caller setting still wins.
-        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         from konfai_apps import KonfAIApp
 
         # Nested KonfAI runs must choose their own rendezvous ports instead of

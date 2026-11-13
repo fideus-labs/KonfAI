@@ -55,6 +55,7 @@ from konfai.utils.runtime import (
     State,
     checkpoint_source,
     configure_workflow_environment,
+    expandable_cuda_segments,
     run_distributed_app,
 )
 from konfai.utils.utils import concretize_patch_size, get_module, module_attribute
@@ -699,6 +700,8 @@ def build_predict(
     ``predictions_dir`` the directory the outputs are written to. The predictor comes back ready to be
     executed by the runtime wrapper.
     """
+    # A model that reads the whole case in one window fits the card's live memory, not its fragments.
+    expandable_cuda_segments()
     configure_workflow_environment(
         config_path=prediction_file,
         root="Predictor",
