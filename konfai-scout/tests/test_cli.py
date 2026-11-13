@@ -57,6 +57,10 @@ def test_inspect_render_export(fixtures, tmp_path, capsys, monkeypatch):
     assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "counts.json")]) == 0
     counts = json.loads((tmp_path / "counts.json").read_text())
     assert set(counts) == {"level", "verdict", "counts"} and counts["verdict"] == summary["verdict"]
+    capsys.readouterr()
+    assert main(["render", str(tmp_path / "nope")]) == 2
+    assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "no" / "c.json")]) == 2
+    assert capsys.readouterr().err.count("konfai-scout: ") == 2
 
 
 def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):

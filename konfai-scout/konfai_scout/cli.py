@@ -163,14 +163,18 @@ def main(argv: list[str] | None = None) -> int:
             if report.error:
                 print(f"error: {report.error}", file=sys.stderr)
         return 1 if report.error else 0
-    if args.command == "render":
+    try:  # render or export: a report that cannot be read, or a path that cannot be written, is said in one line
         report = Report.load(args.report)
-        path = (args.report if args.report.is_dir() else args.report.parent) / "report.md"
-        path.write_text(render_markdown(report), encoding="utf-8")
-        print(path)
-        return 0
-    args.out.write_text(json.dumps(export(Report.load(args.report), args.level), indent=2), encoding="utf-8")
-    print(args.out)
+        if args.command == "render":
+            path = (args.report if args.report.is_dir() else args.report.parent) / "report.md"
+            path.write_text(render_markdown(report), encoding="utf-8")
+        else:
+            path = args.out
+            path.write_text(json.dumps(export(report, args.level), indent=2), encoding="utf-8")
+    except (ValueError, OSError) as error:
+        print(f"konfai-scout: {error}", file=sys.stderr)
+        return 2
+    print(path)
     return 0
 
 

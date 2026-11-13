@@ -307,12 +307,14 @@ class Inspector:
 
     def _crops(self, observation: Observation) -> tuple[list[ImageContent], list[str], list[str]]:
         """The region of an observation, twice its box and at least 64 mm (a small region keeps its surroundings:
-        a few voxels alone are blocks of colour), in the second reader's modes, on the slice the first reader cited
+        a few voxels alone are blocks of colour) but no more than a view shows at full resolution (on a fine grid
+        64 mm would shrink a small defect below a pixel), in the second reader's modes, on the slice the first reader cited
         (the box's centre slice may miss what a large box holds elsewhere), else in the plane the volume was acquired
         in."""
         box = box_from_dict(observation.box_mm)
         spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
-        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, np.maximum(12.0 * spacing, 64.0)))
+        least = np.minimum(np.maximum(12.0 * spacing, 64.0), self.config.max_px * spacing)
+        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, least))
         plane = observation.plane or native_plane(self.case.grid)
         known = {v.id: v for v in self.renderer.views}
         cited = [
@@ -368,7 +370,7 @@ class Inspector:
                 raise SurveySkipped("turned off")
             leads = survey(self.renderer)
         except SurveySkipped as error:
-            return [], f"Leads: no survey was run ({error}); no lead says nothing about the result."
+            return [], f"Leads: no survey was run ({error}); the absence of leads says nothing about the result."
         except Exception as error:
             return [], f"Leads: the survey failed ({type(error).__name__}: {error})."
         return leads, leads_text(leads, active)
