@@ -50,8 +50,8 @@ def make_provider(config: ScoutConfig, client: object = None) -> Provider:
     if config.provider == "claude-code":
         from .claude_code import ClaudeCodeProvider
 
-        # the SDK counts turns, not calls: a few text-only turns on top of the call budget
-        return ClaudeCodeProvider(model, effort=config.effort, max_turns=config.budget.max_tool_calls + 8)
+        # the SDK counts turns, not calls: notes, refused calls and text-only turns on top of the call budget
+        return ClaudeCodeProvider(model, effort=config.effort, max_turns=2 * config.budget.max_tool_calls + 8)
     if config.provider == "codex":
         from .codex import CodexProvider
 

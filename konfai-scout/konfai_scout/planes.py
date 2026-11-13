@@ -50,6 +50,19 @@ def plane_axes(grid: Grid) -> dict[str, int]:
     return assignment
 
 
+def native_plane(grid: Grid) -> str:
+    """The plane a volume was acquired in: the one a single slice lies in (a 2-D image, whatever spacing its promotion
+    gave the axis it lacks), else across its thickest axis when that axis is clearly the thickest (1.5 times the
+    finest spacing: a coronal MRI read axially is blocks), axial otherwise."""
+    axes = plane_axes(grid)
+    for plane, axis in axes.items():
+        if grid.size_zyx[axis] == 1:
+            return plane
+    spacing_zyx = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
+    plane, axis = max(axes.items(), key=lambda item: spacing_zyx[item[1]])
+    return plane if spacing_zyx[axis] >= 1.5 * spacing_zyx.min() else "axial"
+
+
 def plane_axis(grid: Grid, plane: str) -> int:
     if plane not in PLANE_WORLD_AXIS:
         raise ValueError(f"unknown plane {plane!r}; one of {', '.join(PLANES)}")
@@ -110,6 +123,16 @@ def _triple(values: object) -> np.ndarray:
 
 def box_to_dict(value: WorldBox) -> dict[str, list[float]]:
     return {"min": [round(float(v), 3) for v in value.low_xyz], "max": [round(float(v), 3) for v in value.high_xyz]}
+
+
+def box_of(mask: np.ndarray, grid: Grid, offset_zyx: object = (0, 0, 0)) -> dict[str, list[float]]:
+    """The box in mm of a mask's voxels on ``grid``, the mask's array starting at ``offset_zyx`` in it."""
+    from scipy import ndimage
+
+    window = ndimage.find_objects(np.asarray(mask, dtype=np.uint8))[0]
+    return box_to_dict(
+        grid.world_box(tuple(slice(s.start + int(o), s.stop + int(o)) for s, o in zip(window, offset_zyx, strict=True)))
+    )
 
 
 def box_center(value: WorldBox) -> np.ndarray:

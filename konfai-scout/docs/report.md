@@ -4,8 +4,8 @@ An inspection leaves one directory:
 
 ```
 <out>/
-  report.json        the record, schema_version "1.0"
-  report.md          the same for a person: verdict, observations with their evidence, measurements, views, calls
+  report.json        the record, schema_version "1.1"
+  report.md          for a person: the verdict, the findings at a glance, each observation with its images
   case.json          the case as inspected (task, roles, labels, prior evaluation, notes)
   transcript.json    the conversation with the model, images replaced by their byte count
   evidence/vNNN.png  every view rendered, sent to the model or not
@@ -16,23 +16,24 @@ An inspection leaves one directory:
 
 | Field | What it holds |
 |---|---|
-| `schema_version` | `"1.0"`; it changes when a field changes meaning |
+| `schema_version` | `"1.1"`; it changes when a field changes meaning (1.1: a confirmation rests on a value past a threshold, an error's measurements end with Scout's check, `budget.spent.tool_calls` counts the calls that explore; added: `budget.not_enforced`, `leads`, `config.blind`, `config.thresholds`, `config.depth`) |
 | `scout_version`, `versions` | Scout, Python, numpy, SimpleITK, Pillow, scipy, konfai when installed, the provider SDK, the prompt version |
 | `created_at`, `duration_s` | when the inspection started (UTC) and how long it took |
 | `case` | the case with every input's path, SHA-256 and geometry, `truth_available`, the reference grid |
-| `config` | the `ScoutConfig` in full: provider, model, mode, budget, privacy flags, criteria, prices |
+| `config` | the `ScoutConfig` in full: provider, model, mode, budget, privacy flags, `blind`, criteria, thresholds, prices |
 | `provider` | name, model, whether it is remote, the SDK version |
 | `prompts` | the system prompt as sent, and its version |
-| `prior_evaluation` | the whole-case values read from the KonfAI Eval reports given (`{metric key: value}`) |
+| `prior_evaluation` | the whole-case values read from the KonfAI Eval reports given (`{metric key: value}`); shown to the model only with `blind` off |
 | `tool_calls` | every call: number, tool, arguments, start time, duration, ok, summary, the views, measurements or observation it produced, the error |
 | `views` | every view: id, kind (slice, montage), plane, array axis, index, position (mm), the box it covers (mm), mode, window, size, `px_to_mm` (`world = origin + col * u + row * v`), path, SHA-256, whether it was sent, extras (legend, scales, montage tiles) |
-| `measurements` | every measurement: id, kind (`konfai_eval` for `measure`, `scout` for the descriptive statistics of `region_stats`), `reference` (measured against a truth), the box requested and the box measured (the voxels cropped), the values by KonfAI's metric keys (`PRED:TRUTH:Dice:1`) or by dotted statistic names, the request (criteria, labels, dataset), the workspace, duration. A non-finite value, here or in `prior_evaluation`, is written as the string `NaN`, `Infinity` or `-Infinity` |
-| `observations` | every note that passed the rules: id, kind, defect, severity, confidence, description, box (mm), plane, the view ids and measurement ids cited, notes (a downgrade and why, figures read from a view rather than measured), `second_reading` when one was asked (`answer`: visible, not_visible, unsure or unparsed; the reader's sentence; the crops it saw) |
+| `measurements` | every measurement: id, kind (`konfai_eval` for `measure`, `scout` for the descriptive statistics of `region_stats`), `reference` (measured against a truth), the box requested and the box measured (the voxels cropped), the values by KonfAI's metric keys (`PRED:TRUTH:Dice:1`) or by dotted statistic names, the request (criteria, labels, dataset; `check_of` names the observation when Scout took it to check a flagged box), the workspace, duration. A non-finite value, here or in `prior_evaluation`, is written as the string `NaN`, `Infinity` or `-Infinity` |
+| `observations` | every note that passed the rules: id, kind, defect, severity, confidence, description, box (mm), plane, the view ids and measurement ids cited (and the id of Scout's own check of the box, last), notes (a downgrade and why, figures read from a view rather than measured), `second_reading` when one was asked (`answer`: visible, not_visible, unsure or unparsed; the reader's sentence; the crops it saw) |
 | `conclusion` | verdict, summary, confidence, `by` (`model`, or `scout` when Scout had to conclude itself), reason |
 | `usage` | requests, input/output tokens, cache reads and writes, images sent, cost in USD when the price is known |
-| `budget` | the limits, what was spent, what exhausted the budget if anything |
+| `budget` | the limits, what was spent (`tool_calls` counts the calls that explore, not `note` or `conclude`), what exhausted the budget if anything, `not_enforced`: why `max_usd` could not stop this inspection (a price unknown, a CLI that reports its cost only at the end), or `null` |
 | `error` | a provider failure or a refusal, when one ended the inspection |
 | `second_reading` | when asked: the reader's model, how many error observations were re-read and the counts by answer, the path of its transcripts |
+| `leads` | the survey's leads (id, kind, box, the reason it stands out) and the slice views that looked at each |
 
 ## Statements
 
@@ -40,9 +41,25 @@ Three kinds, never confused:
 
 - `measured_property`: a number measured on the case, reported as is.
 - `suspected_error`: something that looks wrong in a view, not established by a measurement against a reference.
-- `confirmed_error`: established by a cited measurement against a reference, or by a measurement that is an error by
-  definition (a folded field, non-finite values). A note that claims a confirmation without such a measurement is
-  recorded as `suspected_error` with the reason in `notes`.
+- `confirmed_error`: a measured value of the region past its criterion's threshold, in the bad direction. A note
+  that claims a confirmation without one is recorded as `suspected_error` with the reason in `notes`.
+
+Thresholds are keyed by KonfAI's result names (`DEFAULT_THRESHOLDS` in `evaluation.py`, extended or overridden by
+`ScoutConfig.thresholds`):
+
+| Criterion | An error when |
+|---|---|
+| `Dice`, `SurfaceDice` | below 0.8 |
+| `HD95` | above 5 mm |
+| `ASSD` | above 2 mm |
+| `TRE` | above 3 mm |
+| `JacobianFolding` | above 0 (any folded voxel) |
+| `JacobianMin` | below 0 |
+
+A criterion whose scale is the data's (MAE, PSNR, SSIM, displacement lengths, bending energy) has no default: it
+confirms nothing until a site sets one (`{"MAE": {"above": 100}}` for a CT in HU). A non-finite statistic of a
+field is an error by definition; an empty value (`None`, a box outside the truth or the mask) proves nothing. A
+perfect Dice cited against a "confirmed" error leaves a suspicion.
 
 Without a truth, no reference metric exists: nothing is confirmed from appearance, and the report says so.
 
@@ -60,17 +77,56 @@ properly:
   no tool returned does not enter the report as a measurement;
 - a confirmation rests on a measurement of the region it describes: a `confirmed_error` whose cited measurements
   were all taken outside its box is refused. A measurement taken elsewhere may be cited beside one of the region,
-  as context; a note says which.
+  as context; a note says which;
+- a `measured_property` is a number, not a defect: it names no defect type (a blur is an error, not a property);
+- an error says where it is: a box over less than a quarter of the image, or a lead's id (its box is taken, rather
+  than coordinates read off a view). Only a defect that can be everywhere (`blur`, `intensity_bias`,
+  `over_smoothing`) may span the image.
 
-Two softer rules downgrade or mark instead of refusing: a confirmation whose cited measurements hold no value
-against a reference (a box outside the truth gives `None`, which proves nothing) and show no error by definition
-becomes a `suspected_error`; a figure in an error's description that no cited measurement holds stays, with the note
-that it was read from a view. The Markdown rendition shows every note in italics under its observation.
+Softer rules check, downgrade or mark instead of refusing:
+
+- Scout checks every error (suspected or confirmed) that has a box: it measures the box itself with KonfAI Eval
+  (every criterion the case allows: a field's folding and Jacobian, Dice or TRE against the references, MAE against
+  a synthesis target), cites that measurement on the observation, and notes which of its values are past a threshold
+  (`Scout's check m007 of the box: WARPED_LABELS:FIXED_LABELS:Dice:1 = 0.42 < 0.8`), or that none is, or why nothing
+  could be measured;
+- a confirmation that neither its cited measurements of the region nor Scout's check supports becomes a
+  `suspected_error`;
+- a figure in an error's description that no cited measurement holds stays, with the note that it was read from a
+  view.
+
+The Markdown rendition shows every note in italics under its observation.
+
+A reader scans a report, so `note` refuses a description over 70 words (what, where, how bad, the view or
+measurement that shows it) and `conclude` a summary over 50 (the verdict and the observation ids it rests on, not
+their descriptions again). `report.md` opens with the verdict, the summary and a table of the errors, worst first,
+built by Scout from the record; then each observation with its notes and the images it cites, the leads, and the
+measurements the observations cite, once each. Every other view, measurement and call is in `report.json`.
+
+### The leads, and what `conclude` asks
+
+Before the model's first turn a deterministic survey of the case lists leads, each a box and the reason it stands
+out, on the case card. Segmentation: stretches of a label's boundary where the image has almost no edge (a cut
+through a homogeneous lesion, a hole, a leak into tissue that does not differ, a component on nothing), each with how
+much the label differs from just outside it there against the same along its whole border; components whose
+contrast against their surroundings is unlike the main component's; and with a truth the clusters of disagreement.
+Registration: folded voxels, and cells of about 16 mm where the edges of the warped and fixed images correlate much
+less than elsewhere in the case (edges, so that two modalities compare; voxels the warp read outside the moving
+image, which it fills with the moving image's minimum, are left out). Synthesis with a target: clusters where the error, smoothed inside the mask, is
+several times the case's typical error and at least 3 % of the target's range, off the target's strongest edges. A
+lead is not a finding and its figures are not measurements; the model looks and judges.
+
+In active mode `conclude` refuses until every lead has been looked at through a slice of its box (a montage tile
+does not count), unless the budget is spent: then the unseen leads are named in the conclusion's `reason`. It also
+keeps the verdict in line with the observations: it is `defective` when, and only when, an error of severity major
+or critical is noted at confidence 0.5 or more (Scout's own conclusion, when the model gives none, follows the same
+rule). Minor and moderate errors are recorded and leave the verdict to `acceptable` or `insufficient_evidence`.
 
 ### The blind second reading
 
 With `second_reading` (CLI `--second-reading`), a fresh session of the same model re-reads every error observation
-that has a box: it receives crops of that box (twice its size, at least a dozen voxels) in two or three modes, the
+that has a box: it receives crops of that box (twice its size, at least a dozen voxels) in two or three modes, on the
+slice the first reader cited when one shows the box (the centre slice of a large box may miss what it holds), the
 claim as written, and nothing else: not the method, not the history, not the measurements. It answers `VISIBLE`,
 `NOT_VISIBLE` or `UNSURE` with one sentence, recorded on the observation as `second_reading` and summed up in the
 report's `second_reading` field. Nothing is removed or re-judged: a confirmation stands on its measurement, and a
@@ -87,6 +143,27 @@ Defect types per task:
 
 Severities: minor, moderate, major, critical. Verdicts: acceptable, defective, insufficient_evidence. A `defective`
 verdict with no confirmed error carries a `reason` saying it rests on suspected errors.
+
+## Blind by default
+
+The model is not told the case's name, its notes (the method, the dataset) or its prior evaluation: the case card
+says they are withheld, and the model judges the images and what it measures. `ScoutConfig.blind = False` (CLI
+`--no-blind`) hands them over, for a study of what that knowledge changes. The report keeps them all for its reader.
+
+## Export at a confidentiality level
+
+`konfai-scout export REPORT_DIR --level full|regions|counts --out FILE` (Python: `konfai_scout.export(report,
+level)`) writes what may be shown of an inspection to a reader that must not identify the case, such as an agent
+tuning a method on cases it must not see (FidOpt's test cases):
+
+| Level | What it holds |
+|---|---|
+| `full` | `report.json` as is |
+| `regions` | `level`, `task`, `verdict`, and per observation: id, kind, defect, severity, confidence, box (mm), plane, the id, box measured and values of each of its measurements, the second reader's answer. No case name, no path, no image or view, no description or note (free text), no transcript, no prior evaluation, no usage. |
+| `counts` | `level`, `verdict`, and the observations counted by kind, defect and severity: `{"suspected_error": {"folding": {"major": 1}}}` |
+
+A box is in the patient's physical frame: at `regions`, a reader learns where a defect is, not whose scan it is.
+`counts` is the level for a reader that must not learn even that.
 
 ## Coordinates
 

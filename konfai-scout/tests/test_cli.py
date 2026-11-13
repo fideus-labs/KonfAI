@@ -4,7 +4,7 @@ import json
 from konfai_scout.cli import main
 
 
-def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
+def test_inspect_render_export(fixtures, tmp_path, capsys, monkeypatch):
     case, _ = fixtures["segmentation"]
     out = tmp_path / "active"
     code = main(
@@ -48,15 +48,19 @@ def test_inspect_render_compare(fixtures, tmp_path, capsys, monkeypatch):
             "mock",
             "--mode",
             "fixed",
+            "--no-blind",
         ]
     )
     assert code == 0 and "->" in capsys.readouterr().out
+    assert json.loads((tmp_path / "fixed" / "report.json").read_text())["config"]["blind"] is False
     assert main(["render", str(out)]) == 0
-    assert main(["compare", str(out), str(tmp_path / "fixed")]) == 0
-    table = capsys.readouterr().out
-    assert "| active |" in table and "| fixed |" in table
-    rows = json.loads(capsys.readouterr().out)["rows"] if main(["compare", str(out), "--json"]) == 0 else []
-    assert rows and rows[0]["planted"] == 4 and rows[0]["found"] >= 1  # the fixture's defects.json, found by itself
+    assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "counts.json")]) == 0
+    counts = json.loads((tmp_path / "counts.json").read_text())
+    assert set(counts) == {"level", "verdict", "counts"} and counts["verdict"] == summary["verdict"]
+    capsys.readouterr()
+    assert main(["render", str(tmp_path / "nope")]) == 2
+    assert main(["export", str(out), "--level", "counts", "--out", str(tmp_path / "no" / "c.json")]) == 2
+    assert capsys.readouterr().err.count("konfai-scout: ") == 2
 
 
 def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):
@@ -75,3 +79,19 @@ def test_refusals_before_any_request(fixtures, tmp_path, capsys, monkeypatch):
     )
     assert code == 2 and "allow-cloud-images" in capsys.readouterr().err
     assert not (tmp_path / "r" / "report.json").exists()
+
+
+def test_a_depth_sets_the_defaults_and_an_explicit_flag_wins():
+    from konfai_scout.cli import _config_from_args, _parser
+    from konfai_scout.config import ScoutConfig
+
+    def config(*flags):
+        return _config_from_args(_parser().parse_args(["inspect", "--out", "o", *flags]))
+
+    quick = config("--depth", "quick", "--max-tool-calls", "20")
+    assert (quick.effort, quick.budget.max_tool_calls, quick.second_reading) == ("low", 20, False)
+    assert config("--depth", "quick").budget.max_tool_calls == 10
+    deep = ScoutConfig(depth="deep", effort="medium")
+    assert (deep.effort, deep.budget.max_tool_calls, deep.second_reading) == ("medium", 40, True)
+    assert config().budget.max_tool_calls == 25 and config().effort is None
+    assert ScoutConfig.from_dict(quick.to_dict()).budget.max_tool_calls == 20  # a saved config reads back as it was

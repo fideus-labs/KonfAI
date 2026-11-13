@@ -1719,15 +1719,13 @@ def run_scout_inspection(
     base_url: Annotated[
         str | None, Field(description="An OpenAI-compatible server (a local VLM) for the openai provider.")
     ] = None,
-    effort: Annotated[
-        Literal["low", "medium", "high", "xhigh", "max"] | None, Field(description="Claude's effort.")
-    ] = None,
+    depth: Annotated[
+        Literal["quick", "standard", "deep"],
+        Field(description="quick: a cheap first pass; deep: more calls, more effort, a blind second reading."),
+    ] = "standard",
     mode: Annotated[
         Literal["active", "fixed"], Field(description="active exploration, or a fixed set of views.")
     ] = "active",
-    max_tool_calls: Annotated[int, Field(description="Tool calls the model may make.", ge=1, le=400)] = 40,
-    max_images: Annotated[int, Field(description="Images the model may receive.", ge=1, le=400)] = 60,
-    max_seconds: Annotated[float | None, Field(description="Wall-clock limit of the inspection.")] = 900.0,
     max_usd: Annotated[float | None, Field(description="Cost limit, when the model's price is known.")] = None,
     allow_cloud_images: Annotated[
         bool, Field(description="Authorise sending images of the case to a cloud API.")
@@ -1745,11 +1743,8 @@ def run_scout_inspection(
         provider=provider,
         model=model,
         base_url=base_url,
-        effort=effort,
+        depth=depth,
         mode=mode,
-        max_tool_calls=max_tool_calls,
-        max_images=max_images,
-        max_seconds=max_seconds,
         max_usd=max_usd,
         allow_cloud_images=allow_cloud_images,
         local_provider=local_provider,

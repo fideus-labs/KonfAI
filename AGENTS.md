@@ -139,9 +139,14 @@ and `TransformPoints` for a registration's warped data, `konfai.evaluate` for ev
 or through Claude Code's Agent SDK, GPT through the API or through the Codex CLI, any OpenAI-compatible local
 server, a mock for tests). Images leave the machine only under `allow_cloud_images`. `note` enforces the epistemic
 rules mechanically (an error cites a view that shows its box, a figure comes from a cited measurement, a
-measurement covers the box; an empty measurement confirms nothing), an optional blind second reading re-reads
-every error from crops alone, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
-invented defects are counted (`examples/study_controls.py`).
+measurement covers the box; a confirmation needs a value past its criterion's threshold, `DEFAULT_THRESHOLDS`),
+Scout measures every flagged box itself and downgrades a confirmation nothing measured supports, the model is blind
+to the case's name, notes and prior scores by default, `export` writes a report at a confidentiality level (`full`,
+`regions`, `counts`) for a reader that must not identify the case, an optional blind second reading re-reads
+every error from crops alone, a deterministic survey (`survey.py`) hands the model leads that `conclude` waits
+for, the verdict is `defective` exactly when a major or critical error is noted at confidence 0.5 or more,
+`depth` (`quick`, `standard`, `deep`) sets the budget, the effort and the second reading in one word, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
+invented defects are counted.
 konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
 `konfai-scout/docs/` hold the user side, the report schema and the studies.
 

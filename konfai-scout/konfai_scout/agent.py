@@ -15,7 +15,6 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +22,16 @@ import numpy as np
 
 from .case import InspectionCase
 from .config import ScoutConfig
-from .evaluation import RegionEvaluator, konfai_version, load_prior
+from .evaluation import RegionEvaluator, load_prior
 from .measure import label_stats
-from .planes import box_around, box_center, box_from_dict, box_size, describe_grid
+from .planes import box_around, box_center, box_from_dict, box_intersection, box_size, describe_grid, native_plane
 from .prompts import PROMPT_VERSION, case_card, second_reader_prompt, second_reading_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
+from .providers import Usage as TokenUsage
+from .providers.base import package_version
 from .providers.pricing import cost_usd, price_of
 from .report import SCHEMA_VERSION, Conclusion, Observation, Report, Usage
+from .survey import Lead, SurveySkipped, leads_text, survey
 from .tools import Toolbox
 from .views import DEFAULT_MODE, Renderer, ViewError
 
@@ -44,6 +46,8 @@ SECOND_READING_MODES = {
     "registration": ["fixed", "warped", "checkerboard"],
     "synthesis": ["synthetic", "target", "difference", "source"],
 }
+#: The calls that record rather than explore: outside the call budget, and still run once it is spent.
+RECORDING = ("note", "conclude")
 NOTICE_BUDGET = (
     "Budget exhausted ({exhausted}). Call `note` for anything established and not yet recorded, then `conclude` now."
 )
@@ -54,22 +58,12 @@ NOTICE_SILENT = (
 
 
 def scout_version() -> str:
-    try:
-        return version("konfai-scout")
-    except PackageNotFoundError:
-        return "0.0.0+source"
+    return package_version("konfai-scout")
 
 
 def _versions(provider: Provider) -> dict[str, str]:
     out = {"python": platform.python_version(), "platform": platform.platform()}
-    for name in ("numpy", "SimpleITK", "Pillow", "scipy"):
-        try:
-            out[name] = version(name)
-        except PackageNotFoundError:
-            pass
-    konfai = konfai_version()
-    if konfai:
-        out["konfai"] = konfai
+    out |= {name: package_version(name) for name in ("numpy", "SimpleITK", "Pillow", "scipy", "konfai")}
     out[f"{provider.name}_sdk"] = provider.sdk_version()
     out["prompt"] = PROMPT_VERSION
     return out
@@ -83,6 +77,8 @@ class BudgetState:
     images: int = 0
     tokens: int = 0
     usd: float = 0.0
+    #: The cost of the request in flight, as a provider that runs the tool loop reports it message by message.
+    running_usd: float = 0.0
 
     def exhausted(self) -> str | None:
         budget = self.config.budget
@@ -92,10 +88,8 @@ class BudgetState:
             return f"{self.images} images (limit {budget.max_images})"
         if budget.max_seconds is not None and time.time() - self.started >= budget.max_seconds:
             return f"{time.time() - self.started:.0f} s (limit {budget.max_seconds:.0f} s)"
-        if budget.max_usd is not None and self.usd >= budget.max_usd:
-            return f"${self.usd:.3f} (limit ${budget.max_usd:.2f})"
-        if budget.max_tokens is not None and self.tokens >= budget.max_tokens:
-            return f"{self.tokens} tokens (limit {budget.max_tokens})"
+        if budget.max_usd is not None and self.usd + self.running_usd >= budget.max_usd:
+            return f"${self.usd + self.running_usd:.3f} (limit ${budget.max_usd:.2f})"
         return None
 
 
@@ -118,12 +112,14 @@ class Inspector:
         #: A fresh session per blind second reading: the same model by default, never the inspecting session.
         self.reader = reader or (lambda: make_provider(config))
         self.second_reading: dict[str, Any] | None = None
+        self.lead_views: dict[str, list[str]] = {}
         case.stage(
             self.out / "work" / "stage"
         )  # the case as KonfAI reads it: every read, warp and measure goes through it
         self.renderer = Renderer(case, self.out / "work", config, self.out / "evidence")
         self.evaluator = RegionEvaluator(case, config, self.out / "work", self.renderer.derived)
         self.toolbox = Toolbox(case, config, self.renderer, self.evaluator)
+        self.toolbox.closing = lambda: self.budget.exhausted() is not None
         self.usage = Usage()
         self.price = price_of(config.model or "", config.prices)
         self.budget = BudgetState(config, time.time())
@@ -140,7 +136,14 @@ class Inspector:
         tools = self.toolbox.specs(exploration)
         self.provider.start(system, tools)
         images, views_text = self._coverage()
-        card = case_card(self.case, prior, self._labels_summary(), self.renderer.modes(), views_text)
+        self.toolbox.leads, survey_text = self._survey(exploration)
+        card = case_card(
+            self.case,
+            prior,
+            self._labels_summary(),
+            f"{views_text}\n\n{survey_text}",
+            self.config.blind,
+        )
         try:
             if getattr(self.provider, "drives_tools", False):
                 self._run_driven(card, images)
@@ -150,62 +153,49 @@ class Inspector:
             self.error = f"provider error: {error}"
         except Exception as error:  # the report must still be written
             self.error = f"{type(error).__name__}: {error}"
+        # what the inspector looked at, before the second reader renders its own crops
+        self.lead_views = {lead.id: self.toolbox.lead_views(lead) for lead in self.toolbox.leads}
         if self.config.second_reading and self.error is None:
             self._second_reading()
         return self._finish()
 
-    def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
-        """Scout drives the loop: each tool call the model makes is run here and its result sent back."""
+    def _start(self, card: str, images: list[ImageContent]) -> Turn:
         turn = self._request(lambda: self.provider.user(card, images))
         self.budget.images += len(images)
         self.toolbox.images_sent += len(images)
-        reminders = 0
-        final = False
-        while self.toolbox.conclusion is None:
-            exhausted = self.budget.exhausted()
-            if turn.stop == "refusal":
-                self.error = f"the model refused: {turn.text}"
-                break
+        return turn
+
+    def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
+        """Scout drives the loop: each call the model makes runs through ``_execute`` and its result goes back. Once
+        the budget is spent the model gets one last turn with `note` and `conclude` only."""
+        turn = self._start(card, images)
+        reminders, final = 0, False
+        while self.toolbox.conclusion is None and turn.stop != "refusal":
             if turn.tool_calls:
-                if exhausted and final:
+                results = [self._execute(call) for call in turn.tool_calls]
+                exhausted = self.budget.exhausted()
+                if self.toolbox.conclusion is not None or (exhausted and final):
                     break
-                if exhausted:
-                    # the budget is spent: only a note or a conclusion still runs, once
-                    final = True
-                    results = [
-                        self._refused(call, exhausted)
-                        if call.name not in ("note", "conclude")
-                        else self.toolbox.call(call)
-                        for call in turn.tool_calls
-                    ]
-                    if self.toolbox.conclusion is not None:
-                        break
-                    final_specs = self.toolbox.specs(exploration, final=True)
-                    turn = self._request(lambda r=results, t=final_specs: self.provider.tool_results(r, t))
-                    continue
-                results = [self.toolbox.call(call) for call in turn.tool_calls]
-                self.budget.calls += len(results)
-                self.budget.images += sum(len(r.images) for r in results)
-                if self.toolbox.conclusion is not None:
-                    break
-                turn = self._request(lambda r=results: self.provider.tool_results(r))
+                final = bool(exhausted)
+                specs = self.toolbox.specs(exploration, final=True) if final else None
+                turn = self._request(lambda r=results, s=specs: self.provider.tool_results(r, s))
                 continue
             if final or reminders >= 2:
                 break
             reminders += 1
-            if exhausted:
-                final = True
-                turn = self._request(lambda e=exhausted: self.provider.user(NOTICE_BUDGET.format(exhausted=e), None))
-                continue
-            turn = self._request(lambda: self.provider.user(NOTICE_SILENT, None))
+            exhausted = self.budget.exhausted()
+            final = bool(exhausted)
+            notice = NOTICE_BUDGET.format(exhausted=exhausted) if exhausted else NOTICE_SILENT
+            turn = self._request(lambda n=notice: self.provider.user(n, None))
+        if turn.stop == "refusal":
+            self.error = f"the model refused: {turn.text}"
 
     def _run_driven(self, card: str, images: list[ImageContent]) -> None:
-        """The provider runs the tool loop itself (the Claude Agent SDK): every call it makes lands in ``_execute``,
-        so the record and the budget are the same; Scout only speaks between its turns."""
+        """The provider runs the tool loop itself (the Claude Agent SDK, Codex): every call it makes lands in
+        ``_execute``, so the record and the budget are the same; Scout only speaks between its turns."""
         self.provider.execute = self._execute  # type: ignore[attr-defined]
-        turn = self._request(lambda: self.provider.user(card, images))
-        self.budget.images += len(images)
-        self.toolbox.images_sent += len(images)
+        self.provider.on_usage = self._running  # type: ignore[attr-defined]
+        turn = self._start(card, images)
         reminders = 0
         while self.toolbox.conclusion is None and turn.stop != "refusal" and reminders < 2:
             reminders += 1
@@ -217,15 +207,19 @@ class Inspector:
 
     def _execute(self, call: ToolCall) -> ToolResult:
         """One tool call under the budget: refused once the budget is spent, except a note or the conclusion."""
-        exhausted = self.budget.exhausted()
-        if exhausted:  # the budget is spent: a note or the conclusion still runs, uncounted as in the API loop
-            if call.name not in ("note", "conclude"):
-                return self._refused(call, exhausted)
+        if call.name in RECORDING:  # a note or the conclusion: never counted, never refused
             return self.toolbox.call(call)
+        exhausted = self.budget.exhausted()
+        if exhausted:
+            return self._refused(call, exhausted)
         result = self.toolbox.call(call)
         self.budget.calls += 1
         self.budget.images += len(result.images)
         return result
+
+    def _running(self, usage: TokenUsage) -> None:
+        """One message's usage while the provider's request is in flight: what ``max_usd`` stops on mid-request."""
+        self.budget.running_usd += cost_usd(usage, self.price) or 0.0
 
     def _request(self, call) -> Turn:
         attempts = 0
@@ -240,6 +234,7 @@ class Inspector:
                 time.sleep(self.config.retry_wait_seconds * attempts)
         if self.price is None and turn.model:  # a provider that names its model only once it answered
             self.price = price_of(turn.model, self.config.prices)
+        self.budget.running_usd = 0.0  # the turn's own usage replaces the running estimate
         self.usage.requests += 1
         self.usage.input_tokens += turn.usage.input_tokens
         self.usage.output_tokens += turn.usage.output_tokens
@@ -299,11 +294,25 @@ class Inspector:
         }
 
     def _crops(self, observation: Observation) -> tuple[list[ImageContent], list[str], list[str]]:
-        """The region of an observation, twice its box (at least a dozen voxels), in the second reader's modes."""
+        """The region of an observation, twice its box and at least 64 mm (a small region keeps its surroundings:
+        a few voxels alone are blocks of colour) but no more than a view shows at full resolution (on a fine grid
+        64 mm would shrink a small defect below a pixel), in the second reader's modes, on the slice the first reader cited
+        (the box's centre slice may miss what a large box holds elsewhere), else in the plane the volume was acquired
+        in."""
         box = box_from_dict(observation.box_mm)
         spacing = np.asarray(self.case.grid.spacing_xyz, dtype=np.float64)
-        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, 12.0 * spacing))
-        plane = observation.plane or "axial"
+        least = np.minimum(np.maximum(12.0 * spacing, 64.0), self.config.max_px * spacing)
+        zoom = box_around(box_center(box), np.maximum(box_size(box) * 2.0, least))
+        plane = observation.plane or native_plane(self.case.grid)
+        known = {v.id: v for v in self.renderer.views}
+        cited = [
+            known[v]
+            for v in observation.views
+            if v in known and known[v].kind == "slice" and box_intersection(box_from_dict(known[v].box_mm), box)
+        ]
+        index = None
+        if cited:
+            plane, index = cited[0].plane, cited[0].index
         modes = [m for m in SECOND_READING_MODES[self.case.task] if m in self.renderer.modes()][:3]
         if self.case.task == "registration" and observation.defect in ("folding", "implausible_deformation"):
             modes = [*modes[:2], "jacobian"]
@@ -311,7 +320,7 @@ class Inspector:
         ids: list[str] = []
         lines: list[str] = []
         for mode in modes:
-            png, view = self.renderer.render(plane, mode, zoom=zoom)
+            png, view = self.renderer.render(plane, mode, index=index, zoom=zoom)
             images.append(ImageContent(png, f"[{view.id}]"))
             ids.append(view.id)
             legend = view.extra.get("legend")
@@ -342,6 +351,18 @@ class Inspector:
                     lines.append(f"- {view.id}: {plane} central slice, mode {mode}")
         return images, "\n".join(lines)
 
+    def _survey(self, active: bool) -> tuple[list[Lead], str]:
+        """The leads, and their text for the case card: a survey that fails costs the leads, not the inspection."""
+        try:
+            if not self.config.survey:
+                raise SurveySkipped("turned off")
+            leads = survey(self.renderer)
+        except SurveySkipped as error:
+            return [], f"Leads: no survey was run ({error}); the absence of leads says nothing about the result."
+        except Exception as error:
+            return [], f"Leads: the survey failed ({type(error).__name__}: {error})."
+        return leads, leads_text(leads, active)
+
     def _labels_summary(self) -> dict[str, object]:
         role = {"segmentation": "prediction", "registration": "fixed_labels", "synthesis": None}[self.case.task]
         if role is None or role not in self.case.inputs:
@@ -363,18 +384,18 @@ class Inspector:
             reason = self.error or (
                 f"budget exhausted: {exhausted}" if exhausted else "the model ended without concluding"
             )
-            confirmed = [o for o in self.toolbox.observations if o.kind == "confirmed_error"]
+            serious = self.toolbox.serious()
             conclusion = Conclusion(
-                verdict="defective" if confirmed else "insufficient_evidence",
+                verdict="defective" if serious else "insufficient_evidence",
                 summary=(
                     f"Scout concluded for the model ({reason}). "
                     + (
-                        f"{len(confirmed)} confirmed error(s) were recorded."
-                        if confirmed
-                        else f"{len(self.toolbox.observations)} observation(s) were recorded, none confirmed."
+                        f"Major error(s) {', '.join(serious)} were recorded."
+                        if serious
+                        else f"{len(self.toolbox.observations)} observation(s) were recorded, none major."
                     )
                 ),
-                confidence=0.5 if confirmed else 0.2,
+                confidence=0.5 if serious else 0.2,
                 by="scout",
                 reason=reason,
             )
@@ -413,6 +434,7 @@ class Inspector:
             budget={
                 "limits": self.config.budget.to_dict(),
                 "exhausted": exhausted,
+                "not_enforced": self._unenforced(),
                 "spent": {
                     "tool_calls": self.budget.calls,
                     "images": self.budget.images,
@@ -423,10 +445,21 @@ class Inspector:
             },
             error=self.error,
             transcript_path="transcript.json",
+            leads=[{**lead.to_dict(), "views": self.lead_views.get(lead.id, [])} for lead in self.toolbox.leads],
             second_reading=self.second_reading,
         )
         report.save(self.out)
         return report
+
+    def _unenforced(self) -> str | None:
+        """Why ``max_usd`` could not stop this inspection, when it could not: said, never pretended."""
+        if self.config.budget.max_usd is None:
+            return None
+        if self.price is None:
+            return f"max_usd: the price of {self.provider.model} is unknown, the cost was not counted"
+        if not getattr(self.provider, "running_cost", True):
+            return f"max_usd: the {self.provider.name} CLI reports its cost only once its whole loop has run"
+        return None
 
 
 def parse_second_reading(text: str) -> tuple[str, str]:

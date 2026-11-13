@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 KINDS = ("measured_property", "suspected_error", "confirmed_error")
 SEVERITIES = ("minor", "moderate", "major", "critical")
 VERDICTS = ("acceptable", "defective", "insufficient_evidence")
@@ -161,6 +161,8 @@ class Report:
     transcript_path: str | None = None
     #: The blind second reading of the error observations, when asked: model, counts by answer, transcript path.
     second_reading: dict[str, Any] | None = None
+    #: The survey's leads (id, kind, box, reason) and the slice views that looked at each.
+    leads: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -188,6 +190,7 @@ class Report:
             error=data.get("error"),
             transcript_path=data.get("transcript_path"),
             second_reading=data.get("second_reading"),
+            leads=list(data.get("leads") or []),
         )
 
     def save(self, out: Path) -> Path:
@@ -195,7 +198,7 @@ class Report:
         out.mkdir(parents=True, exist_ok=True)
         # JSON has no NaN or infinity, which a prior evaluation or a measurement can hold: they are written as the
         # strings "NaN", "Infinity" and "-Infinity", so a confirmation resting on one stays readable as such
-        finite = json.loads(json.dumps(self.to_dict(), default=_json_default), parse_constant=str)
+        finite = json.loads(json.dumps(self.to_dict(), default=json_default), parse_constant=str)
         (out / "report.json").write_text(json.dumps(finite, indent=2, allow_nan=False), encoding="utf-8")
         (out / "report.md").write_text(render_markdown(self), encoding="utf-8")
         return out / "report.json"
@@ -250,26 +253,22 @@ class Report:
         }
 
 
-def _json_default(value: object) -> object:
-    if isinstance(value, Path):
-        return str(value)
+def json_default(value: object) -> object:
+    """numpy scalars and arrays as numbers and lists, anything else (a path) as its text."""
     if hasattr(value, "item"):
         return value.item()
     if hasattr(value, "tolist"):
         return value.tolist()
-    raise TypeError(f"{type(value).__name__} is not JSON serialisable")
+    return str(value)
 
 
 def _box_text(box: dict[str, list[float]] | None) -> str:
     if not box:
         return "whole case"
     lo, hi = box["min"], box["max"]
-    center = [(a + b) / 2 for a, b in zip(lo, hi, strict=True)]
-    size = [b - a for a, b in zip(lo, hi, strict=True)]
-    return (
-        f"centre ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}) mm, "
-        f"size {size[0]:.1f} x {size[1]:.1f} x {size[2]:.1f} mm"
-    )
+    center = ", ".join(f"{(a + b) / 2:.0f}" for a, b in zip(lo, hi, strict=True))
+    size = " x ".join(f"{b - a:.0f}" for a, b in zip(lo, hi, strict=True))
+    return f"({center}) mm, {size} mm"
 
 
 def value_text(value: object) -> str:
@@ -278,11 +277,44 @@ def value_text(value: object) -> str:
     return str(value)
 
 
+def _findings_table(report: Report) -> list[str]:
+    """The errors at a glance, built by Scout from the record, worst first: the same report reads the same way."""
+    rank = {s: n for n, s in enumerate(reversed(SEVERITIES))}
+    errors = sorted(
+        (o for o in report.observations if o.kind != "measured_property"),
+        key=lambda o: (rank[o.severity], -o.confidence, o.id),
+    )
+    if not errors:
+        return ["No error was recorded.", ""]
+    lines = [
+        "| Finding | Defect | Kind | Severity | Confidence | Where | Second reading |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for o in errors:
+        kind = "confirmed" if o.kind == "confirmed_error" else "suspected"
+        reading = (o.second_reading or {}).get("answer", "")
+        lines.append(
+            f"| {o.id} | {o.defect} | {kind} | {o.severity} | {o.confidence:.2f} | {_box_text(o.box_mm)} | {reading} |"
+        )
+    return [*lines, ""]
+
+
+def short_key(key: str) -> str:
+    """A KonfAI result key without its groups (`WARPED_LABELS:FIXED_LABELS:Dice:1` is `Dice:1`)."""
+    parts = key.split(":")
+    return ":".join(parts[2:]) if len(parts) > 2 else key
+
+
+def _values_text(values: dict[str, Any]) -> str:
+    return ", ".join(f"{short_key(k)} {value_text(v)}" for k, v in values.items()) or "no value"
+
+
 def render_markdown(report: Report) -> str:
-    """The report for a person: verdict first, then the observations with their evidence, then the record."""
+    """The report for a person: the verdict, the findings at a glance, each observation with the images it cites,
+    then the measurements cited. Everything else (every view, measurement and call) is in report.json."""
     case = report.case
-    lines = [f"# Scout report: {case.get('name', 'case')} ({case.get('task', '?')})", ""]
     conclusion = report.conclusion
+    lines = [f"# Scout report: {case.get('name', 'case')} ({case.get('task', '?')})", ""]
     if conclusion:
         lines += [
             f"**Verdict: {conclusion.verdict}** (confidence {conclusion.confidence:.2f}, by {conclusion.by})",
@@ -290,41 +322,27 @@ def render_markdown(report: Report) -> str:
             conclusion.summary,
             "",
         ]
-        if conclusion.reason:
-            lines += [f"_{conclusion.reason}_", ""]
-    if report.error:
-        lines += [f"**Error:** {report.error}", ""]
-    provider = report.provider
-    lines += [
-        f"Provider {provider.get('name')} / model {provider.get('model')}, mode `{report.config.get('mode')}`, "
-        f"{len(report.tool_calls)} tool calls, {len(report.views)} views ({report.usage.images_sent} sent), "
-        f"{len(report.measurements)} measurements, {report.duration_s:.0f} s, "
-        + (f"${report.usage.cost_usd:.4f}" if report.usage.cost_usd is not None else "cost unknown")
-        + f", {report.usage.input_tokens + report.usage.output_tokens} tokens.",
-        "",
-    ]
+    lines += _findings_table(report)
+    caveats = [conclusion.reason] if conclusion and conclusion.reason else []
+    caveats += [f"Error: {report.error}"] if report.error else []
     if not case.get("truth_available"):
-        lines += [
-            "No reference was given: nothing here is measured against a truth, and no anatomical claim is certain.",
-            "",
-        ]
+        caveats.append("No reference given: nothing is measured against a truth.")
     if report.budget.get("exhausted"):
-        lines += [f"Budget exhausted: {report.budget['exhausted']}.", ""]
+        caveats.append(f"Budget exhausted: {report.budget['exhausted']}.")
+    if report.budget.get("not_enforced"):
+        caveats.append(f"Not enforced: {report.budget['not_enforced']}.")
     second = report.second_reading
     if second and second.get("observations"):
-        lines += [
-            f"Second reading, blind, by {second.get('model')}: of {second['observations']} error observation(s), "
-            f"{second.get('visible', 0)} visible, {second.get('not_visible', 0)} not visible, "
-            f"{second.get('unsure', 0)} unsure"
-            + (f", {second['unparsed']} unanswered" if second.get("unparsed") else "")
-            + ".",
-            "",
-        ]
+        caveats.append(
+            f"Blind second reading ({second.get('model')}): {second.get('visible', 0)} visible, "
+            f"{second.get('not_visible', 0)} not visible, {second.get('unsure', 0)} unsure of "
+            f"{second['observations']}."
+        )
+    lines += [f"_{c}_" for c in caveats] + ([""] if caveats else [])
     lines += ["## Observations", ""]
     if not report.observations:
         lines += ["None recorded.", ""]
     views = {view.id: view for view in report.views}
-    measurements = {m.id: m for m in report.measurements}
     for o in report.observations:
         lines += [
             f"### {o.id}: {o.defect} ({o.kind}, {o.severity}, confidence {o.confidence:.2f})",
@@ -334,175 +352,103 @@ def render_markdown(report: Report) -> str:
             o.description,
             "",
         ]
-        for note in o.notes:
-            lines += [f"_{note}_", ""]
+        lines += [line for note in o.notes for line in (f"_{note}_", "")]
         if o.second_reading:
             lines += [
                 f"_Second reading ({o.second_reading.get('answer')}, views "
                 f"{', '.join(o.second_reading.get('views') or [])}): {o.second_reading.get('text', '')}_",
                 "",
             ]
-        for mid in o.measurements:
-            m = measurements.get(mid)
-            if m is None:
-                continue
-            kind = "against a reference" if m.reference else "no reference"
-            values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items())
-            lines += [f"- {mid} ({m.kind}, {kind}, {_box_text(m.box_measured or m.box_requested)}): {values}"]
-        if o.measurements:
-            lines.append("")
-        for vid in o.views:
-            v = views.get(vid)
-            if v is None:
-                continue
-            lines += [f"![{vid}: {v.plane} {v.mode}]({v.path})", ""]
-    lines += ["## Prior evaluation (KonfAI Eval, whole case)", ""]
-    if report.prior_evaluation:
-        lines += [f"- {k} = {value_text(v)}" for k, v in report.prior_evaluation.items()] + [""]
-    else:
-        lines += ["None given.", ""]
-    lines += ["## Measurements", ""]
+        if o.measurements:  # their values are under Evidence: the description quotes the ones that matter
+            lines += [f"Measurements: {', '.join(o.measurements)}.", ""]
+        lines += [
+            line for vid in o.views if (v := views.get(vid)) for line in (f"![{vid}: {v.plane} {v.mode}]({v.path})", "")
+        ]
+    if report.leads:
+        lines += ["## Leads", ""]
+        lines += [
+            f"- {lead['id']} {lead['kind']}: {lead['reason']}. "
+            + (f"Looked at in {', '.join(lead['views'])}." if lead.get("views") else "Not looked at.")
+            for lead in report.leads
+        ]
+        lines.append("")
+    cited = {m for o in report.observations for m in o.measurements}
+    evidence: list[str] = []
+    seen: dict[str, str] = {}  # Scout's check of a box the model measured already holds the same values
     for m in report.measurements:
-        values = ", ".join(f"{k} = {value_text(v)}" for k, v in m.values.items()) or (m.error or "no value")
-        lines += [
-            f"- {m.id} ({m.kind}, {'reference' if m.reference else 'no reference'}, "
-            f"{_box_text(m.box_measured or m.box_requested)}): {values}"
-        ]
-    lines += ["", "## Views examined", ""]
-    for v in report.views:
-        where = f"{v.plane}" + (
-            f" at {v.position_mm[0]:.1f}, {v.position_mm[1]:.1f}, {v.position_mm[2]:.1f} mm" if v.position_mm else ""
-        )
-        lines += [
-            f"- {v.id}: {v.kind} {where}, mode `{v.mode}`"
-            + ("" if v.sent else " (rendered, not sent)")
-            + f" — [{v.path}]({v.path})"
-        ]
-    lines += ["", "## Tool calls", ""]
-    for c in report.tool_calls:
-        status = "ok" if c.ok else f"error: {c.error}"
-        lines += [
-            f"{c.n}. `{c.tool}` {json.dumps(c.args, default=_json_default)} → {c.summary} "
-            f"({status}, {c.duration_s:.1f} s)"
-        ]
+        if m.id in cited:
+            same = json.dumps([m.box_measured, m.values], sort_keys=True, default=str)  # exact, not as displayed
+            text = f"{_box_text(m.box_measured or m.box_requested)}: {_values_text(m.values)}"
+            evidence.append(f"- {m.id} " + (f"same as {seen[same]}" if same in seen else text))
+            seen.setdefault(same, m.id)
+    if report.prior_evaluation:
+        evidence.append(f"- prior evaluation (whole case): {_values_text(report.prior_evaluation)}")
+    if evidence:
+        lines += ["## Evidence", "", *evidence, ""]
+    provider = report.provider
     lines += [
-        "",
-        "## Record",
-        "",
-        f"- Scout {report.scout_version}; " + ", ".join(f"{k} {v}" for k, v in report.versions.items()),
-        f"- Created {report.created_at}",
-        "- Inputs: "
-        + ", ".join(
-            f"{role} `{Path(str(entry.get('path', ''))).name}` ({str(entry.get('sha256', ''))[:12]})"
-            for role, entry in (case.get("inputs") or {}).items()
-        ),
+        f"{provider.get('name')} / {provider.get('model')}, {report.config.get('mode')}, "
+        f"{len(report.tool_calls)} calls, {len(report.views)} views ({report.usage.images_sent} sent), "
+        f"{len(report.measurements)} measurements, {report.duration_s:.0f} s, "
+        + (f"${report.usage.cost_usd:.3f}" if report.usage.cost_usd is not None else "cost unknown")
+        + f". Scout {report.scout_version}, {report.created_at}. Every view, measurement and call: report.json.",
         "",
     ]
     return "\n".join(lines)
+
+
+#: What an export may show: everything, what is wrong where, or how much is wrong.
+LEVELS = ("full", "regions", "counts")
+
+
+def export(report: Report, level: str) -> dict[str, Any]:
+    """What may be shown of an inspection at a confidentiality level, for a reader that must not identify the case.
+
+    ``full``: the report as is. ``regions``: the verdict and every observation with its kind, defect, severity, box
+    and the values of its measurements; no case name, path, image, description, transcript or prior evaluation.
+    ``counts``: the verdict and the number of observations by kind, defect and severity."""
+    if level not in LEVELS:
+        raise ValueError(f"level is one of {LEVELS}, not {level!r}")
+    if level == "full":
+        return report.to_dict()
+    verdict = report.conclusion.verdict if report.conclusion else None
+    if level == "counts":
+        counts: dict[str, dict[str, dict[str, int]]] = {}
+        for o in report.observations:
+            severities = counts.setdefault(o.kind, {}).setdefault(o.defect, {})
+            severities[o.severity] = severities.get(o.severity, 0) + 1
+        return {"level": level, "verdict": verdict, "counts": counts}
+    measurements = {m.id: m for m in report.measurements}
+    return {
+        "level": level,
+        "task": report.case.get("task"),
+        "verdict": verdict,
+        "observations": [
+            {
+                "id": o.id,
+                "kind": o.kind,
+                "defect": o.defect,
+                "severity": o.severity,
+                "confidence": o.confidence,
+                "box_mm": o.box_mm,
+                "plane": o.plane,
+                "measurements": [
+                    {
+                        "id": m.id,
+                        "reference": m.reference,
+                        "box_measured": m.box_measured,
+                        # numbers only: a statistic may carry text (a label's name), and text may name anything
+                        "values": {k: v for k, v in m.values.items() if not isinstance(v, str)},
+                    }
+                    for m in (measurements.get(mid) for mid in o.measurements)
+                    if m is not None
+                ],
+                "second_reading": (o.second_reading or {}).get("answer"),
+            }
+            for o in report.observations
+        ],
+    }
 
 
 def _overlap(a: dict[str, list[float]], b: dict[str, list[float]]) -> bool:
     return all(a["min"][i] < b["max"][i] and b["min"][i] < a["max"][i] for i in range(3))
-
-
-def match_defects(report: Report, defects: dict[str, Any]) -> dict[str, Any]:
-    """The planted defects of a synthetic case against the error observations: a defect is found when an error
-    observation's box overlaps its box (or names it, for a defect planted without a box); an error observation that
-    overlaps no planted defect is a false positive. On a clean case (no defect) every error observation is one."""
-    errors = [o for o in report.observations if o.kind != "measured_property"]
-    boxes = [p["box_mm"] for p in defects.values() if p.get("box_mm")]
-    names = {p.get("defect") for p in defects.values() if not p.get("box_mm")}
-
-    def hits(o: Observation, planted: dict[str, Any]) -> bool:
-        if planted.get("box_mm"):
-            return bool(o.box_mm) and _overlap(o.box_mm, planted["box_mm"])  # type: ignore[arg-type]
-        return o.defect == planted.get("defect")
-
-    found = [name for name, planted in defects.items() if any(hits(o, planted) for o in errors)]
-    false_positives = [
-        o.id for o in errors if not (o.box_mm and any(_overlap(o.box_mm, b) for b in boxes)) and o.defect not in names
-    ]
-    return {
-        "planted": len(defects),
-        "found": len(found),
-        "found_names": found,
-        "false_positives": len(false_positives),
-        "false_positive_ids": false_positives,
-    }
-
-
-def defects_of(report: Report) -> dict[str, Any] | None:
-    """The planted defects of a synthetic case: the ``defects.json`` beside its inputs, when there is one."""
-    for entry in (report.case.get("inputs") or {}).values():
-        path = Path(str(entry.get("path", ""))).parent / "defects.json"
-        if path.is_file():
-            return dict(json.loads(path.read_text(encoding="utf-8")))
-    return None
-
-
-def compare(reports: list[Report], defects: list[dict[str, Any] | None] | None = None) -> dict[str, Any]:
-    """Side by side: what each inspection spent and found. For a study of fixed views against active exploration,
-    and, with the planted defects of each case, of what was found and what was invented."""
-    rows = []
-    for n, report in enumerate(reports):
-        counts = report.counts()
-        planted = defects[n] if defects and n < len(defects) else None
-        matched = match_defects(report, planted) if planted is not None else {}
-        readings = [o.second_reading for o in report.observations if o.second_reading]
-        rows.append(
-            {
-                "case": report.case.get("name"),
-                "mode": report.config.get("mode"),
-                "provider": report.provider.get("name"),
-                "model": report.provider.get("model"),
-                "verdict": report.conclusion.verdict if report.conclusion else None,
-                "confidence": report.conclusion.confidence if report.conclusion else None,
-                "tool_calls": len(report.tool_calls),
-                "views": len(report.views),
-                "images_sent": report.usage.images_sent,
-                "measurements": len(report.measurements),
-                "observations": len(report.observations),
-                "confirmed": counts["confirmed_error"],
-                "suspected": counts["suspected_error"],
-                "measured": counts["measured_property"],
-                "planted": matched.get("planted"),
-                "found": matched.get("found"),
-                "false_positives": matched.get("false_positives"),
-                "not_visible": sum(r.get("answer") == "not_visible" for r in readings) if readings else None,
-                "tokens": report.usage.input_tokens + report.usage.output_tokens,
-                "cost_usd": report.usage.cost_usd,
-                "duration_s": round(report.duration_s, 1),
-                "budget_exhausted": report.budget.get("exhausted"),
-                "error": report.error,
-            }
-        )
-    return {"rows": rows}
-
-
-def compare_markdown(comparison: dict[str, Any]) -> str:
-    columns = [
-        "case",
-        "mode",
-        "model",
-        "verdict",
-        "confidence",
-        "tool_calls",
-        "views",
-        "images_sent",
-        "measurements",
-        "observations",
-        "confirmed",
-        "suspected",
-        "measured",
-        "planted",
-        "found",
-        "false_positives",
-        "not_visible",
-        "tokens",
-        "cost_usd",
-        "duration_s",
-    ]
-    lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
-    for row in comparison["rows"]:
-        lines.append("| " + " | ".join("" if row.get(c) is None else value_text(row[c]) for c in columns) + " |")
-    return "\n".join(lines)

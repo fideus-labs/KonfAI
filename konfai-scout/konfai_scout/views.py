@@ -16,12 +16,12 @@ from pathlib import Path
 
 import numpy as np
 from konfai.data.geometry import Grid, WorldBox
+from konfai.utils.ITK import field_jacobian_determinant
 from PIL import Image, ImageDraw, ImageFont
 
 from .case import InspectionCase, Volume
 from .config import ScoutConfig
 from .derived import Derived
-from .measure import jacobian_determinant
 from .planes import (
     PlaneFrame,
     axis_world_vector,
@@ -122,6 +122,24 @@ def to_unit(plane: np.ndarray, window: tuple[float, float]) -> np.ndarray:
     return np.clip((np.asarray(plane, dtype=np.float32) - low) / (high - low), 0.0, 1.0)
 
 
+#: The roles a registration's warped labels come from: given warped, or moving ones the field carries.
+WARPED_LABEL_ROLES = {"warped_labels", "moving_labels"}
+#: The band above every view that holds its header.
+HEADER_PX = 18
+#: The registration modes drawn over one image, and which.
+GRAY_REGISTRATION = {
+    **dict.fromkeys(("fixed", "field_arrows", "grid", "labels", "landmarks", "field_magnitude", "jacobian"), "fixed"),
+    "moving": "moving_on_fixed",
+    "warped": "warped",
+}
+
+
+def heat(values: np.ndarray, name: str) -> tuple[np.ndarray, float]:
+    """Values coloured from 0 to their 99th percentile, and that percentile."""
+    scale = float(max(np.percentile(values, 99), 1e-6))
+    return colormap(values / scale, name), round(scale, 3)
+
+
 def colormap(unit: np.ndarray, name: str) -> np.ndarray:
     anchors = _COLORMAPS[name]
     positions = np.linspace(0.0, 1.0, len(anchors))
@@ -129,17 +147,12 @@ def colormap(unit: np.ndarray, name: str) -> np.ndarray:
     return np.stack([np.interp(unit, positions, anchors[:, channel]) for channel in range(3)], axis=-1)
 
 
-def contours(labels: np.ndarray, only: int | None = None) -> np.ndarray:
-    """The pixels where a label meets another (or the background), 4-connected."""
-    array = np.asarray(labels)
-    if only is not None:
-        array = (array == only).astype(np.int32)
-    edge = np.zeros(array.shape, dtype=bool)
-    edge[:-1, :] |= array[:-1, :] != array[1:, :]
-    edge[1:, :] |= array[1:, :] != array[:-1, :]
-    edge[:, :-1] |= array[:, :-1] != array[:, 1:]
-    edge[:, 1:] |= array[:, 1:] != array[:, :-1]
-    return edge & (array != 0)
+def contours(mask: np.ndarray) -> np.ndarray:
+    """The pixels of a mask that touch the outside of it, 4-connected; the image's edge is not an outside."""
+    from scipy import ndimage
+
+    mask = np.asarray(mask, dtype=bool)
+    return mask & ~ndimage.binary_erosion(mask, border_value=1)
 
 
 def fill_labels(rgb: np.ndarray, labels: np.ndarray, alpha: float, only: int | None = None) -> np.ndarray:
@@ -202,11 +215,7 @@ class Renderer:
         if self.case.task == "segmentation" and "truth" not in self.case.inputs:
             available = [m for m in available if m not in ("truth", "both", "disagreement")]
         if self.case.task == "registration":
-            if (
-                "fixed_labels" not in self.case.inputs
-                and "moving_labels" not in self.case.inputs
-                and "warped_labels" not in self.case.inputs
-            ):
+            if not ({"fixed_labels"} | WARPED_LABEL_ROLES) & self.case.inputs.keys():
                 available.remove("labels")
             if "fixed_landmarks" not in self.case.inputs:
                 available.remove("landmarks")
@@ -244,7 +253,8 @@ class Renderer:
     def window(self, role: str) -> tuple[float, float]:
         if role not in self._windows:  # KonfAI's bounded passes: the volume is never held for its window
             volume = self.volume(role)
-            low, high = volume.quantile(0.01), volume.quantile(0.99)
+            # the 99.9th: a hyperintense lesion (DWI, contrast) fills well under 1 % of a volume and must not saturate
+            low, high = volume.quantile(0.01), volume.quantile(0.999)
             self._windows[role] = (low, high if high > low else low + 1.0)
         return self._windows[role]
 
@@ -256,7 +266,10 @@ class Renderer:
                 raise ViewError(
                     f"unknown window preset {window!r}; presets: {', '.join(WINDOW_PRESETS)}, or [low, high]"
                 )
-            return WINDOW_PRESETS[window]
+            # ponytail: a CT stored as HU + 1024 is told by its 1st percentile (no air below 0); a scan of HU with
+            # no value below 0 in 99% of it would be shifted too. Read the stored offset from the header if it matters.
+            offset = 1024.0 if self.window(role)[0] >= 0 else 0.0
+            return WINDOW_PRESETS[window][0] + offset, WINDOW_PRESETS[window][1] + offset
         values = [float(v) for v in np.asarray(window, dtype=float).ravel()]
         if len(values) != 2:
             raise ViewError("a window is a preset name or [low, high]")
@@ -295,7 +308,7 @@ class Renderer:
         rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop)
         self._count += 1
         view_id = f"v{self._count:03d}"  # on the image before anything else: a model cites what it reads there
-        header = self._header_text(frame, index, mode, resolved_window, extra).format(id=view_id)
+        header = self._header_text(frame, index, mode, resolved_window, extra, crop).format(id=view_id)
         image, mapping = self._display(rgb, frame, index, crop, header)
         view = self._record(view_id, frame, index, mode, resolved_window, image, mapping, extra, crop, sent)
         return self._png(image, view), view
@@ -338,7 +351,7 @@ class Renderer:
         width = max(t[0].width for t in tiles)
         height = max(t[0].height for t in tiles)
         gap = 3
-        header_h = 18
+        header_h = HEADER_PX
         sheet = Image.new(
             "RGB", (columns * width + (columns - 1) * gap, header_h + rows * height + (rows - 1) * gap), (20, 20, 20)
         )
@@ -358,7 +371,8 @@ class Renderer:
         draw = ImageDraw.Draw(sheet)
         extra = {"tiles": placed, "indices": indices}
         title = (
-            f"{{id}} {plane} montage of {len(indices)} slices | {mode} | window {self._window_text(resolved_window)}"
+            f"{{id}} {self._plane_name(frame)} montage of {len(indices)} slices | {mode} | "
+            f"window {self._window_text(resolved_window)}"
         )
         self._count += 1
         view_id = f"v{self._count:03d}"
@@ -462,12 +476,8 @@ class Renderer:
                     "red: prediction only (false positive), blue: truth only (false negative), green: both"
                 )
         elif task == "registration":
-            if mode in ("fixed", "field_arrows", "grid", "labels", "landmarks", "field_magnitude", "jacobian"):
-                rgb = gray("fixed")
-            elif mode == "moving":
-                rgb = gray("moving_on_fixed")
-            elif mode == "warped":
-                rgb = gray("warped")
+            if mode in GRAY_REGISTRATION:
+                rgb = gray(GRAY_REGISTRATION[mode])
             elif mode == "before":
                 fixed, moving = unit("fixed"), unit("moving_on_fixed")
                 rgb = np.stack([fixed, moving, fixed], axis=-1)
@@ -483,61 +493,43 @@ class Renderer:
                 )
             elif mode == "difference":
                 resolved = self.resolve_window(window, "fixed")
-                diff = np.abs(
-                    self._plane("fixed", frame, index, crop).astype(np.float32)
-                    - self._plane("warped", frame, index, crop).astype(np.float32)
+                rgb, scale = heat(
+                    np.abs(
+                        self._plane("fixed", frame, index, crop).astype(np.float32)
+                        - self._plane("warped", frame, index, crop)
+                    ),
+                    "hot",
                 )
-                scale = float(max(np.percentile(diff, 99), 1e-6))
-                rgb = colormap(diff / scale, "hot")
-                extra["scale"] = {
-                    "difference_max": round(scale, 3),
-                    "legend": "black 0 to white at the 99th percentile",
-                }
+                extra["scale"] = {"difference_max": scale, "legend": "black 0 to white at the 99th percentile"}
             else:
                 raise ViewError(f"unknown mode {mode}")
             if mode == "field_magnitude":
                 field = self._plane("field", frame, index, crop).astype(np.float32)
-                magnitude = np.linalg.norm(field, axis=0)
-                scale = float(max(np.percentile(magnitude, 99), 1e-6))
-                rgb = 0.4 * rgb + 0.6 * colormap(magnitude / scale, "viridis")
-                extra["scale"] = {
-                    "magnitude_max_mm": round(scale, 3),
-                    "legend": "dark 0 mm to yellow at the 99th percentile",
-                }
+                colours, scale = heat(np.linalg.norm(field, axis=0), "viridis")
+                rgb = 0.4 * rgb + 0.6 * colours
+                extra["scale"] = {"magnitude_max_mm": scale, "legend": "dark 0 mm to yellow at the 99th percentile"}
             elif mode == "jacobian":
                 rgb = self._jacobian_overlay(rgb, frame, index, crop, extra)
             elif mode == "labels":
-                fixed_labels = (
-                    self._plane("fixed_labels", frame, index, crop) if "fixed_labels" in self.case.inputs else None
-                )
-                try:
-                    warped_labels = self._plane("warped_labels", frame, index, crop)
-                except ViewError:
-                    warped_labels = None
-                if warped_labels is not None:
-                    rgb = fill_labels(rgb, warped_labels, 0.35, label)
-                if fixed_labels is not None:
+                if WARPED_LABEL_ROLES & self.case.inputs.keys():
+                    rgb = fill_labels(rgb, self._plane("warped_labels", frame, index, crop), 0.35, label)
+                if "fixed_labels" in self.case.inputs:
+                    fixed_labels = self._plane("fixed_labels", frame, index, crop)
                     rgb = draw_contours(rgb, fixed_labels, label, color=(1.0, 1.0, 1.0))
                 extra["legend"] = "warped moving labels filled in colour, fixed labels as white contours"
         else:  # synthesis
-            if mode == "synthetic":
-                rgb = gray("synthetic")
-            elif mode == "target":
-                rgb = gray("target")
-            elif mode == "source":
-                rgb = gray("source")
+            if mode in ("synthetic", "target", "source"):
+                rgb = gray(mode)
             elif mode == "difference":
                 resolved = self.resolve_window(window, "synthetic")
-                diff = np.abs(
-                    self._plane("synthetic", frame, index, crop).astype(np.float32)
-                    - self._plane("target", frame, index, crop).astype(np.float32)
+                rgb, scale = heat(
+                    np.abs(
+                        self._plane("synthetic", frame, index, crop).astype(np.float32)
+                        - self._plane("target", frame, index, crop)
+                    ),
+                    "hot",
                 )
-                scale = float(max(np.percentile(diff, 99), 1e-6))
-                rgb = colormap(diff / scale, "hot")
-                extra["scale"] = {
-                    "difference_max": round(scale, 3),
-                    "legend": "black 0 to white at the 99th percentile",
-                }
+                extra["scale"] = {"difference_max": scale, "legend": "black 0 to white at the 99th percentile"}
             elif mode == "checkerboard":  # one window, the target's: the comparison is of intensities
                 rgb = np.repeat(checkerboard(unit("synthetic", "target"), unit("target"))[..., None], 3, axis=-1)
                 extra["legend"] = "alternating tiles of the synthetic and the real target image"
@@ -561,7 +553,7 @@ class Renderer:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
         block = field.region(tuple(lo), tuple(hi)).astype(np.float64)  # type: ignore[arg-type]
-        determinant = jacobian_determinant(block, self.grid)
+        determinant = field_jacobian_determinant(np.asarray(block, np.float64), self.grid.world_to_index.matrix)
         plane = np.take(determinant, index - lo[frame.array_axis], axis=frame.array_axis)
         folded = plane <= 0
         unit = np.clip(np.log2(np.clip(plane, 1e-9, None)) / 2 + 0.5, 0.0, 1.0)  # det 0.25..4 over the map
@@ -584,21 +576,38 @@ class Renderer:
     def _axis_letter(self, frame: PlaneFrame) -> str:
         return "xyz"[self._world_axis(frame)]
 
-    def _position(self, frame: PlaneFrame, index: int) -> np.ndarray:
+    def _position(self, frame: PlaneFrame, index: int, crop: tuple[slice, slice] | None = None) -> np.ndarray:
+        """The world point at the centre of what is shown: the slice's, or the zoom's."""
         center = [(n - 1) / 2 for n in reversed(self.grid.size_zyx)]
         center[2 - frame.array_axis] = float(index)
+        if crop is not None:
+            center[2 - frame.rows_axis] = (crop[0].start + crop[0].stop - 1) / 2
+            center[2 - frame.cols_axis] = (crop[1].start + crop[1].stop - 1) / 2
         return self.grid.index_to_world.apply(np.array(center))
+
+    def _plane_name(self, frame: PlaneFrame) -> str:
+        """The plane, and its tilt when the grid is oblique: the world coordinate then changes across the view."""
+        normal = axis_world_vector(self.grid, frame.array_axis)
+        cosine = abs(normal[self._world_axis(frame)]) / max(float(np.linalg.norm(normal)), 1e-12)
+        tilt = float(np.degrees(np.arccos(min(cosine, 1.0))))
+        return frame.plane + (f" tilted {tilt:.0f}°" if tilt >= 1 else "")
 
     def _window_text(self, window: list[float] | None) -> str:
         return "n/a" if window is None else f"[{window[0]:.4g}, {window[1]:.4g}]"
 
     def _header_text(
-        self, frame: PlaneFrame, index: int, mode: str, window: list[float] | None, extra: dict[str, object]
+        self,
+        frame: PlaneFrame,
+        index: int,
+        mode: str,
+        window: list[float] | None,
+        extra: dict[str, object],
+        crop: tuple[slice, slice] | None,
     ) -> str:
-        position = self._position(frame, index)
+        position = self._position(frame, index, crop)
         depth = self.grid.size_zyx[frame.array_axis]
         text = (
-            f"{{id}} {frame.plane} {self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm "
+            f"{{id}} {self._plane_name(frame)} {self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm "
             f"(slice {index}/{depth - 1}) | {mode} | window {self._window_text(window)}"
         )
         scale = extra.get("scale")
@@ -654,7 +663,7 @@ class Renderer:
         u_px = u_step * (drawn_width / width1)
         v_px = v_step * (height0 / height1)
         origin_px = origin - 0.5 * u_step - 0.5 * v_step + 0.5 * u_px + 0.5 * v_px
-        header_h = 18 if header else 0
+        header_h = HEADER_PX if header else 0
         canvas = Image.new("RGB", (image.width, image.height + header_h), (20, 20, 20))
         canvas.paste(image, (0, header_h))
         draw = ImageDraw.Draw(canvas)
@@ -717,7 +726,7 @@ class Renderer:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
         box = self.grid.world_box(tuple(slice(a, b) for a, b in zip(lo, hi, strict=True)))
-        position = self._position(frame, index)
+        position = self._position(frame, index, crop)
         view = View(
             id=view_id,
             kind="slice",
@@ -775,31 +784,28 @@ class Renderer:
         height0, width0 = field.shape[1:]
         assert view.px_to_mm is not None
         u, v = np.asarray(view.px_to_mm["u"]), np.asarray(view.px_to_mm["v"])
-        scale_x, scale_y = view.size_px[0] / width0, (view.size_px[1] - 18) / height0
+        scale_x, scale_y = view.size_px[0] / width0, (view.size_px[1] - HEADER_PX) / height0
         step = max(12, int(min(view.size_px) / 18))
+        rows, columns = range(0, view.size_px[1] - HEADER_PX), range(0, view.size_px[0])
+
+        def moved(row: int, col: int) -> tuple[float, float]:
+            """Where the field takes the fixed point drawn at (col, row) under the header."""
+            vector = field[:, min(height0 - 1, int(row / scale_y)), min(width0 - 1, int(col / scale_x))]
+            return col + np.dot(vector, u) / np.dot(u, u), row + HEADER_PX + np.dot(vector, v) / np.dot(v, v)
+
         if mode == "field_arrows":
-            for row in range(step // 2, view.size_px[1] - 18, step):
-                for col in range(step // 2, view.size_px[0], step):
-                    vector = field[:, min(height0 - 1, int(row / scale_y)), min(width0 - 1, int(col / scale_x))]
-                    du, dv = np.dot(vector, u) / np.dot(u, u), np.dot(vector, v) / np.dot(v, v)
-                    x0, y0 = col, row + 18
-                    x1, y1 = x0 + du, y0 + dv
-                    draw.line((x0, y0, x1, y1), fill=(255, 255, 0), width=1)
+            for row in rows[step // 2 :: step]:
+                for col in columns[step // 2 :: step]:
+                    x1, y1 = moved(row, col)
+                    draw.line((col, row + HEADER_PX, x1, y1), fill=(255, 255, 0), width=1)
                     draw.ellipse((x1 - 1.5, y1 - 1.5, x1 + 1.5, y1 + 1.5), fill=(255, 80, 0))
             view.extra["legend"] = "arrows: the displacement of the fixed point at their tail, in the plane, to scale"
         elif mode == "grid":
-            for row in range(0, view.size_px[1] - 18, step):
-                points = []
-                for col in range(0, view.size_px[0], max(1, step // 4)):
-                    vector = field[:, min(height0 - 1, int(row / scale_y)), min(width0 - 1, int(col / scale_x))]
-                    points.append((col + np.dot(vector, u) / np.dot(u, u), row + 18 + np.dot(vector, v) / np.dot(v, v)))
-                draw.line(points, fill=(0, 255, 255), width=1)
-            for col in range(0, view.size_px[0], step):
-                points = []
-                for row in range(0, view.size_px[1] - 18, max(1, step // 4)):
-                    vector = field[:, min(height0 - 1, int(row / scale_y)), min(width0 - 1, int(col / scale_x))]
-                    points.append((col + np.dot(vector, u) / np.dot(u, u), row + 18 + np.dot(vector, v) / np.dot(v, v)))
-                draw.line(points, fill=(0, 255, 255), width=1)
+            fine = max(1, step // 4)
+            for row in rows[::step]:
+                draw.line([moved(row, col) for col in columns[::fine]], fill=(0, 255, 255), width=1)
+            for col in columns[::step]:
+                draw.line([moved(row, col) for row in rows[::fine]], fill=(0, 255, 255), width=1)
             view.extra["legend"] = (
                 "a regular grid of the fixed image pushed by the field: crossings and folds show as crushed cells"
             )

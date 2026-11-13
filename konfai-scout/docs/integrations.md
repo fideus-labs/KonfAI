@@ -22,6 +22,9 @@ konfai-studio ── drives konfai-mcp ── Scout panel: launch, follow the jo
   them as a one-case dataset and calls `konfai.evaluate` with KonfAI's criteria by name. The criteria per kind are
   in `DEFAULT_CRITERIA` and can be replaced through `ScoutConfig.criteria` (the metric vocabulary of another KonfAI
   branch, a tolerance, a dynamic range).
+- `DEFAULT_THRESHOLDS` says when a measured value is an error (Dice below 0.8, TRE above 3 mm, a folded field...);
+  `ScoutConfig.thresholds` sets one for a criterion whose scale is the data's (MAE in HU). A confirmed error rests
+  on such a value, and Scout measures every flagged box itself the same way.
 - A registration is measured through its field: the moving labels and image are warped once by SimpleITK with ITK's
   reading of the field (`x` matches `x + u(x)`), the fixed landmarks are carried the same way, and KonfAI scores
   Dice, MAE and TRE on the crop; the field's own statistics (Jacobian folding, minimum and log-std, bending energy,
@@ -60,3 +63,11 @@ flags on `fidopt tune`. After the rows are scored, while the method's outputs ar
 `results/<machine>/<method>/<dataset>.scout/<case>/` with a `summary.json`. The rows and the published scores do
 not change; the reports are a complementary evaluation. Images of a test case leave the machine only under
 `--scout-allow-cloud`, and `fidopt publish` never sends a report.
+What an agent may read of a case it must not identify is an export, never the report itself:
+
+```bash
+konfai-scout export results/<machine>/<method>/<dataset>.scout/<case> --level counts --out <case>.counts.json
+```
+
+`--level regions` adds the observations' boxes, defects, severities and measured values; `counts` keeps the verdict
+and the counts by kind, defect and severity only (`docs/report.md`).
