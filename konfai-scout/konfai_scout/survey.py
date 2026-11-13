@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where to look: a deterministic survey that hands the model leads, each a region and the reason it stands out.
 A lead is not a finding; the model looks at it and judges. Segmentation: label boundaries that run where the image
-has no edge, components unlike their label's main one, and with a truth the clusters of disagreement. Registration:
-folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters of error
-against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole only when
-it is small, as for the label summary. The figures in a reason rank the lead: they are not measurements."""
+has no edge, components unlike their label's main one, and with a reference the clusters of disagreement.
+Registration: folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters
+of error against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole
+only when it is small, as for the label summary. The figures in a reason rank the lead: they are not measurements."""
 
 from __future__ import annotations
 
@@ -16,12 +16,17 @@ import numpy as np
 from konfai.utils.ITK import field_jacobian_determinant
 from scipy import ndimage
 
+from .case import Volume
 from .planes import box_to_dict
 from .views import Renderer
 
 MAX_LEADS = 8
+LARGEST = 512**3  # voxels of a region read whole (a label's window, a map compared with its truth)
 BLOCK = 64
 CELL_MM = 16.0
+SHIFT_MM = 32.0  # the side of a cell in which a displacement is estimated: room for an edge and where it went
+REACH_MM = 8.0  # the longest displacement looked for
+GAIN = 0.02  # what a displaced overlay must gain in correlation over the overlay in place
 WEAK = 0.55  # a boundary voxel is edgeless below this fraction of the label's median boundary edge
 _FULL = np.ones((3, 3, 3), dtype=bool)
 
@@ -57,7 +62,8 @@ def leads_text(leads: list[Lead], active: bool) -> str:
     if not leads:
         return "Leads: the survey found nothing that stands out."
     lines = [
-        "Leads, from a deterministic survey of the case: where the result is most likely wrong, not findings."
+        "Leads, from a deterministic survey of the case: where the result, or its reference, is most likely wrong; "
+        "not findings."
         + (" Look at each through a slice of its box (a view zoomed on it) before concluding." if active else "")
     ]
     lines += [f"- {lead.id} {lead.kind}, box {json.dumps(lead.box_mm)}: {lead.reason}" for lead in leads]
@@ -89,6 +95,28 @@ def _edges(image: np.ndarray, spacing_zyx: np.ndarray) -> np.ndarray:
     return np.sqrt(sum(g**2 for g in np.gradient(smooth, *spacing_zyx)))
 
 
+def _shift(a: np.ndarray, b: np.ndarray, spacing_zyx: np.ndarray) -> tuple[float, float]:
+    """How far the edges of ``b`` lie from those of ``a``, in millimetres, and how well they overlay once moved back
+    (a correlation): the peak of the cross-correlation of the two edge maps within ``REACH_MM``. Edges, not
+    intensities, so that two modalities compare; a low correlation says the two do not show the same edges. A peak
+    that beats the correlation in place by less than ``GAIN`` is noise: the edges are where they were."""
+    ea, eb = _edges(a, spacing_zyx), _edges(b, spacing_zyx)
+    ea, eb = ea - ea.mean(), eb - eb.mean()
+    norm = float(np.sqrt((ea**2).sum() * (eb**2).sum()))
+    if norm == 0:
+        return 0.0, 0.0
+    axes = (0, 1, 2)
+    cross = np.fft.irfftn(np.fft.rfftn(ea, axes=axes).conj() * np.fft.rfftn(eb, axes=axes), ea.shape, axes)
+    reach = [min(int(REACH_MM / s), n // 2 - 1) for s, n in zip(spacing_zyx, ea.shape, strict=True)]
+    near = np.fft.fftshift(cross)[
+        tuple(slice(n // 2 - k, n // 2 + k + 1) for n, k in zip(ea.shape, reach, strict=True))
+    ]
+    at = np.asarray(np.unravel_index(int(np.argmax(near)), near.shape)) - reach
+    if near.max() - near[tuple(reach)] < GAIN * norm:
+        return 0.0, float(near[tuple(reach)] / norm)
+    return float(np.linalg.norm(at * spacing_zyx)), float(near.max() / norm)
+
+
 def _clusters(mask: np.ndarray, minimum: int) -> list[tuple[int, tuple[slice, ...]]]:
     """Connected clusters of at least ``minimum`` voxels, largest first, with their array windows."""
     labelled, count = ndimage.label(mask, structure=_FULL)
@@ -111,33 +139,50 @@ def _offset(window: tuple[slice, ...], lo: tuple[int, ...]) -> tuple[slice, ...]
 # ---------------------------------------------------------------------------------------------- segmentation
 
 
+def _extents(volume: Volume, size: tuple[int, int, int]) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Each label's extent (``lo``, ``hi`` in array order), the map read by slabs of up to ``BLOCK`` planes."""
+    planes = min(BLOCK, LARGEST // (size[1] * size[2]))
+    if planes == 0:
+        raise SurveySkipped("a plane of the label map has more than 512^3 voxels")
+    lo: dict[int, np.ndarray] = {}
+    hi: dict[int, np.ndarray] = {}
+    for z in range(0, size[0], planes):
+        slab = volume.region((z, 0, 0), (z + planes, size[1], size[2]))[0].astype(np.int32)
+        for label, extent in enumerate(ndimage.find_objects(slab), start=1):
+            if extent is not None:
+                a, b = np.array([[s.start + o, s.stop + o] for s, o in zip(extent, (z, 0, 0), strict=True)]).T
+                lo[label], hi[label] = np.minimum(lo.get(label, a), a), np.maximum(hi.get(label, b), b)
+    return {label: (lo[label], hi[label]) for label in sorted(lo)}
+
+
 def _segmentation(r: Renderer) -> list[Found]:
+    """Each label read in its own window (the map is never read whole, but to compare it with a truth)."""
     case, grid = r.case, r.grid
-    if max(grid.size_zyx) > 512:  # the same limit as the label summary: a big map is not read whole
-        raise SurveySkipped("the label map is larger than 512 voxels along an axis")
     size = _zyx(grid.size_zyx)
-    prediction = r.volume("prediction").region((0, 0, 0), size)[0]
-    truth = r.volume("truth").region((0, 0, 0), size)[0] if "truth" in case.inputs else None
+    truth = None
+    if "truth" in case.inputs and np.prod(size) <= LARGEST:  # a larger map keeps its leads label by label
+        truth = r.volume("truth").region((0, 0, 0), size)[0]
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
     margin = np.ceil(10.0 / spacing).astype(int)
+    found: list[Found] = []
     components: list[tuple[float, Found]] = []
     edgeless: list[tuple[int, Found]] = []
-    for label, extent in enumerate(ndimage.find_objects(prediction.astype(np.int32)), start=1):
-        if extent is None:
-            continue
+    for label, (start, stop) in _extents(r.volume("prediction"), size).items():
         name = case.labels.get(label, f"label {label}") if case.labels else f"label {label}"
-        lo = _zyx(np.maximum([s.start for s in extent] - margin, 0))
-        hi = _zyx(np.minimum([s.stop for s in extent] + margin, grid.size_zyx))
-        window = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+        lo, hi = _zyx(np.maximum(start - margin, 0)), _zyx(np.minimum(stop + margin, size))
+        if np.prod(np.subtract(hi, lo)) > LARGEST:
+            raise SurveySkipped(f"{name} spans more than 512^3 voxels")
+        labels = r.volume("prediction").region(lo, hi)[0]
         image = r.volume(case.image_role).region(lo, hi)[0].astype(np.float32)
-        mask, other = prediction[window] == label, (prediction[window] != 0) & (prediction[window] != label)
+        mask, other = labels == label, (labels != 0) & (labels != label)
         components += [
             (score, (k, _offset(w, lo), why)) for score, (k, w, why) in _components(image, mask, other, name)
         ]
         edgeless += [(size, (k, _offset(w, lo), why)) for size, (k, w, why) in _edgeless(image, mask, spacing, name)]
-    found = [f for _, f in sorted(components, key=lambda c: -c[0])[:3]]
+    found += [f for _, f in sorted(components, key=lambda c: -c[0])[:3]]
     found += [f for _, f in sorted(edgeless, key=lambda c: -c[0])[:3]]
     if truth is not None:
+        prediction = r.volume("prediction").region((0, 0, 0), size)[0]
         found += _disagreement(prediction, truth, case.labels or {})[: MAX_LEADS - len(found)]
     return found
 
@@ -227,11 +272,11 @@ def _disagreement(prediction: np.ndarray, truth: np.ndarray, names: dict[int, st
         name = names.get(label, f"label {label}")
         reference = int((truth == label).sum())
         for kind, mask, what in (
-            ("false_positive", (prediction == label) & (truth != label), "the prediction adds"),
-            ("false_negative", (truth == label) & (prediction != label), "the prediction misses"),
+            ("result_only", (prediction == label) & (truth != label), "in the result and not in the reference"),
+            ("reference_only", (truth == label) & (prediction != label), "in the reference and not in the result"),
         ):
             for size, window in _clusters(mask, max(10, int(0.01 * reference)))[:3]:
-                out.append((size, (kind, window, f"{size} voxels of {name} {what} against the truth")))
+                out.append((size, (kind, window, f"{size} voxels of {name} {what}: one of the two is wrong there")))
     return [f for _, f in sorted(out, key=lambda c: -c[0])]
 
 
@@ -353,7 +398,7 @@ def _synthesis(r: Renderer) -> list[Found]:
         hot[window] = ((np.abs(e) > threshold) & (_edges(t, spacing) < strong) & inside)[inner]
         signed[window] = e[inner]
     hot = ndimage.binary_opening(hot, structure=_FULL)  # a seam one voxel thick is not a cluster
-    out = []
+    out = _displacements(r, spacing, size)
     for count, window in _clusters(hot, 30)[:5]:
         mean = float(signed[window][hot[window]].astype(np.float32).mean())
         out.append(
@@ -362,6 +407,61 @@ def _synthesis(r: Renderer) -> list[Found]:
                 window,
                 f"{count} voxels where the synthetic is {'brighter' if mean > 0 else 'darker'} than the target by "
                 f"{abs(mean):.3g} on average (smoothed inside the mask), away from the target's strongest edges",
+            )
+        )
+    return out
+
+
+def _displacements(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) -> list[Found]:
+    """Cells of about 32 mm where the synthetic image and the target, two CTs, lie apart: an edge moved in one of
+    them. The target is another acquisition registered to the source and may be the one that is off; the source
+    says which, where its edges overlay a CT's well enough to tell."""
+    synthetic, target, source = r.volume("synthetic"), r.volume("target"), r.volume("source")
+    mask = r.volume("mask") if "mask" in r.case.inputs else None
+
+    def made(lo: tuple[int, ...], hi: tuple[int, ...]) -> np.ndarray:
+        """The synthetic image, the target's values outside the mask: it need not be anything there, so no edge."""
+        image = synthetic.region(lo, hi)[0]
+        return image if mask is None else np.where(mask.region(lo, hi)[0] > 0, image, target.region(lo, hi)[0])
+
+    cell = tuple(int(min(n, max(8, round(SHIFT_MM / s)))) for s, n in zip(spacing, size, strict=True))
+    apart = np.zeros(tuple(-(-n // c) for n, c in zip(size, cell, strict=True)), dtype=np.float32)
+    for index in np.ndindex(*apart.shape):
+        lo = tuple(i * c for i, c in zip(index, cell, strict=True))
+        hi = tuple(min(a + c, n) for a, c, n in zip(lo, cell, size, strict=True))
+        if min(b - a for a, b in zip(lo, hi, strict=True)) < 4 or (
+            mask is not None and (mask.region(lo, hi)[0] > 0).mean() < 0.5
+        ):
+            continue
+        mm, overlay = _shift(target.region(lo, hi)[0], made(lo, hi), spacing)
+        if mm > 0 and overlay >= 0.7:  # the same edges, elsewhere: a blur or a change of content overlays less
+            apart[index] = mm
+    out = []
+    for count, window in _clusters(apart > 0, 1)[:3]:
+        region = tuple(slice(w.start * c, min(w.stop * c, n)) for w, c, n in zip(window, cell, size, strict=True))
+        worst = np.asarray(np.unravel_index(int(np.argmax(apart[window])), apart[window].shape))
+        lo = tuple(
+            int((w.start + k) * c) for w, k, c in zip(window, worst, cell, strict=True)
+        )  # the cell furthest apart
+        hi = tuple(min(a + c, n) for a, c, n in zip(lo, cell, size, strict=True))
+        seen = source.region(lo, hi)[0]
+        moved, overlay = _shift(seen, made(lo, hi), spacing)
+        off, fit = _shift(seen, target.region(lo, hi)[0], spacing)
+        if min(overlay, fit) < 0.5:
+            which = "the source's edges are too unlike a CT's there to say which of the two moved"
+        elif abs(moved - off) < 0.5:  # the same place, to less than a voxel
+            which = "the source's edges do not say which of the two moved"
+        else:
+            which = (
+                f"from the source's edges the synthetic lies {moved:.1f} mm and the target {off:.1f} mm, which "
+                f"points at the {'synthetic' if moved > off else 'target'}"
+            )
+        out.append(
+            (
+                "displacement",
+                region,
+                f"{count} cell(s) of about {SHIFT_MM:.0f} mm where the edges of the synthetic and of the target lie "
+                f"{float(apart[window].max()):.1f} mm apart; {which}",
             )
         )
     return out

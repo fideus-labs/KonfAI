@@ -19,6 +19,14 @@ def toolbox(fixtures, key, tmp_path) -> Toolbox:
     return Toolbox(case, config, renderer, RegionEvaluator(case, config, tmp_path / "work", renderer.derived))
 
 
+def unsure_reader():
+    """A blind reader that cannot tell, for a test whose scripted client plays the inspecting model only."""
+    from konfai_scout.providers.base import Turn, Usage
+    from konfai_scout.providers.mock import ScriptedProvider
+
+    return ScriptedProvider([Turn(text="UNSURE\nNothing decides.", tool_calls=[], stop="end_turn", usage=Usage(0, 0))])
+
+
 def run(box: Toolbox, name: str, **arguments) -> dict:
     result = box.call(ToolCall(id=f"c{len(box.calls)}", name=name, arguments=arguments))
     return {"error": result.text} if result.is_error else json.loads(result.text)
@@ -276,3 +284,36 @@ def test_scouts_check_of_a_box_never_costs_the_note(fixtures, tmp_path):
     note = {"kind": "suspected_error", "defect": "leak", "severity": "minor", "confidence": 0.5, "description": "x"}
     observation = run(box, "note", **note, box_mm=view["box_mm"], plane="axial", views=[view["id"]], measurements=[])
     assert "Scout's check of the box: RuntimeError: the evaluation crashed" in observation["observation"]["notes"]
+
+
+def test_an_error_of_the_reference_is_noted_and_never_held_against_the_result(fixtures, tmp_path):
+    error = {
+        "defect": "reference_error",
+        "severity": "major",
+        "confidence": 0.9,
+        "description": "the truth stops short",
+        "box_mm": {"center": [4, 34, 29], "size": 8},
+    }
+    blind = toolbox(fixtures, "segmentation_no_truth", tmp_path / "blind")
+    view = run(blind, "view", plane="axial", mode="prediction")["view"]["id"]
+    assert "given with its reference" in run(blind, "note", kind="suspected_error", views=[view], **error)["error"]
+    box = toolbox(fixtures, "segmentation_clean", tmp_path / "ref")
+    view = run(box, "view", plane="axial", mode="both")["view"]["id"]
+    assert "given with its reference" in run(box, "note", kind="confirmed_error", views=[view], **error)["error"]
+    assert "observation" in run(box, "note", kind="suspected_error", views=[view], **error)
+    assert box.serious() == []
+    verdict = run(
+        box, "conclude", verdict="acceptable", summary="the reference is short, the result holds", confidence=0.8
+    )
+    assert verdict["conclusion"]["verdict"] == "acceptable"
+
+
+def test_the_measuring_tools_can_be_taken_away(fixtures, tmp_path):
+    box = toolbox(fixtures, "segmentation", tmp_path)
+    assert {"measure", "region_stats"} <= {tool.name for tool in box.specs(True)}
+    box.config = ScoutConfig(max_px=200, measure=False)
+    assert {tool.name for tool in box.specs(True)} == {"view", "montage", "note", "conclude"}
+    view = run(box, "view", plane="axial", mode="both")["view"]["id"]
+    note = {"defect": "spurious_structure", "severity": "minor", "confidence": 0.5, "description": "a blob"}
+    run(box, "note", kind="suspected_error", views=[view], box_mm={"center": [4, 34, 29], "size": 8}, **note)
+    assert len(box.observations) == 1 and box.measurements == []  # Scout's own check of the box is a measure too

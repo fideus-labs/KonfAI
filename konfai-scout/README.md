@@ -99,11 +99,11 @@ for o in report.observations:
 | `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
 | `conclude` | the verdict |
 
-Modes: segmentation `image`, `prediction`, `truth`, `both`, `disagreement`; registration `fixed`, `moving`, `warped`,
+Modes: segmentation `image`, `prediction`, `truth`, `both`, `contours`, `disagreement`; registration `fixed`, `moving`, `warped`,
 `before`, `checkerboard`, `overlay`, `difference`, `field_magnitude`, `field_arrows`, `grid`, `jacobian`, `labels`,
-`landmarks`; synthesis `synthetic`, `target`, `source`, `difference`, `side_by_side`, `checkerboard`. A view's window
-is the image's own 1st to 99.9th percentile unless the model asks for `[low, high]` or a CT preset (in HU, shifted by
-1024 on a CT stored as HU + 1024).
+`landmarks`; synthesis `synthetic`, `target`, `source`, `source_checkerboard`, `difference`, `side_by_side`,
+`checkerboard`. A view's window is the image's own 1st to 99.9th percentile unless the model asks for `[low, high]` or
+a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
 
 ## Budget, privacy, cost
 

@@ -9,8 +9,10 @@ MCP image content of tool results. The CLI keeps the session, images included, u
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import threading
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from .base import (
@@ -100,6 +102,9 @@ class ClaudeCodeProvider(ToolDriver):
             allowed_tools=[f"mcp__{SERVER}__{spec.name}" for spec in self.tools],
             permission_mode="dontAsk",  # anything not listed above is denied
             setting_sources=[],  # no CLAUDE.md, hooks or project settings of the directory Scout runs from
+            # the CLI tells the model its working directory and attaches that project's memory whatever the
+            # settings: a directory of Scout's own, so that the caller's path and notes stay out of the inspection
+            cwd=self._neutral(),
             model=self.model,
             effort=self.effort,  # type: ignore[arg-type]
             max_turns=self.max_turns,
@@ -108,6 +113,12 @@ class ClaudeCodeProvider(ToolDriver):
             # the SDK's default 1 MB message buffer
             max_buffer_size=64 * 1024 * 1024,
         )
+
+    @staticmethod
+    def _neutral() -> Path:
+        path = Path(tempfile.gettempdir()) / "konfai-scout-claude-code"
+        path.mkdir(exist_ok=True)
+        return path
 
     async def _stream(self, content: list[dict[str, Any]], options: Any) -> AsyncIterator[Any]:
         from claude_agent_sdk import query

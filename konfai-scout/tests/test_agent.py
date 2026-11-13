@@ -222,14 +222,16 @@ def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
     config = ScoutConfig(provider="mock", max_px=200, second_reading=True)
     report = inspect(case, config, tmp_path / "blind", provider=HeuristicProvider(), reader=reader)
     errors = [o for o in report.observations if o.kind != "measured_property"]
-    assert report.error is None and errors and len(readers) == len(errors)
+    blind = [lead for lead in report.leads if "blind reading" in lead["reason"]]  # one session per disagreement too
+    assert report.error is None and errors and blind and len(readers) == len(errors) + len(blind)
+    assert all("could not tell" in lead["reason"] for lead in blind)  # this reader's answer names no contour
     for o in errors:
         assert o.second_reading["answer"] == "not_visible" and o.second_reading["text"].startswith("In v005")
         assert o.second_reading["views"] and all(
             any(v.id == i and v.sent for v in report.views) for i in o.second_reading["views"]
         )
     assert all(o.second_reading is None for o in report.observations if o.kind == "measured_property")
-    system, user = readers[0].messages[0], readers[0].messages[1]
+    system, user = readers[-1].messages[0], readers[-1].messages[1]  # the last session: a second reading
     assert system["role"] == "system" and "second reader" in system["content"] and "VISIBLE" in system["content"]
     assert user["images"] == 3 and user["content"].startswith("Claim: ") and "Views attached" in user["content"]
     assert "heuristic" not in user["content"] and "measure" not in user["content"].lower()
@@ -256,3 +258,24 @@ def test_a_clean_case_is_a_negative_control(tmp_path):
     assert report.conclusion is not None and report.conclusion.verdict == "acceptable"
     assert registration_case(tmp_path / "reg", clean=True)[1] == {}
     assert synthesis_case(tmp_path / "syn", clean=True)[1] == {}
+
+
+def test_a_disagreement_with_the_reference_is_read_blind_before_the_model_looks(fixtures, tmp_path):
+    """The reader sees contours A and B and is not told which is the reference: its answer joins the lead, and its
+    views are not the model's look at the lead."""
+    case, _ = fixtures["segmentation"]
+
+    def reader():
+        return ScriptedProvider(
+            [Turn(text="A\nA follows the edge.", tool_calls=[], stop="end_turn", usage=Usage(3, 2))]
+        )
+
+    report = inspect(
+        case, ScoutConfig(provider="mock", max_px=200), tmp_path, provider=HeuristicProvider(), reader=reader
+    )
+    blind = [lead for lead in report.leads if lead["kind"] in ("result_only", "reference_only")]
+    assert blind and all("blind reading" in lead["reason"] for lead in blind)
+    judged = {lead["reason"].split("judged the ")[1].split("'s")[0] for lead in blind}
+    assert judged <= {"result", "reference"} and judged  # A is the result or the reference, by the lead's draw
+    contours = [v for v in report.views if v.mode == "contours"]
+    assert len(contours) == len(blind) and not any(v.sent for v in contours)

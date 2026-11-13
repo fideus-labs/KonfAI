@@ -26,6 +26,7 @@ from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import (
     DEFECTS,
     KINDS,
+    REFERENCE_ERROR,
     SEVERITIES,
     VERDICTS,
     Conclusion,
@@ -123,7 +124,7 @@ class Toolbox:
                     ),
                 ),
             ]
-        if not final:
+        if not final and self.config.measure:
             tools += [
                 ToolSpec(
                     "measure",
@@ -351,6 +352,11 @@ class Toolbox:
                 f"say it in {MAX_WORDS['note']} words or fewer (this is {len(description.split())}): what, where, "
                 "and which view or measurement shows it"
             )
+        if defect == REFERENCE_ERROR and (kind != "suspected_error" or not self.case.truth_available):
+            raise ValueError(
+                "a reference_error is a suspected_error of a case given with its reference: the result follows the "
+                "image where the reference does not, and no measurement against that reference can confirm it"
+            )
         if kind == "measured_property" and defect != "other":
             raise ValueError(
                 f"a measured_property is a number, not a defect: a {defect} is a suspected_error or a "
@@ -428,7 +434,7 @@ class Toolbox:
             notes.append("measurement(s) taken outside this box, cited as context: " + ", ".join(outside))
         observation_id = f"o{len(self.observations) + 1:03d}"
         support = _support(inside, self.thresholds)
-        if kind != "measured_property" and box is not None:
+        if kind != "measured_property" and box is not None and self.config.measure:
             # Scout's own check of the box: every criterion this case allows, recorded on the observation
             try:
                 check = self.evaluator.measure(box, None, measurement_id=f"m{len(self.measurements) + 1:03d}")
@@ -518,17 +524,21 @@ class Toolbox:
         return {"conclusion": {"verdict": verdict, "note": reason}, "summary": record.summary}, []
 
     def serious(self) -> list[str]:
-        """The errors that make the result defective: major or critical, noted at confidence 0.5 or more."""
+        """The errors that make the result defective: major or critical, noted at confidence 0.5 or more; an error of
+        the reference is not one of the result."""
         return [
             o.id
             for o in self.observations
-            if o.kind != "measured_property" and o.severity in ("major", "critical") and o.confidence >= 0.5
+            if o.kind != "measured_property"
+            and o.defect != REFERENCE_ERROR
+            and o.severity in ("major", "critical")
+            and o.confidence >= 0.5
         ]
 
     def lead_views(self, lead: Lead) -> list[str]:
-        """The slice views (not montage tiles) that show some of a lead's box."""
+        """The slice views (not montage tiles) the model was sent that show some of a lead's box."""
         box = box_from_dict(lead.box_mm)
-        return [v.id for v in self.renderer.views if v.kind == "slice" and _shows(v, box, self.case.grid)]
+        return [v.id for v in self.renderer.views if v.kind == "slice" and v.sent and _shows(v, box, self.case.grid)]
 
 
 def _confidence(value: float) -> float:
