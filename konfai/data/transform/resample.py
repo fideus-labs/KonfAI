@@ -18,6 +18,7 @@
 """Resampling onto a target grid: reference grids, stored maps, displacement fields, the SimpleITK host path."""
 
 import functools
+import itertools
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
@@ -170,8 +171,9 @@ class _RuleGrid(_DerivedGrid):
     - ``zoom`` (``scipy.ndimage.zoom`` with its corners aligned): ``round(n * s / s')`` voxels, the first and
       the last voxel centers where the case's are. The header then records voxel 0 where it was and the spacing
       ``s / (s / s')``, so a grid placed after it counts from that spacing;
-    - ``centers``: ``round((n - 1) s / s' + 1)`` voxels, voxel 0's center where it was, the spacing ``s'``
-      exactly.
+    - ``centers``: ``round((n - 1) s / s' + 1)`` voxels, the spacing ``s'`` exactly, voxel 0's center where it was
+      when the map between the two grids is a scaling to 1e-8 of a voxel; otherwise (a direction off the axes, whose
+      columns a float32 header leaves a little skewed) index ``n / 2`` of the case on index ``m / 2`` of the grid.
     """
 
     def __init__(self, spacing: list[float], rule: str) -> None:
@@ -208,7 +210,8 @@ class _RuleGrid(_DerivedGrid):
         if self.rule == "faces":
             return source.resampled(size_zyx=size, align="extent")
         if self.rule == "centers":
-            return Grid(size, source.origin_xyz, self._wanted(source, name), source.direction_xyz)
+            wanted = self._wanted(source, name)
+            return Grid(size, self._centers_origin(source, size, wanted), wanted, source.direction_xyz)
         n = np.array(source.size_zyx[::-1], dtype=np.float64)
         m = np.array(size[::-1], dtype=np.float64)
         if np.any((n == 1) & (m > 1)):
@@ -220,6 +223,24 @@ class _RuleGrid(_DerivedGrid):
             )
         spacing = np.where(m > 1, source.spacing_xyz * (n - 1) / np.maximum(m - 1, 1), source.spacing_xyz)
         return Grid(size, source.origin_xyz, spacing, source.direction_xyz)
+
+    @staticmethod
+    def _centers_origin(source: Grid, size: tuple[int, ...], wanted: np.ndarray) -> np.ndarray:
+        """Voxel 0 of the centers grid. The case's matrix is a rotation times ``U``, the upper triangular factor of its
+        Gram matrix, so a case index ``i`` lies at ``U i / s'`` on a grid of that rotation. A corner of the case that
+        is the least along every axis of that grid, to 1e-8, keeps its place; otherwise the two grids are centred,
+        index ``n / 2`` of the case on index ``m / 2`` of the grid, along the case's direction, which the grid keeps
+        (that rotation to the skew of its columns, 1e-9 for a float32 header)."""
+        matrix = source.direction_xyz @ np.diag(source.spacing_xyz)
+        upper = np.linalg.cholesky(matrix.T @ matrix).T
+        n = np.array(source.size_zyx[::-1], dtype=np.float64)
+        corners = np.array(list(itertools.product(*[(0.0, extent - 1.0) for extent in n]))).T
+        reach = upper @ corners / wanted[:, None]
+        for i in range(corners.shape[1]):
+            if np.all(np.abs(np.min(reach - reach[:, i : i + 1], axis=1)) <= 1e-8):
+                return source.origin_xyz + matrix @ corners[:, i]
+        m = np.array(size[::-1], dtype=np.float64)
+        return source.origin_xyz + source.direction_xyz @ (source.spacing_xyz * n / 2.0 - wanted * m / 2.0)
 
     def header(self, source: Grid, name: str) -> Grid:
         if self.rule != "zoom":

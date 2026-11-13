@@ -25,7 +25,9 @@ import numpy as np
 import pytest
 import torch
 from konfai.data import spline
+from konfai.data.geometry import Grid
 from konfai.data.transform import Canonical, LocalityKind, Resample
+from konfai.data.transform.resample import _RuleGrid
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 from oracle_support import assert_same_as_scipy, geometry
@@ -177,6 +179,51 @@ def test_the_centers_grid_counts_round_n_minus_one_s_over_s_prime_plus_one() -> 
     attribute = Attribute(geometry([3.0, -2.0, 7.0], spacing, None))
     shape = stage.transform_shape("Volume", "case", [16, 40, 33], attribute)
     assert shape == [int(np.round((n - 1) * s / 1.5 + 1.0)) for n, s in zip([16, 40, 33], spacing[::-1], strict=True)]
+
+
+_TILT = np.deg2rad(12.5)
+#: Directions (columns): the axes and a tilt about x, which keep voxel 0, and VerSe 715's, which centres the grids.
+_DIRECTIONS = {
+    "axes": np.eye(3),
+    "tilted": np.array([[1.0, 0.0, 0.0], [0.0, np.cos(_TILT), -np.sin(_TILT)], [0.0, np.sin(_TILT), np.cos(_TILT)]]),
+    "verse": np.array(
+        [
+            [0.9987560953641755, -0.010064606841436, 0.04883610702867956],
+            [-0.01293068385654846, -0.9981900794403377, 0.05873127933589366],
+            [-0.04815661312746052, 0.05928970396299656, 0.9970785683575054],
+        ]
+    ),
+}
+
+
+@pytest.mark.parametrize("direction", list(_DIRECTIONS))
+@pytest.mark.parametrize("spacing", [1.5, 3.0])
+def test_the_centers_grid_sits_where_monais_spacing_puts_it(direction: str, spacing: float) -> None:
+    """MONAI's ``Spacing`` keeps voxel 0 where the map between the two grids is a scaling, and centres the grids where
+    a direction off the axes leaves the columns a little skewed (VerSe 715's): the count and voxel 0 of
+    ``grid: centers`` are its own, either way."""
+    utils = pytest.importorskip("monai.data.utils")
+    matrix = _DIRECTIONS[direction] @ np.diag([0.79, 0.85, 2.5])
+    origin, size_xyz = np.array([3.0, -2.0, 7.0]), [33, 40, 16]
+    affine = np.eye(4)
+    affine[:3, :3], affine[:3, 3] = matrix, origin
+    shape, offset = utils.compute_shape_offset(size_xyz, affine, utils.zoom_affine(affine, [spacing] * 3, False))
+    norms = np.linalg.norm(matrix, axis=0)
+    case = Grid(tuple(size_xyz[::-1]), origin, norms, matrix / norms)
+    grid = _RuleGrid([spacing] * 3, "centers").of(case, "case")
+    assert list(grid.size_zyx[::-1]) == shape.tolist()
+    np.testing.assert_allclose(grid.origin_xyz, offset, rtol=0, atol=1e-6)  # MONAI's axes are the rotation
+    assert np.array_equal(grid.origin_xyz, origin) == (direction != "verse")  # both branches are met
+
+
+def test_the_centers_grid_of_a_skewed_case_on_its_own_spacing_is_the_case() -> None:
+    """A direction whose columns are skewed fails the corner test; centred along that direction, the grid of the
+    case's own spacing is the case's own grid."""
+    direction = np.array([[1.0, -0.6, 0.0], [0.0, 0.8, 0.0], [0.0, 0.0, 1.0]])
+    case = Grid((10, 10, 10), np.array([3.0, -2.0, 7.0]), np.ones(3), direction)
+    grid = _RuleGrid([1.0, 1.0, 1.0], "centers").of(case, "case")
+    assert grid.size_zyx == case.size_zyx
+    np.testing.assert_allclose(grid.origin_xyz, case.origin_xyz, rtol=0, atol=1e-12)
 
 
 def test_nearest_even_picks_as_grid_sample() -> None:
