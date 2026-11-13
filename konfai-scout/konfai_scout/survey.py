@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where to look: a deterministic survey that hands the model leads, each a region and the reason it stands out.
 A lead is not a finding; the model looks at it and judges. Segmentation: label boundaries that run where the image
-has no edge, components unlike their label's main one, and with a reference the clusters of disagreement.
+has no edge, components unlike their label's main one, cavities a label encloses (its shape alone, no anatomy),
+and with a reference the clusters of disagreement. Each kind gives its best lead in turn.
 Registration: folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters
 of error against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole
 only when it is small, as for the label summary. The figures in a reason rank the lead: they are not measurements."""
@@ -164,9 +165,7 @@ def _segmentation(r: Renderer) -> list[Found]:
         truth = r.volume("truth").region((0, 0, 0), size)[0]
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
     margin = np.ceil(10.0 / spacing).astype(int)
-    found: list[Found] = []
-    components: list[tuple[float, Found]] = []
-    edgeless: list[tuple[int, Found]] = []
+    kinds: dict[str, list[tuple[float, Found]]] = {"component": [], "cavity": [], "edgeless": []}
     for label, (start, stop) in _extents(r.volume("prediction"), size).items():
         name = case.labels.get(label, f"label {label}") if case.labels else f"label {label}"
         lo, hi = _zyx(np.maximum(start - margin, 0)), _zyx(np.minimum(stop + margin, size))
@@ -175,16 +174,52 @@ def _segmentation(r: Renderer) -> list[Found]:
         labels = r.volume("prediction").region(lo, hi)[0]
         image = r.volume(case.image_role).region(lo, hi)[0].astype(np.float32)
         mask, other = labels == label, (labels != 0) & (labels != label)
-        components += [
-            (score, (k, _offset(w, lo), why)) for score, (k, w, why) in _components(image, mask, other, name)
-        ]
-        edgeless += [(size, (k, _offset(w, lo), why)) for size, (k, w, why) in _edgeless(image, mask, spacing, name)]
-    found += [f for _, f in sorted(components, key=lambda c: -c[0])[:3]]
-    found += [f for _, f in sorted(edgeless, key=lambda c: -c[0])[:3]]
-    if truth is not None:
-        prediction = r.volume("prediction").region((0, 0, 0), size)[0]
-        found += _disagreement(prediction, truth, case.labels or {})[: MAX_LEADS - len(found)]
-    return found
+        for kind, leads in (
+            ("component", _components(image, mask, other, name)),
+            ("cavity", _cavities(image, mask, spacing, name)),
+            ("edgeless", _edgeless(image, mask, spacing, name)),
+        ):
+            kinds[kind] += [(score, (k, _offset(w, lo), why)) for score, (k, w, why) in leads]
+    ranked = [[f for _, f in sorted(leads, key=lambda c: -c[0])] for leads in kinds.values()]
+    if truth is not None:  # with a reference, its disagreements first
+        ranked.insert(0, _disagreement(r.volume("prediction").region((0, 0, 0), size)[0], truth, case.labels or {}))
+    return _in_turn(ranked)
+
+
+def _in_turn(ranked: list[list[Found]]) -> list[Found]:
+    """The best lead of each kind, then the second of each, and so on: no kind takes every place."""
+    out: list[Found] = []
+    for rank in range(max((len(leads) for leads in ranked), default=0)):
+        out += [leads[rank] for leads in ranked if rank < len(leads)]
+    return out[:MAX_LEADS]
+
+
+def _cavities(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name: str) -> list[tuple[float, Found]]:
+    """What the label encloses and leaves out, its shape alone. A cavity that holds what the label holds around it
+    ranks first: a hole in one tissue; a cavity of another tissue (a vessel, a lesion the label excludes) after."""
+    cavity = ndimage.binary_fill_holes(mask) & ~mask
+    spread = float(np.subtract(*np.percentile(image, [90, 10]))) or 1.0
+    out = []
+    for size, window in _clusters(cavity, max(8, int(20.0 / float(np.prod(spacing_zyx)))))[:5]:
+        pad = tuple(slice(max(w.start - 2, 0), w.stop + 2) for w in window)  # the label around a box-shaped cavity
+        inside = cavity[pad]
+        around = ndimage.binary_dilation(inside, iterations=2) & mask[pad]
+        if not around.any():
+            continue
+        unlike = abs(float(np.median(image[pad][inside]) - np.median(image[pad][around]))) / spread
+        millilitres = size * float(np.prod(spacing_zyx)) / 1000.0
+        out.append(
+            (
+                1.0 / (1.0 + unlike),
+                (
+                    "cavity",
+                    window,
+                    f"a cavity of {millilitres:.2g} mL enclosed by {name} and left out of it; the image inside it "
+                    f"differs from the label around it by {unlike:.2f} (in units of the image's 10-90 % spread)",
+                ),
+            )
+        )
+    return out
 
 
 def _components(image: np.ndarray, mask: np.ndarray, other: np.ndarray, name: str) -> list[tuple[float, Found]]:

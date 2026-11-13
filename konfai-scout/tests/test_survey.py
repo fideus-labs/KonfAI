@@ -22,6 +22,23 @@ def test_the_leads_cover_the_planted_defects_and_spare_a_clean_case(task, tmp_pa
     assert survey(toolbox(fixtures, "clean", tmp_path / "c").renderer) == []
 
 
+def test_a_hole_in_one_tissue_is_a_cavity_lead(tmp_path):
+    case, planted = MAKERS["segmentation"](tmp_path / "planted")
+    leads = survey(toolbox({"planted": (case, planted)}, "planted", tmp_path / "p").renderer)
+    hole = box_from_dict(planted["hole"]["box_mm"])
+    assert any(lead.kind == "cavity" and box_intersection(box_from_dict(lead.box_mm), hole) for lead in leads)
+
+
+def test_a_box_shaped_hole_is_a_cavity_lead():
+    import numpy as np
+    from konfai_scout.survey import _cavities
+
+    mask = np.ones((12, 12, 12), dtype=bool)
+    mask[5:8, 5:8, 5:8] = False  # its own bounding box holds no label voxel
+    image = np.random.default_rng(0).normal(100, 5, mask.shape).astype(np.float32)
+    assert [found[0] for _, found in _cavities(image, mask, np.ones(3), "organ")] == ["cavity"]
+
+
 def test_a_map_of_more_than_512_slices_is_surveyed_label_by_label(tmp_path):
     import numpy as np
     from konfai_scout.survey import _extents
