@@ -265,8 +265,9 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
+            # Two patches: a case's only patch is not staged (test_predictor_offload_borrow).
             del index_augmentation
-            return [(slice(0, 2), slice(0, 2))]
+            return [(slice(0, 2), slice(0, 2)), (slice(2, 4), slice(0, 2))]
 
         @staticmethod
         def get_sweep_axis(index_augmentation: int) -> int:

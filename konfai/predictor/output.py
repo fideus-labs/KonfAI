@@ -613,9 +613,11 @@ class OutputDataset(Dataset, NeedDevice):
                     f"case '{self.names[index_dataset]}' accumulates on the host.",
                 )
         target = self._accum_device[index_dataset]
-        # A GPU accumulator takes the patch straight in; a CPU one takes an offloaded copy.
+        # A GPU accumulator takes the patch straight in; a CPU one takes an offloaded copy, but for the case's only
+        # patch, copied straight into the host buffer: staged, the whole case would be held twice.
         if target.type == "cpu":
-            if layer.device.type != "cpu":
+            accumulator.device = target
+            if layer.device.type != "cpu" and len(accumulator.patch_slices) > 1:
                 with self._borrow_cpu_patch(layer) as cpu_patch:
                     return accumulator.add_layer(index_patch, cpu_patch) or []
         elif str(layer.device) != str(target):
