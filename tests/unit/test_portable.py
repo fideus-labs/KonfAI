@@ -1052,6 +1052,10 @@ def _compile_stage(key: str, params: dict[str, object]) -> object:
     return steps([{"Expand": {"nb": 2}}, {name: params}, _WRITE], "G")[0]
 
 
+def test_canonical_reads_its_orientation_in_any_case() -> None:
+    assert _compile_stage("Canonical", {"orientation": "ras"}) == _compile_stage("Canonical", {})
+
+
 def _outcome(key: str, params: dict[str, object]) -> object:
     """The compiled form, or the refusal naming the stage, which is an outcome of its own."""
     try:

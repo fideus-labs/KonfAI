@@ -765,7 +765,8 @@ class Canonical(TransformInverse):
 
     The pipeline writes direction cosines in the SimpleITK convention, where the identity is LPS, so
     RAS is ``diag(-1, -1, 1)`` there and a volume already in LPS is reoriented by this stage.
-    ``orientation`` names where each array axis (x, y, z) points, as ``sitk.DICOMOrient`` reads it:
+    ``orientation`` names where each ITK axis points, in x, y, z order (the tensor's spatial dimensions are z,
+    y, x), as ``sitk.DICOMOrient`` reads it:
     ``LPS``, the identity, for a model that expects its arrays in DICOM order (MRSegmentator).
 
     An orthogonal reorientation is a signed permutation of the axes, an exact index remap; only an
@@ -777,8 +778,8 @@ class Canonical(TransformInverse):
     it swaps, so ``transform_shape`` folds the patch grid onto the reoriented shape.
 
     ``resample: false`` never resamples: an oblique case too is permuted and flipped onto the axes
-    nearest RAS, its direction left as oblique as it was (``D @ M``), its centre fixed: nibabel's
-    ``as_closest_canonical``. An index remap
+    nearest ``orientation``, its direction left as oblique as it was (``D @ M``), its centre fixed: for RAS,
+    nibabel's ``as_closest_canonical``. An index remap
     always, so it always streams. On an orthogonal case the two are the same remap.
     """
 

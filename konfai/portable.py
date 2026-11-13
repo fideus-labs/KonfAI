@@ -237,7 +237,8 @@ def _refuse_lazy(stage: str, p: dict[str, Any]) -> None:
 
 
 def _op_canonical(p: dict[str, Any]) -> dict[str, Any]:
-    _refuse_set("Canonical", p, {"resample": True, "orientation": "RAS"})
+    orientation = str(clean(p.get("orientation", "RAS"))).upper()  # konfai reads the letters in any case
+    _refuse_set("Canonical", {**p, "orientation": orientation}, {"resample": True, "orientation": "RAS"})
     return {"op": "canonical"}
 
 
