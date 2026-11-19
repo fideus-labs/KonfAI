@@ -397,23 +397,37 @@ class Inspector:
                     != self.renderer.volume("truth").region(lo, hi)[0]
                 )
                 index = lo[axis] + int(np.argmax(differ.sum(axis=tuple(a for a in range(3) if a != axis))))
+                # the point of that slice where they differ, through which the two other planes are cut
+                point = np.argwhere(np.take(differ, index - lo[axis], axis=axis)).mean(axis=0).round().astype(int)
+                at = list(point)
+                at.insert(axis, index - lo[axis])
+                at = [int(a + o) for a, o in zip(at, lo, strict=True)]
                 outer = self.case.grid.index_window(zoom, 0)
                 region = self.renderer.volume("image").region(
                     *(tuple(getattr(s, k) for s in outer) for k in ("start", "stop"))
                 )
                 window = [float(v) for v in np.percentile(region[0], [1, 99])]
-                shown = {"index": index, "zoom": zoom, "window": window, "sent": False}
+                shown = {"zoom": zoom, "window": window, "sent": False}
+                others = [p for p in ("axial", "coronal", "sagittal") if p != plane]
                 views = [  # not sent to the model that inspects: they do not count as its look at the lead
-                    self.renderer.render(plane, "image", **shown),
-                    self.renderer.render(plane, "contours", swap=swap, **shown),
+                    self.renderer.render(plane, "image", index=index, **shown),
+                    self.renderer.render(plane, "contours", swap=swap, index=index, **shown),
+                ] + [
+                    self.renderer.render(
+                        p, "contours", swap=swap, index=at[plane_frame(self.case.grid, p).array_axis], **shown
+                    )
+                    for p in others
                 ]
                 images = [ImageContent(png, f"[{view.id}]") for png, view in views]
                 self.toolbox.images_sent += len(images)
                 reader = self.reader()
                 reader.start(ARBITER, [])
                 labels = list((self.case.labels or {}).values())
-                card = f"Structure: {labels[0] if len(labels) == 1 else 'see the label map'}. The slice alone, then "
-                turn = self._request(lambda r=reader, c=card + "with the two contours.", i=images: r.user(c, i))
+                card = (
+                    f"Structure: {labels[0] if len(labels) == 1 else 'see the label map'}. The slice alone, then with "
+                    "the two contours, then the two contours on the two other planes through the same point."
+                )
+                turn = self._request(lambda r=reader, c=card, i=images: r.user(c, i))
                 word = ((turn.text or "").strip().split() or [""])[0].strip(".,:").upper()
             except (ViewError, ProviderError):
                 word = ""

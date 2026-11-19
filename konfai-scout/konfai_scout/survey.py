@@ -181,9 +181,12 @@ def _segmentation(r: Renderer) -> list[Found]:
         ):
             kinds[kind] += [(score, (k, _offset(w, lo), why)) for score, (k, w, why) in leads]
     ranked = [[f for _, f in sorted(leads, key=lambda c: -c[0])] for leads in kinds.values()]
-    if truth is not None:  # with a reference, its disagreements first
-        ranked.insert(0, _disagreement(r.volume("prediction").region((0, 0, 0), size)[0], truth, case.labels or {}))
-    return _in_turn(ranked)
+    if truth is None:
+        return _in_turn(ranked)
+    # with a reference, its disagreements are where an error lies, of one side or the other: they come first
+    prediction = r.volume("prediction").region((0, 0, 0), size)[0]
+    found = _disagreement(prediction, truth, case.labels or {}, spacing)[: MAX_LEADS - 2]
+    return found + _in_turn(ranked)[: MAX_LEADS - len(found)]
 
 
 def _in_turn(ranked: list[list[Found]]) -> list[Found]:
@@ -301,18 +304,31 @@ def _edgeless(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name
     return out
 
 
-def _disagreement(prediction: np.ndarray, truth: np.ndarray, names: dict[int, str]) -> list[Found]:
-    out: list[tuple[int, Found]] = []
+def _disagreement(
+    prediction: np.ndarray, truth: np.ndarray, names: dict[int, str], spacing_zyx: np.ndarray
+) -> list[Found]:
+    """Where the result and its reference disagree, deepest first. Two right contours of one structure differ by a
+    voxel or so along its border: a sheet with no depth, which an opening removes. What is left, a region several
+    voxels deep, is where one of the two is wrong; the sheets come after, largest first."""
+    out: list[tuple[int, int, Found]] = []
+    least = max(10, int(20.0 / float(np.prod(spacing_zyx))))  # 20 mm^3: a hole in a large organ counts
     for label in (int(v) for v in np.union1d(np.unique(prediction), np.unique(truth)) if v != 0):
         name = names.get(label, f"label {label}")
-        reference = int((truth == label).sum())
         for kind, mask, what in (
             ("result_only", (prediction == label) & (truth != label), "in the result and not in the reference"),
             ("reference_only", (truth == label) & (prediction != label), "in the reference and not in the result"),
         ):
-            for size, window in _clusters(mask, max(10, int(0.01 * reference)))[:3]:
-                out.append((size, (kind, window, f"{size} voxels of {name} {what}: one of the two is wrong there")))
-    return [f for _, f in sorted(out, key=lambda c: -c[0])]
+            deep = _clusters(ndimage.binary_opening(mask, structure=_FULL), least)[:3]
+            for size, window in deep:
+                why = f"{size} voxels of {name} {what}, several voxels deep: one of the two is wrong there"
+                out.append((1, size, (kind, window, why)))
+            if not deep:
+                for size, window in _clusters(mask, least)[:2]:
+                    why = (
+                        f"{size} voxels of {name} {what}, a thin sheet along the border: one of the two is wrong there"
+                    )
+                    out.append((0, size, (kind, window, why)))
+    return [f for _, _, f in sorted(out, key=lambda c: (-c[0], -c[1]))]
 
 
 # ---------------------------------------------------------------------------------------------- registration

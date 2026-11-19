@@ -129,7 +129,7 @@ def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path,
     assert (
         report.usage.input_tokens == 400 and report.usage.cache_read_tokens == 600 and report.usage.output_tokens == 50
     )
-    assert report.usage.requests == 1 + blind // 2 and not report.usage.cost_known
+    assert report.usage.requests == 1 + blind // 4 and not report.usage.cost_known
     # the command the CLI was given
     cmd = fake.commands[0]
     assert cmd[:2] == ["codex", "exec"] and "--ignore-user-config" in cmd and "--json" in cmd and "-m" not in cmd

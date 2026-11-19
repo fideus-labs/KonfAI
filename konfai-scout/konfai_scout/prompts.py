@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "2.5"
+PROMPT_VERSION = "2.6"
 
 SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
 it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.
@@ -148,8 +148,8 @@ modalities is not a misalignment; a smooth, plausible boundary is not an error; 
 defect only if the claim is about coverage."""
 
 
-ARBITER = """You compare two contours of the same structure, A in cyan and B in orange, drawn over one slice of a \
-medical image; a second view shows the slice alone. They differ somewhere in the view. You are not told where either \
+ARBITER = """You compare two contours of the same structure, A in cyan and B in orange, drawn over slices of a \
+medical image in three planes through the same point; a first view shows one of the slices alone. They differ somewhere in the view. You are not told where either \
 contour comes from. Judge from the image alone which one follows the structure better where they differ. Where only \
 one contour is drawn, the other holds that the structure is not there: the drawn one is the better if the image \
 shows the structure inside it, the other one if it does not.

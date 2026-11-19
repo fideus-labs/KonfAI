@@ -278,4 +278,4 @@ def test_a_disagreement_with_the_reference_is_read_blind_before_the_model_looks(
     judged = {lead["reason"].split("judged the ")[1].split("'s")[0] for lead in blind}
     assert judged <= {"result", "reference"} and judged  # A is the result or the reference, by the lead's draw
     contours = [v for v in report.views if v.mode == "contours"]
-    assert len(contours) == len(blind) and not any(v.sent for v in contours)
+    assert len(contours) == 3 * len(blind) and not any(v.sent for v in contours)  # three planes a disagreement

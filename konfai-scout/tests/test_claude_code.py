@@ -170,7 +170,7 @@ def test_the_session_drives_the_tools_under_the_budget_and_the_record_is_complet
     assert (
         report.usage.input_tokens == 100
         and report.usage.cache_read_tokens == 30
-        and report.usage.requests == 1 + blind // 2
+        and report.usage.requests == 1 + blind // 4
     )
     assert report.usage.cost_known and report.usage.cost_usd > 0
     # what the session was given
