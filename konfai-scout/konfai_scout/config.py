@@ -21,7 +21,7 @@ DEFAULT_MODELS = {
 #: matters. A depth changes the defaults only: a field set to anything but its standard value keeps that value.
 DEPTHS: dict[str, dict[str, object]] = {
     "quick": {"effort": "low", "budget": {"max_tool_calls": 10}},
-    "standard": {},
+    "standard": {"effort": "high"},
     "deep": {"effort": "high", "second_reading": True, "budget": {"max_tool_calls": 40}},
 }
 
@@ -50,7 +50,7 @@ class ScoutConfig:
     base_url: str | None = None
     #: The environment variable holding the key; the SDK's own default when unset.
     api_key_env: str | None = None
-    #: Claude's effort (low, medium, high, xhigh, max); the model's default when unset.
+    #: The model's reasoning effort (low, medium, high, xhigh, max); the depth's when unset.
     effort: str | None = None
     max_output_tokens: int = 16000
     mode: str = "active"

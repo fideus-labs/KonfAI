@@ -93,5 +93,5 @@ def test_a_depth_sets_the_defaults_and_an_explicit_flag_wins():
     assert config("--depth", "quick").budget.max_tool_calls == 10
     deep = ScoutConfig(depth="deep", effort="medium")
     assert (deep.effort, deep.budget.max_tool_calls, deep.second_reading) == ("medium", 40, True)
-    assert config().budget.max_tool_calls == 25 and config().effort is None
+    assert config().budget.max_tool_calls == 25 and config().effort == "high"
     assert ScoutConfig.from_dict(quick.to_dict()).budget.max_tool_calls == 20  # a saved config reads back as it was

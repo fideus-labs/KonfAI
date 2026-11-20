@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--depth",
         choices=list(DEPTHS),
-        help="quick: a cheap first pass (10 calls, low effort); standard (25 calls); deep: 40 calls, high effort and "
+        help="quick: a cheap first pass (10 calls, low effort); standard: 25 calls, high effort; deep: 40 calls and "
         "a blind second reading. The flags below override it.",
     )
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
@@ -118,14 +118,13 @@ def _case_from_args(args: argparse.Namespace) -> InspectionCase:
 
 
 def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
-    config = ScoutConfig.load(args.config) if args.config else ScoutConfig()
+    # built once, from the file then the flags: a depth sets only what neither of them did
+    data = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else {}
     for key in ("provider", "model", "base_url", "api_key_env", "depth", "effort", "mode"):
         value = getattr(args, key)
         if value is not None:
-            setattr(config, key, value)
-    if args.provider is not None and args.model is None and not args.config:
-        config.model = None
-    config.__post_init__()
+            data[key] = value
+    config = ScoutConfig.from_dict(data)
     for key in ("max_tool_calls", "max_images", "max_seconds", "max_usd"):
         value = getattr(args, key)
         if value is not None:

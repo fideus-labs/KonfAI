@@ -112,7 +112,7 @@ a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
 | Depth | Tool calls | Effort | Second reading | For |
 |---|---|---|---|---|
 | `quick` | 10 | low | no | a cheap first pass over many cases |
-| `standard` (default) | 25 | the model's | no | one case |
+| `standard` (default) | 25 | high | no | one case |
 | `deep` | 40 | high | yes | a case that matters, or a doubt to settle |
 
 The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
