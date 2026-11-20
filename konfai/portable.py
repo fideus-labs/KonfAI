@@ -1406,6 +1406,7 @@ def transform_manifest(
     predictor runs per copy, before any reduction. ``masked``: the caller applies the before-reduction
     ``Mask`` stages as program steps of its own. ``others`` is what each group past the first holds per
     voxel, in the order the model reads them."""
+    _refuse_another_sink(config, root, output)
     _refuse_another_mirror(config, root, output)
     roots = [str(entry) for entry in ((config.get(root) or {}).get("Dataset") or {}).get("dataset_filenames") or []]
     pre, folds, inverted = compile_pipeline(
@@ -1418,6 +1419,18 @@ def transform_manifest(
     if reads:
         manifest["reads"] = reads
     return manifest, folds, per_copy
+
+
+def _refuse_another_sink(config: dict[str, Any], root: str, output: str | None) -> None:
+    """The program assembles and writes an output as ``OutputDataset`` does: another sink (``OutputLayerDataset``,
+    a class of the app's own) blends its patches or places its grid its own way, which the runtime would not."""
+    sink = clean(output_spec(config, root, output).get("name_class"))
+    if sink not in (None, "OutputDataset", "konfai.predictor:OutputDataset"):
+        raise ConfigError(
+            f"the output is written by '{sink}', a sink with no portable form: the runtime assembles its patches"
+            " and writes them as OutputDataset does.",
+            _or_konfai("Write the output with name_class: OutputDataset", _PREDICT),
+        )
 
 
 def _refuse_another_mirror(config: dict[str, Any], root: str, output: str | None) -> None:

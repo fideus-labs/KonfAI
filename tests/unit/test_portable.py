@@ -726,6 +726,14 @@ def test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_nam
         transform_manifest(_prediction({"Resample": {"spacing": [1, 1, 1]}, "Crop": {}}, {}), "Predictor")
 
 
+@pytest.mark.parametrize("sink", ["OutputLayerDataset", "Custom:ConfidenceSelect"])
+def test_a_prediction_output_written_by_another_sink_is_refused_by_name(sink: str) -> None:
+    # Another sink assembles its patches its own way; the program would blend and write as OutputDataset does.
+    with pytest.raises(ConfigError, match=f"written by '{sink}'"):
+        transform_manifest(_prediction({}, {"name_class": sink}), "Predictor")
+    transform_manifest(_prediction({}, {"name_class": "OutputDataset"}), "Predictor")
+
+
 @pytest.mark.parametrize(
     ("stage", "params"),
     [("Clip", {"min_value": "min", "max_value": 1.0}), ("Standardize", {"std": 1.0, "inverse": False})],
