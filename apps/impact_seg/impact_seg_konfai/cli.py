@@ -23,7 +23,7 @@ import argparse
 
 from konfai_apps.cli import build_app_cli
 
-IMPACT_SEG_KONFAI_REPO = "VBoussot/ImpactSeg"
+IMPACT_SEG_KONFAI_REPO = "HCedric/IMPACTSeg"
 
 
 def _add_selection(parser: argparse.ArgumentParser) -> None:

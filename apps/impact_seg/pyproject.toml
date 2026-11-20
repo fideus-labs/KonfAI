@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "impact-seg-konfai"
 dynamic = ["version", "dependencies"]
-description = "Fast and lightweight CLI for anatomical segmentation with 2.5D U-Net models using a residual encoder within the KonfAI framework."
+description = "Fast and lightweight CLI for multimodal anatomical segmentation with the IMPACT-Seg residual-encoder U-Nets within the KonfAI framework."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
