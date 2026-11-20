@@ -945,6 +945,11 @@ def main_apps() -> None:
         "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
     )
     bundle_p.add_argument(
+        "--extension",
+        help="The app's extension of KonfAI Edge (a .wasm), copied into the bundle and, with the 'extension' extra"
+        " installed, compared with the app's own classes on random voxels.",
+    )
+    bundle_p.add_argument(
         "--onnx",
         action="store_true",
         help=(

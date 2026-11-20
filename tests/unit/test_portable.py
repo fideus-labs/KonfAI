@@ -1744,11 +1744,92 @@ def test_an_apps_own_fold_compiles_to_the_patch_combine_of_its_extension(
     (step,) = program["outputs"][0]["program"]["steps"]
     manifest = step["manifest"]
     assert (manifest["blend"], manifest["output"]["channels"]) == ("Fusion:Surest", 2)
-    assert manifest["blended"] == {"channels": 1, "dtype": "uint8"}
+    assert manifest["blended"] == {"channels": 1, "dtype": "uint8", "params": {}}
     session = onnxruntime.InferenceSession(str(out.parent / "model.onnx"), providers=["CPUExecutionProvider"])
     (entered,) = session.run(None, {"input": np.ones((1, 1, 16, 16), np.float32)})
     assert entered.dtype == np.float32 and entered.shape[1] == 2
     assert set(np.unique(entered[:, 0])) <= {0.0, 1.0} and entered[:, 1].max() <= 255
+
+
+def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A transform, a test-time draw and a reduction of the app's own, each named by classpath: with the app's
+    # extension the program names them by it, built with the keys konfai binds them with; without it, a transform is
+    # folded into the model's graph and the two others are refused.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "Own.py").write_text(
+        "import torch\n"
+        "from konfai.data.augmentation import DataAugmentation\n"
+        "from konfai.data.reduction import Reduction\n"
+        "from konfai.data.transform import LocalityKind, PatchLocality, TransformInverse\n\n\n"
+        "class Scale(TransformInverse):\n"
+        "    def __init__(self, scale: float = 2.0, inverse: bool = True) -> None:\n"
+        "        super().__init__(inverse)\n"
+        "        self.scale = scale\n\n"
+        "    def patch_locality(self, cache_attribute):\n"
+        "        return PatchLocality(LocalityKind.POINTWISE)\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float() * self.scale\n\n"
+        "    def inverse(self, name, tensor, cache_attribute):\n"
+        "        return tensor / self.scale\n\n\n"
+        "class Gain(DataAugmentation):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __init__(self, g_std: float = 0.1, groups: list[str] | None = None) -> None:\n"
+        "        super().__init__(groups)\n"
+        "        self.g_std = g_std\n\n"
+        "    def _state_init(self, index, shapes, caches_attribute):\n"
+        "        return shapes\n\n"
+        "    def _compute(self, name, index, a, tensor):\n"
+        "        return tensor * (1 + self.g_std)\n\n"
+        "    def _inverse(self, index, a, tensor):\n"
+        "        return tensor\n\n\n"
+        "class Largest(Reduction):\n"
+        "    voxel_local = True\n\n"
+        "    def __call__(self, tensors):\n"
+        "        return torch.stack(tensors).amax(0)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    predictor = resolved["Predictor"]
+    # konfai undoes an input transform once the copies are folded, which a program does for a resample alone.
+    own = {"Own:Scale": {"scale": 4.0, "inverse": False}}
+    predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
+    predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}
+    predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {"reduction": "Own:Largest"}
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+
+    with pytest.raises(KonfAIError, match="'Own:Gain'"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", tmp_path / "bare" / "prediction.json")
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    out = tmp_path / "out" / "prediction.json"
+    program = compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+
+    assert program["extension"] == "own.wasm"
+    steps = program["outputs"][0]["program"]["steps"]
+    # The identity and two drawn copies, then the app's own fold of the three.
+    models = [step["manifest"] for step in steps if "manifest" in step]
+    assert len(models) == 3
+    scale = {"op": "extension", "class": "Own:Scale", "params": own["Own:Scale"], "dtype": "float32"}
+    assert models[0]["preprocessing"] == [scale]
+    # A copy's draw closes its preprocessing with a seed of its own, and is undone first.
+    draws = [manifest["preprocessing"][-1] for manifest in models[1:]]
+    assert [draw["class"] for draw in draws] == ["Own:Gain"] * 2 and all(draw["id"] == "__tta_0" for draw in draws)
+    # The keys konfai binds the draw with, the defaults it resolved among them, and the copy's seed.
+    assert draws[0]["params"].keys() == {"g_std", "groups", "seed"} and draws[0]["params"] != draws[1]["params"]
+    assert models[1]["postprocessing"][0] == {"op": "inverse", "of": "__tta_0"}
+    (fold,) = [step for step in steps if step.get("op") == "extension_reduce"]
+    assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
 
 
 def test_a_crop_on_a_needed_apps_group_compiles_to_a_read_beside_the_case(

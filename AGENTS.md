@@ -152,7 +152,7 @@ pixi run check                                                    # lint + forma
 pixi run test                                                     # core unit + integration (tests/), ~3 min (pytest-xdist), not an iteration loop
 pixi run test-fast                                                # dev loop (~25 s): skips slow oracle + integration tests
 pixi run --environment dev typecheck                              # mypy konfai
-pixi run --environment dev python -m pip install -e "./konfai-apps[server]" && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate; [server] for the job-server tests)
+pixi run --environment dev python -m pip install -e "./konfai-apps[server,extension]" && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate; [server] for the job-server tests, [extension] for the extension check)
 pixi run --environment dev python -m pip install -e ./konfai-mcp && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
 pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or its two front tests skip)
 pixi run --environment dev python -m pip install -e "./konfai-scout[dev]" && pixi run --environment dev python -m pytest konfai-scout/tests  # scout suite (separate; no API key: fake clients and a mock model)

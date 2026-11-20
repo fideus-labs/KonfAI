@@ -24,6 +24,8 @@ License = "https://www.apache.org/licenses/LICENSE-2.0"
 [project.optional-dependencies]
 # The HTTP job server (konfai-apps-server). Running an app, locally or against a server, needs none of it.
 server = ["fastapi", "uvicorn", "python-multipart"]
+# Checks an app's extension of KonfAI Edge against its Python classes (konfai-apps bundle --extension).
+extension = ["wasmtime"]
 
 [project.scripts]
 konfai-apps = "konfai_apps:main_apps"

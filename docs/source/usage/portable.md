@@ -250,15 +250,39 @@ mean commutes with the blend. With a `before_reduction_transforms` chain, the
 program averages each copy's models and runs the chain on that average, as
 konfai does; the copies then fold by the output's `reduction`.
 
-A `patch_combine` of the app's own (a `Fold`, named by classpath) runs in KonfAI
-Edge as the patch combine of the same name in the app's extension, a WebAssembly
-module written against `konfai-edge-ext` and passed as
-`compile_prediction(..., extension=...)`; without one the config is refused. What
-the `Fold` enters a patch as is part of the model's graph. Several models are
-then run as one: the program's `averaged` key names the models whose outputs the
-runtime averages on each patch, its `enter` key the graph their mean goes
-through, and a run selects among them by checkpoint. This form takes one pass
-and no `InferenceStack`.
+### An app's own classes
+
+An app extends konfai with classes in its `.py` files, named by classpath in its
+configs. KonfAI Edge runs the same classes from the app's extension: a
+WebAssembly module written against `konfai-edge-ext`, which implements each
+class under the same classpath. Pass it as `extension=...` to
+`compile_prediction` or `compile_evaluation`: the program names the file, which
+is copied beside it.
+
+| Class of the app | In the program | What the extension is handed |
+|---|---|---|
+| `Transform` whose `patch_locality` is `POINTWISE` | an `extension` step | the volume, and what to undo when the stage is undone |
+| `DataAugmentation` whose `locality` is `POINTWISE`, as a test-time draw | an `extension` step carrying a `seed` | a copy to draw from the seed, then to undo |
+| `Reduction` that is `voxel_local`, as the copies' `reduction` | an `extension_reduce` step | the copies |
+| `Fold`, as the output's `patch_combine` | the manifest's `blend` | the patches, where they overlap |
+| `Criterion`, in an evaluation | a criterion of `metric: extension` | the output and its targets |
+
+The extension builds each class from the keys konfai binds it with, and is
+handed its volumes voxel by voxel: a class that reads past the voxel it writes
+is refused. Without an extension, a pointwise transform is folded into the
+model's graph and the other classes are refused. A reduction takes no parameter.
+
+`konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
+With `konfai-apps[extension]` installed, it also runs each class in Python and
+from the extension on the same random voxels, and refuses a bundle whose two
+halves disagree. A test-time draw is opened and not compared: the extension
+draws from the seed, konfai from torch's generator.
+
+What a `Fold` enters a patch as is part of the model's graph. Several models
+under a `Fold` are run as one: the program's `averaged` key names the models
+whose outputs the runtime averages on each patch, its `enter` key the graph
+their mean goes through, and a run selects among them by checkpoint. This form
+takes one pass and no `InferenceStack`.
 
 ## Refusals, by name
 

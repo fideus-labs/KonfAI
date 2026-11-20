@@ -105,6 +105,39 @@ def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) ->
         _compile(tmp_path, "            MSE: {reduction: mean}\n")
 
 
+def test_a_criterion_of_the_apps_own_is_measured_by_its_extension(tmp_path: Path, monkeypatch) -> None:
+    # Named by classpath: with the app's extension the program names the criterion by it, with the keys konfai binds
+    # it with; without it, the criterion has no portable form.
+    import jsonschema
+    from konfai.portable_evaluation import compile_evaluation
+    from konfai.portable_schema import program_schema
+
+    (tmp_path / "OwnCriteria.py").write_text(
+        "import torch\n"
+        "from konfai.metric.measure import Criterion\n\n\n"
+        "class Bias(Criterion):\n"
+        "    def __init__(self, scale: float = 1.0) -> None:\n"
+        "        super().__init__()\n"
+        "        self.scale = scale\n\n"
+        "    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:\n"
+        "        return self.scale * (output - targets[0]).mean()\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _evaluation(tmp_path, "            OwnCriteria:Bias: {scale: 2.0}\n")
+    out = tmp_path / "program" / "evaluation.json"
+    with pytest.raises(EvaluatorError, match="Criterion 'Bias' has no portable form"):
+        compile_evaluation(config, tmp_path / "Evaluations", out)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_evaluation(config, tmp_path / "Evaluations", out, extension=extension)
+
+    assert program["extension"] == "own.wasm" and (out.parent / "own.wasm").is_file()
+    (criterion,) = program["metrics"][0]["criteria"]
+    assert (criterion["metric"], criterion["class"]) == ("extension", "OwnCriteria:Bias")
+    assert criterion["params"]["scale"] == 2.0
+    jsonschema.validate(program, program_schema())
+
+
 def test_an_evaluation_split_into_train_and_validation_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="scores one split"):
         _compile(tmp_path, "            Dice: {labels: None}\n", validation="[P001]")
