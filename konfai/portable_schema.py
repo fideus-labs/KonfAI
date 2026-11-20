@@ -345,8 +345,11 @@ def program_schema() -> dict[str, Any]:
                 "geometry": _object({"mode": {"const": "preserve_from_input"}}, ["mode"]),
                 "preprocessing": _ref("chain"),
                 "postprocessing": _ref("chain"),
+                # A blend of the runtime's, or a patch combine of the app's extension by its classpath.
                 "blend": _STRING,
                 "accumulation_dtype": {"enum": ["float32", "float16"]},
+                # What an extension's patch combine hands the output chain.
+                "blended": _object({"channels": _INTEGER, "dtype": _STRING}, ["channels", "dtype"]),
                 "reads": _array(_ref("read")),
             },
             ["konfai_edge_manifest", "model", "opset", "output_module", "input", "output", "patch", "geometry"],
@@ -363,6 +366,15 @@ def program_schema() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": _object({"checkpoint": _STRING, "pass": _INTEGER}, ["checkpoint", "pass"]),
                 },
+                # A model a step names -> the models it is the average of, patch by patch, each with its checkpoint.
+                "averaged": {
+                    "type": "object",
+                    "additionalProperties": _array(
+                        _object({"model": _STRING, "checkpoint": _STRING}, ["model", "checkpoint"])
+                    ),
+                },
+                # An averaged model -> the model its mean goes through before the blend: what a Fold enters a patch as.
+                "enter": {"type": "object", "additionalProperties": _STRING},
             },
             ["steps", "output"],
         ),
@@ -446,6 +458,8 @@ def program_schema() -> dict[str, Any]:
                 "cases": _array(_STRING),
                 "input_group": {"type": ["string", "array"], "items": _STRING},
                 "models": {"type": "object", "additionalProperties": _STRING},
+                # The app's extension of KonfAI Edge, a WebAssembly module beside the program.
+                "extension": _STRING,
                 "outputs": _array(
                     _object(
                         {"program": _ref("program"), "write": _ref("destination"), "stack": _ref("destination")},

@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
 
 MANIFEST_VERSION = 5  # 5: patch.stride under the end and spread placements
-#: A manifest blending by GaussianFloat16: a runtime reading version 5 alone refuses it rather than blend it as Cosinus.
+#: A manifest blending by GaussianFloat16 or by a patch combine of the app's extension: a runtime reading version 5
+#: alone refuses it rather than blend it as Cosinus.
 FLOAT16_BLEND_VERSION = 6
 
 
@@ -68,7 +69,8 @@ class _NamedHead(torch.nn.Module):
 
     ``named_forward`` exposes every module output as ``(dotted_name, tensor)``; this returns the
     tensor of ``output_module``. ``fold_pre`` are per-patch tensor->tensor callables applied to the
-    input *inside* the graph, so they trace into the ONNX; only pointwise ops are foldable.
+    input *inside* the graph, so they trace into the ONNX; only pointwise ops are foldable. ``fold_post``
+    are applied to the output alike.
     """
 
     def __init__(
@@ -76,11 +78,13 @@ class _NamedHead(torch.nn.Module):
         net: torch.nn.Module,
         output_module: str,
         fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
+        fold_post: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     ) -> None:
         super().__init__()
         self.net = _routed(net)
         self.output_module = output_module
         self.fold_pre = list(fold_pre or [])
+        self.fold_post = list(fold_post or [])
 
     def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
         # The folds prepare the group the chain belongs to, which is the model's first input.
@@ -91,6 +95,8 @@ class _NamedHead(torch.nn.Module):
         for name, tensor in self.net.named_forward(first, *rest):
             if name == self.output_module:
                 out = tensor
+        for post in self.fold_post:
+            out = post(out)
         return out
 
 
@@ -377,6 +383,7 @@ def export_to_onnx(
     placement: Placement = "pad",
     patch_stride: list[float] | None = None,
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
+    fold_post: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
     write_manifest: bool = True,
@@ -450,9 +457,15 @@ def export_to_onnx(
         )
     _refuse_one_patch_of_several(model, available, output_module)
     output_shape = matches[-1]
+    if fold_post:
+        # What the graph ends on past the head: its channels, read off one voxel.
+        voxel = torch.zeros(1, int(output_shape[1]), *[1] * (len(output_shape) - 2))
+        for post in fold_post:
+            voxel = post(voxel)
+        output_shape = (output_shape[0], int(voxel.shape[1]), *output_shape[2:])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
+    wrapper = _NamedHead(model, output_module, fold_pre=fold_pre, fold_post=fold_post).eval()
     names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
     _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset, dynamic)
     if dynamic:
@@ -495,7 +508,8 @@ def export_to_onnx(
         manifest.update(extra_manifest)
     if patch_overlap is None:
         manifest.setdefault("blend", "Overwrite")
-    if manifest.get("blend") == "GaussianFloat16":
+    # A patch combine of the app's extension is named by its classpath.
+    if manifest.get("blend") == "GaussianFloat16" or ":" in manifest.get("blend", ""):
         manifest["konfai_edge_manifest"] = FLOAT16_BLEND_VERSION
     if write_manifest:
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

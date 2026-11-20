@@ -187,9 +187,10 @@ def test_a_python_float_is_a_constant_of_the_graph_s_own_precision(tmp_path, dty
     assert initializer.dtype == constant.dtype and initializer == constant
 
 
-@pytest.mark.parametrize(("blend", "version"), [("Gaussian", 5), ("GaussianFloat16", 6)])
+@pytest.mark.parametrize(("blend", "version"), [("Gaussian", 5), ("GaussianFloat16", 6), ("fusion:Surest", 6)])
 def test_a_float16_blend_is_written_at_the_manifest_version_that_carries_it(tmp_path, blend, version):
-    # A runtime reading version 5 alone refuses a GaussianFloat16 blend rather than blend it as Cosinus.
+    # A runtime reading version 5 alone refuses a GaussianFloat16 blend, or a patch combine of an app's extension,
+    # rather than blend it as Cosinus.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
 

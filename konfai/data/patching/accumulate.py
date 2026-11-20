@@ -23,7 +23,7 @@ from typing import cast
 
 import torch
 
-from konfai.data.patching.blend import GaussianFloat16, PathCombine, outer_product
+from konfai.data.patching.blend import Fold, GaussianFloat16, PathCombine, outer_product
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import Placement
 
@@ -69,6 +69,10 @@ class Accumulator:
         #: Under a ``float16_sums`` blend: ``_result`` is the float16 sum, this the float16 sum of the windows.
         self._float16_sums = getattr(patch_combine, "float16_sums", False)
         self._window_sums: torch.Tensor | None = None
+        #: A ``Fold``: ``_result`` holds what its ``fold`` returned, and ``leave`` of it is handed back.
+        self._fold = patch_combine if isinstance(patch_combine, Fold) else None
+        if self._fold is not None and batch:
+            raise PatchError("A Fold patch_combine folds one case, [S, ...]: the accumulator is given batch=False.")
         # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per axis.
         self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
@@ -126,6 +130,8 @@ class Accumulator:
             window = cast(GaussianFloat16, self.patch_combine).weights(extents).to(data.device)[tuple(crop)]
             result[slices_dest] += data * window
             cast(torch.Tensor, self._window_sums)[tuple(dest)] += window
+        elif self._fold is not None:
+            result[slices_dest] = self._fold.fold(result[slices_dest], data)
         elif self.patch_combine.selects:
             # The kept regions partition the volume: the box this patch owns is written, not summed.
             # Cut to the patch's in-volume part like the data above: the kept run of the last patch
@@ -300,6 +306,10 @@ class Accumulator:
             )
         return outer_product(own).clamp_min(floor) / total
 
+    def _finished(self, result: torch.Tensor) -> torch.Tensor:
+        """What is handed back of ``result``: a ``Fold``'s ``leave`` of it."""
+        return result if self._fold is None else self._fold.leave(result)
+
     def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:
         """Index a result tensor over ``span`` on the sweep axis and whole on every other."""
         spatial = [span if dim == self.sweep_axis else slice(None) for dim in range(len(self.shape))]
@@ -329,7 +339,7 @@ class Accumulator:
                 f"Expected up to {self._count} patch(es) via add_layer() before assembling.",
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
-        result = self._result
+        result = self._finished(self._result)
         if self._float16_sums:
             torch.div(result, cast(torch.Tensor, self._window_sums), out=result)
         # Nothing to normalise or crop: both happened at blend time.
@@ -430,7 +440,7 @@ class StreamingAccumulator(Accumulator):
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
         # Cloned: the window slides over these rows right after, so the slab handed out must not be a view.
-        slab = self._result[self._along_sweep(slice(0, length), n)].clone()
+        slab = self._finished(self._result[self._along_sweep(slice(0, length), n)]).clone()
         keep = self._window - length
         # .clone(): source and destination views overlap when length < window.
         self._result[self._along_sweep(slice(0, keep), n)] = self._result[

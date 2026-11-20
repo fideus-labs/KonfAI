@@ -149,6 +149,12 @@ The key is the model output to save ({doc}`../reference/components/models`).
 
 `GaussianFloat16` is a `patch_combine` too: a Gaussian window (`sigma_scale`, default `0.125`) whose patches and windows are summed in float16, one divided by the other at the end; give the model `full_precision_outputs` so nothing rounds before it.
 
+A `patch_combine` can also be a class of your own, named by classpath (`fusion:MostConfident`): subclass
+`konfai.data.patching.Fold` and write `fold(held, patch)`, what the voxels a patch covers hold once it is folded
+in. `enter(patch)` is what a patch of the model's output is folded as and `leave(held)` what is written; both
+default to the tensor itself. The three read one voxel at a time, so the output still streams. With several
+`--models`, their outputs go through `combine` first (averaged under `Mean`), then `enter`.
+
 ### Writing a layer as it is
 
 `OutputDataset` writes an output on the grid of an input group (`same_as_group`) and undoes that group's

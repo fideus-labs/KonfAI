@@ -1277,3 +1277,24 @@ def test_a_window_set_aside_for_a_single_patch_is_back_once_a_replan_tiles_the_a
     output.set_patch_config([100, 80, 100], "20%", 1)
     assert output.patch_combine is window
     assert window.overlaps == [20, 16, 20]
+
+
+def test_a_fold_stays_on_a_grid_of_one_patch(tmp_path) -> None:
+    # The output is what it leaves: dropped as a window is, the output would be the model's own channels.
+    from konfai.data.patching import Fold
+
+    class Kept(Fold):
+        def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+            return patch
+
+    output = OutputDataset(
+        same_as_group="src:dest",
+        dataset_filename=f"{tmp_path}/output:mha",
+        group="out",
+        patch_combine="Mean",
+        reduction="Mean",
+    )
+    output.patch_combine = fold = Kept()
+    for overlap in ("20%", None):
+        output.set_patch_config([0, 0, 0], overlap, 1)
+        assert output.patch_combine is fold

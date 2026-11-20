@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import shutil
 import warnings
 from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
@@ -1193,6 +1194,29 @@ def derive_blend(config: dict[str, Any], root: str, output: str | None = None) -
     return str(clean(spec["patch_combine"]) or "Overwrite") if "patch_combine" in spec else None
 
 
+def app_fold(config: dict[str, Any], root: str, output: str | None = None) -> Any | None:
+    """The app's own ``Fold`` the output's ``patch_combine`` names by classpath, built with the keys konfai binds
+    it by; ``None`` for a blend of konfai's, or a class that is no ``Fold``."""
+    import inspect
+
+    from konfai.data.patching import Fold
+    from konfai.utils.utils import get_module
+
+    spec = output_spec(config, root, output)
+    name = clean(spec.get("patch_combine"))
+    if not isinstance(name, str) or ":" not in name:
+        return None
+    try:
+        module, class_name = get_module(name, "konfai.data.patching")
+        cls = getattr(module, class_name)
+    except Exception:
+        return None
+    if not (isinstance(cls, type) and issubclass(cls, Fold)):
+        return None
+    bound = inspect.signature(cls.__init__).parameters
+    return cls(**{key: clean(value) for key, value in spec.items() if key in bound})
+
+
 #: The manifest ``blend`` values the runtime runs.
 RUNTIME_BLENDS = ("Cosinus", "Mean", "Gaussian", "GaussianFloat16", "Overwrite", "Trim")
 
@@ -1570,6 +1594,7 @@ def transform_manifest(
     others: list[int] | None = None,
     fold_out: TypedFoldOut | None = None,
     case_statistic: StatisticOut | None = None,
+    blended: str | None = None,
 ) -> tuple[dict[str, Any], list[Callable[[Any], Any]], int]:
     """The pre/post op pipeline the portable runtime applies around the tiled forward, the ``fold_pre``
     callables (POINTWISE preprocessing transforms baked into the ONNX graph), and how many post ops the
@@ -1584,7 +1609,9 @@ def transform_manifest(
         input_group_transforms(config, root), fold=True, invertible=True, roots=roots
     )
     folds += _patch_folds(config, root)
-    post, per_copy = _post_chain(config, root, output_spec(config, root, output), pre, inverted, masked, fold_out)
+    post, per_copy = _post_chain(
+        config, root, output_spec(config, root, output), pre, inverted, masked, fold_out, blended
+    )
     manifest = {"preprocessing": pre, "postprocessing": post}
     reads = _reads_of(config, root, pre, others, case_statistic)
     if reads:
@@ -1636,6 +1663,7 @@ def _post_chain(
     inverted: list[str],
     masked: bool,
     fold_out: TypedFoldOut | None = None,
+    blended: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """The post chain in the predictor's own order, and how many of its ops run per copy: the per-copy
     transforms, then the ones that follow the reduction, then the inverses of the input chain in reverse, then
@@ -1663,16 +1691,17 @@ def _post_chain(
         return fold
 
     copies = str(clean(spec.get("reduction")) or "Mean")
+    # What the blend hands the chain: the model's floating output, or what the app's own Fold leaves (``blended``).
+    blended = blended or "float32"
     concat = "Concat" in (_class_name(str(clean(config.get(root, {}).get("combine")) or "Mean")), _class_name(copies))
     before, _, _ = compile_pipeline(
         bound_chain(spec.get("before_reduction_transforms")),
         consumed=("Mask",) if masked else (),
-        fold_out=folding(False, "float32"),
+        fold_out=folding(False, blended),
     )
     done += before
-    # The model hands the post chain a floating tensor, and the reduction between the per-copy ops and
-    # the rest settles the dtype the rest reads.
-    dtype = resolve_interpolation(before, "float32") or "float32"
+    # The reduction between the per-copy ops and the rest settles the dtype the rest reads.
+    dtype = resolve_interpolation(before, blended) or blended
     folded = _reduced_dtype(dtype, copies)
     restored = [step["id"] for step in pre if step["op"] == "cast" and "id" in step]
     # The stack or the label merge that opens the chain is the reduce op `derive_reduction` names.
@@ -2361,6 +2390,7 @@ def export_checkpoints(
     write_manifest: bool = False,
     masked: bool = False,
     output: str | None = None,
+    extension: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Path], int]:
     """Export the config's model once per checkpoint to ``<out_dir>/<id>.onnx``, in the ``KONFAI_*`` environment
     the caller set; return each model as ``{id, manifest}``, the files written and how many post ops run per
@@ -2389,18 +2419,39 @@ def export_checkpoints(
     classpath = config[root]["Model"]["classpath"]
     traced = [64] * len(patch_size) if whole else patch_size
     folded = statistics = 0
+    blend = derive_blend(config, root, output)
+    fold = app_fold(config, root, output)
 
-    def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
-        """A run of pointwise output transforms as one graph beside the model's, on what the post steps before it
-        leave of the head's channels, in the ``dtype`` konfai hands it."""
-        nonlocal folded
-        from konfai.export import export_folds, list_output_modules
+    def head_channels() -> int:
+        """The channels of the head the graph ends on."""
+        from konfai.export import list_output_modules
 
         model = _loaded_model(classpath, checkpoints[0])
         count = channels or getattr(model, "in_channels", None) or 1
         examples = tuple(torch.randn(1, n, *traced) for n in [count, *others])
         name = head or select_inference_head(model, *examples)
-        held = int(dict(list_output_modules(model, *examples))[name][1])
+        return int(dict(list_output_modules(model, *examples))[name][1])
+
+    if fold is not None and not extension:
+        raise ConfigError(
+            f"the output's patch_combine '{blend}' is the app's own, which KonfAI Edge runs from the app's"
+            " extension, and none is given.",
+            _or_konfai("Pass the extension that implements it (extension=...)", _PREDICT),
+        )
+    # What the app's own Fold leaves of one voxel of the head: the channels and the dtype the output chain reads.
+    blended_channels, blended_dtype = 0, None
+    if fold is not None:
+        left = fold.leave(fold.enter(torch.rand(head_channels(), *[1] * len(traced))))
+        blended_channels, blended_dtype = int(left.shape[0]), str(left.dtype).split(".")[-1]
+
+    def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
+        """A run of pointwise output transforms as one graph beside the model's, on what the post steps before it
+        leave of the head's channels, in the ``dtype`` konfai hands it."""
+        nonlocal folded
+        from konfai.export import export_folds
+
+        # The app's own Fold hands the chain what it leaves.
+        held = blended_channels or head_channels()
         for step in before:
             held = _channels_after(step, held)
         filename = f"{ids[0]}_post_{folded}.onnx"
@@ -2424,12 +2475,27 @@ def export_checkpoints(
         return {"op": "case_statistic", "halo": int(statistic.halo), "partial": partial, "finish": finish}
 
     extra, folds, per_copy = transform_manifest(
-        config, root, masked=masked, output=output, others=others, fold_out=fold_out, case_statistic=case_statistic
+        config,
+        root,
+        masked=masked,
+        output=output,
+        others=others,
+        fold_out=fold_out,
+        case_statistic=case_statistic,
+        blended=blended_dtype,
     )
-    blend = derive_blend(config, root, output)
-    check_blend(overlap, blend)
+    if fold is None:  # the app's own is its extension's to run
+        check_blend(overlap, blend)
     if blend is not None:
         extra["blend"] = blend
+    if blended_dtype is not None:
+        extra["blended"] = {"channels": blended_channels, "dtype": blended_dtype}
+    fold_post = []
+    if fold is not None and len(checkpoints) == 1:
+        # The app's Fold enters each patch in the graph: voxel by voxel, so the batch is one more axis to it. The
+        # runtime's buffers are float32. Several models are averaged first: their mean is entered by a graph of
+        # its own (`compile_output`).
+        fold_post = [lambda tensor: fold.enter(tensor.transpose(0, 1)).transpose(0, 1).float()]
     # konfai runs `batch_size` patches through each forward; the runtime batches them alike where the
     # device holds them.
     batch = int(clean((config.get(root, {}).get("Dataset") or {}).get("batch_size")) or 1)
@@ -2459,6 +2525,7 @@ def export_checkpoints(
             patch_stride=stride,
             extra_manifest=extra | {"accumulation_dtype": precision},
             fold_pre=folds,
+            fold_post=fold_post,
             model_filename=f"{model_id}.onnx",
             write_manifest=write_manifest,
             dynamic=whole,
@@ -2559,6 +2626,20 @@ def mask_specs(config: dict[str, Any], root: str, output: str | None = None) -> 
     return specs
 
 
+def averaged_per_patch(
+    config: dict[str, Any], root: str, models: int, passes: list[list[dict[str, Any]]], output: str | None = None
+) -> bool:
+    """Whether a program runs the ``models`` as one, their outputs averaged patch by patch as konfai's ``combine:
+    Mean`` averages them: under an app's own ``Fold``, which no mean of each model's own output commutes with."""
+    spec = output_spec(config, root, output)
+    combine = _class_name(str(clean(config.get(root, {}).get("combine")) or "Mean"))
+    stack, _ = _split_stack(config, root, spec)
+    # ponytail: one pass and no stack; the copies of a pass and a stack's rows need a member each, add them when an
+    # app folds test-time copies.
+    folds = app_fold(config, root, output) is not None
+    return models > 1 and folds and combine == "Mean" and len(passes) == 1 and stack is None
+
+
 def program_reduction(
     config: dict[str, Any], root: str, models: int, passes: list[list[dict[str, Any]]], output: str | None = None
 ) -> str:
@@ -2568,6 +2649,15 @@ def program_reduction(
     spec = output_spec(config, root, output)
     combine = _class_name(str(clean(config.get(root, {}).get("combine")) or "Mean"))
     derived = derive_reduction(config, root, output)
+    blend = clean(spec.get("patch_combine"))
+    if models > 1 and app_fold(config, root, output) is not None:
+        # konfai combines the models before a Fold enters each patch: no fold of each model's own output is that.
+        # `averaged_per_patch` hands them to the runtime as one model.
+        raise ConfigError(
+            f"{models} models combine by '{combine}' before '{blend}' folds, and the runtime averages such"
+            " models patch by patch under combine: Mean alone, on one pass, with no InferenceStack.",
+            _or_konfai("Combine by Mean, with no test-time copy and no stack", _PREDICT),
+        )
     if models > 1 and combine != "Concat":
         # konfai combines the models inside the forward, on each batch of patches: before the overlap
         # blend, before the before-reduction transforms, and without the per-model layout MergeLabels
@@ -2621,6 +2711,7 @@ def compile_output(
     patch_size: list[int] | None = None,
     in_channels: int | None = None,
     write_manifest: bool = False,
+    extension: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Path], dict[str, Any]]:
     """One output of the config, compiled: its checkpoints exported to ``<out_dir>/<id>.onnx`` and the program
     that runs them with the nested models of ``aux``. ``head`` is the module output the graph ends on and
@@ -2639,11 +2730,40 @@ def compile_output(
         write_manifest=write_manifest,
         masked=bool(aux),
         output=output,
+        extension=extension,
     )
+    names = [c.name for c in checkpoints if c is not None]
+    own = app_fold(config, root, output)
+    if own is not None and averaged_per_patch(config, root, len(checkpoints), passes, output):
+        # One model to the program, the mean of the exported ones: its id is theirs without the index.
+        mean = ids[0].removesuffix("_0")
+        manifest = models[0]["manifest"]
+        members = [{"model": model["id"], "checkpoint": name} for model, name in zip(models, names, strict=True)]
+        # What the app's Fold enters a patch as, a graph run on the mean: the one model then hands its channels.
+        from konfai.export import export_folds
+
+        enter = f"{mean}_enter"
+        channels, _ = export_folds(
+            [own.enter, lambda tensor: tensor.float()],
+            out_dir / f"{enter}.onnx",
+            int(manifest["output"]["channels"]),
+            int(manifest["patch"]["dim"]),
+        )
+        manifest = manifest | {"output": manifest["output"] | {"channels": channels}}
+        models = [*models, {"id": enter, "manifest": manifest}]
+        written = [*written, out_dir / f"{enter}.onnx"]
+        program = assemble_program(
+            [{"id": mean, "manifest": manifest}],
+            reduce=program_reduction(config, root, 1, passes, output),
+            passes=passes,
+            aux=aux,
+            masks=masks,
+            per_copy=per_copy,
+        )
+        return models, written, program | {"averaged": {mean: members}, "enter": {mean: enter}}
     reduce = program_reduction(config, root, len(checkpoints), passes, output)
     fold = models_fold_first(config, root, len(checkpoints), output)
     stack, _ = _split_stack(config, root, output_spec(config, root, output))
-    names = [c.name for c in checkpoints if c is not None]
     program = assemble_program(
         models,
         reduce=reduce,
@@ -2676,17 +2796,21 @@ def compile_prediction(
     predictions_dir: str | Path = Path("./Predictions"),
     output: str | Path = Path("./prediction.json"),
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
+    extension: str | Path | None = None,
 ) -> dict[str, Any]:
     """Compile a ``Prediction.yml`` and its checkpoints into the program the portable runtime executes, each
     checkpoint exported to ONNX beside ``output`` and each output landing where PREDICTION would write it. A
     nested app (a ``KonfAIInference`` group a ``Mask`` reads) needs ``nested_exporter``, which resolves that
-    app and writes its ONNX: only konfai-apps resolves an app."""
+    app and writes its ONNX: only konfai-apps resolves an app. ``extension`` is the app's extension of KonfAI Edge, the
+    WebAssembly module that implements each ``patch_combine`` the config names by a classpath of the app's own; it
+    is copied beside the program."""
     from konfai.predictor.workflow import Predictor, build_predict
 
     root = "Predictor"
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoints = [Path(model).resolve() for model in models or []]
+    extension = None if extension is None else Path(extension).resolve()
 
     with (
         _sources_staged_at_run_time(),
@@ -2728,7 +2852,7 @@ def compile_prediction(
         # A model without checkpoints (a parameter-free one) is exported once, as it builds.
         weights: list[Path | None] = [*checkpoints] or [None]
         exported, written = _compile_heads(
-            resolved, root, predictor.outputs_dataset, weights, passes, aux, output.parent
+            resolved, root, predictor.outputs_dataset, weights, passes, aux, output.parent, extension is not None
         )
         predictor.dataset.prepare()
         # What each case is read from: the model's first input group, then every group the manifest names,
@@ -2747,6 +2871,11 @@ def compile_prediction(
             "outputs": written,
         }
 
+    blends = [step.get("manifest", {}).get("blend", "") for head in written for step in head["program"]["steps"]]
+    if extension is not None and any(":" in blend for blend in blends):
+        if extension.parent != output.parent:
+            shutil.copy(extension, output.parent / extension.name)
+        prediction["extension"] = extension.name
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
 
@@ -2783,6 +2912,7 @@ def _compile_heads(
     passes: list[list[dict[str, Any]]],
     aux: dict[str, dict[str, Any]],
     out_dir: Path,
+    extension: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """One program per output sink of ``heads``: each names the head it reads, its own models and its own
     destination. Returns every model exported and every output as its program and its write target."""
@@ -2796,7 +2926,7 @@ def _compile_heads(
             else [f"{prefix}model_{index}" for index in range(len(checkpoints))]
         )
         models, _files, program = compile_output(
-            config, root, checkpoints, out_dir, ids, passes=passes, aux=aux, head=head, output=head
+            config, root, checkpoints, out_dir, ids, passes=passes, aux=aux, head=head, output=head, extension=extension
         )
         exported += models
         destination = _destination(_portable_root(sink.filename), sink.file_format, sink.group)

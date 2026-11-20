@@ -1679,6 +1679,78 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
 
 
+def test_an_apps_own_fold_compiles_to_the_patch_combine_of_its_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The app's Fold is named by classpath: the program names the extension's patch combine by it, what it enters a
+    # patch as is part of the model's graph, and the manifest states what it leaves.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    onnxruntime = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "Fusion.py").write_text(
+        "import torch\n"
+        "from konfai.data.patching import Fold\n\n\n"
+        "class Surest(Fold):\n"
+        "    def enter(self, patch):\n"
+        "        score, label = patch.max(0, keepdim=True)\n"
+        "        return torch.cat((label.to(torch.uint8), (score * 255).round().to(torch.uint8)))\n\n"
+        "    def fold(self, held, patch):\n"
+        "        return torch.where(patch[1:] >= held[1:], patch, held)\n\n"
+        "    def leave(self, held):\n"
+        "        return held[:1]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    output = resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]
+    output |= {"patch_combine": "Fusion:Surest", "final_transforms": "None"}
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    out = tmp_path / "out" / "prediction.json"
+
+    with pytest.raises(KonfAIError, match="'Fusion:Surest' is the app's own"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", out)
+    extension = tmp_path / "fusion.wasm"
+    extension.write_bytes(b"\0asm")
+    # Two models: each graph ends on the head, and their mean is entered by a graph of its own.
+    folds = [tmp_path / "fold_0.pt", tmp_path / "fold_1.pt"]
+    torch.save({"Model": TinySegNet().network_states()}, folds[1])
+    both = compile_prediction(
+        config, folds, tmp_path / "Predictions", tmp_path / "two" / "prediction.json", extension=extension
+    )
+    assert both["models"] == {"model_0": "model_0.onnx", "model_1": "model_1.onnx", "model_enter": "model_enter.onnx"}
+    averaged = both["outputs"][0]["program"]
+    assert averaged["enter"] == {"model": "model_enter"} and len(averaged["averaged"]["model"]) == 2
+    assert averaged["steps"][0]["manifest"]["output"]["channels"] == 2
+    enter = onnxruntime.InferenceSession(str(tmp_path / "two" / "model_enter.onnx"), providers=["CPUExecutionProvider"])
+    mean = np.stack([np.full((16, 16), 0.25, np.float32), np.full((16, 16), 0.75, np.float32)])[None]
+    (entered,) = enter.run(None, {"input": mean})
+    assert (entered[0, 0] == 1).all() and (entered[0, 1] == 191).all()
+    program = compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+
+    assert program["extension"] == "fusion.wasm" and (out.parent / "fusion.wasm").read_bytes() == b"\0asm"
+    # An extension already beside the program is the one it names: compiled again, nothing is copied over itself.
+    again = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", out, extension=out.parent / "fusion.wasm"
+    )
+    assert again["extension"] == "fusion.wasm"
+    (step,) = program["outputs"][0]["program"]["steps"]
+    manifest = step["manifest"]
+    assert (manifest["blend"], manifest["output"]["channels"]) == ("Fusion:Surest", 2)
+    assert manifest["blended"] == {"channels": 1, "dtype": "uint8"}
+    session = onnxruntime.InferenceSession(str(out.parent / "model.onnx"), providers=["CPUExecutionProvider"])
+    (entered,) = session.run(None, {"input": np.ones((1, 1, 16, 16), np.float32)})
+    assert entered.dtype == np.float32 and entered.shape[1] == 2
+    assert set(np.unique(entered[:, 0])) <= {0.0, 1.0} and entered[:, 1].max() <= 255
+
+
 def test_a_crop_on_a_needed_apps_group_compiles_to_a_read_beside_the_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2729,3 +2801,13 @@ def test_the_compiler_imports_without_pyyaml() -> None:
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([root, os.environ.get("PYTHONPATH", "")])}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_output_chain_reads_the_dtype_an_apps_fold_leaves() -> None:
+    # A Fold leaving uint8 labels: the copies' Mean reads them as float32 and their Vote keeps them, so konfai's
+    # Resample undoes the first linearly and the second by the nearest voxel.
+    for reduction, interpolation in (("Mean", "linear"), ("Vote", "nearest")):
+        config = _prediction({"Resample": {"spacing": [1, 1, 1], "inverse": True}}, {"reduction": reduction})
+        manifest, _folds, _per_copy = transform_manifest(config, "Predictor", blended="uint8")
+        [undone] = [step for step in manifest["postprocessing"] if step["op"] == "inverse"]
+        assert undone["interpolation"] == interpolation

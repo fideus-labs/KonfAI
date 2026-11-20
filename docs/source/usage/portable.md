@@ -20,7 +20,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
 | EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
-| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`), 6 with a `GaussianFloat16` blend | KonfAI Edge with `patch.stride` (unreleased) |
+| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`), 6 with a `GaussianFloat16` blend or a patch combine of the app's extension | KonfAI Edge with `patch.stride` (unreleased) |
 
 A bump on one side is a line in this table and in the runtime's README.
 
@@ -249,6 +249,16 @@ before the overlap blend; a program folds each model's blended output. Only a
 mean commutes with the blend. With a `before_reduction_transforms` chain, the
 program averages each copy's models and runs the chain on that average, as
 konfai does; the copies then fold by the output's `reduction`.
+
+A `patch_combine` of the app's own (a `Fold`, named by classpath) runs in KonfAI
+Edge as the patch combine of the same name in the app's extension, a WebAssembly
+module written against `konfai-edge-ext` and passed as
+`compile_prediction(..., extension=...)`; without one the config is refused. What
+the `Fold` enters a patch as is part of the model's graph. Several models are
+then run as one: the program's `averaged` key names the models whose outputs the
+runtime averages on each patch, its `enter` key the graph their mean goes
+through, and a run selects among them by checkpoint. This form takes one pass
+and no `InferenceStack`.
 
 ## Refusals, by name
 
