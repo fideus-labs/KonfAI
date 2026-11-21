@@ -219,7 +219,7 @@ class _RegionState:
 
     shapes: list[list[int]]
     #: The most values a voxel holds between two stages of the pipe: a block's widest form, channels included.
-    widest: int = 1
+    widest: int
     stream: SlabRegionStream | None = None
     # The attribute the latest emission ran the pipe on: what the sink opens with.
     attribute: Attribute | None = None
