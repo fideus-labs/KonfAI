@@ -93,13 +93,16 @@ def _built(classpath: str, given: dict[str, Any], kinds: tuple[type, ...]) -> tu
     was built with, defaults included: what the compiler hands the extension. ``None`` for a class of no kind an
     extension implements (the model), or for no class at all."""
     from konfai.portable import clean
+    from konfai.utils.errors import ConfigError
     from konfai.utils.utils import get_module
 
     try:
         module, name = get_module(classpath, "konfai")
         cls = getattr(module, name)
         signature = inspect.signature(cls)
-    except Exception:  # a path, a format, a callable of another library: no class of the app's
+    except ImportError as error:  # the module is there and does not import: a class nothing would check
+        raise AppMetadataError(f"'{classpath}' does not import, so the extension is not checked: {error}") from error
+    except (ConfigError, AttributeError, TypeError, ValueError):  # a path, a format, a module's output: no class
         return None
     if not (isinstance(cls, type) and issubclass(cls, kinds)):
         return None
@@ -189,14 +192,20 @@ def _check_criterion(extension: Path, name: str, criterion: Any, params: dict[st
     import torch
 
     generator = torch.Generator().manual_seed(0)
-    output, target = (torch.rand((1, *_SHAPE), generator=generator) for _ in range(2))
+    # As many targets as the class's forward names, one for a variadic `*targets`.
+    named = [
+        parameter
+        for parameter in inspect.signature(criterion.forward).parameters.values()
+        if parameter.kind is parameter.POSITIONAL_OR_KEYWORD and parameter.default is parameter.empty
+    ]
+    output, *targets = (torch.rand((1, *_SHAPE), generator=generator) for _ in range(max(len(named), 2)))
     opened = _Opened(extension, CRITERION, name, params)
-    targets = opened.put(np.array([opened.put(target), 1]), "uint32")
-    opened.call("ext_measure", opened.put(output), 1, targets, 1, math.prod(_SHAPE))
+    table = opened.put(np.array([[opened.put(target), 1] for target in targets]), "uint32")
+    opened.call("ext_measure", opened.put(output), 1, table, len(targets), math.prod(_SHAPE))
     value = opened.buffer(2)
     opened.call("ext_value", value)
     measured = np.frombuffer(bytes(opened.exports["memory"].read(opened.store, value, value + 8)), np.float64)
-    scored = criterion(output[None], target[None])
+    scored = criterion(output[None], *(target[None] for target in targets))
     scored = scored[0] if isinstance(scored, tuple) else scored
     _close(name, "score a case", [float(scored)], measured.astype(np.float32))
 
