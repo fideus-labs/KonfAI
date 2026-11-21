@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -343,11 +343,14 @@ def _check_criterion(
     _close(name, "score a case", [float(scored)], measured.astype(np.float32))
 
 
-def check_extension(extension: str | Path, configs: list[str | Path]) -> list[str]:
+def check_extension(
+    extension: str | Path, configs: Collection[str | Path], runs: dict[str, list[dict[str, Any]] | None] | None = None
+) -> list[str]:
     """Run every class of the app's own that ``configs`` name, in Python and from ``extension``, on the same random
     voxels: a transform and its inverse, a reduction, a ``patch_combine`` and a criterion. Returns the classpaths
     checked. A test-time draw is opened and not compared: the extension draws from the seed its step carries,
-    where konfai draws from torch's generator.
+    where konfai draws from torch's generator. ``runs``, the classes a compiled program runs by the extension
+    (:func:`classes_run`), leaves out those it folds into a graph.
 
     Raises ``AppMetadataError`` when the extension lacks a class, or returns other values than the Python class.
     """
@@ -357,7 +360,7 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
     from konfai.data.reduction import Reduction
     from konfai.data.transform import Transform
     from konfai.metric.measure import Criterion
-    from konfai.portable import inference_patch
+    from konfai.portable import clean, inference_patch
 
     checks = {
         Fold: _check_fold,
@@ -381,6 +384,11 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
             if (built := _built(name, given, tuple(checks))) is None:
                 continue
             instance, params = built
+            # A class, or a binding of it, the program does not run by the extension.
+            if runs is not None:
+                bindings = runs.get(name, [])
+                if bindings is not None and {k: clean(v) for k, v in given.items()} not in bindings:
+                    continue
             # A class bound twice with other parameters is two things to check.
             bound = (name, json.dumps(params, sort_keys=True, default=str))
             if bound in checked:
@@ -390,3 +398,34 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
             )
             checked[bound] = None
     return list(dict.fromkeys(name for name, _ in checked))
+
+
+def classes_run(program: Any) -> dict[str, list[dict[str, Any]] | None]:
+    """The classes of the app's own a compiled program (a prediction or an evaluation program, a manifest) runs by its
+    extension, each with the parameters each of its transform steps binds it with, or ``None`` for a class run with the
+    parameters its config binds: a draw, a reduction, a manifest's ``blend``, a criterion."""
+    from konfai.portable import own_class
+
+    found: dict[str, list[dict[str, Any]] | None] = {}
+    if isinstance(program, list):
+        for item in program:
+            for name, bound in classes_run(item).items():
+                _merge(found, name, bound)
+    if isinstance(program, dict):
+        for key, value in program.items():
+            if key in ("class", "blend") and isinstance(value, str) and own_class(value):
+                # A draw's step carries its own seed and no `prob`: any binding of it.
+                params = program.get("params") or {}
+                step = key == "class" and program.get("op") == "extension" and "seed" not in params
+                _merge(found, value, [params] if step else None)
+            for name, bound in classes_run(value).items():
+                _merge(found, name, bound)
+    return found
+
+
+def _merge(found: dict[str, list[dict[str, Any]] | None], name: str, bound: list[dict[str, Any]] | None) -> None:
+    """``name`` run with the bindings ``bound`` too (``None``: any)."""
+    if (name in found and found[name] is None) or bound is None:
+        found[name] = None
+    else:
+        found[name] = [*(found.get(name) or []), *bound]

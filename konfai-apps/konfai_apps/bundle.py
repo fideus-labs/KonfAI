@@ -546,22 +546,10 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
 
     if args.get("extension"):
-        from .extension import check_extension
+        # The app's extension of KonfAI Edge rides in the bundle.
+        shutil.copy(args["extension"], bundle / Path(args["extension"]).name)
 
-        # The app's extension of KonfAI Edge rides in the bundle, checked against the classes it stands for.
-        extension = bundle / Path(args["extension"]).name
-        shutil.copy(args["extension"], extension)
-        sys.path.insert(0, str(bundle))  # the app's own classes, as konfai imports them
-        try:
-            checked = check_extension(extension, [bundle / Path(config).name for config in args["config"]])
-            print(f"[KonfAI-Apps] Extension checked against: {', '.join(checked) or 'no class of the app'}")
-        except ModuleNotFoundError as error:
-            if error.name != "wasmtime":
-                raise
-            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
-        finally:
-            sys.path.remove(str(bundle))
-
+    runs = None
     if args.get("onnx"):
         artifact = export_portable_into_bundle(
             bundle,
@@ -572,3 +560,26 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             extension=bool(args.get("extension")),
         )
         print(f"[KonfAI-Apps] Portable model exported: {artifact}")
+        if args.get("extension"):
+            from .extension import classes_run
+
+            # The classes the program runs by the extension: a class folded into a graph is no longer its.
+            # A program, or the manifest beside the one model it would run.
+            written = artifact if artifact.suffix == ".json" else bundle / "manifest.json"
+            runs = classes_run(json.loads(written.read_text()))
+
+    if args.get("extension"):
+        from .extension import check_extension
+
+        # Checked against the classes it stands for, as konfai imports them.
+        sys.path.insert(0, str(bundle))
+        try:
+            configs = [bundle / Path(config).name for config in args["config"]]
+            checked = check_extension(bundle / Path(args["extension"]).name, configs, runs)
+            print(f"[KonfAI-Apps] Extension checked against: {', '.join(checked) or 'no class of the app'}")
+        except ModuleNotFoundError as error:
+            if error.name != "wasmtime":
+                raise
+            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
+        finally:
+            sys.path.remove(str(bundle))

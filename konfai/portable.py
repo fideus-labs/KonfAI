@@ -1606,6 +1606,24 @@ def try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
     return lambda tensor: inst("fold", tensor, Attribute())
 
 
+def _traces(folds: list[Callable[[Any], Any]], probe: tuple[int, ...], dtype: str = "float32") -> bool:
+    """Whether pointwise ``folds`` export to one ONNX graph on a volume of ``probe``'s channels and axes, in ``dtype``:
+    what a class of the app's own must do to be folded rather than run by its extension."""
+    import contextlib
+    import io
+    import tempfile
+
+    try:
+        from konfai.export import export_folds
+
+        # The exporter prints each attempt; a class that does not trace is an answer here, not news.
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            export_folds(folds, Path(directory) / "folds.onnx", probe[0], len(probe) - 1, dtype)
+    except Exception:  # nosec B110 - a class no graph carries is its extension's to run
+        return False
+    return True
+
+
 def declares_inverse(name: str, params: Any) -> bool:
     """Whether the predictor undoes this chain entry after the forward: a ``TransformInverse`` whose
     ``apply_inverse`` is set, read from the class so a user's transform is treated like a shipped one."""
@@ -1715,6 +1733,14 @@ def compile_pipeline(
             steps.append(_admitted(case_statistic(params)))
             continue
         own = extension and ":" in base
+        if own and fold_out is not None:
+            # A class of the app's own that a graph carries is folded into one, as without an extension; one the chain
+            # undoes stays its extension's, which undoes it. ponytail: output chains only; before the model the folds
+            # run after the test-time draws the program appends, so folding there would reorder an intensity draw.
+            read = getattr(fold_out, "reads", lambda _steps: "float32")(steps)
+            folded = None if declares_inverse(name, params) or read is None else try_fold(name, params)
+            traced = folded is not None and _traces([*pending, folded], probe(steps) if probe else _VOLUME_PROBE, read)
+            own = not traced
         if base in OP_MAP or own:
             flush()
             refuse_a_late_crop(name, moved, ConfigError, params=params)
@@ -1943,6 +1969,9 @@ def _post_chain(
                 )
             return fold_out(folds, [*done, *steps], held)
 
+        # The dtype a fold after `steps` reads, `None` where only the run knows it: a class of the app's own folds only
+        # where it is known, traced on it.
+        fold.reads = lambda steps: _dtype_after(steps, dtype)  # type: ignore[attr-defined]
         return fold
 
     copies = str(clean(spec.get("reduction")) or "Mean")

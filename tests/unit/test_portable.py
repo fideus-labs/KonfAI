@@ -1804,6 +1804,10 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "    voxel_local = True\n\n"
         "    def __call__(self, tensors):\n"
         "        return torch.stack(tensors).amax(0)\n\n\n"
+        "class Double(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n\n\n"
         "class Strongest(Transform):\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        if tensor.shape[0] != 2:\n"
@@ -1823,7 +1827,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     # whole volume may write fewer.
     predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {
         "reduction": "Own:Largest",
-        "before_reduction_transforms": {"Own:Strongest": {}},
+        # A pointwise class a graph carries is folded into one, extension or not.
+        "before_reduction_transforms": {"Own:Strongest": {}, "Own:Double": {}},
     }
     config.write_text(json.dumps(resolved))
     checkpoint = tmp_path / "fold_0.pt"
@@ -1855,6 +1860,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
     strongest = {"op": "extension", "class": "Own:Strongest", "params": {}, "whole": True}
     assert all(strongest in model["postprocessing"] for model in models)
+    assert '"Own:Double"' not in json.dumps(program)
+    assert all(model["postprocessing"][-1]["op"] == "onnx" for model in models)
 
 
 def test_a_final_chain_reading_groups_of_the_case_closes_the_program(

@@ -283,8 +283,10 @@ At the end of the `final_transforms`, a class reading the whole volume may read
 groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
 the program runs that end of the chain on the prediction, and reads those groups
 with the case.
-Without an extension, a pointwise transform is folded into the model's graph and
-the other classes are refused. A reduction takes no parameter.
+In an output chain, a pointwise transform that exports to ONNX is folded into a
+graph, with or without an extension. Without an extension, a pointwise
+transform before the model is folded into its graph and the other classes are
+refused. A reduction takes no parameter.
 
 `konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
 With `konfai-apps[extension]` installed, it also runs each class in Python and
