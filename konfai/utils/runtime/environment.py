@@ -231,6 +231,19 @@ class NeedDevice:
         self.device = get_device(device)
 
 
+def expandable_cuda_segments() -> None:
+    """Let CUDA's caching allocator grow its segments in place (``expandable_segments:True``), in this process and the
+    ranks it starts: a window that fits the card's live memory then does not fail on blocks it reserved but cannot
+    reuse. Appended to the user's own allocator settings, ``PYTORCH_CUDA_ALLOC_CONF`` or else ``PYTORCH_ALLOC_CONF``
+    (the first replaces the second when both are set), and never over an ``expandable_segments`` they set. PyTorch
+    reads them when the process first initialises CUDA: a process that already has does not change."""
+    alone = "PYTORCH_ALLOC_CONF" in os.environ and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ
+    name = "PYTORCH_ALLOC_CONF" if alone else "PYTORCH_CUDA_ALLOC_CONF"
+    settings = os.environ.get(name, "")
+    if "expandable_segments" not in settings:
+        os.environ[name] = f"{settings},expandable_segments:True" if settings else "expandable_segments:True"
+
+
 def get_device(device: int):
     """Return a CUDA index or CPU device depending on availability. ``device_count`` and not availability
     alone: a latched runtime keeps ``is_available()`` True after ``CUDA_VISIBLE_DEVICES`` was narrowed."""

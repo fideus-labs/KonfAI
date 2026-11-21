@@ -39,6 +39,7 @@ from konfai.utils.runtime import (
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     execute_distributed_object,
+    expandable_cuda_segments,
     is_interactive_session,
 )
 
@@ -76,6 +77,34 @@ def test_configure_workflow_environment_normalizes_paths(monkeypatch: pytest.Mon
     assert os.environ["KONFAI_ROOT"] == "Trainer"
     assert os.environ["KONFAI_STATE"] == str(State.TRAIN)
     assert Path(os.environ["KONFAI_STATISTICS_DIRECTORY"]).name == "Statistics"
+
+
+@pytest.mark.parametrize(
+    ("cuda", "generic", "expected_cuda", "expected_generic"),
+    [
+        (None, None, "expandable_segments:True", None),
+        ("per_process_memory_fraction:0.4", None, "per_process_memory_fraction:0.4,expandable_segments:True", None),
+        ("expandable_segments:False", None, "expandable_segments:False", None),
+        (None, "per_process_memory_fraction:0.4", None, "per_process_memory_fraction:0.4,expandable_segments:True"),
+        (
+            "max_split_size_mb:64",
+            "per_process_memory_fraction:0.4",
+            "max_split_size_mb:64,expandable_segments:True",
+            "per_process_memory_fraction:0.4",
+        ),
+    ],
+)
+def test_cuda_segments_expand_beside_the_users_own_allocator_settings(
+    monkeypatch: pytest.MonkeyPatch, cuda, generic, expected_cuda, expected_generic
+) -> None:
+    for name, value in (("PYTORCH_CUDA_ALLOC_CONF", cuda), ("PYTORCH_ALLOC_CONF", generic)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    expandable_cuda_segments()
+    assert os.environ.get("PYTORCH_CUDA_ALLOC_CONF") == expected_cuda
+    assert os.environ.get("PYTORCH_ALLOC_CONF") == expected_generic
 
 
 def test_confirm_overwrite_or_raise_requires_flag_in_non_interactive(monkeypatch: pytest.MonkeyPatch) -> None:

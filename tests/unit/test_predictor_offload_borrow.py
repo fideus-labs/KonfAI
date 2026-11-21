@@ -90,12 +90,29 @@ def test_cpu_blend_consumes_the_borrowed_buffer_inside_its_context(monkeypatch):
             return super().add_layer(index, layer)
 
     monkeypatch.setattr(owner, "_borrow_cpu_patch", tracked_borrow)
-    accumulator = InspectAccumulator([(slice(0, 3), slice(0, 3))], [3, 3], batch=False)
+    accumulator = InspectAccumulator([(slice(0, 3), slice(0, 3)), (slice(3, 6), slice(0, 3))], [3, 3], batch=False)
     source = torch.arange(18, dtype=torch.float32, device="cuda").reshape(2, 3, 3)
     owner._blend_patch(0, 0, source, accumulator)
     assert not active
     owner._pin_buffer.fill_(float("nan"))
-    assert torch.equal(accumulator.assemble(), source.cpu())
+    assert torch.equal(accumulator.assemble()[:, :3], source.cpu())
+
+
+@CUDA
+@pytest.mark.parametrize("combine_type", [None, Gaussian, Trim])
+def test_a_case_of_one_patch_is_copied_straight_into_the_host_buffer(monkeypatch, combine_type):
+    """A whole-case window blended on the host is not staged: the case is held once, with the patch's values."""
+    owner = _owner(force_pinned=True)
+    monkeypatch.setattr(owner, "_borrow_cpu_patch", lambda layer: pytest.fail("the only patch was staged"))
+    combine = combine_type() if combine_type else None
+    if combine is not None:
+        combine.set_patch_config([4, 5], 0)
+    accumulator = Accumulator([(slice(0, 4), slice(0, 5))], [4, 5], combine, batch=False)
+    source = torch.rand(2, 4, 5, device="cuda")
+    owner._blend_patch(0, 0, source, accumulator)
+    result = accumulator.assemble()
+    assert owner._pin_buffer is None and result.device.type == "cpu"
+    assert torch.equal(result, source.cpu())
 
 
 @CUDA
@@ -146,10 +163,10 @@ def test_failed_pinned_allocation_keeps_the_pageable_fallback(monkeypatch):
         return real_empty(*args, **kwargs)
 
     monkeypatch.setattr(torch, "empty", empty)
-    accumulator = Accumulator([(slice(0, 3), slice(0, 3))], [3, 3], batch=False)
+    accumulator = Accumulator([(slice(0, 3), slice(0, 3)), (slice(3, 6), slice(0, 3))], [3, 3], batch=False)
     owner._blend_patch(0, 0, source, accumulator)
     assert attempts == [True] and owner._pin_buffer is None
-    assert torch.equal(accumulator.assemble(), source.cpu())
+    assert torch.equal(accumulator.assemble()[:, :3], source.cpu())
     assert torch.equal(owner._offload_to_cpu(source), source.cpu())
 
 

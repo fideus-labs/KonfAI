@@ -65,6 +65,9 @@ class Accumulator:
         self._done = [False] * self._count
         # Patches are blended into this running buffer as they arrive (add_layer), never kept.
         self._result: torch.Tensor | None = None
+        #: Where the running buffers are allocated, the first patch's device when None. A patch on another device is
+        #: copied into them as it is written, and moved there first when the blend weighs it.
+        self.device: torch.device | None = None
         self._weighted: torch.Tensor | None = None
         #: Under a ``float16_sums`` blend: ``_result`` is the float16 sum, this the float16 sum of the windows.
         self._float16_sums = getattr(patch_combine, "float16_sums", False)
@@ -92,14 +95,15 @@ class Accumulator:
     def _allocate(self, layer: torch.Tensor, spatial: list[int]) -> None:
         """The running buffers over ``spatial``."""
         dtype = torch.float16 if self._float16_sums else layer.dtype
-        self._result = torch.zeros(list(layer.shape[: self._n]) + spatial, dtype=dtype, device=layer.device)
+        device = self.device or layer.device
+        self._result = torch.zeros(list(layer.shape[: self._n]) + spatial, dtype=dtype, device=device)
         if self._float16_sums:
             if not layer.dtype.is_floating_point:
                 raise PatchError(
                     f"'{type(self.patch_combine).__name__}' blends floating-point outputs, and this one is {layer.dtype}.",
                     "Blend the logits the labels are taken from, or use 'patch_combine: Trim'.",
                 )
-            self._window_sums = torch.zeros(spatial, dtype=torch.float16, device=layer.device)
+            self._window_sums = torch.zeros(spatial, dtype=torch.float16, device=device)
 
     def _blend(self, layer: torch.Tensor, patch_slice: tuple[slice, ...], row_offset: int = 0) -> None:
         """Blend one patch at its in-volume destination, ``row_offset`` rows down on the first spatial
@@ -118,6 +122,8 @@ class Accumulator:
         dest[sweep] = slice(dest[sweep].start - row_offset, dest[sweep].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
         result = cast(torch.Tensor, self._result)
+        if self.patch_combine is not None and not self.patch_combine.selects:
+            data = data.to(result.device)
         lead = slices_dest[:n]
         if self.patch_combine is None:
             result[slices_dest] = data
