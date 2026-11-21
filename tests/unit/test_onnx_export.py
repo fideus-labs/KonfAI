@@ -226,6 +226,15 @@ def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_r
         def named_forward(self, x):
             yield "head", self.conv(x)[..., : int(x.shape[-2]) // 2, :]
 
+    class Floored(
+        Free
+    ):  # pads up to a floor in a branch on the size: the export keeps the example's branch (SynthSeg v1)
+        def named_forward(self, x):
+            width = x.shape[-1]
+            if width < 32:
+                x = torch.nn.functional.pad(x, (0, 32 - width))
+            yield "head", self.conv(x)
+
     class Decided(Free):  # a hard decision between two networks, as SynthSeg takes one
         def named_forward(self, x):
             yield "head", self.conv(self.conv(x)[:, :1].tanh() * (self.conv(x).argmax(1, keepdim=True) == 1))
@@ -237,6 +246,9 @@ def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_r
     assert session.run(None, {"input": np.zeros((1, 1, 5, 7, 9), np.float32)})[0].shape == (1, 2, 5, 7, 9)
     with pytest.raises(PredictorError, match="answers for the example's shape alone"):
         export_to_onnx(Fixed().eval(), tmp_path / "fixed", example, "head", dynamic=True)
+    # Right on the example's shape a little larger (28 < 32 along the last axis), wrong on it twice as long.
+    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_to_onnx(Floored().eval(), tmp_path / "floored", example, "head", dynamic=True)
     # Checked on a smooth input, against the gap at the example's own shape: a hard decision is not a fixed shape.
     export_to_onnx(Decided().eval(), tmp_path / "decided", example, "head", dynamic=True)
 

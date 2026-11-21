@@ -264,9 +264,10 @@ def _smooth(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
 def _check_free_axes(
     module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str]
 ) -> None:
-    """Refuse a graph exported with free axes that answers for the example's shape alone: on a smooth input of
-    another shape (16 voxels more along the last axis, 32 along the one before, and so on) it must give torch's
-    shape, and torch's values as closely as on a smooth input of the example's own shape."""
+    """Refuse a graph exported with free axes that answers for the example's shape alone: on smooth inputs of other
+    shapes (16 voxels more along the last axis, 32 along the one before, and so on; then the same with one axis at a
+    time twice as long, past a size the forward floors or caps at export) it must give torch's shape, and torch's
+    values as closely as on a smooth input of the example's own shape."""
     ort = _require("onnxruntime")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
@@ -283,21 +284,26 @@ def _check_free_axes(
         return float(np.abs(got.astype(np.float64) - want).max(initial=0.0)), list(want.shape), ""
 
     own, _, _ = gap([_smooth(list(example.shape), example.dtype) for example in examples])
-    other = []
-    for example in examples:
-        shape = list(example.shape)
-        shape[2:] = [extent + 16 * (len(shape) - axis) for axis, extent in enumerate(shape[2:], 2)]
-        other.append(_smooth(shape, example.dtype))
-    there, shape, answer = gap(other)
     own = 0.0 if own is None else own
-    if there is None or there > max(1e-4, 10.0 * own):
-        answer = answer or f"lands {there:.3g} from torch where it lands {own:.3g} at the example's shape"
-        raise PredictorError(
-            f"The model exported with free spatial axes {answer} on inputs of {list(other[0].shape)}, where torch"
-            f" gives {shape}: the forward answers for the example's shape alone.",
-            "Compute what depends on the input's shape with symbolic sizes (torch.sym_max, no int()), or give the"
-            " model a fixed patch_size.",
-        )
+    rank = examples[0].dim()
+    for doubled in (None, *range(2, rank)):  # one axis at a time, so the probe holds twice the example at most
+        other = []
+        for example in examples:
+            shape = list(example.shape)
+            shape[2:] = [
+                (2 if axis == doubled else 1) * extent + 16 * (len(shape) - axis)
+                for axis, extent in enumerate(shape[2:], 2)
+            ]
+            other.append(_smooth(shape, example.dtype))
+        there, shape, answer = gap(other)
+        if there is None or there > max(1e-4, 10.0 * own):
+            answer = answer or f"lands {there:.3g} from torch where it lands {own:.3g} at the example's shape"
+            raise PredictorError(
+                f"The model exported with free spatial axes {answer} on inputs of {list(other[0].shape)}, where torch"
+                f" gives {shape}: the forward answers for the example's shape alone.",
+                "Compute what depends on the input's shape with symbolic sizes (torch.sym_max, no int()), or give the"
+                " model a fixed patch_size.",
+            )
 
 
 class _Folds(torch.nn.Module):
