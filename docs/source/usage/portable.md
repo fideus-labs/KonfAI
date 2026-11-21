@@ -276,7 +276,9 @@ by block, keeps the grid and the channels and is not undone; its halo is the
 one it declares for a grid, which the extension states again for each case's
 grid when it depends on the spacing. Reading the whole
 volume, it may leave another grid, which the extension states as
-`transform_shape` does, and be undone after the model, or write other channels
+`transform_shape` does (one fitted to the values, bounded by another it states
+first), and be undone after the model with what it measured on the volume, or
+write other channels
 (labels out of posteriors) and not be undone; the case is then held whole. Each
 class is compiled on the channels and the axes its place in the chain hands it.
 At the end of the `final_transforms`, a class reading the whole volume may read

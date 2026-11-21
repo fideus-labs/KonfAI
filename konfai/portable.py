@@ -727,7 +727,8 @@ class _GroupsRead:
         self.read: list[str] = []
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
-        if group not in self.read:
+        # The probe's own group is the volume the class is handed, as stored: no other group of the case.
+        if group != "probe" and group not in self.read:
             self.read.append(group)
         return True
 
@@ -797,6 +798,12 @@ def _extension_step(
     kwargs = {key: clean(value) for key, value in _mapping(params).items()}
     rank = len(probe) - 1
     stage = _own_stage(classpath, kwargs, rank)
+
+    def probed(volume: Any, attribute: Any) -> Any:
+        """The class on ``volume``, its plan-time facts first, as konfai settles them (``transform_shape``)."""
+        stage.transform_shape("probe", "probe", list(volume.shape[1:]), attribute)
+        return stage("probe", volume, attribute)
+
     # Asked with a grid: a halo in millimetres needs the spacing. The runtime asks the extension again for each
     # case's grid (its `halo`), the halo written here standing where the extension says none.
     locality = stage.patch_locality(_probe_attribute(rank))
@@ -814,7 +821,7 @@ def _extension_step(
     if reads:
         attribute = _probe_attribute(rank)
         try:
-            returned = stage("probe", torch.zeros(probe), attribute)
+            returned = probed(torch.zeros(probe), attribute)
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -840,7 +847,7 @@ def _extension_step(
                 ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
-    dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute(rank)), voxels)
+    dtype = _own_dtype(classpath, lambda volume: probed(volume, _probe_attribute(rank)), voxels)
     step = _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
     if read := stage.datasets[0].read:
         if not groups or "whole" not in reads:

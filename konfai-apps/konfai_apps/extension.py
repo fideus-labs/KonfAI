@@ -134,6 +134,14 @@ class _Served:
         self.shape = shape
         self.read: list[str] = []
         self.volumes: dict[str, Any] = {}
+        #: What a class memoizes per case, as on a dataset (konfai's ``Dataset.case_facts``).
+        self.case_facts: dict[Any, Any] = {}
+
+    def own(self, volume: Any) -> None:
+        """``volume`` as the checked group stored: what a class reads of its own case (``transform_shape``), what it
+        memoized of another forgotten."""
+        self.volumes["check"] = volume.numpy()
+        self.case_facts.clear()
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
         import numpy as np
@@ -174,6 +182,9 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     channels, *shape = volume.shape
     rank = len(shape)
     geometry, attribute = _geometry(rank)
+    # Its plan-time facts first, as konfai settles them, then the class.
+    stage.datasets[0].own(volume)
+    stage.transform_shape("check", "check", list(shape), attribute)
     transformed = stage("check", volume.clone(), attribute)
 
     def grid(shape: Any, read: Any) -> Any:
@@ -182,30 +193,45 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     opened = _Opened(extension, VOLUME_TRANSFORM, name, params)
     source = grid(shape, geometry.__getitem__)
     _check_halo(opened, name, stage, source, rank, attribute)
-    written_at = opened.put(source, "float64")
-    opened.call("ext_output_grid", written_at, rank, 1)
-    written = opened.get(written_at, (source.size,), "float64")
-    _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
+
+    def stated(export: str, *notes: int) -> Any:
+        """The grid the extension states for the grid compared, given the notes at `notes` where there are."""
+        at = opened.put(source, "float64")
+        opened.call(export, at, rank, 1, *notes)
+        return opened.get(at, (source.size,), "float64")
 
     # The groups of the case the class read, in that order, each in a buffer listed with its channels.
     served = stage.datasets[0]
     groups = [served.volumes[group] for group in served.read]
-
-    def run(values: Any, written: tuple[int, ...], inverse: bool) -> Any:
-        out = opened.buffer(math.prod(written))
-        at = opened.put(source, "float64")
-        read = (opened.put(values), values.shape[0], at, rank, 1)
-        if groups and not inverse:
-            table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
-            opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
-        elif not opened.call("ext_apply_volume", *read, out, int(inverse)):
-            raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
-        return opened.get(out, written)
-
-    _close(name, "transform a volume", transformed, run(volume, tuple(transformed.shape), False))
+    # The forward into the grid stated before the values are read, which bounds one the values settle.
+    bound = stated("ext_output_grid")
+    out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
+    read = (opened.put(volume), channels, opened.put(source, "float64"), rank, 1)
+    if groups:
+        table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
+        opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
+    else:
+        opened.call("ext_apply_volume", *read, out, 0)
+    # What it measured on the volume, and the grid it settled on.
+    count = opened.call("ext_notes_len") if opened.has("ext_notes_len") else 0
+    notes = opened.buffer(2 * count)
+    if count:
+        opened.call("ext_notes", notes)
+    written = stated("ext_output_grid_noted", notes, count) if count else bound
+    _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
+    _close(name, "transform a volume", transformed, opened.get(out, tuple(transformed.shape)))
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
-        _close(name, "undo itself", undone, run(transformed, (channels, *shape), True))
+        back = opened.buffer(channels * math.prod(shape))
+        read = (opened.put(transformed), transformed.shape[0], opened.put(source, "float64"), rank, 1)
+        done = (
+            opened.call("ext_inverse_noted", *read, notes, count, back)
+            if count
+            else opened.call("ext_apply_volume", *read, back, 1)
+        )
+        if not done:
+            raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
+        _close(name, "undo itself", undone, opened.get(back, (channels, *shape)))
 
 
 def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, attribute: Any) -> None:
@@ -239,8 +265,14 @@ def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
     refused: Exception | None = None
     for channels in range(1, 1025):
         volume = torch.rand((channels, *shape), generator=generator) * 100
+        # A first slab of zeros along each axis: a class that crops to the content crops.
+        for axis in range(1, volume.dim()):
+            volume.narrow(axis, 0, 1).zero_()
+        attribute = _geometry(len(shape))[1]
         try:
-            stage("check", volume.clone(), _geometry(len(shape))[1])
+            stage.datasets[0].own(volume)
+            stage.transform_shape("check", "check", list(shape), attribute)
+            stage("check", volume.clone(), attribute)
         except Exception as error:  # a count the class refuses is not the one its chain hands it
             refused = refused or error
             continue
