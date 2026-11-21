@@ -758,7 +758,7 @@ def _extension_step(name: str, params: Any) -> dict[str, Any]:
     locality = stage.patch_locality(Attribute())
     reads: dict[str, Any] = {}
     if locality.kind is LocalityKind.HALO and locality.halo:
-        reads = {"halo": max(1, *locality.halo)}
+        reads = {"halo": max(locality.halo)}
     elif locality.kind is LocalityKind.WHOLE_VOLUME:
         reads = {"whole": True}
     elif locality.kind is not LocalityKind.POINTWISE:
