@@ -18,6 +18,7 @@
 """The data sources of each workflow: training, prediction, evaluation, dataset preparation."""
 
 import itertools
+import math
 import os
 import random
 import warnings
@@ -838,20 +839,29 @@ class Data(DataSources):
         self._managers, self._prepared_mapping = training, mapping
         self._validation_managers, self._prepared_validation_mapping = validation, validation_mapping
 
-    def worst_case_shape(self) -> list[int] | None:
-        """Per-axis maximum spatial extent over every prepared case and augmentation copy. A
-        provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
-        size, which smaller cases clamp to fewer (or single whole-volume) patches for free."""
-        shapes = [
+    def _prepared_shapes(self) -> list:
+        """The spatial shape of every group of every prepared case and augmentation copy."""
+        return [
             shape
             for prepared in (self._managers, self._validation_managers)
             for managers in (prepared or {}).values()
             for manager in managers
             for shape in manager.shapes
         ]
+
+    def worst_case_shape(self) -> list[int] | None:
+        """Per-axis maximum spatial extent over every prepared case and augmentation copy. A
+        provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
+        size, which smaller cases clamp to fewer (or single whole-volume) patches for free."""
+        shapes = self._prepared_shapes()
         if not shapes:
             return None
         return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
+
+    def worst_case_voxels(self) -> int:
+        """The most voxels one group of a prepared case or copy holds: what a case taken whole holds. The product of
+        ``worst_case_shape`` overstates it when the grids differ per axis (a long thin volume beside a wide flat one)."""
+        return max((math.prod(int(n) for n in shape) for shape in self._prepared_shapes()), default=0)
 
     def set_free_axis_multiple(self, multiple: list[int] | None) -> None:
         """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()``
