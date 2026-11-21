@@ -621,6 +621,7 @@ def _drive_prediction(
             result = output_dataset.get_output(0, [volume.shape[0]], cast(DatasetIter, DummyDatasetIter()))
             output_dataset.write_prediction(0, "CASE_000", result)
 
+    output_dataset.finalize_writes()  # a background writer may still hold the case
     data, _ = Dataset(f"{tmp_path}/{store[0]}", store[1]).read_data("out", "CASE_000")
     return torch.from_numpy(data)
 
@@ -722,8 +723,9 @@ def test_add_layer_streams_a_b_spline_inverse_from_the_buffer_once_its_range_is_
     tmp_path, monkeypatch, capsys, spacing: list[float], back: str | None
 ) -> None:
     # A B-spline on the faces grid clips to its input's range, which the buffer holds: measured there, the
-    # inverse streams from it into the sink and writes what the whole-volume inverse writes.
-    volume = torch.from_numpy((np.random.default_rng(5).standard_normal((1, 13, 12, 9)) * 300).astype(np.float32))
+    # inverse streams from it into the sink and writes what the whole-volume inverse writes. The case is longer than a
+    # region's window, so a region does not read it all.
+    volume = torch.from_numpy((np.random.default_rng(5).standard_normal((1, 300, 12, 9)) * 300).astype(np.float32))
     transforms = [Resample(spacing, grid="faces", interpolation="bspline", inverse_interpolation=back, inverse=True)]
     tails: list[bool] = []
     stream_tail = OutputDataset._stream_tail
@@ -773,6 +775,27 @@ def test_a_streamed_tail_cuts_its_blocks_by_the_output_it_writes(tmp_path, monke
     assert largest[1] <= largest[0] + slab
     reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
     assert torch.allclose(streamed, reference, rtol=float(np.finfo(np.float32).eps), atol=1e-9)
+
+
+@pytest.mark.parametrize("sweep_axis", [0, 2])
+def test_a_resample_apart_from_the_sweep_axis_is_never_one_block(tmp_path, monkeypatch, sweep_axis: int) -> None:
+    # The faces grid resamples axis 0 apart: a region reads its picked slices whole in plane. Swept along that axis, the
+    # pipe streams; swept along another, every region would read the whole case and the pipe would resample it in one
+    # block, so the case takes the buffered tail, whose whole call goes slab by slab.
+    import konfai.data.transform.resample as resample_module
+
+    monkeypatch.setattr(resample_module, "SLAB_VOXELS", 4 * 12 * 9)
+    blocks: list[int] = []
+    region = Resample._spline_region
+    monkeypatch.setattr(Resample, "_spline_region", lambda *args: blocks.append((out := region(*args)).numel()) or out)
+    volume = torch.from_numpy((np.random.default_rng(12).standard_normal((1, 24, 12, 9)) * 3).astype(np.float32))
+    transforms = [Resample([1.0, 1.0, 4.0], grid="faces", interpolation="bspline", inverse=True)]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, sweep_axis=sweep_axis)
+    assert max(blocks) < volume.numel()
+    reference = _drive_prediction(
+        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, sweep_axis=sweep_axis
+    )
+    assert torch.equal(streamed, reference)
 
 
 class _ForeignRange(Transform):

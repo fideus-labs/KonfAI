@@ -934,9 +934,8 @@ class DatasetManager:
         if not loc.kind.is_region:
             plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None, measured=seed, kept=kept)
         elif loc.kind is LocalityKind.HALO:
-            plan = _ReadStagePlan(
-                loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
-            )
+            halo = _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), halo, measured=seed, kept=kept)
         else:
             # ORIENTATION / CROP / REGRID: the stage's own remap, on the state the stages before it left.
             pull = _RemapPull(stage.stream_region_source, list(shape), Attribute(evolved), self.name)

@@ -98,8 +98,10 @@ def test_cuda_segments_expand_beside_the_users_own_allocator_settings(
     monkeypatch: pytest.MonkeyPatch, cuda, generic, expected_cuda, expected_generic
 ) -> None:
     for name, value in (("PYTORCH_CUDA_ALLOC_CONF", cuda), ("PYTORCH_ALLOC_CONF", generic)):
+        # Set first, so the helper's own write is undone too even where the variable was absent.
+        monkeypatch.setenv(name, "sentinel")
         if value is None:
-            monkeypatch.delenv(name, raising=False)
+            monkeypatch.delenv(name)
         else:
             monkeypatch.setenv(name, value)
     expandable_cuda_segments()

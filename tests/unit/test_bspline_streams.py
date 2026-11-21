@@ -273,3 +273,23 @@ def test_a_measured_statistic_reads_the_channels_its_stage_declares(tmp_path) ->
     case.warm_stream_statistics([0], apply_augmentations=False)
     region = case.read_region((slice(0, 4), slice(0, 4), slice(0, 4)), 0, False)
     np.testing.assert_array_equal(region[1].numpy(), 0.0)
+
+
+class _HaloLessMin(Transform):
+    """A neighbourhood stage that subtracts the least value of its own input, a statistic of the whole volume."""
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.HALO, halo=(1,), stat_keys=frozenset({"Min"}))
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor - float(cache_attribute["Min"] if "Min" in cache_attribute else tensor.min())
+
+
+def test_a_neighbourhood_stage_reads_the_statistic_measured_on_its_own_input(tmp_path) -> None:
+    """A halo stage behind a clip is seeded, as a regrid is, with the least value of the clipped volume."""
+    volume = np.full((1, 150, 20, 18), 100.0, dtype=np.float32)
+    volume[0, 0, 0, 0] = -20.0
+    case = manager(_store(tmp_path, volume), [Clip(-10.0, 500.0), _HaloLessMin()], patch=DatasetPatch([8, 16, 16]))
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    region = case.read_region((slice(100, 104), slice(0, 4), slice(0, 4)), 0, False)
+    np.testing.assert_array_equal(region.numpy(), 110.0)

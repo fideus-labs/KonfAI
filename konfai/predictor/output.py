@@ -927,7 +927,7 @@ class OutputDataset(Dataset, NeedDevice):
         seed: tuple[tuple[str, np.ndarray], ...] = (),
     ) -> _RegionState | None:
         """Wire the case's streamed pipe into one :class:`SlabRegionStream`, or answer ``None`` for
-        the buffered tail where streaming would not be exact.
+        the buffered tail where streaming would not be exact or would wait for the whole case.
 
         The pull map folds each stage's declaration backward from the written region down to the
         accumulator; ``produce`` walks the pipe forward over the pulled window. The fold is planned
@@ -1034,6 +1034,12 @@ class OutputDataset(Dataset, NeedDevice):
             return block
 
         state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1], plan.axis)
+        if not state.stream.streams:
+            # One block of the whole case (the faces grid resampling apart an axis other than the slab axis): the
+            # tail's whole call holds no more.
+            reason = "every region of its pipe reads the whole case along the slab axis"
+            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
+            return None
         return state
 
     def _apply_pipe_stage(

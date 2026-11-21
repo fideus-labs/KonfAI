@@ -513,6 +513,12 @@ class SlabRegionStream:
         slices[self._axis] = rows
         return tuple(slices)
 
+    @property
+    def streams(self) -> bool:
+        """Whether the first output row comes before the last input row. Where its pull already reads the whole input
+        along the slab axis, the stream holds the input whole and emits the output in one block."""
+        return self._pull(self._prefix_slices(1))[self._in_axis].stop < self._in_shape[self._in_axis]
+
     def push(self, region: slice, slab: torch.Tensor) -> list[tuple[tuple[slice, ...], torch.Tensor]]:
         """Take the next finalized slab (rows ``region`` of the input) and emit what it completes."""
         if region.start != self._complete_to:
