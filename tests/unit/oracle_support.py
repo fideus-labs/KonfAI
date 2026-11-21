@@ -89,15 +89,9 @@ CASE_NAME = "CASE_000"
 PEAK = 450.0
 
 # Byte-identical is the norm: a streamable transform reads exactly the voxels the whole-volume pass
-# reads and does the same arithmetic on them. Two kinds legitimately round differently:
+# reads and does the same arithmetic on them, a seeded statistic included (the whole-volume route folds
+# the tensor in hand as the scan folds the store). Some kinds legitimately round differently:
 #
-# - the seeded statistic: streaming seeds Mean/Std from `read_data_statistics` (a numpy pass over the
-#   stored volume) while the whole-volume path recomputes them with torch over the loaded tensor: the
-#   same values summed in a different order, so a standardized (unit-scale) voxel may land a few
-#   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
-#   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
-STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
-
 #: What two routes computing the same expression over different extents may differ by, relative to
 #: each value: a few float32 ulps.
 VECTORISED_RTOL = 8 * float(np.finfo(np.float32).eps)
@@ -641,7 +635,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "SelectLabel": [StageCase(SelectLabel(["(1,2)", "(3,1)"]), group="Labels")],
         "Softmax": [StageCase(Softmax(0), group="Ensemble")],
         "Squeeze": [StageCase(Squeeze(0))],
-        "Standardize": [StageCase(transform_module.Standardize(), atol=STAT_ATOL)],
+        "Standardize": [StageCase(transform_module.Standardize())],
         "StandardDeviation": [StageCase(StandardDeviation(), group="Ensemble")],
         "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
         # Landmarks pushed through a stored transform, not a volume: test_registration_evaluation.py proves it.

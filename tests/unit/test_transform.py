@@ -54,6 +54,7 @@ from konfai.data.transform import (
     Variance,
 )
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset.statistics import nonzero_statistics
 from konfai.utils.errors import TransformError
 
 # --------------------------------------------------------------------------------------
@@ -585,15 +586,15 @@ def _zero_backed_volume() -> torch.Tensor:
 
 
 def test_standardize_nonzero_standardizes_each_channel_over_its_non_zero_voxels_to_the_bit() -> None:
-    """Each channel over its own non-zero voxels: their float32 mean and population deviation (0 read as 1),
-    applied to them alone, the zeros kept; recorded per channel."""
+    """Each channel over its own non-zero voxels: their mean and population deviation (0 read as 1) as a
+    streamed case is seeded with them, applied to them alone, the zeros kept; recorded per channel."""
     volume = _zero_backed_volume()
     attribute = Attribute()
     out = Standardize(nonzero=True, inverse=False)("c", volume.clone(), attribute)
     expected = volume.to(torch.float32, copy=True)
-    for channel in expected:
+    seed = nonzero_statistics([volume.numpy()])
+    for channel, mean, std in zip(expected, seed["mean_per_channel"], seed["std_per_channel"], strict=True):
         values = channel[channel != 0]
-        mean, std = float(torch.mean(values)), float(torch.std(values, unbiased=False)) or 1.0
         channel[channel != 0] = (values - mean) / std
     assert out.dtype is torch.float32
     assert torch.equal(out, expected)
@@ -606,6 +607,83 @@ def test_standardize_nonzero_standardizes_each_channel_over_its_non_zero_voxels_
     assert torch.equal(stated, torch.where(volume != 0, volume / 2.0, volume))
     # A channel of zeros alone is left as it is.
     assert not Standardize(nonzero=True, inverse=False)("c", torch.zeros(2, 4, 4), Attribute()).any()
+
+
+@pytest.mark.parametrize(
+    ("make", "untraced"),
+    [(lambda: Standardize(inverse=False), 2.0), (lambda: Standardize(nonzero=True, inverse=False), 2.0)],
+    ids=["measuring", "nonzero"],
+)
+def test_a_standardize_prices_the_float64_pieces_its_statistics_hold(
+    tmp_path: Path, image_attributes, make, untraced: float
+) -> None:
+    """One row of a [1, 1, 2048, 2048] case is over a piece of the statistics fold (2^18 values), so the piece is
+    the whole case, held in float64: its host copy (torch's, ``untraced`` volumes-worth at the plan's four bytes),
+    its centred values, and over the non-zero voxels their selection (numpy's, traced). The stage prices them for
+    this case, and the whole-volume fallback with it; a CT's pieces are slivers and keep the class's figure."""
+    import tracemalloc
+
+    from konfai.data.materialize import CaseMaterializer
+    from konfai.data.patching import DatasetManager, DatasetPatch
+
+    array = (np.random.default_rng(0).standard_normal((1, 1, 2048, 2048)) + 3.0).astype(np.float32)
+    case_bytes = array.size * 4
+    stage = make()
+    stage.transform_shape("CT", "CASE", [1, 2048, 2048], Attribute())
+    tensor = torch.from_numpy(array.copy())
+    tracemalloc.start()
+    stage("CASE", tensor, Attribute())
+    _, traced = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    held = traced / case_bytes + untraced
+    # The few KiB of Python objects a call makes beside its buffers are no volume's worth.
+    assert stage.case_working_multiple("CASE") >= held - 0.01
+
+    sliver = make()
+    sliver.transform_shape("CT", "CT_CASE", [300, 512, 512], Attribute())
+    assert sliver.case_working_multiple("CT_CASE") == (2.5 if sliver.nonzero else sliver.working_multiple)
+
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "CASE", array, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+
+    # Sixteen channels of one 512 x 512 row: each plane is within the grain, the row of them is not, and the piece is
+    # the whole case again. The channels are the case's header's.
+    shallow = (np.random.default_rng(1).standard_normal((16, 1, 512, 512)) + 3.0).astype(np.float32)
+    dataset.write("CT", "SHALLOW", shallow, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    wide = make()
+    wide.set_datasets([dataset])
+    wide.transform_shape("CT", "SHALLOW", [1, 512, 512], Attribute())
+    tensor = torch.from_numpy(shallow.copy())
+    tracemalloc.start()
+    wide("SHALLOW", tensor, Attribute())
+    _, traced = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    shallow_held = traced / (shallow.size * 4) + untraced
+    assert wide.case_working_multiple("SHALLOW") >= shallow_held - 0.01
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE",
+        dataset=dataset,
+        patch=DatasetPatch([0, 0, 0]),
+        transforms=[make()],
+        data_augmentations_list=[],
+    )
+    assert CaseMaterializer(manager).fallback_working_set_bytes() >= (2 + held - 0.01) * case_bytes
+    priced = make()
+    priced.set_datasets([dataset])
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="SHALLOW",
+        dataset=dataset,
+        patch=DatasetPatch([0, 0, 0]),
+        transforms=[priced],
+        data_augmentations_list=[],
+    )
+    assert CaseMaterializer(manager).fallback_working_set_bytes() >= (2 + shallow_held - 0.01) * shallow.size * 4
 
 
 def test_standardize_nonzero_refuses_an_inverse_and_a_mask() -> None:

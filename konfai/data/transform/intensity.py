@@ -19,7 +19,7 @@
 
 import inspect
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -35,7 +35,15 @@ from konfai.data.transform.base import (
 )
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
-from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
+from konfai.utils.dataset.statistics import (
+    _STATISTICS_UPDATE_ELEMENTS,
+    _update_pieces,
+    data_statistics,
+    masked_statistics,
+    nonzero_statistics,
+    read_masked_data_statistics,
+    read_nonzero_data_statistics,
+)
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.utils import get_module, module_attribute
@@ -157,15 +165,27 @@ def _stated(stated: list[float] | None, channel: int, measured: float) -> float:
     return float(stated[0] if len(stated) == 1 else stated[channel])
 
 
-def _masked_values(stage: "Clip | Standardize", name: str, tensor: torch.Tensor) -> torch.Tensor:
-    """The tensor's values under ``stage``'s mask, on the whole-volume path."""
+def _mask_of(stage: "Clip | Standardize", name: str, tensor: torch.Tensor) -> np.ndarray:
+    """``stage``'s mask, on the whole-volume path, refused where it is not the tensor's grid."""
     mask = stage.read_companion(stage.mask, name)  # type: ignore[arg-type]
     if tuple(mask.shape) != tuple(tensor.shape):
         raise TransformError(
             f"The mask '{stage.mask}' has shape {list(mask.shape)} where the tensor in hand has {list(tensor.shape)}.",
             "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
         )
-    return tensor[mask != 0]
+    return mask
+
+
+def _masked_values(stage: "Clip | Standardize", name: str, tensor: torch.Tensor) -> torch.Tensor:
+    """The tensor's values under ``stage``'s mask, on the whole-volume path."""
+    return tensor[_mask_of(stage, name, tensor) != 0]
+
+
+def _host_pieces(tensor: torch.Tensor | np.ndarray) -> Iterator[np.ndarray]:
+    """``tensor`` in the pieces a scan of its store folds, each on the host in float64: a statistic of the
+    tensor in hand is then the store's to the bit, and no host copy of the volume is made."""
+    for piece in _update_pieces(tensor):  # type: ignore[arg-type]  # a tensor slices as an array does
+        yield torch.as_tensor(piece).to("cpu", torch.float64).contiguous().numpy()
 
 
 class Clip(Transform):
@@ -423,12 +443,16 @@ class UnNormalize(Transform):
 class Standardize(TransformInverse):
     """Standardize tensors using cached or computed mean and standard deviation.
 
+    The statistics a stage measures are the ones a streamed case is seeded with: folded in float64, piece
+    by piece, as a scan of the store folds them (``konfai.utils.dataset.statistics``), over the tensor in hand
+    on the whole-volume route, so the two routes standardize to the same bits. Held in float32, as applied.
+
     ``nonzero`` standardizes each channel over its voxels that are not exactly 0: its mean and population
     standard deviation (N, not N - 1; 0 taken as 1) over those voxels, applied to them alone, the zeros kept,
     in float32. Per channel always: KonfAI states a ``Standardize``'s numbers per channel. Not invertible (a voxel at 0 and one at the mean both land on 0), so it takes ``inverse: false``.
     """
 
-    working_multiple = 1.0  # the float copy the statistics are taken on
+    working_multiple = 1.0  # at most the mask a masked statistic reads; the fold's pieces, per case
 
     def __init__(
         self,
@@ -456,13 +480,37 @@ class Standardize(TransformInverse):
         self.mask = mask
         self.nonzero = nonzero
         self._masked_seed = _MaskedStatisticsSeed(mask) if mask is not None or nonzero else None
+        self._cases: dict[str, tuple[str, list[int]]] = {}
 
     def case_working_multiple(self, name: str) -> float:
-        # The non-zero path holds, per channel, the mask, the gathered values and their centred copy.
-        return 2.5 if self.nonzero else self.working_multiple
+        """Applying: under a mask, the mask; over the non-zero voxels, per channel, the mask, the gathered values and
+        their centred copy. Measuring: float64 copies of a piece of the case (the piece and its centred values; under
+        a mask, the mask's piece and the selection too; over the non-zero voxels, the selection). A piece within the
+        fold's grain is a few MiB whatever the case; one row of every channel over it is a piece of its own, the whole
+        of a shallow case. Answered from headers: the shape :meth:`transform_shape` met for this case and the channels
+        its group holds."""
+        base = 2.5 if self.nonzero else self.working_multiple
+        case = self._cases.get(name)
+        if case is None or (self.mean is not None and self.std is not None):
+            return base
+        group, shape = case
+        if self._channels(group, name) * int(np.prod(shape[1:], dtype=np.int64)) <= _STATISTICS_UPDATE_ELEMENTS:
+            return base
+        share = 1.0 / max(1, int(shape[0]))
+        copies = 4 if self.mask is not None else 3 if self.nonzero else 2
+        # A float64 value is two of the plan's float32 ones.
+        return max(base, (1.0 if self.mask is not None else 0.0) + 2 * copies * share)
+
+    def _channels(self, group: str, name: str) -> int:
+        """The channels the case's group holds, from its header; one where no dataset of the run holds it."""
+        holder = self.dataset_holding(group, name) if group else None
+        return int(holder.get_infos(group, name)[0][0]) if holder is not None else 1
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        # Identity on the shape; a masked statistic records the group the masked disk scan needs.
+        # Identity on the shape, kept with the case's group for its working multiple; a masked statistic records the
+        # group the masked disk scan needs.
+        group = group_src or self._cases.get(name, ("", []))[0]
+        self._cases[name] = (group, [int(extent) for extent in shape])
         if self._masked_seed is not None:
             self._masked_seed.record_group(group_src)
         return shape
@@ -498,22 +546,26 @@ class Standardize(TransformInverse):
                 return tensor
             return self._standardized(tensor, mean_value, std_value)
 
-        selected: torch.Tensor | None = None
+        statistics: dict[str, Any] | None = None
 
-        def values() -> torch.Tensor:
-            # Cast once: the mean and the std of an integer case would each convert the volume.
-            nonlocal selected
-            if selected is None:
-                selected = (tensor if self.mask is None else _masked_values(self, name, tensor)).type(torch.float32)
-            return selected
+        def measured(key: str) -> torch.Tensor:
+            # What a streamed case is seeded with: the store's fold, here over the tensor in hand, held in float32.
+            nonlocal statistics
+            if statistics is None:
+                statistics = (
+                    data_statistics(_host_pieces(tensor))
+                    if self.mask is None
+                    else masked_statistics(
+                        zip(_host_pieces(tensor), _host_pieces(_mask_of(self, name, tensor)), strict=True)
+                    )
+                )
+            return torch.tensor([statistics[key]], dtype=torch.float32)
 
         if "Mean" not in cache_attribute:
-            cache_attribute["Mean"] = (
-                torch.tensor([torch.mean(values())]) if self.mean is None else torch.tensor(self.mean)
-            )
+            cache_attribute["Mean"] = measured("mean") if self.mean is None else torch.tensor(self.mean)
 
         if "Std" not in cache_attribute:
-            cache_attribute["Std"] = torch.tensor([torch.std(values())]) if self.std is None else torch.tensor(self.std)
+            cache_attribute["Std"] = measured("std") if self.std is None else torch.tensor(self.std)
         if self.lazy:
             return tensor
         return self._standardized(tensor, cache_attribute.get_tensor("Mean"), cache_attribute.get_tensor("Std"))
@@ -531,26 +583,25 @@ class Standardize(TransformInverse):
         return stat
 
     def _nonzero(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        """Each channel over its non-zero voxels, the statistics in float32 (``torch.mean`` and the population
-        ``torch.std`` of the gathered values) or, on a streamed region,
-        seeded from the disk scan of the stored volume; what was applied is recorded per channel."""
-        scanned = (
-            self._masked_seed.statistics(self.datasets, name)  # type: ignore[union-attr]
-            if (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute
-            else None
-        )
+        """Each channel over its non-zero voxels, the statistics folded as a scan of the store folds them
+        (:func:`nonzero_statistics`): over the tensor in hand, or on a streamed region from the disk scan of
+        the stored volume; what was applied is recorded per channel."""
+        measured: dict[str, list[float]] | None = None
+        if self.mean is None or self.std is None:
+            measured = (
+                self._masked_seed.statistics(self.datasets, name)  # type: ignore[union-attr]
+                if "StatisticsSeeded" in cache_attribute
+                else nonzero_statistics(_host_pieces(tensor))
+            )
         out = tensor.to(torch.float32, copy=True)
         means: list[float] = []
         stds: list[float] = []
         for index, channel in enumerate(out):
             selected = channel != 0
             values = channel[selected]
-            if scanned is not None:
-                mean, std = float(scanned["mean_per_channel"][index]), float(scanned["std_per_channel"][index])
-            elif values.numel():
-                mean, std = float(torch.mean(values)), float(torch.std(values, unbiased=False)) or 1.0
-            else:
-                mean, std = 0.0, 1.0  # applied to no voxel: such a channel is left as it is
+            # A channel of no non-zero voxel reads 0 and 1: applied to no voxel, it is left as it is.
+            mean = float(measured["mean_per_channel"][index]) if measured is not None else 0.0
+            std = float(measured["std_per_channel"][index]) if measured is not None else 1.0
             mean, std = _stated(self.mean, index, mean), _stated(self.std, index, std)
             means.append(mean)
             stds.append(std)

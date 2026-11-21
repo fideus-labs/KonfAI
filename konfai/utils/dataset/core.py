@@ -56,15 +56,11 @@ from konfai.utils.dataset.ome_zarr_file import OmeZarrFile
 from konfai.utils.dataset.sitk_file import SitkFile
 from konfai.utils.dataset.staging import _recover_orphaned_backup, is_staging_entry
 from konfai.utils.dataset.statistics import (
-    _finalize_running_statistics,
     _lerp_like_numpy,
     _order_statistics,
     _scan_rows,
     _statistics_chunk_length,
-    _update_pieces,
-    _update_running_extrema,
-    _update_running_statistics,
-    needs_moments,
+    data_statistics,
 )
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
@@ -694,12 +690,7 @@ class Dataset:
         both to those), folded over :meth:`iter_data_blocks`: the volume is never held. ``keys``
         names the statistics the caller reads (``min``, ``max_per_channel``, ...): without a mean or
         std the fold stays in the stored dtype and computes the extrema only. ``None`` computes the four."""
-        update = _update_running_statistics if needs_moments(keys) else _update_running_extrema
-        state = None
-        for block in self.iter_data_blocks(groups, name)():
-            for piece in _update_pieces(block if channels is None else block[channels]):
-                state = update(state, piece)
-        return _finalize_running_statistics(state)
+        return data_statistics(self.iter_data_blocks(groups, name)(), channels, keys)
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self.exists_on_disk():
