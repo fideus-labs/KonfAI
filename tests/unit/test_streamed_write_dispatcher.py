@@ -781,10 +781,12 @@ def test_a_streamed_tail_cuts_its_blocks_by_the_output_it_writes(tmp_path, monke
 def test_a_resample_apart_from_the_sweep_axis_is_never_one_block(tmp_path, monkeypatch, sweep_axis: int) -> None:
     # The faces grid resamples axis 0 apart: a region reads its picked slices whole in plane. Swept along that axis, the
     # pipe streams; swept along another, every region would read the whole case and the pipe would resample it in one
-    # block, so the case takes the buffered tail, whose whole call goes slab by slab.
+    # block, so the case takes the buffered tail, which streams along axis 0 slab by slab.
     import konfai.data.transform.resample as resample_module
+    import konfai.predictor.output as output_module
 
     monkeypatch.setattr(resample_module, "SLAB_VOXELS", 4 * 12 * 9)
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", 4 * 12 * 9)
     blocks: list[int] = []
     region = Resample._spline_region
     monkeypatch.setattr(Resample, "_spline_region", lambda *args: blocks.append((out := region(*args)).numel()) or out)
@@ -795,6 +797,99 @@ def test_a_resample_apart_from_the_sweep_axis_is_never_one_block(tmp_path, monke
     reference = _drive_prediction(
         tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, sweep_axis=sweep_axis
     )
+    assert torch.equal(streamed, reference)
+
+
+@pytest.mark.parametrize("interpolation", ["bspline", "linear"])
+@pytest.mark.parametrize(("spacing", "apart", "sweep_axis"), [([1.0, 1.0, 4.0], 0, 2), ([4.0, 1.0, 1.0], 2, 0)])
+def test_a_tail_waiting_for_the_whole_case_streams_along_the_axis_resampled_apart(
+    tmp_path, monkeypatch, interpolation: str, spacing: list[float], apart: int, sweep_axis: int
+) -> None:
+    # Swept along another axis than the one the faces grid resamples apart, the pipe would read the whole case for its
+    # first row: the case is buffered, and its tail streams from the buffer along the axis apart. Every block holds a
+    # slab of values across its channels, none grows with the case, and the output is the whole route's to the bit.
+    import konfai.predictor.output as output_module
+
+    slab = 2 * 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    write = OutputDataset._write_stream_block
+    monkeypatch.setattr(
+        OutputDataset, "_write_stream_block", lambda self, *args: blocks.append(args[2].numel()) or write(self, *args)
+    )
+    transforms = [Flip("1", inverse=True), Resample(spacing, grid="faces", interpolation=interpolation, inverse=True)]
+    largest = []
+    for rows in (24, 48):
+        shape = [9, 12, 9]
+        shape[apart] = rows
+        volume = torch.from_numpy((np.random.default_rng(13).standard_normal((2, *shape)) * 3).astype(np.float32))
+        blocks.clear()
+        streamed = _drive_prediction(tmp_path / f"s{rows}", transforms, volume, monkeypatch, sweep_axis=sweep_axis)
+        assert len(blocks) == rows // 8
+        largest.append(max(blocks))
+        reference = _drive_prediction(
+            tmp_path / f"r{rows}", transforms, volume, monkeypatch, streamed=False, sweep_axis=sweep_axis
+        )
+        assert torch.equal(streamed, reference)
+    assert largest == [slab, slab]
+
+
+class _Repeat(Transform):
+    """Repeats its channels four times: a per-voxel stage that widens the tensor."""
+
+    locality = LocalityKind.POINTWISE
+
+    def output_channels(self, channels: int) -> int:
+        return 4 * channels
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor.repeat(4, *([1] * (tensor.dim() - 1)))
+
+
+def test_a_streamed_tail_cuts_its_blocks_by_the_widest_stage_of_its_pipe(tmp_path, monkeypatch) -> None:
+    # A per-voxel stage behind the resample widens each block four times: the tail counts the channels of the widest
+    # stage, not the buffer's, so a block still holds a slab of values.
+    import konfai.predictor.output as output_module
+
+    slab = 4 * 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    write = OutputDataset._write_stream_block
+    monkeypatch.setattr(
+        OutputDataset, "_write_stream_block", lambda self, *args: blocks.append(args[2].numel()) or write(self, *args)
+    )
+    transforms = [Resample([1.0, 1.0, 4.0], grid="faces", interpolation="linear", inverse=True)]
+    volume = torch.from_numpy((np.random.default_rng(14).standard_normal((1, 48, 12, 9)) * 3).astype(np.float32))
+    streamed = _drive_prediction(tmp_path / "s", transforms, volume, monkeypatch, final=[_Repeat()], sweep_axis=2)
+    assert max(blocks) == slab
+    reference = _drive_prediction(
+        tmp_path / "r", transforms, volume, monkeypatch, streamed=False, final=[_Repeat()], sweep_axis=2
+    )
+    assert torch.equal(streamed, reference)
+
+
+def test_a_streamed_tail_cuts_its_blocks_by_the_largest_grid_of_its_pipe(tmp_path, monkeypatch) -> None:
+    # Undone, the second resample grows the buffer eight times and the first halves it again: the tail counts the grid
+    # between them, the largest of its pipe, so no block of it holds much more than a slab.
+    import konfai.predictor.output as output_module
+
+    slab = 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    apply = OutputDataset._apply_pipe_stage
+    monkeypatch.setattr(
+        OutputDataset,
+        "_apply_pipe_stage",
+        lambda self, *args: blocks.append((out := apply(self, *args)).numel()) or out,
+    )
+    transforms = [
+        Resample([1.0, 1.0, 0.5], grid="faces", interpolation="linear", inverse=True),
+        Resample([1.0, 1.0, 4.0], grid="faces", interpolation="linear", inverse=True),
+    ]
+    volume = torch.from_numpy((np.random.default_rng(15).standard_normal((1, 48, 12, 9)) * 3).astype(np.float32))
+    streamed = _drive_prediction(tmp_path / "s", transforms, volume, monkeypatch, sweep_axis=2)
+    assert 0 < max(blocks) < 2 * slab
+    reference = _drive_prediction(tmp_path / "r", transforms, volume, monkeypatch, streamed=False, sweep_axis=2)
     assert torch.equal(streamed, reference)
 
 

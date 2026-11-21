@@ -22,7 +22,7 @@ when the gate refuses.
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION: in-slab mirrors), a ``Padding`` inverse (CROP), a
 a spacing ``Resample`` inverse on a uint8 chain and on a float chain (REGRID: each of its rows reads all
-three slices of the case, so the case takes the buffered path), a two-inverse pipe, and the full
+three slices of the case, so the case is buffered and its tail streams along them), a two-inverse pipe, and the full
 three-inverse stack (crop + rescale + reorient composed, streamed end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
 streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
 whole-volume. Every variant is compared voxel for voxel against its own kill-switch reference."""
@@ -177,9 +177,10 @@ _VARIANT_USES_STREAMED_WRITER = {
     "base": True,
     "Canonical": True,
     "Padding": True,
-    # Each row of the resample reads all three slices: a pipe would wait for the whole case, which the buffer holds.
-    "ResampleLabel": False,
-    "ResampleFloat": False,
+    # Each row of the resample reads all three slices: the case is buffered, and its tail streams from the buffer
+    # along the slices, the axis the faces grid resamples apart.
+    "ResampleLabel": True,
+    "ResampleFloat": True,
     "GeometryPair": True,
     "GeometryStack": True,
     # Crop's inverse pads the box back region by region, as its forward crops.

@@ -218,6 +218,8 @@ class _RegionState:
     """
 
     shapes: list[list[int]]
+    #: The most values a voxel holds between two stages of the pipe: a block's widest form, channels included.
+    widest: int = 1
     stream: SlabRegionStream | None = None
     # The attribute the latest emission ran the pipe on: what the sink opens with.
     attribute: Attribute | None = None
@@ -582,8 +584,10 @@ class OutputDataset(Dataset, NeedDevice):
                     " Reported once per reason.",
                 )
             elif plan is not None and not plan.to_sink:
-                path = "buffered (the prefix streams, the tail runs whole-volume)"
-                self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
+                reason = "the prefix streams into a buffer held whole, and the tail runs from it"
+                self._report_once(
+                    f"buffered: {reason}", f"streaming: case '{input_dataset.name}' takes the buffered path: {reason}."
+                )
         # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
         # per patch, taken before any inverse ran.
         attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
@@ -941,6 +945,7 @@ class OutputDataset(Dataset, NeedDevice):
 
         corner: tuple[EllipsisType | slice, ...] = (Ellipsis, *([slice(0, 1)] * len(in_shape)))
         probe = block[corner].clone()
+        widest = probe.numel()
         walking = Attribute(attr0)
         shapes = [list(in_shape)]
         kinds: list[LocalityKind] = []
@@ -1000,12 +1005,13 @@ class OutputDataset(Dataset, NeedDevice):
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
                     probe = stage.stream_region(name, probe, _corner_context(shape), walking)
+                widest = max(widest, probe.numel())
         except Exception as error:  # nosec B110 - an unplannable pipe keeps the case on the buffered path
             reason = f"its region pipe could not be planned ({type(error).__name__}: {error})"
             self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
             return None
 
-        state = _RegionState(shapes)
+        state = _RegionState(shapes, widest)
 
         def spans_for(target: tuple[slice, ...]) -> list[list[slice]]:
             """The region of each inter-stage space behind ``target``, folded back to the accumulator."""
@@ -1036,9 +1042,9 @@ class OutputDataset(Dataset, NeedDevice):
         state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1], plan.axis)
         if not state.stream.streams:
             # One block of the whole case (the faces grid resampling apart an axis other than the slab axis): the
-            # tail's whole call holds no more.
+            # buffered tail streams it along the axis it does stream along (``_stream_tail``).
             reason = "every region of its pipe reads the whole case along the slab axis"
-            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
+            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason} ({plan.axis}).")
             return None
         return state
 
@@ -1134,45 +1140,59 @@ class OutputDataset(Dataset, NeedDevice):
         name = self.names[index]
         if self._stream_tail(index, plan, result, attribute):
             return
+        self._report_once("tail whole", f"streaming: case '{name}' runs its tail whole-volume on the buffer.")
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
         self._submit_final_write(index, name, result, attribute)
 
     def _stream_tail(self, index: int, plan: _StreamPlan, buffer: torch.Tensor, attribute: Attribute) -> bool:
-        """Stream the tail from the buffer into the sink when all it waited for is the range of the buffer per
-        channel, which its first stage clips to (a B-spline): measured on the buffer, seeded for that stage alone, the
-        tail runs as a region pipe and the finalized case is never held whole. A later stage wanting a statistic of
-        its own input keeps the tail whole (``_make_pipe_state`` refuses it). Whether it streamed."""
-        if plan.tail_start >= len(plan.stages):
-            return False
-        keys = plan.stages[plan.tail_start].locality(Attribute(attribute)).stat_keys
+        """Stream the tail from the buffer into the sink when its stages are region or per-voxel ones and all it waited
+        for is the buffer: whole along the slab axis (the faces grid resampling another axis apart), or its range per
+        channel, which its first stage clips to (a B-spline), measured on the buffer and seeded for that stage alone.
+        The tail runs as a region pipe along the first axis it streams along, the slab axis first, and the finalized
+        case is never held whole. A later stage wanting a statistic of its own input keeps the tail whole
+        (``_make_pipe_state`` refuses it). Whether it streamed."""
+        localities = [stage.locality(Attribute(attribute)) for stage in plan.stages[plan.tail_start :]]
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
-        if keys != frozenset(RANGE_KEYS) or buffer.dim() != len(spatial) + 1:
+        if not localities or localities[0].stat_keys not in (frozenset(), frozenset(RANGE_KEYS)):
             return False
-        if not self.can_stream_data(attribute):
+        if not all(locality.kind.is_region or self._voxel_local(locality, attribute) for locality in localities):
             return False
-        # Each channel's range, NaN left out, folded slab by slab as the store's statistics are: only the slab in hand
-        # is moved to the host or widened.
-        extent, folded = spatial[plan.axis], None
-        rows = max(1, SLAB_VOXELS // max(1, buffer.numel() // extent))
-        for first in range(0, extent, rows):
-            folded = _update_running_extrema(
-                folded, _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
-            )
-        stats = _finalize_running_statistics(folded)
-        seed = tuple((key, np.asarray(stats[_STREAM_STATS[key]], np.float64)) for key in RANGE_KEYS)
+        if buffer.dim() != len(spatial) + 1 or not self.can_stream_data(attribute):
+            return False
+        seed: tuple[tuple[str, np.ndarray], ...] = ()
+        if localities[0].stat_keys:
+            # Each channel's range, NaN left out, folded slab by slab as the store's statistics are: only the slab in
+            # hand is moved to the host or widened.
+            extent, folded = spatial[plan.axis], None
+            rows = max(1, SLAB_VOXELS // max(1, buffer.numel() // extent))
+            for first in range(0, extent, rows):
+                folded = _update_running_extrema(
+                    folded, _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
+                )
+            stats = _finalize_running_statistics(folded)
+            seed = tuple((key, np.asarray(stats[_STREAM_STATS[key]], np.float64)) for key in RANGE_KEYS)
         tail = replace(plan, pipe_start=plan.tail_start, tail_start=len(plan.stages), to_sink=True)
-        state = self._make_pipe_state(index, tail, spatial, buffer, seed)
+        for axis in sorted(range(len(spatial)), key=lambda axis: axis != plan.axis):
+            state = self._make_pipe_state(index, replace(tail, axis=axis), spatial, buffer, seed)
+            if state is not None:
+                break
         if state is None:
             return False
+        self._report_once(
+            f"tail along {axis}",
+            f"streaming: case '{self.names[index]}' streams its tail from the buffer along axis {axis}.",
+        )
         self._region_states[index] = state
         stream = cast(SlabRegionStream, state.stream)
-        # A slab completes the output its rows write, which an inverse onto a finer grid makes many times larger.
-        per_row = max(buffer[0].numel(), int(np.prod(state.shapes[-1]))) // extent
+        # A slab completes what its rows become through the pipe, which an inverse onto a finer grid makes many times
+        # larger: sized on the pipe's largest grid, in every channel of its widest stage.
+        extent = spatial[axis]
+        per_row = state.widest * max(int(np.prod(shape)) for shape in state.shapes) // extent
         rows = max(1, SLAB_VOXELS // max(1, per_row))
         for first in range(0, extent, rows):
             region = slice(first, min(first + rows, extent))
-            for target, block in stream.push(region, buffer[(slice(None), *_slab(region, spatial, plan.axis))]):
+            for target, block in stream.push(region, buffer[(slice(None), *_slab(region, spatial, axis))]):
                 self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
         for target, block in stream.finalize():
             self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
