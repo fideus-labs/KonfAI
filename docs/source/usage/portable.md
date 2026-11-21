@@ -262,20 +262,27 @@ is copied beside it.
 | Class of the app | In the program | What the extension is handed |
 |---|---|---|
 | `Transform` whose `patch_locality` is `POINTWISE` | an `extension` step | the volume, and what to undo when the stage is undone |
+| `Transform` whose `patch_locality` is `HALO` | an `extension` step carrying its `halo` | a block with its neighbours and its grid |
+| `Transform` whose `patch_locality` is `WHOLE_VOLUME` | an `extension` step marked `whole` | the whole volume and its grid, and what to undo |
 | `DataAugmentation` whose `locality` is `POINTWISE`, as a test-time draw | an `extension` step carrying a `seed` | a copy to draw from the seed, then to undo |
 | `Reduction` that is `voxel_local`, as the copies' `reduction` | an `extension_reduce` step | the copies |
 | `Fold`, as the output's `patch_combine` | the manifest's `blend` | the patches, where they overlap |
 | `Criterion`, in an evaluation | a criterion of `metric: extension` | the output and its targets |
 
 The extension builds each class from the keys konfai binds it with, and is
-handed its volumes voxel by voxel: a class that reads past the voxel it writes
-is refused. Without an extension, a pointwise transform is folded into the
-model's graph and the other classes are refused. A reduction takes no parameter.
+handed its volumes voxel by voxel. A transform that reads past the voxel it
+writes is handed the volume with its grid instead, and keeps the channels. With
+a halo it streams block by block, keeps the grid and is not undone. Reading the
+whole volume, it may leave another grid, which the extension states as
+`transform_shape` does, and be undone after the model; the case is then held
+whole. Without an extension, a pointwise transform is folded into the model's
+graph and the other classes are refused. A reduction takes no parameter.
 
 `konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
 With `konfai-apps[extension]` installed, it also runs each class in Python and
 from the extension on the same random voxels, and refuses a bundle whose two
-halves disagree. A test-time draw is opened and not compared: the extension
+halves disagree, on the values or on the grid a transform leaves. A test-time
+draw is opened and not compared: the extension
 draws from the seed, konfai from torch's generator.
 
 What a `Fold` enters a patch as is part of the model's graph. Several models

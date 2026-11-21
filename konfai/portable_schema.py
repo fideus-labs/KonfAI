@@ -146,10 +146,21 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     # Pointwise transforms of an output chain, exported as one graph beside the model's: its file, the channels it
     # hands back, and the dtype konfai's transforms do (the program holds it as float32).
     "onnx": ({"model": _STRING, "channels": _INTEGER, "dtype": _STRING}, ["model", "channels", "dtype"]),
-    # A voxel-local transform of the app's own, run by its extension: the classpath the config names the class by,
-    # the keys konfai binds it with (a test-time draw's `seed` among them), and the dtype it writes where that is
-    # not the one it reads.
-    "extension": ({"class": _STRING, "params": {"type": "object"}, "dtype": _STRING, **_ID}, ["class", "params"]),
+    # A transform of the app's own, run by its extension: the classpath the config names the class by, the keys
+    # konfai binds it with (a test-time draw's `seed` among them), and the dtype it writes where that is not the one
+    # it reads. It reads the voxel it writes, or, keeping the channels, the voxels `halo` away (konfai's HALO) or
+    # the `whole` volume, which it may leave on another grid.
+    "extension": (
+        {
+            "class": _STRING,
+            "params": {"type": "object"},
+            "dtype": _STRING,
+            "halo": _INTEGER,
+            "whole": _BOOLEAN,
+            **_ID,
+        },
+        ["class", "params"],
+    ),
     # A whole-volume statistic as one float32 channel: `partial` (float64 `block` [C, *spatial], the region plus `halo`
     # edge-replicated pixels per side of every spatial axis, to `partial` [K]) summed over the regions in float64, then
     # `finish` (`total` [K] to the 0-d `statistic`), two graphs beside the program.

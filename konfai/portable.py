@@ -687,10 +687,10 @@ def own_class(classpath: str) -> bool:
     return bool(module) and module.replace(":", ".").split(".")[0] not in ("konfai", "konfai_apps")
 
 
-def _own_dtype(classpath: str, returned: Callable[[Any], Any]) -> dict[str, str]:
+def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int, ...] = (1, 1, 1, 1)) -> dict[str, str]:
     """The ``dtype`` the step of an app's own class states: the one the class returns whatever it reads, nothing
     for a class that returns the dtype it reads, which is all a step of the runtime writes. ``returned`` is the
-    class on one voxel."""
+    class on a volume of the shape ``probe``, one voxel unless the class reads past it."""
     import torch
 
     # ponytail: one voxel of one channel; a class that reads several channels states its dtype with a TensorCast
@@ -698,7 +698,7 @@ def _own_dtype(classpath: str, returned: Callable[[Any], Any]) -> dict[str, str]
     got = {}
     for dtype in ("uint8", "int16", "float32"):
         try:
-            got[dtype] = str(returned(torch.zeros((1, 1, 1, 1), dtype=getattr(torch, dtype))).dtype).split(".")[-1]
+            got[dtype] = str(returned(torch.zeros(probe, dtype=getattr(torch, dtype))).dtype).split(".")[-1]
         except Exception:  # nosec B112 - a dtype the class refuses is none its chain hands it
             continue
     if not got:
@@ -725,23 +725,59 @@ def _own_stage(classpath: str, params: dict[str, Any]) -> Any:
     return getattr(module, name)(**params)
 
 
+#: The volume a class that reads past the voxel is probed on: two channels, wider than a neighbourhood.
+_VOLUME_PROBE = (2, 8, 8, 8)
+
+
+def _probe_attribute() -> Any:
+    """The geometry a probed class may read: the identity grid."""
+    import numpy as np
+
+    from konfai.utils.dataset import Attribute
+
+    attribute = Attribute()
+    attribute["Origin"], attribute["Spacing"], attribute["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    return attribute
+
+
 def _extension_step(name: str, params: Any) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
-    it by and with the keys konfai binds it with. An extension is handed a volume voxel by voxel."""
-    from konfai.data.transform import LocalityKind
+    it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
+    ``HALO`` one a block with the ``halo`` it declares, whose grid it keeps; a ``WHOLE_VOLUME`` one the case
+    (``whole``), which may leave another grid and be undone. Both keep the channels."""
+    import torch
+
+    from konfai.data.transform import LocalityKind, TransformInverse
     from konfai.utils.dataset import Attribute
 
     classpath = base_name(name)
     kwargs = {key: clean(value) for key, value in _mapping(params).items()}
     stage = _own_stage(classpath, kwargs)
-    if stage.patch_locality(Attribute()).kind is not LocalityKind.POINTWISE:
+    locality = stage.patch_locality(Attribute())
+    reads: dict[str, Any] = {}
+    if locality.kind is LocalityKind.HALO and locality.halo:
+        reads = {"halo": max(locality.halo)}
+    elif locality.kind is LocalityKind.WHOLE_VOLUME:
+        reads = {"whole": True}
+    elif locality.kind is not LocalityKind.POINTWISE:
         raise ConfigError(
-            f"transform '{name}' reads past the voxel it writes, and an app's extension is handed a volume voxel"
-            " by voxel.",
-            _or_konfai("Declare patch_locality POINTWISE where each voxel is computed from itself alone", _RUN),
+            f"transform '{name}' declares the locality {locality.kind.name}, and an app's extension runs a"
+            " POINTWISE class, a HALO one with its halo or a WHOLE_VOLUME one.",
+            _or_konfai("Declare one of these three", _RUN),
         )
-    dtype = _own_dtype(classpath, lambda voxel: stage("probe", voxel, Attribute()))
-    return _admitted({"op": "extension", "class": classpath, "params": kwargs, **dtype})
+    if reads:
+        returned = stage("probe", torch.zeros(_VOLUME_PROBE), _probe_attribute())
+        moved = tuple(returned.shape) != _VOLUME_PROBE or (isinstance(stage, TransformInverse) and stage.apply_inverse)
+        if returned.shape[0] != _VOLUME_PROBE[0] or ("halo" in reads and moved):
+            raise ConfigError(
+                f"transform '{name}' returns {list(returned.shape)} for {list(_VOLUME_PROBE)}: an app's extension"
+                " runs a class that reads past the voxel where it keeps the channels and, for a HALO one, keeps"
+                " the grid and is not undone.",
+                _or_konfai("Declare WHOLE_VOLUME for a class that moves the grid or is undone", _RUN),
+            )
+    probe = _VOLUME_PROBE if reads else (1, 1, 1, 1)
+    dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute()), probe)
+    return _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
 
 
 def _reduce_step(reduce: str) -> dict[str, Any]:
@@ -2697,7 +2733,7 @@ def _channels_after(step: dict[str, Any], held: int) -> int:
         return held * 3
     if step["op"] == "keep_largest_component" and "mask" in step:
         return held - 1
-    if step["op"] == "extension":
+    if step["op"] == "extension" and not ("halo" in step or "whole" in step):
         import torch
 
         from konfai.utils.dataset import Attribute

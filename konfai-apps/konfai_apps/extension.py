@@ -19,7 +19,7 @@ from typing import Any
 from .errors import AppMetadataError
 
 #: The kinds an extension opens a class as, numbered as the extension numbers them.
-PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION = range(4)
+PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION, VOLUME_TRANSFORM = range(5)
 #: The spatial extent of the volumes compared.
 _SHAPE = (3, 4, 5)
 
@@ -57,16 +57,16 @@ class _Opened:
         import numpy as np
 
         array = np.ascontiguousarray(values, dtype=dtype)
-        at = self.buffer(array.size)
+        at = self.buffer(-(-array.nbytes // 4))
         self.exports["memory"].write(self.store, array.tobytes(), at)
         return at
 
-    def get(self, at: int, shape: tuple[int, ...]) -> Any:
-        """The float32 volume of ``shape`` at ``at``."""
+    def get(self, at: int, shape: tuple[int, ...], dtype: str = "float32") -> Any:
+        """The volume of ``shape`` at ``at``."""
         import numpy as np
 
-        data = self.exports["memory"].read(self.store, at, at + 4 * math.prod(shape))
-        return np.frombuffer(bytes(data), np.float32).reshape(shape)
+        data = self.exports["memory"].read(self.store, at, at + np.dtype(dtype).itemsize * math.prod(shape))
+        return np.frombuffer(bytes(data), dtype).reshape(shape)
 
 
 def own_classes(config: Any) -> Iterator[tuple[str, dict[str, Any]]]:
@@ -122,14 +122,57 @@ def _close(name: str, what: str, konfai: Any, extension: Any) -> None:
         )
 
 
-def _check_transform(extension: Path, name: str, stage: Any, params: dict[str, Any]) -> None:
-    import torch
+def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict[str, Any], volume: Any) -> None:
+    """A class that reads past the voxel: the extension is handed the volume with its grid, and says the grid it
+    writes, where konfai's class records it in the attribute."""
+    import numpy as np
     from konfai.data.transform import TransformInverse
     from konfai.utils.dataset import Attribute
 
+    rank = len(_SHAPE)
+    # A spacing and a direction no axis shares, so a class that reads the wrong one is told apart.
+    direction = np.diag([1.0, -1.0, 1.0])
+    geometry = {"Spacing": np.array([0.5, 1.0, 2.0]), "Origin": np.array([10.0, 20.0, 30.0]), "Direction": direction}
+    attribute = Attribute()
+    for key, value in geometry.items():
+        attribute[key] = value.flatten()
+    transformed = stage("check", volume.clone(), attribute)
+
+    def grid(shape: Any, read: Any) -> Any:
+        return np.concatenate([np.asarray(shape, float), *(np.asarray(read(key), float).flatten() for key in geometry)])
+
+    opened = _Opened(extension, VOLUME_TRANSFORM, name, params)
+    source = grid(_SHAPE, geometry.__getitem__)
+    written_at = opened.put(source, "float64")
+    opened.call("ext_output_grid", written_at, rank, 1)
+    written = opened.get(written_at, (source.size,), "float64")
+    _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
+
+    def run(values: Any, shape: tuple[int, ...], inverse: bool) -> Any:
+        out = opened.buffer(math.prod(shape))
+        at = opened.put(source, "float64")
+        if not opened.call("ext_apply_volume", opened.put(values), 1, at, rank, 1, out, int(inverse)):
+            raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
+        return opened.get(out, (1, *shape))
+
+    _close(name, "transform a volume", transformed, run(volume, tuple(transformed.shape[1:]), False))
+    if isinstance(stage, TransformInverse) and stage.apply_inverse:
+        _close(
+            name, "undo itself", stage.inverse("check", transformed.clone(), attribute), run(transformed, _SHAPE, True)
+        )
+
+
+def _check_transform(extension: Path, name: str, stage: Any, params: dict[str, Any]) -> None:
+    import torch
+    from konfai.data.transform import LocalityKind, TransformInverse
+    from konfai.utils.dataset import Attribute
+
     volume = torch.rand((1, *_SHAPE), generator=torch.Generator().manual_seed(0)) * 100
-    opened = _Opened(extension, TRANSFORM, name, params)
     pixels = math.prod(_SHAPE)
+    if stage.patch_locality(Attribute()).kind is not LocalityKind.POINTWISE:
+        _check_volume_transform(extension, name, stage, params, volume)
+        return
+    opened = _Opened(extension, TRANSFORM, name, params)
 
     def run(values: Any, inverse: bool) -> Any:
         channels = opened.call("ext_output", 1, 1)

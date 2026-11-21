@@ -1769,7 +1769,15 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "import torch\n"
         "from konfai.data.augmentation import DataAugmentation\n"
         "from konfai.data.reduction import Reduction\n"
-        "from konfai.data.transform import LocalityKind, PatchLocality, TransformInverse\n\n\n"
+        "from konfai.data.transform import LocalityKind, PatchLocality, Transform, TransformInverse\n\n\n"
+        "class Smooth(Transform):\n"
+        "    locality = LocalityKind.HALO\n"
+        "    halo = (1,)\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return torch.nn.functional.avg_pool3d(tensor.float()[None], 3, 1, 1, count_include_pad=False)[0]\n\n\n"
+        "class Centered(Transform):\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float() - tensor.float().mean()\n\n\n"
         "class Scale(TransformInverse):\n"
         "    def __init__(self, scale: float = 2.0, inverse: bool = True) -> None:\n"
         "        super().__init__(inverse)\n"
@@ -1800,7 +1808,9 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     resolved = json.loads(config.read_text())
     predictor = resolved["Predictor"]
     # konfai undoes an input transform once the copies are folded, which a program does for a resample alone.
-    own = {"Own:Scale": {"scale": 4.0, "inverse": False}}
+    # A class reads the voxel it writes, its neighbours as far as the halo it declares, or, declaring nothing, the
+    # whole volume.
+    own = {"Own:Scale": {"scale": 4.0, "inverse": False}, "Own:Smooth": {}, "Own:Centered": {}}
     predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
     predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}
     predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {"reduction": "Own:Largest"}
@@ -1821,7 +1831,9 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     models = [step["manifest"] for step in steps if "manifest" in step]
     assert len(models) == 3
     scale = {"op": "extension", "class": "Own:Scale", "params": own["Own:Scale"], "dtype": "float32"}
-    assert models[0]["preprocessing"] == [scale]
+    smooth = {"op": "extension", "class": "Own:Smooth", "params": {}, "halo": 1, "dtype": "float32"}
+    centered = {"op": "extension", "class": "Own:Centered", "params": {}, "whole": True, "dtype": "float32"}
+    assert models[0]["preprocessing"] == [scale, smooth, centered]
     # A copy's draw closes its preprocessing with a seed of its own, and is undone first.
     draws = [manifest["preprocessing"][-1] for manifest in models[1:]]
     assert [draw["class"] for draw in draws] == ["Own:Gain"] * 2 and all(draw["id"] == "__tta_0" for draw in draws)
@@ -1830,6 +1842,52 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     assert models[1]["postprocessing"][0] == {"op": "inverse", "of": "__tta_0"}
     (fold,) = [step for step in steps if step.get("op") == "extension_reduce"]
     assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
+
+
+def test_an_own_class_that_moves_the_grid_is_undone_by_the_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class that reads the whole volume may leave another grid: its step is marked `whole`, and the output is
+    # put back on the grid the class read by the inverse of that step.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "OwnGrid.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import TransformInverse\n\n\n"
+        "class Trim(TransformInverse):\n"
+        "    def __init__(self, margin: int = 1, inverse: bool = True) -> None:\n"
+        "        super().__init__(inverse)\n"
+        "        self.margin = margin\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return [*shape[:-2], *(extent - 2 * self.margin for extent in shape[-2:])]\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[..., self.margin : -self.margin, self.margin : -self.margin]\n\n"
+        "    def inverse(self, name, tensor, cache_attribute):\n"
+        "        return torch.nn.functional.pad(tensor, [self.margin] * 4)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    transforms = {"OwnGrid:Trim": {"margin": 2, "inverse": True}}
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = transforms
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+
+    manifest = program["outputs"][0]["program"]["steps"][0]["manifest"]
+    trim = {"op": "extension", "class": "OwnGrid:Trim", "params": transforms["OwnGrid:Trim"], "whole": True}
+    assert manifest["preprocessing"] == [trim | {"id": "OwnGrid:Trim"}]
+    assert {"op": "inverse", "of": "OwnGrid:Trim"} in manifest["postprocessing"]
 
 
 def test_a_crop_on_a_needed_apps_group_compiles_to_a_read_beside_the_case(
