@@ -40,6 +40,7 @@ from konfai.data.data_manager import (
 )
 from konfai.data.patching import (
     Accumulator,
+    Fold,
     PathCombine,
     SlabAligner,
     SlabRegionStream,
@@ -454,6 +455,9 @@ class OutputDataset(Dataset, NeedDevice):
             if self.patch_combine is not None:
                 axes = blend_axes(patch_size)
                 self.patch_combine.set_patch_config(axes, blend_overlap(overlap, axes))
+        elif isinstance(self._window, Fold):
+            # It stays on any grid: the output is what it leaves.
+            self.patch_combine = self._window
         self.nb_data_augmentation = nb_data_augmentation
 
     def to(self, device: int):
@@ -513,6 +517,8 @@ class OutputDataset(Dataset, NeedDevice):
         number_of_channels_per_model: list[int] | None = None,
     ):
         with PREDICTION_CLOCK.phase("blend"):
+            if isinstance(self.patch_combine, Fold):
+                layer = self.patch_combine.enter(layer)
             self._ensure_case_state(
                 index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
             )
@@ -1599,7 +1605,8 @@ class OutputLayerDataset(OutputDataset):
         self.names[index_dataset] = input_dataset.name
         self._stream_plans[index_dataset] = None
         window = self.patch_combine
-        if window is not None and any(r != 1 for r in ratio):
+        # A Fold has no window to bring onto the layer's grid.
+        if window is not None and not isinstance(window, Fold) and any(r != 1 for r in ratio):
             window = copy.deepcopy(window)
             window.set_patch_config(
                 [int(len(axis) * r) if len(axis) > 1 else 1 for axis, r in zip(window.windows_1d, ratio, strict=True)],

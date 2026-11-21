@@ -146,6 +146,21 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     # Pointwise transforms of an output chain, exported as one graph beside the model's: its file, the channels it
     # hands back, and the dtype konfai's transforms do (the program holds it as float32).
     "onnx": ({"model": _STRING, "channels": _INTEGER, "dtype": _STRING}, ["model", "channels", "dtype"]),
+    # A transform of the app's own, run by its extension: the classpath the config names the class by, the keys
+    # konfai binds it with (a test-time draw's `seed` among them), and the dtype it writes where that is not the one
+    # it reads. It reads the voxel it writes, or, keeping the channels, the voxels `halo` away (konfai's HALO) or
+    # the `whole` volume, which it may leave on another grid.
+    "extension": (
+        {
+            "class": _STRING,
+            "params": {"type": "object"},
+            "dtype": _STRING,
+            "halo": _INTEGER,
+            "whole": _BOOLEAN,
+            **_ID,
+        },
+        ["class", "params"],
+    ),
     # A whole-volume statistic as one float32 channel: `partial` (float64 `block` [C, *spatial], the region plus `halo`
     # edge-replicated pixels per side of every spatial axis, to `partial` [K]) summed over the regions in float64, then
     # `finish` (`total` [K] to the 0-d `statistic`), two graphs beside the program.
@@ -176,6 +191,8 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "vote": ({}, []),
     "concat": ({}, []),
     "merge_labels": ({"classes": _array(_INTEGER)}, ["classes"]),
+    # A voxel-local reduction of the app's own, run by its extension.
+    "extension_reduce": ({"class": _STRING, "dtype": _STRING}, ["class"]),
     # Aligned on the origin, the align, the spacing and the fill of the resample undone onto the reference buffer.
     "resample_linear": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
     "resample_nearest": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
@@ -200,6 +217,8 @@ CRITERIA: dict[str, tuple[dict[str, Any], list[str]]] = {
     "mae": ({"reduction": {"enum": ["mean", "sum"]}, "map": {"$ref": "#/$defs/destination"}}, ["reduction"]),
     "psnr": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
     "mean": ({}, []),
+    # A criterion of the app's own, measured by its extension voxel by voxel.
+    "extension": ({"class": _STRING, "params": {"type": "object"}}, ["class", "params"]),
     "ssim": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
     "sam_perceptual": (
         {
@@ -345,8 +364,13 @@ def program_schema() -> dict[str, Any]:
                 "geometry": _object({"mode": {"const": "preserve_from_input"}}, ["mode"]),
                 "preprocessing": _ref("chain"),
                 "postprocessing": _ref("chain"),
+                # A blend of the runtime's, or a patch combine of the app's extension by its classpath.
                 "blend": _STRING,
                 "accumulation_dtype": {"enum": ["float32", "float16"]},
+                # What an extension's patch combine hands the output chain.
+                "blended": _object(
+                    {"channels": _INTEGER, "dtype": _STRING, "params": {"type": "object"}}, ["channels", "dtype"]
+                ),
                 "reads": _array(_ref("read")),
             },
             ["konfai_edge_manifest", "model", "opset", "output_module", "input", "output", "patch", "geometry"],
@@ -363,6 +387,15 @@ def program_schema() -> dict[str, Any]:
                     "type": "object",
                     "additionalProperties": _object({"checkpoint": _STRING, "pass": _INTEGER}, ["checkpoint", "pass"]),
                 },
+                # A model a step names -> the models it is the average of, patch by patch, each with its checkpoint.
+                "averaged": {
+                    "type": "object",
+                    "additionalProperties": _array(
+                        _object({"model": _STRING, "checkpoint": _STRING}, ["model", "checkpoint"])
+                    ),
+                },
+                # An averaged model -> the model its mean goes through before the blend: what a Fold enters a patch as.
+                "enter": {"type": "object", "additionalProperties": _STRING},
             },
             ["steps", "output"],
         ),
@@ -417,6 +450,8 @@ def program_schema() -> dict[str, Any]:
                     )
                 ),
                 "models": {"type": "object", "additionalProperties": _STRING},
+                # The app's extension of KonfAI Edge, a WebAssembly module beside the program.
+                "extension": _STRING,
                 "metrics": _array(
                     _object(
                         {"output": _STRING, "targets": _array(_STRING), "criteria": _array(_ref("criterion"))},
@@ -446,6 +481,8 @@ def program_schema() -> dict[str, Any]:
                 "cases": _array(_STRING),
                 "input_group": {"type": ["string", "array"], "items": _STRING},
                 "models": {"type": "object", "additionalProperties": _STRING},
+                # The app's extension of KonfAI Edge, a WebAssembly module beside the program.
+                "extension": _STRING,
                 "outputs": _array(
                     _object(
                         {"program": _ref("program"), "write": _ref("destination"), "stack": _ref("destination")},

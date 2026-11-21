@@ -394,6 +394,7 @@ def export_portable_into_bundle(
     prediction_config: str = "Prediction.yml",
     output_module: str | None = None,
     root: str = "Predictor",
+    extension: bool = False,
 ) -> Path:
     """Write the bundle's portable-runtime artifacts from its prediction config.
 
@@ -402,6 +403,10 @@ def export_portable_into_bundle(
     assembles, every checkpoint on every test-time pass, the nested models a ``Mask`` reads, folded by the
     reduction the config declares. The patch geometry, transforms, blend, and reduction are all read from
     the config: nothing is per-app. Reading a config mutates it, so the export reads a private copy of it.
+
+    ``extension``: the bundle carries the app's extension of KonfAI Edge, so the classes of the app's own compile
+    to the steps the extension runs. These artifacts name no extension: the program
+    :func:`konfai.portable.compile_prediction` writes does.
     """
     import yaml
 
@@ -441,7 +446,7 @@ def export_portable_into_bundle(
             name: {**export_nested_model(name, group["inference"], bundle), "ops": group["ops"]}
             for name, group in aux_mask_groups(config, root).items()
         }
-        passes = tta_passes(config, root)
+        passes = tta_passes(config, root, extension)
         _models, written, program = compile_output(
             config,
             root,
@@ -454,6 +459,7 @@ def export_portable_into_bundle(
             patch_size=patch_size,
             in_channels=in_channels,
             write_manifest=not ensemble,
+            extension=extension,
         )
     portable_assets = set(written) | {bundle / f"{name}.onnx" for name in aux}
     if not ensemble:
@@ -539,6 +545,23 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
             print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
 
+    if args.get("extension"):
+        from .extension import check_extension
+
+        # The app's extension of KonfAI Edge rides in the bundle, checked against the classes it stands for.
+        extension = bundle / Path(args["extension"]).name
+        shutil.copy(args["extension"], extension)
+        sys.path.insert(0, str(bundle))  # the app's own classes, as konfai imports them
+        try:
+            checked = check_extension(extension, [bundle / Path(config).name for config in args["config"]])
+            print(f"[KonfAI-Apps] Extension checked against: {', '.join(checked) or 'no class of the app'}")
+        except ModuleNotFoundError as error:
+            if error.name != "wasmtime":
+                raise
+            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
+        finally:
+            sys.path.remove(str(bundle))
+
     if args.get("onnx"):
         artifact = export_portable_into_bundle(
             bundle,
@@ -546,5 +569,6 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             patch_size=args.get("patch_size"),
             in_channels=args.get("in_channels"),
             output_module=args.get("output_module"),
+            extension=bool(args.get("extension")),
         )
         print(f"[KonfAI-Apps] Portable model exported: {artifact}")

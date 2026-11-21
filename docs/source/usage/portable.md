@@ -20,7 +20,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
 | EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
-| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`), 6 with a `GaussianFloat16` blend | KonfAI Edge with `patch.stride` (unreleased) |
+| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`), 6 with a `GaussianFloat16` blend or a patch combine of the app's extension | KonfAI Edge with `patch.stride` (unreleased) |
 
 A bump on one side is a line in this table and in the runtime's README.
 
@@ -249,6 +249,47 @@ before the overlap blend; a program folds each model's blended output. Only a
 mean commutes with the blend. With a `before_reduction_transforms` chain, the
 program averages each copy's models and runs the chain on that average, as
 konfai does; the copies then fold by the output's `reduction`.
+
+### An app's own classes
+
+An app extends konfai with classes in its `.py` files, named by classpath in its
+configs. KonfAI Edge runs the same classes from the app's extension: a
+WebAssembly module written against `konfai-edge-ext`, which implements each
+class under the same classpath. Pass it as `extension=...` to
+`compile_prediction` or `compile_evaluation`: the program names the file, which
+is copied beside it.
+
+| Class of the app | In the program | What the extension is handed |
+|---|---|---|
+| `Transform` whose `patch_locality` is `POINTWISE` | an `extension` step | the volume, and what to undo when the stage is undone |
+| `Transform` whose `patch_locality` is `HALO` | an `extension` step carrying its `halo` | a block with its neighbours and its grid |
+| `Transform` whose `patch_locality` is `WHOLE_VOLUME` | an `extension` step marked `whole` | the whole volume and its grid, and what to undo |
+| `DataAugmentation` whose `locality` is `POINTWISE`, as a test-time draw | an `extension` step carrying a `seed` | a copy to draw from the seed, then to undo |
+| `Reduction` that is `voxel_local`, as the copies' `reduction` | an `extension_reduce` step | the copies |
+| `Fold`, as the output's `patch_combine` | the manifest's `blend` | the patches, where they overlap |
+| `Criterion`, in an evaluation | a criterion of `metric: extension` | the output and its targets |
+
+The extension builds each class from the keys konfai binds it with, and is
+handed its volumes voxel by voxel. A transform that reads past the voxel it
+writes is handed the volume with its grid instead, and keeps the channels. With
+a halo it streams block by block, keeps the grid and is not undone. Reading the
+whole volume, it may leave another grid, which the extension states as
+`transform_shape` does, and be undone after the model; the case is then held
+whole. Without an extension, a pointwise transform is folded into the model's
+graph and the other classes are refused. A reduction takes no parameter.
+
+`konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
+With `konfai-apps[extension]` installed, it also runs each class in Python and
+from the extension on the same random voxels, and refuses a bundle whose two
+halves disagree, on the values or on the grid a transform leaves. A test-time
+draw is opened and not compared: the extension
+draws from the seed, konfai from torch's generator.
+
+What a `Fold` enters a patch as is part of the model's graph. Several models
+under a `Fold` are run as one: the program's `averaged` key names the models
+whose outputs the runtime averages on each patch, its `enter` key the graph
+their mean goes through, and a run selects among them by checkpoint. This form
+takes one pass and no `InferenceStack`.
 
 ## Refusals, by name
 

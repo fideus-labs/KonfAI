@@ -1396,3 +1396,38 @@ def test_gaussian_float16_sums_and_divides_in_float16_whole_and_streamed() -> No
         rows += [slab for _, slab in streamed.add_layer(index, piece)]
     rows += [slab for _, slab in streamed.finalize()]
     assert torch.equal(torch.cat(rows, dim=2)[0], expected)
+
+
+def test_an_apps_own_fold_keeps_what_it_returns_and_writes_what_it_leaves() -> None:
+    # A class of an app's module, as its configuration names one by classpath: no accumulator method overridden.
+    from konfai.data.patching import Fold
+    from konfai.data.patching.accumulate import Accumulator, StreamingAccumulator
+    from konfai.utils.utils import get_patch_slices_from_shape
+
+    class Highest(Fold):
+        """Each voxel keeps the patch whose first channel is highest, and writes its second."""
+
+        def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+            return torch.where(patch[:1] > held[:1], patch, held)
+
+        def leave(self, held: torch.Tensor) -> torch.Tensor:
+            return held[1:]
+
+    shape, patch = [9, 12, 7], [4, 6, 5]
+    grid = get_patch_slices_from_shape(patch, shape, [2, 3, 2], placement="spread")
+    generator = torch.Generator().manual_seed(0)
+    patches = [torch.rand(2, *patch, generator=generator) for _ in grid]
+    score, value = torch.zeros(shape), torch.zeros(shape)
+    for piece, cut in zip(patches, grid, strict=True):
+        value[cut] = torch.where(piece[0] > score[cut], piece[1], value[cut])
+        score[cut] = torch.maximum(score[cut], piece[0])
+
+    whole = Accumulator(grid, patch, Highest(), batch=False)
+    streamed = StreamingAccumulator(grid, patch, Highest(), batch=False)
+    rows = []
+    for index, piece in enumerate(patches):
+        whole.add_layer(index, piece)
+        rows += [slab for _, slab in streamed.add_layer(index, piece)]
+    rows += [slab for _, slab in streamed.finalize()]
+    assert torch.equal(whole.assemble(), value[None])
+    assert torch.equal(torch.cat(rows, dim=1), value[None])
