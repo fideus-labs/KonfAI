@@ -70,6 +70,7 @@ def _scan_block_on_the_store_grid(
     budget: float | None,
     element_bytes: int = _STATISTICS_ELEMENT_BYTES,
     companions: Sequence[tuple[Sequence[int] | None, int]] = (),
+    piece: int = 1,
 ) -> tuple[int, int]:
     """The rows one scan block reads, and what reading it holds.
 
@@ -79,8 +80,14 @@ def _scan_block_on_the_store_grid(
     and what the store decodes is CHARGED, so an impossible scan is refused by the plan instead of
     by the kernel. ``companions`` are the entries read at the same steps (a mask), each as its grain
     and its element size: each holds its own blocks and decodes on its own grain, so each is charged.
+    A block raised to the grain stays a whole number of ``piece`` (their common multiple), so the fold sees the same
+    pieces; where that multiple is taller than the grain and than the block the scan reads anyway, the block keeps
+    its own height, a whole number of pieces too, and the grain is decoded again where a block straddles it.
     """
-    block = max(1, int(granularity[0])) if granularity else 0
+    grain = max(1, int(granularity[0])) if granularity else 0
+    block = math.lcm(grain, piece) if grain else 0
+    if block > max(grain, rows):
+        block = 0
     sources = [(granularity, element_bytes), *companions]
 
     def decoded(step: int, grain: Sequence[int] | None) -> int:
@@ -104,7 +111,13 @@ def _scan_block_on_the_store_grid(
         held = held_for(aligned)
         if budget is None or held <= budget:
             return aligned, held
-    return rows, held_for(rows)
+    held = held_for(rows)
+    if budget is not None and held > budget:
+        # Over the budget, a lower whole number of pieces may still fit: what it decodes past it shrinks with it.
+        for lower in range(rows - piece, 0, -piece):
+            if held_for(lower) <= budget:
+                return lower, held_for(lower)
+    return rows, held
 
 
 def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], piece: int = 1) -> int:
@@ -131,6 +144,7 @@ def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], 
         budget,
         element_bytes[0],
         list(zip(grains[1:], element_bytes[1:], strict=True)),
+        piece,
     )
     if budget is not None and held > budget:
         raise DatasetManagerError(
@@ -320,7 +334,9 @@ def _update_running_statistics(
     channel_count = float(per_channel.shape[1])
     channel_mean = per_channel.mean(axis=1)
     centred = per_channel - channel_mean[:, None]
-    channel_m2 = np.einsum("ij,ij->i", centred, centred)
+    # numpy's pairwise sum, as the mean takes it: a port can repeat it to the bit, where einsum's
+    # accumulation follows the vector width of the build that runs it.
+    channel_m2 = np.square(centred, out=centred).sum(axis=1)
     channel_min = per_channel.min(axis=1)
     channel_max = per_channel.max(axis=1)
 
@@ -402,7 +418,7 @@ def read_masked_data_statistics(
     mask_group: str,
     name: str,
 ) -> dict[str, Any]:
-    """Min/max/mean/std of one entry over the voxels where the mask entry equals 1, streamed.
+    """Min/max/mean/std of one entry over the voxels where the mask entry is not 0, streamed.
 
     The masked twin of ``Dataset.read_data_statistics``: both volumes are walked slab by slab along
     the first spatial axis, the slab sized and refused as ``Dataset.iter_data_blocks`` sizes and
@@ -423,28 +439,59 @@ def read_masked_data_statistics(
             " volume's own grid (same extent, same channels).",
         )
 
-    state: dict[str, Any] | None = None
-    for volume, mask in _walk_slabs([(source, group), (mask_source, mask_group)], name, shape):
-        selected = volume[mask != 0]
-        if selected.size:
-            state = _update_running_statistics(state, selected.reshape(1, -1))
-    return _finalize_running_statistics(state)
+    return masked_statistics(_walk_slabs([(source, group), (mask_source, mask_group)], name, shape))
 
 
 def read_nonzero_data_statistics(source: Any, group: str, name: str) -> dict[str, list[float]]:
     """Each channel's mean and population standard deviation over its voxels that are not 0, streamed:
-    what ``Standardize(nonzero=True)`` seeds a streamed case with. A channel with no such voxel reads 0 and 1,
-    and a deviation of 0 reads 1, as the stage applies them."""
-    shape, _ = source.get_infos(group, name)
-    states: list[dict[str, Any] | None] = [None] * int(shape[0])
-    for (volume,) in _walk_slabs([(source, group)], name, shape):
-        for index, channel in enumerate(volume):
-            selected = channel[channel != 0]
-            if selected.size:
-                states[index] = _update_running_statistics(states[index], selected.reshape(1, -1))
+    what ``Standardize(nonzero=True)`` seeds a streamed case with (:func:`nonzero_statistics`)."""
+    return nonzero_statistics(source.iter_data_blocks(group, name)())
+
+
+def data_statistics(
+    blocks: Iterable[np.ndarray], channels: list[int] | None = None, keys: Iterable[str] | None = None
+) -> dict[str, Any]:
+    """Min/max/mean/std of a volume handed as blocks of rows along its first spatial axis, over the volume
+    and per channel (``channels`` restricts both to those), folded piece by piece in float64, the pieces cut
+    from every channel before the channels are selected. Blocks of a whole number of pieces fold to the same
+    bits whatever their height, so a volume in hand folds to what a scan of its store reads. ``keys`` as
+    :meth:`Dataset.read_data_statistics` takes them."""
+    update = _update_running_statistics if needs_moments(keys) else _update_running_extrema
+    state = None
+    for block in blocks:
+        # Pieces of every channel, then the channels asked for: the pieces are the block's whatever is selected.
+        for piece in _update_pieces(block):
+            state = update(state, piece if channels is None else piece[channels])
+    return _finalize_running_statistics(state)
+
+
+def nonzero_statistics(blocks: Iterable[np.ndarray]) -> dict[str, list[float]]:
+    """Each channel's mean and population standard deviation over its voxels that are not 0, of a volume
+    handed as :func:`data_statistics` takes it, folded piece by piece. A channel with no such voxel reads
+    0 and 1, and a deviation of 0 reads 1, as ``Standardize(nonzero=True)`` applies them."""
+    states: list[dict[str, Any] | None] = []
+    for block in blocks:
+        for piece in _update_pieces(block):
+            states = states or [None] * len(piece)
+            for index, channel in enumerate(piece):
+                selected = channel[channel != 0]
+                if selected.size:
+                    states[index] = _update_running_statistics(states[index], selected.reshape(1, -1))
     means = [state["mean"] if state else 0.0 for state in states]
     stds = [math.sqrt(state["m2"] / state["count"]) if state else 1.0 for state in states]
     return {"mean_per_channel": means, "std_per_channel": [std or 1.0 for std in stds]}
+
+
+def masked_statistics(blocks: Iterable[Sequence[np.ndarray]]) -> dict[str, Any]:
+    """Min/max/mean/std over the voxels whose mask is not 0, of a volume and its mask handed as
+    :func:`data_statistics` takes a volume, each step a ``(volume, mask)`` pair of blocks on one grid."""
+    state: dict[str, Any] | None = None
+    for volume, mask in blocks:
+        for volume_piece, mask_piece in zip(_update_pieces(volume), _update_pieces(mask), strict=True):
+            selected = volume_piece[mask_piece != 0]
+            if selected.size:
+                state = _update_running_statistics(state, selected.reshape(1, -1))
+    return _finalize_running_statistics(state)
 
 
 def _walk_slabs(entries: Sequence[tuple[Any, str]], name: str, shape: list[int]) -> Iterator[list[np.ndarray]]:
@@ -463,10 +510,13 @@ def _walk_slabs(entries: Sequence[tuple[Any, str]], name: str, shape: list[int])
         return lambda slices: resident[slices]
 
     readers = [slab_reader(dataset, group) for dataset, group in entries]
+    # A whole number of update pieces, as Dataset.iter_data_blocks steps.
+    piece = _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS) if len(shape) >= 2 else 1
     if by_region:
-        rows = _scan_rows(by_region, name, shape)
+        rows = _scan_rows(by_region, name, shape, piece)
     else:
         rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
+        rows = max(piece, rows // piece * piece)
     extent = int(shape[1]) if len(shape) >= 2 else 1
     for start in range(0, extent, rows):
         slices: tuple[slice, ...] = (
