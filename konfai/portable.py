@@ -505,6 +505,9 @@ FoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]]], dict[str,
 TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]], str], dict[str, Any]]
 #: Exports the two graphs of a ``CaseStatistic``, handed its parameters: the step that runs them.
 StatisticOut = Callable[[dict[str, Any]], dict[str, Any]]
+#: The volume an app's own class is probed on past the steps of its chain before it: the channels they leave, at the
+#: rank of the case.
+Probe = Callable[[list[dict[str, Any]]], tuple[int, ...]]
 
 #: KonfAI transform name -> the runtime op it compiles to. A stage outside this map has no portable
 #: form; each compiler refuses it by name. Either workflow's program reads the companion group a stage
@@ -693,8 +696,6 @@ def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int,
     class on a volume of the shape ``probe``, one voxel unless the class reads past it."""
     import torch
 
-    # ponytail: one voxel of one channel; a class that reads several channels states its dtype with a TensorCast
-    # after it until the probe is handed the channels of its place in the chain.
     got = {}
     for dtype in ("uint8", "int16", "float32"):
         try:
@@ -703,8 +704,8 @@ def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int,
             continue
     if not got:
         raise ConfigError(
-            f"'{classpath}' takes no voxel of one channel, so the dtype its step writes cannot be read from it.",
-            _or_konfai("Run it on one channel", _RUN),
+            f"'{classpath}' takes no volume of {list(probe)}, so the dtype its step writes cannot be read from it.",
+            _or_konfai("Take the channels its place in the chain hands it", _RUN),
         )
     if all(given == returned_dtype for given, returned_dtype in got.items()):
         return {}
@@ -725,27 +726,43 @@ def _own_stage(classpath: str, params: dict[str, Any]) -> Any:
     return getattr(module, name)(**params)
 
 
-#: The volume a class that reads past the voxel is probed on: one channel, as the parity check hands it, and wider
-#: than a neighbourhood.
-_VOLUME_PROBE = (1, 8, 8, 8)
+#: The extent of the volume a class that reads past the voxel is probed on, along each axis: wider than a
+#: neighbourhood.
+_PROBE_EXTENT = 8
+#: What a class is probed on where its chain is not known: one channel of a 3D volume.
+_VOLUME_PROBE = (1, *[_PROBE_EXTENT] * 3)
 
 
-def _probe_attribute() -> Any:
-    """The geometry a probed class may read: the identity grid."""
+def _probe_attribute(rank: int = 3) -> Any:
+    """The geometry a probed class may read: the identity grid of ``rank`` axes."""
     import numpy as np
 
     from konfai.utils.dataset import Attribute
 
     attribute = Attribute()
-    attribute["Origin"], attribute["Spacing"], attribute["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    attribute["Origin"], attribute["Spacing"] = np.zeros(rank), np.ones(rank)
+    attribute["Direction"] = np.eye(rank).flatten()
     return attribute
 
 
-def _extension_step(name: str, params: Any) -> dict[str, Any]:
+def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[dict[str, Any]]] = list) -> Probe:
+    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists."""
+
+    def probe(steps: list[dict[str, Any]]) -> tuple[int, ...]:
+        held = start()
+        for step in [*before(), *steps]:
+            held = _channels_after(step, held, rank)
+        return (held, *[_PROBE_EXTENT] * rank)
+
+    return probe
+
+
+def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
-    ``HALO`` one a block with the ``halo`` it declares, whose grid it keeps; a ``WHOLE_VOLUME`` one the case
-    (``whole``), which may leave another grid and be undone. Both keep the channels."""
+    ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; a ``WHOLE_VOLUME`` one
+    the case (``whole``), which may leave another grid and be undone, or other channels and not be. The class is run
+    on ``probe``, the channels and rank its place in the chain hands it."""
     import numpy as np
     import torch
 
@@ -767,35 +784,37 @@ def _extension_step(name: str, params: Any) -> dict[str, Any]:
             " POINTWISE class, a HALO one with its halo or a WHOLE_VOLUME one.",
             _or_konfai("Declare one of these three", _RUN),
         )
+    rank = len(probe) - 1
     if reads:
-        attribute = _probe_attribute()
+        attribute = _probe_attribute(rank)
         try:
-            returned = stage("probe", torch.zeros(_VOLUME_PROBE), attribute)
+            returned = stage("probe", torch.zeros(probe), attribute)
         except Exception as error:
-            # ponytail: one channel, as _own_dtype probes; hand the probe the channels of the class's place in the
-            # chain when a class needs several.
             raise ConfigError(
-                f"transform '{name}' takes no volume of one channel ({error}), so what it returns cannot be read.",
-                _or_konfai("Run it on one channel", _RUN),
+                f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
+                _or_konfai("Take the channels its place in the chain hands it", _RUN),
             ) from error
+        undone = isinstance(stage, TransformInverse) and stage.apply_inverse
         # A HALO class keeps the grid: the extents, and the geometry it could record without changing them.
         moved = (
-            tuple(returned.shape) != _VOLUME_PROBE
-            or (isinstance(stage, TransformInverse) and stage.apply_inverse)
+            tuple(returned.shape) != probe
+            or undone
             or any(
-                not np.array_equal(attribute.get_np_array(key), _probe_attribute().get_np_array(key))
+                not np.array_equal(attribute.get_np_array(key), _probe_attribute(rank).get_np_array(key))
                 for key in ("Origin", "Spacing", "Direction")
             )
         )
-        if returned.shape[0] != _VOLUME_PROBE[0] or ("halo" in reads and moved):
+        if ("halo" in reads and moved) or (returned.shape[0] != probe[0] and undone):
             raise ConfigError(
-                f"transform '{name}' returns {list(returned.shape)} for {list(_VOLUME_PROBE)}: an app's extension"
-                " runs a class that reads past the voxel where it keeps the channels and, for a HALO one, keeps"
-                " the grid and is not undone.",
-                _or_konfai("Declare WHOLE_VOLUME for a class that moves the grid or is undone", _RUN),
+                f"transform '{name}' returns {list(returned.shape)} for {list(probe)}: an app's extension runs a"
+                " HALO class that keeps the grid and the channels and is not undone, and undoes a WHOLE_VOLUME one"
+                " that keeps the channels.",
+                _or_konfai(
+                    "Declare WHOLE_VOLUME for a class that moves the grid, and undo none that folds channels", _RUN
+                ),
             )
-    probe = _VOLUME_PROBE if reads else (1, 1, 1, 1)
-    dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute()), probe)
+    voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
+    dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute(rank)), voxels)
     return _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
 
 
@@ -1600,6 +1619,7 @@ def compile_pipeline(
     fold_out: FoldOut | None = None,
     case_statistic: StatisticOut | None = None,
     extension: bool = False,
+    probe: Probe | None = None,
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``extension`` (the app carries its extension of
     KonfAI Edge), a transform of the app's own is the step its extension runs. With ``fold``, a POINTWISE transform with no op is
@@ -1609,7 +1629,8 @@ def compile_pipeline(
     ``roots`` are the run's ``dataset_filenames``, where a ``Resample`` looks its stored transforms up. With
     ``fold_out`` (an output chain), each run of POINTWISE transforms with no op is one step, which ``fold_out``
     makes of them and the steps before them, where it stands in the chain. With ``case_statistic`` (the chain of a
-    group the model reads past its first), a ``CaseStatistic`` is the step it makes."""
+    group the model reads past its first), a ``CaseStatistic`` is the step it makes. ``probe`` says what an app's own
+    class is run on to compile it, past the steps before it; one channel of a 3D volume without it."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
@@ -1653,7 +1674,7 @@ def compile_pipeline(
                     "(pointwise custom) transforms to the end of the inference pipeline."
                 )
             if own:
-                step = _extension_step(name, params)
+                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE)
             else:
                 step = _admitted(_op_resample(params, roots=roots) if base == "Resample" else OP_MAP[base](params))
             # A Crop past the app's own transform finds its box in the values it changed.
@@ -1719,12 +1740,16 @@ def _group_chain(
     channels: int,
     case_statistic: StatisticOut | None = None,
     extension: bool = False,
+    rank: int = 3,
 ) -> dict[str, Any]:
     """One more group the model reads: its name on disk, what it holds per voxel, and the chain that
     prepares it. konfai patches every group of a case on the first one's grid, so a chain moving this
     group off that grid is refused by name rather than discovered as a shape mismatch at run time."""
     steps, _folds, _inverted = compile_pipeline(
-        group.get("transforms"), case_statistic=case_statistic, extension=extension
+        group.get("transforms"),
+        case_statistic=case_statistic,
+        extension=extension,
+        probe=_probe_after(rank, lambda: channels),
     )
     if (moved := next((step for step in steps if step["op"] in REGRIDS), None)) is not None:
         raise ConfigError(
@@ -1752,6 +1777,7 @@ def transform_manifest(
     case_statistic: StatisticOut | None = None,
     blended: str | None = None,
     extension: bool = False,
+    heads: tuple[int, Callable[[], int]] | None = None,
 ) -> tuple[dict[str, Any], list[Callable[[Any], Any]], int]:
     """The pre/post op pipeline the portable runtime applies around the tiled forward, the ``fold_pre``
     callables (POINTWISE preprocessing transforms baked into the ONNX graph), and how many post ops the
@@ -1759,15 +1785,33 @@ def transform_manifest(
     ``Mask`` stages as program steps of its own. ``others`` is what each group past the first holds per
     voxel, in the order the model reads them. ``fold_out`` exports a run of pointwise output transforms with no op
     to one graph, handed the transforms and the post steps before them; without it they are refused. ``case_statistic``
-    exports a ``CaseStatistic`` of a group past the first; without it, it is refused."""
+    exports a ``CaseStatistic`` of a group past the first; without it, it is refused. ``heads`` are the channels of
+    the first group the model reads and those the output chain starts from, which an app's own class is run on;
+    one channel of each without them."""
     _refuse_another_mirror(config, root, output)
+    rank = _spatial_rank(config, root)
+    first, head = heads or (1, lambda: 1)
     roots = [str(entry) for entry in ((config.get(root) or {}).get("Dataset") or {}).get("dataset_filenames") or []]
     pre, folds, inverted = compile_pipeline(
-        input_group_transforms(config, root), fold=True, invertible=True, roots=roots, extension=extension
+        input_group_transforms(config, root),
+        fold=True,
+        invertible=True,
+        roots=roots,
+        extension=extension,
+        probe=_probe_after(rank, lambda: first),
     )
     folds += _patch_folds(config, root)
     post, per_copy = _post_chain(
-        config, root, output_spec(config, root, output), pre, inverted, masked, fold_out, blended, extension
+        config,
+        root,
+        output_spec(config, root, output),
+        pre,
+        inverted,
+        masked,
+        fold_out,
+        blended,
+        extension,
+        (rank, head),
     )
     manifest = {"preprocessing": pre, "postprocessing": post}
     reads = _reads_of(config, root, pre, others, case_statistic, extension)
@@ -1822,14 +1866,17 @@ def _post_chain(
     fold_out: TypedFoldOut | None = None,
     blended: str | None = None,
     extension: bool = False,
+    head: tuple[int, Callable[[], int]] = (3, lambda: 1),
 ) -> tuple[list[dict[str, Any]], int]:
     """The post chain in the predictor's own order, and how many of its ops run per copy: the per-copy
     transforms, then the ones that follow the reduction, then the inverses of the input chain in reverse, then
     the final transforms. Softmax and argmax after the inverses decide a class on the output grid; before them,
     a resample of a label map would move every class boundary by a voxel. A run of pointwise transforms with no op is
     one graph ``fold_out`` exports, while the copies hold what the model gives each voxel: not past a concatenation of
-    models or copies, which changes what a voxel holds."""
+    models or copies, which changes what a voxel holds. ``head`` is the rank of the case and the channels the chain
+    starts from, which an app's own class is run on past the steps before it."""
     done: list[dict[str, Any]] = []
+    probe = _probe_after(*head, before=lambda: done)
 
     def folding(concatenated: bool, dtype: str | None) -> FoldOut | None:
         """``fold_out`` in a phase konfai hands ``dtype`` (``None``: the stored one)."""
@@ -1870,6 +1917,7 @@ def _post_chain(
         consumed=("Mask",) if masked else (),
         fold_out=folding(False, blended),
         extension=extension,
+        probe=probe,
     )
     done += before
     # The reduction between the per-copy ops and the rest settles the dtype the rest reads.
@@ -1878,13 +1926,14 @@ def _post_chain(
     restored = [step["id"] for step in pre if step["op"] == "cast" and "id" in step]
     # The stack or the label merge that opens the chain is the reduce op `derive_reduction` names.
     stack, after_stack = _split_stack(config, root, spec)
-    after, _, _ = compile_pipeline(after_stack, fold_out=folding(concat, folded), extension=extension)
+    after, _, _ = compile_pipeline(after_stack, fold_out=folding(concat, folded), extension=extension, probe=probe)
     done += after
     undone_cast = set(inverted) & set(restored)
     final, _, _ = compile_pipeline(
         bound_chain(spec.get("final_transforms")),
         fold_out=folding(concat, None if undone_cast else _dtype_after(after, folded)),
         extension=extension,
+        probe=probe,
     )
     op_of = _op_of(pre)
     for name in inverted:
@@ -1952,7 +2001,7 @@ def _reads_of(
     statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them as stored, so
     the program runs nothing on them."""
     reads = [
-        _group_chain(group_src, group, channels, case_statistic, extension)
+        _group_chain(group_src, group, channels, case_statistic, extension, _spatial_rank(config, root))
         for (group_src, group), channels in zip(
             input_groups(config, root)[1:], chain(others or [], repeat(1)), strict=False
         )
@@ -2655,7 +2704,7 @@ def export_checkpoints(
         # The app's own Fold hands the chain what it leaves.
         held = blended_channels or head_channels()
         for step in before:
-            held = _channels_after(step, held)
+            held = _channels_after(step, held, len(traced))
         filename = f"{ids[0]}_post_{folded}.onnx"
         folded += 1
         out_channels, out_dtype = export_folds(steps, out_dir / filename, held, len(traced), dtype)
@@ -2686,6 +2735,7 @@ def export_checkpoints(
         case_statistic=case_statistic,
         blended=blended_dtype,
         extension=extension,
+        heads=(channels or 1, lambda: blended_channels or head_channels()),
     )
     if fold is None:  # the app's own is its extension's to run
         check_blend(overlap, blend)
@@ -2743,7 +2793,7 @@ def export_checkpoints(
     return models, written, per_copy
 
 
-def _channels_after(step: dict[str, Any], held: int) -> int:
+def _channels_after(step: dict[str, Any], held: int, rank: int = 3) -> int:
     """The channels a post step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis three each, a folded graph its own."""
     if step["op"] in ("argmax", "magnitude", "threshold_labels"):
@@ -2752,13 +2802,12 @@ def _channels_after(step: dict[str, Any], held: int) -> int:
         return held * 3
     if step["op"] == "keep_largest_component" and "mask" in step:
         return held - 1
-    if step["op"] == "extension" and not ("halo" in step or "whole" in step):
+    if step["op"] == "extension":
         import torch
 
-        from konfai.utils.dataset import Attribute
-
-        voxel = torch.zeros((held, 1, 1, 1))
-        return int(_own_stage(step["class"], step["params"])("probe", voxel, Attribute()).shape[0])
+        extent = _PROBE_EXTENT if "halo" in step or "whole" in step else 1
+        volume = torch.zeros((held, *[extent] * rank))
+        return int(_own_stage(step["class"], step["params"])("probe", volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 
@@ -2909,11 +2958,15 @@ def models_fold_first(config: dict[str, Any], root: str, models: int, output: st
     mean, so it runs once per copy, on the average, and the copies then fold by the output's ``reduction``."""
     combine = _class_name(str(clean(config.get(root, {}).get("combine")) or "Mean"))
     spec = output_spec(config, root, output)
-    # Only whether the chain holds a step is read here: an app's own transform is one, with or without an extension.
+    # Only whether the chain holds a step is read here: an app's own transform is one, with or without an extension,
+    # and is not run.
+    chain = bound_chain(spec.get("before_reduction_transforms"))
+    own = any(own_class(name) for name in chain)
     before, _, _ = compile_pipeline(
-        bound_chain(spec.get("before_reduction_transforms")), consumed=("Mask",), extension=True
+        {name: params for name, params in chain.items() if not own_class(name)}, consumed=("Mask",)
     )
-    return models > 1 and combine == "Mean" and bool(before) and derive_reduction(config, root, output) is None
+    steps = own or bool(before)
+    return models > 1 and combine == "Mean" and steps and derive_reduction(config, root, output) is None
 
 
 def compile_output(
