@@ -792,12 +792,14 @@ def _extension_step(
     import torch
 
     from konfai.data.transform import LocalityKind, TransformInverse
-    from konfai.utils.dataset import Attribute
 
     classpath = base_name(name)
     kwargs = {key: clean(value) for key, value in _mapping(params).items()}
-    stage = _own_stage(classpath, kwargs, len(probe) - 1)
-    locality = stage.patch_locality(Attribute())
+    rank = len(probe) - 1
+    stage = _own_stage(classpath, kwargs, rank)
+    # Asked with a grid: a halo in millimetres needs the spacing. The runtime asks the extension again for each
+    # case's grid (its `halo`), the halo written here standing where the extension says none.
+    locality = stage.patch_locality(_probe_attribute(rank))
     reads: dict[str, Any] = {}
     if locality.kind is LocalityKind.HALO and locality.halo:
         reads = {"halo": max(locality.halo)}
@@ -809,7 +811,6 @@ def _extension_step(
             " POINTWISE class, a HALO one with its halo or a WHOLE_VOLUME one.",
             _or_konfai("Declare one of these three", _RUN),
         )
-    rank = len(probe) - 1
     if reads:
         attribute = _probe_attribute(rank)
         try:

@@ -1770,8 +1770,10 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "from konfai.data.reduction import Reduction\n"
         "from konfai.data.transform import LocalityKind, PatchLocality, Transform, TransformInverse\n\n\n"
         "class Smooth(Transform):\n"
-        "    locality = LocalityKind.HALO\n"
-        "    halo = (1,)\n\n"
+        "    def patch_locality(self, cache_attribute):\n"
+        "        if 'Spacing' not in cache_attribute:\n"
+        "            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason='a halo in millimetres')\n"
+        "        return PatchLocality(LocalityKind.HALO, halo=(1,))\n\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        return torch.nn.functional.avg_pool3d(tensor.float()[None], 3, 1, 1, count_include_pad=False)[0]\n\n\n"
         "class Centered(Transform):\n"
@@ -1812,8 +1814,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     resolved = json.loads(config.read_text())
     predictor = resolved["Predictor"]
     # konfai undoes an input transform once the copies are folded, which a program does for a resample alone.
-    # A class reads the voxel it writes, its neighbours as far as the halo it declares, or, declaring nothing, the
-    # whole volume.
+    # A class reads the voxel it writes, its neighbours as far as the halo it declares for a grid, or, declaring
+    # nothing, the whole volume.
     own = {"Own:Scale": {"scale": 4.0, "inverse": False}, "Own:Smooth": {}, "Own:Centered": {}}
     predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
     predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}

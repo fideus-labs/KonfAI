@@ -272,7 +272,9 @@ is copied beside it.
 The extension builds each class from the keys konfai binds it with, and is
 handed its volumes voxel by voxel. A transform that reads past the voxel it
 writes is handed the volume with its grid instead. With a halo it streams block
-by block, keeps the grid and the channels and is not undone. Reading the whole
+by block, keeps the grid and the channels and is not undone; its halo is the
+one it declares for a grid, which the extension states again for each case's
+grid when it depends on the spacing. Reading the whole
 volume, it may leave another grid, which the extension states as
 `transform_shape` does, and be undone after the model, or write other channels
 (labels out of posteriors) and not be undone; the case is then held whole. Each

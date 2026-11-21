@@ -42,6 +42,10 @@ class _Opened:
     def call(self, name: str, *arguments: int) -> int:
         return int(self.exports[name](self.store, *arguments) or 0)
 
+    def has(self, name: str) -> bool:
+        """Whether the extension exports ``name``."""
+        return self.exports.get(name) is not None
+
     def buffer(self, count: int) -> int:
         """``count`` float32 at zero in the extension's memory."""
         return self.call("ext_buffer", count) & 0xFFFFFFFF
@@ -144,16 +148,16 @@ class _Served:
         return self.volumes[group], None
 
 
-def _geometry(rank: int) -> tuple[dict[str, Any], Any]:
+def _geometry(rank: int, identity: bool = False) -> tuple[dict[str, Any], Any]:
     """A grid of ``rank`` axes, and the attribute konfai's class reads it from: a spacing and a direction no axis
-    shares, so a class that reads the wrong one is told apart."""
+    shares, so a class that reads the wrong one is told apart, or, with ``identity``, the identity grid."""
     import numpy as np
     from konfai.utils.dataset import Attribute
 
     geometry = {
-        "Spacing": np.array([0.5, 1.0, 2.0][:rank]),
-        "Origin": np.array([10.0, 20.0, 30.0][:rank]),
-        "Direction": np.diag([1.0, -1.0, 1.0][:rank]),
+        "Spacing": np.ones(rank) if identity else np.array([0.5, 1.0, 2.0][:rank]),
+        "Origin": np.zeros(rank) if identity else np.array([10.0, 20.0, 30.0][:rank]),
+        "Direction": np.eye(rank) if identity else np.diag([1.0, -1.0, 1.0][:rank]),
     }
     attribute = Attribute()
     for key, value in geometry.items():
@@ -177,6 +181,7 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
 
     opened = _Opened(extension, VOLUME_TRANSFORM, name, params)
     source = grid(shape, geometry.__getitem__)
+    _check_halo(opened, name, stage, source, rank, attribute)
     written_at = opened.put(source, "float64")
     opened.call("ext_output_grid", written_at, rank, 1)
     written = opened.get(written_at, (source.size,), "float64")
@@ -201,6 +206,28 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
         _close(name, "undo itself", undone, run(transformed, (channels, *shape), True))
+
+
+def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, attribute: Any) -> None:
+    """A class that reads its neighbours: the halo the extension states for the grid compared, or, where it states
+    none, one the class keeps whatever the grid (the halo its step states)."""
+    from konfai.data.transform import LocalityKind
+
+    locality = stage.patch_locality(attribute)
+    if locality.kind is not LocalityKind.HALO:
+        return
+    halo = max(locality.halo or (0,))
+    # An int32 to wasmtime: `None`, the class's u32::MAX, is -1.
+    stated = opened.call("ext_halo", opened.put(source, "float64"), rank, 1) if opened.has("ext_halo") else -1
+    if stated == -1:
+        identity = stage.patch_locality(_geometry(rank, identity=True)[1])
+        if max(identity.halo or (0,)) != halo:
+            raise AppMetadataError(
+                f"'{name}' reads {halo} pixels around each on the grid compared and another count on another grid,"
+                " and its extension states no halo for the grid (VolumeTransform::halo)."
+            )
+    elif stated != halo:
+        raise AppMetadataError(f"The extension's '{name}' reads {stated} pixels around each, the Python class {halo}.")
 
 
 def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
