@@ -725,8 +725,9 @@ def _own_stage(classpath: str, params: dict[str, Any]) -> Any:
     return getattr(module, name)(**params)
 
 
-#: The volume a class that reads past the voxel is probed on: two channels, wider than a neighbourhood.
-_VOLUME_PROBE = (2, 8, 8, 8)
+#: The volume a class that reads past the voxel is probed on: one channel, as the parity check hands it, and wider
+#: than a neighbourhood.
+_VOLUME_PROBE = (1, 8, 8, 8)
 
 
 def _probe_attribute() -> Any:
@@ -745,6 +746,7 @@ def _extension_step(name: str, params: Any) -> dict[str, Any]:
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
     ``HALO`` one a block with the ``halo`` it declares, whose grid it keeps; a ``WHOLE_VOLUME`` one the case
     (``whole``), which may leave another grid and be undone. Both keep the channels."""
+    import numpy as np
     import torch
 
     from konfai.data.transform import LocalityKind, TransformInverse
@@ -756,7 +758,7 @@ def _extension_step(name: str, params: Any) -> dict[str, Any]:
     locality = stage.patch_locality(Attribute())
     reads: dict[str, Any] = {}
     if locality.kind is LocalityKind.HALO and locality.halo:
-        reads = {"halo": max(locality.halo)}
+        reads = {"halo": max(1, *locality.halo)}
     elif locality.kind is LocalityKind.WHOLE_VOLUME:
         reads = {"whole": True}
     elif locality.kind is not LocalityKind.POINTWISE:
@@ -766,8 +768,25 @@ def _extension_step(name: str, params: Any) -> dict[str, Any]:
             _or_konfai("Declare one of these three", _RUN),
         )
     if reads:
-        returned = stage("probe", torch.zeros(_VOLUME_PROBE), _probe_attribute())
-        moved = tuple(returned.shape) != _VOLUME_PROBE or (isinstance(stage, TransformInverse) and stage.apply_inverse)
+        attribute = _probe_attribute()
+        try:
+            returned = stage("probe", torch.zeros(_VOLUME_PROBE), attribute)
+        except Exception as error:
+            # ponytail: one channel, as _own_dtype probes; hand the probe the channels of the class's place in the
+            # chain when a class needs several.
+            raise ConfigError(
+                f"transform '{name}' takes no volume of one channel ({error}), so what it returns cannot be read.",
+                _or_konfai("Run it on one channel", _RUN),
+            ) from error
+        # A HALO class keeps the grid: the extents, and the geometry it could record without changing them.
+        moved = (
+            tuple(returned.shape) != _VOLUME_PROBE
+            or (isinstance(stage, TransformInverse) and stage.apply_inverse)
+            or any(
+                not np.array_equal(attribute.get_np_array(key), _probe_attribute().get_np_array(key))
+                for key in ("Origin", "Spacing", "Direction")
+            )
+        )
         if returned.shape[0] != _VOLUME_PROBE[0] or ("halo" in reads and moved):
             raise ConfigError(
                 f"transform '{name}' returns {list(returned.shape)} for {list(_VOLUME_PROBE)}: an app's extension"
