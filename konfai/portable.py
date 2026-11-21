@@ -760,9 +760,9 @@ def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[
 def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
-    ``HALO`` one a block with the ``halo`` it declares, whose grid it keeps; a ``WHOLE_VOLUME`` one the case
-    (``whole``), which may leave another grid and be undone. Both keep the channels. The class is run on ``probe``,
-    the channels and rank its place in the chain hands it."""
+    ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; a ``WHOLE_VOLUME`` one
+    the case (``whole``), which may leave another grid and be undone, or other channels and not be. The class is run
+    on ``probe``, the channels and rank its place in the chain hands it."""
     import numpy as np
     import torch
 
@@ -794,21 +794,24 @@ def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PRO
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
                 _or_konfai("Take the channels its place in the chain hands it", _RUN),
             ) from error
+        undone = isinstance(stage, TransformInverse) and stage.apply_inverse
         # A HALO class keeps the grid: the extents, and the geometry it could record without changing them.
         moved = (
             tuple(returned.shape) != probe
-            or (isinstance(stage, TransformInverse) and stage.apply_inverse)
+            or undone
             or any(
                 not np.array_equal(attribute.get_np_array(key), _probe_attribute(rank).get_np_array(key))
                 for key in ("Origin", "Spacing", "Direction")
             )
         )
-        if returned.shape[0] != probe[0] or ("halo" in reads and moved):
+        if ("halo" in reads and moved) or (returned.shape[0] != probe[0] and undone):
             raise ConfigError(
-                f"transform '{name}' returns {list(returned.shape)} for {list(probe)}: an app's extension"
-                " runs a class that reads past the voxel where it keeps the channels and, for a HALO one, keeps"
-                " the grid and is not undone.",
-                _or_konfai("Declare WHOLE_VOLUME for a class that moves the grid or is undone", _RUN),
+                f"transform '{name}' returns {list(returned.shape)} for {list(probe)}: an app's extension runs a"
+                " HALO class that keeps the grid and the channels and is not undone, and undoes a WHOLE_VOLUME one"
+                " that keeps the channels.",
+                _or_konfai(
+                    "Declare WHOLE_VOLUME for a class that moves the grid, and undo none that folds channels", _RUN
+                ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
     dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute(rank)), voxels)
@@ -2799,13 +2802,12 @@ def _channels_after(step: dict[str, Any], held: int, rank: int = 3) -> int:
         return held * 3
     if step["op"] == "keep_largest_component" and "mask" in step:
         return held - 1
-    if step["op"] == "extension" and not ("halo" in step or "whole" in step):
+    if step["op"] == "extension":
         import torch
 
-        from konfai.utils.dataset import Attribute
-
-        voxel = torch.zeros((held, *[1] * rank))
-        return int(_own_stage(step["class"], step["params"])("probe", voxel, Attribute()).shape[0])
+        extent = _PROBE_EXTENT if "halo" in step or "whole" in step else 1
+        volume = torch.zeros((held, *[extent] * rank))
+        return int(_own_stage(step["class"], step["params"])("probe", volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 

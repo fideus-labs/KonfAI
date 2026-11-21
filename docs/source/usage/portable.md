@@ -271,12 +271,14 @@ is copied beside it.
 
 The extension builds each class from the keys konfai binds it with, and is
 handed its volumes voxel by voxel. A transform that reads past the voxel it
-writes is handed the volume with its grid instead, and keeps the channels. With
-a halo it streams block by block, keeps the grid and is not undone. Reading the
-whole volume, it may leave another grid, which the extension states as
-`transform_shape` does, and be undone after the model; the case is then held
-whole. Without an extension, a pointwise transform is folded into the model's
-graph and the other classes are refused. A reduction takes no parameter.
+writes is handed the volume with its grid instead. With a halo it streams block
+by block, keeps the grid and the channels and is not undone. Reading the whole
+volume, it may leave another grid, which the extension states as
+`transform_shape` does, and be undone after the model, or write other channels
+(labels out of posteriors) and not be undone; the case is then held whole. Each
+class is compiled on the channels and the axes its place in the chain hands it.
+Without an extension, a pointwise transform is folded into the model's graph and
+the other classes are refused. A reduction takes no parameter.
 
 `konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
 With `konfai-apps[extension]` installed, it also runs each class in Python and

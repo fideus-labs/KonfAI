@@ -1803,12 +1803,11 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "    voxel_local = True\n\n"
         "    def __call__(self, tensors):\n"
         "        return torch.stack(tensors).amax(0)\n\n\n"
-        "class First(Transform):\n"
-        "    locality = LocalityKind.POINTWISE\n\n"
+        "class Strongest(Transform):\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        if tensor.shape[0] != 2:\n"
-        "            raise ValueError('First reads the head and its two channels')\n"
-        "        return tensor[:1]\n"
+        "            raise ValueError('Strongest reads the head and its two channels')\n"
+        "        return tensor[tensor.flatten(1).sum(1).argmax()][None]\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     resolved = json.loads(config.read_text())
@@ -1819,10 +1818,11 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     own = {"Own:Scale": {"scale": 4.0, "inverse": False}, "Own:Smooth": {}, "Own:Centered": {}}
     predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
     predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}
-    # A class is compiled on what its place in the chain hands it: the head's two channels here.
+    # A class is compiled on what its place in the chain hands it, the head's two channels here, and one reading the
+    # whole volume may write fewer.
     predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {
         "reduction": "Own:Largest",
-        "before_reduction_transforms": {"Own:First": {}},
+        "before_reduction_transforms": {"Own:Strongest": {}},
     }
     config.write_text(json.dumps(resolved))
     checkpoint = tmp_path / "fold_0.pt"
@@ -1852,7 +1852,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     assert models[1]["postprocessing"][0] == {"op": "inverse", "of": "__tta_0"}
     (fold,) = [step for step in steps if step.get("op") == "extension_reduce"]
     assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
-    assert '"class": "Own:First"' in json.dumps(program)
+    strongest = {"op": "extension", "class": "Own:Strongest", "params": {}, "whole": True}
+    assert all(strongest in model["postprocessing"] for model in models)
 
 
 def test_an_own_class_that_moves_the_grid_is_undone_by_the_extension(
