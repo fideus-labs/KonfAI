@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any
 
@@ -356,6 +357,7 @@ def _update_running_statistics(
         state["channel_count"] = channel_total
         state["channel_min"] = np.minimum(state["channel_min"], channel_min)
         state["channel_max"] = np.maximum(state["channel_max"], channel_max)
+        _fold_nan_extrema(state, per_channel, channel_min, channel_max)
 
     total_count = state["count"] + chunk_count
     delta = chunk_mean - state["mean"]
@@ -383,11 +385,27 @@ def _update_running_extrema(state: dict[str, Any] | None, array: np.ndarray) -> 
     channel_max = per_channel.max(axis=1)
     state["channel_min"] = np.minimum(state["channel_min"], channel_min)
     state["channel_max"] = np.maximum(state["channel_max"], channel_max)
+    _fold_nan_extrema(state, per_channel, channel_min, channel_max)
     state["min"] = _fold_extremum(min, state["min"], float(channel_min.min()))
     state["max"] = _fold_extremum(max, state["max"], float(channel_max.max()))
     state["count"] += float(per_channel.size)
     state["channel_count"] += float(per_channel.shape[1])
     return state
+
+
+def _fold_nan_extrema(
+    state: dict[str, Any], per_channel: np.ndarray, channel_min: np.ndarray, channel_max: np.ndarray
+) -> None:
+    """Fold a piece's per-channel extrema with NaN left out, as ``numpy.nanmin`` takes them (scikit-image's resize clips
+    to these): the extrema themselves where no NaN came."""
+    holed = np.isnan(channel_min) | np.isnan(channel_max)
+    if holed.any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # a channel of NaN alone: its range stays unmeasured
+            channel_min = np.where(holed, np.nanmin(per_channel, axis=1), channel_min)
+            channel_max = np.where(holed, np.nanmax(per_channel, axis=1), channel_max)
+    state["channel_nanmin"] = np.fmin(state["channel_nanmin"], channel_min)
+    state["channel_nanmax"] = np.fmax(state["channel_nanmax"], channel_max)
 
 
 def needs_moments(keys: Iterable[str] | None) -> bool:
@@ -408,6 +426,8 @@ def _empty_statistics_state(channels: int) -> dict[str, Any]:
         "channel_m2": np.zeros(channels, dtype=np.float64),
         "channel_min": np.full(channels, np.inf),
         "channel_max": np.full(channels, -np.inf),
+        "channel_nanmin": np.full(channels, np.inf),
+        "channel_nanmax": np.full(channels, -np.inf),
     }
 
 
@@ -537,10 +557,11 @@ def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]
     """
     if state is None or state["count"] == 0:
         return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0} | {
-            f"{key}_per_channel": [0.0] for key in ("min", "max", "mean", "std")
+            f"{key}_per_channel": [0.0] for key in ("min", "max", "mean", "std", "nanmin", "nanmax")
         }
     variance = state["m2"] / (state["count"] - 1) if state["count"] > 1 else 0.0
     channel_variance = state["channel_m2"] / max(1.0, state["channel_count"] - 1)
+    measured = state["channel_nanmin"] <= state["channel_nanmax"]
     return {
         "min": state["min"],
         "max": state["max"],
@@ -550,4 +571,7 @@ def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]
         "max_per_channel": state["channel_max"].tolist(),
         "mean_per_channel": state["channel_mean"].tolist(),
         "std_per_channel": np.sqrt(np.maximum(channel_variance, 0.0)).tolist(),
+        # A channel of NaN alone has no range: NaN, as numpy.nanmin gives it.
+        "nanmin_per_channel": np.where(measured, state["channel_nanmin"], np.nan).tolist(),
+        "nanmax_per_channel": np.where(measured, state["channel_nanmax"], np.nan).tolist(),
     }

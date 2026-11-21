@@ -47,8 +47,10 @@ from konfai.data.patching import (
     blend_axes,
     blend_overlap,
 )
+from konfai.data.patching.budget import _STREAM_STATS
 from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
 from konfai.data.reduction import Concat, Reduction
+from konfai.data.spline import SLAB_VOXELS
 from konfai.data.transform import (
     InferenceStack,
     LocalityKind,
@@ -58,10 +60,12 @@ from konfai.data.transform import (
     TransformInverse,
     TransformLoader,
 )
+from konfai.data.transform.resample import RANGE_KEYS, _host_array
 from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset, DataStream, drop_native_form
+from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_extrema
 from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
@@ -222,6 +226,12 @@ class _RegionState:
 # Below this fraction of allocatable memory, the case takes the whole-volume path.
 # KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction.
 _STREAM_WORTH_MIN_FRACTION = 0.05
+
+
+def _has_its_statistics(locality: PatchLocality, attribute: Attribute) -> bool:
+    """Whether a stage holds the statistics it reads: none, or ones it takes as present (``Normalize`` behind a
+    ``Clip`` that records its bounds). A stage measuring its own input finds no slab that holds it."""
+    return not locality.stat_keys or (locality.takes_present and all(key in attribute for key in locality.stat_keys))
 
 
 def _records_oom(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -687,11 +697,13 @@ class OutputDataset(Dataset, NeedDevice):
             print(f"[KonfAI] {message}")
 
     def _worth_streaming(self, dataset: DatasetIter, index: int, layer: torch.Tensor) -> bool:
-        """Whether this case's accumulators are heavy enough for the per-slab machinery to pay. The
-        estimate is taken before the patch-level inverses, so a dtype-widening inverse under-counts by
-        at most 2x."""
-        spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
-        assembled = int(layer.shape[0]) * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
+        """Whether this case's output is heavy enough for the per-slab machinery to pay: its accumulators, or the output
+        they are written back as on the case's own grid, which a resample undone can make many times larger (the
+        whole-volume path holds it). The estimate is taken before the patch-level inverses, so a dtype-widening
+        inverse under-counts by at most 2x."""
+        case = dataset.get_dataset_from_index(self.group_dest, index)
+        voxels = max(int(np.prod(case.shapes[0])) * self.nb_data_augmentation, int(np.prod(case.base_shape[1:])))
+        assembled = int(layer.shape[0]) * voxels * layer.element_size()
         raw = os.environ.get("KONFAI_STREAM_WORTH_THRESHOLD")
         try:
             fraction = float(raw) if raw is not None else _STREAM_WORTH_MIN_FRACTION
@@ -785,7 +797,9 @@ class OutputDataset(Dataset, NeedDevice):
                 # A SLAB stage streams through ``stream_slab``, slabs of the first axis, only on the accumulator grid.
                 slab_stages.add(position)
                 continue
-            if locality.kind.is_region:
+            # A region stage measuring its own input (a B-spline's range) waits in the tail, seeded from the buffer: a
+            # statistic present in the case's attribute describes another tensor.
+            if locality.kind.is_region and _has_its_statistics(locality, attribute):
                 if pipe_start is None:
                     pipe_start = position
                 continue
@@ -905,7 +919,12 @@ class OutputDataset(Dataset, NeedDevice):
         return plan
 
     def _make_pipe_state(
-        self, index: int, plan: _StreamPlan, in_shape: list[int], block: torch.Tensor
+        self,
+        index: int,
+        plan: _StreamPlan,
+        in_shape: list[int],
+        block: torch.Tensor,
+        seed: tuple[tuple[str, np.ndarray], ...] = (),
     ) -> _RegionState | None:
         """Wire the case's streamed pipe into one :class:`SlabRegionStream`, or answer ``None`` for
         the buffered tail where streaming would not be exact.
@@ -913,7 +932,8 @@ class OutputDataset(Dataset, NeedDevice):
         The pull map folds each stage's declaration backward from the written region down to the
         accumulator; ``produce`` walks the pipe forward over the pulled window. The fold is planned
         by walking a one-voxel corner of the first slab through the pipe with one evolving attribute,
-        and ``produce`` replays the same transitions on a fresh copy per emission.
+        and ``produce`` replays the same transitions on a fresh copy per emission. ``seed`` is the
+        first stage's statistics, pushed right before it runs and taken back after it.
         """
         attr0 = self._post_prefix_attributes[index]
         pipe = plan.stages[cast(int, plan.pipe_start) :]
@@ -926,9 +946,15 @@ class OutputDataset(Dataset, NeedDevice):
         kinds: list[LocalityKind] = []
         pull_fns: list[Callable[[tuple[slice, ...]], list[slice]]] = []
         try:
-            for stage in pipe:
+            for position, stage in enumerate(pipe):
                 shape = shapes[-1]
-                locality = stage.locality(Attribute(walking))
+                judged = Attribute(walking)
+                for key, value in seed if position == 0 else ():
+                    judged[key] = value
+                locality = stage.locality(judged)
+                if locality.kind.is_region and not ((position == 0 and seed) or _has_its_statistics(locality, judged)):
+                    # A statistic of the stage's own input, which no slab holds: only the first stage is seeded.
+                    raise PredictorError(f"{type(stage.transform).__name__} needs {sorted(locality.stat_keys)}")
                 kinds.append(locality.kind)
                 snapshot = Attribute(walking)
                 if locality.kind is LocalityKind.HALO:
@@ -997,9 +1023,13 @@ class OutputDataset(Dataset, NeedDevice):
             spans = spans_for(target)
             block = window
             for i, (stage, kind) in enumerate(zip(pipe, kinds, strict=True)):
+                for key, value in seed if i == 0 else ():
+                    attribute[key] = value
                 block = self._apply_pipe_stage(
                     stage, kind, block, tuple(spans[i + 1]), spans[i], shapes[i], shapes[i + 1], attribute, name
                 )
+                for key, _ in seed if i == 0 else ():
+                    attribute.pop(key)
             state.attribute = attribute
             return block
 
@@ -1096,9 +1126,51 @@ class OutputDataset(Dataset, NeedDevice):
         result = self._stream_buffers.pop(index)
         attribute = Attribute(self._post_prefix_attributes[index])
         name = self.names[index]
+        if self._stream_tail(index, plan, result, attribute):
+            return
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
         self._submit_final_write(index, name, result, attribute)
+
+    def _stream_tail(self, index: int, plan: _StreamPlan, buffer: torch.Tensor, attribute: Attribute) -> bool:
+        """Stream the tail from the buffer into the sink when all it waited for is the range of the buffer per
+        channel, which its first stage clips to (a B-spline): measured on the buffer, seeded for that stage alone, the
+        tail runs as a region pipe and the finalized case is never held whole. A later stage wanting a statistic of
+        its own input keeps the tail whole (``_make_pipe_state`` refuses it). Whether it streamed."""
+        if plan.tail_start >= len(plan.stages):
+            return False
+        keys = plan.stages[plan.tail_start].locality(Attribute(attribute)).stat_keys
+        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+        if keys != frozenset(RANGE_KEYS) or buffer.dim() != len(spatial) + 1:
+            return False
+        if not self.can_stream_data(attribute):
+            return False
+        # Each channel's range, NaN left out, folded slab by slab as the store's statistics are: only the slab in hand
+        # is moved to the host or widened.
+        extent, folded = spatial[plan.axis], None
+        rows = max(1, SLAB_VOXELS // max(1, buffer.numel() // extent))
+        for first in range(0, extent, rows):
+            folded = _update_running_extrema(
+                folded, _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
+            )
+        stats = _finalize_running_statistics(folded)
+        seed = tuple((key, np.asarray(stats[_STREAM_STATS[key]], np.float64)) for key in RANGE_KEYS)
+        tail = replace(plan, pipe_start=plan.tail_start, tail_start=len(plan.stages), to_sink=True)
+        state = self._make_pipe_state(index, tail, spatial, buffer, seed)
+        if state is None:
+            return False
+        self._region_states[index] = state
+        stream = cast(SlabRegionStream, state.stream)
+        # A slab completes the output its rows write, which an inverse onto a finer grid makes many times larger.
+        per_row = max(buffer[0].numel(), int(np.prod(state.shapes[-1]))) // extent
+        rows = max(1, SLAB_VOXELS // max(1, per_row))
+        for first in range(0, extent, rows):
+            region = slice(first, min(first + rows, extent))
+            for target, block in stream.push(region, buffer[(slice(None), *_slab(region, spatial, plan.axis))]):
+                self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
+        for target, block in stream.finalize():
+            self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
+        return True
 
     def _prepare_copy_slab(
         self,

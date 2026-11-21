@@ -83,8 +83,9 @@ from konfai.data.transform import (
     stat_seed_valid,
 )
 from konfai.data.transform.base import MEASURING_STATISTICS
+from konfai.data.transform.resample import _host_array
 from konfai.utils.dataset import Attribute, Dataset, decompressed
-from konfai.utils.dataset.statistics import needs_moments
+from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_extrema, needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
 from konfai.utils.utils import env_flag
@@ -258,6 +259,9 @@ class DatasetManager:
         #: The copies whose plan refused for want of a statistic no pass had measured yet. A pass may
         #: have measured it since, and the refusal is memoised, so the next load drops the plans.
         self._awaiting_measurement: set[int] = set()
+        #: Per copy waiting on a pass: the chain and the source its plan was drawn on, for an extremum a
+        #: stage wants of its own input, measured by slabs through the stages before it (:meth:`_measure_extrema`).
+        self._waiting_chains: dict[int, tuple[list[Stage], Dataset, str, str, Attribute, list[int]]] = {}
 
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
         # existence probe answers "not written", and without this ledger every copy of an Expand chain
@@ -421,8 +425,7 @@ class DatasetManager:
         for stage, locality in zip(stages, localities, strict=True):
             key = (a, _stage_identity(stage))
             if (
-                locality.kind is LocalityKind.GLOBAL_STAT
-                and locality.stat_keys
+                locality.stat_keys
                 and key not in self._measured_statistics
                 and key not in self._unmeasurable
                 and key not in self._scope_served
@@ -650,6 +653,8 @@ class DatasetManager:
             if not self._awaiting_measurement.intersection(refused) or self.loaded or known == answered:
                 return passed and len(refused) < len(copies)
             answered = known
+            if self._measure_extrema(refused):
+                continue
             # A stage here wants its own input, which the chain has changed, and only a pass over the volume
             # can say it: one pass for every copy and every stage waiting on it. Nothing a selected draw
             # changed precedes the stage (the plan refuses when one does), so the number holds for every
@@ -658,6 +663,59 @@ class DatasetManager:
             self.unload()
             self.unload_augmentation()
             passed = True
+
+    def _measure_extrema(self, copies: Sequence[int]) -> bool:
+        """Measure by slabs the extrema a waiting stage wants of its own input, through the stages before it as they
+        stream, where a whole-volume pass would hold the case: a minimum and a maximum are the same numbers whatever
+        order the voxels are met in. Whether it measured any; a statistic it cannot serve, or a source this run has
+        still to write (a ``Save`` cache), is left to that pass."""
+        extrema = {"Min", "Max", "MinPerChannel", "MaxPerChannel", "NanMinPerChannel", "NanMaxPerChannel"}
+        measured = False
+        for a in copies:
+            if a not in self._waiting_chains:
+                continue
+            stages, dataset, group, entry, attribute, shape = self._waiting_chains[a]
+            if not dataset.is_dataset_exist(group, entry):
+                continue
+            channels = int(dataset.get_infos(group, entry)[0][0])
+            for index, stage in enumerate(stages):
+                locality = self._wanted_measurements.get(id(stage), {}).get(a)
+                # A stage taking a statistic an earlier one records (Normalize behind a saving Clip) is the pass's.
+                if locality is None or locality.takes_present or not locality.stat_keys <= extrema:
+                    continue
+                prefix, landing, probe = stages[:index], list(shape), Attribute(attribute)
+                for earlier in prefix:
+                    landing = self._fold_case_state(earlier, landing, probe)
+                streams, plans, _, _ = self._plan_stream_region(
+                    a, prefix, dataset, group, entry, Attribute(attribute), list(shape), landing_shape=landing
+                )
+                if not streams:
+                    break  # a stage before it waits too: the whole-volume pass measures both
+                source = _PatchStreamSource(dataset, group, entry, [0, *shape], prefix, plans)
+                # Regions as the sweep cuts them, read one at a time: priced on the budget, the channels and the
+                # windows of the stages before; one the budget cannot hold is refused by name.
+                granularity = self._entry_granularity(dataset, group, entry)
+                tile = self._sizer(landing, channels, plans, prefix, granularity).sweep_tile(0)
+                state = None
+                for target in _sweep_targets(landing, tile):
+                    spans = self._region_spans(source, target)
+                    tensor, read = self._read_streamed_region(source, spans)
+                    tensor, _, _ = self._apply_streamed_region(source, spans, tensor, read, Attribute(attribute), None)
+                    values = _host_array(tensor)
+                    # The channels the stage declares, as the store's statistics are read for it.
+                    state = _update_running_extrema(
+                        state, values if locality.stat_channels is None else values[locality.stat_channels]
+                    )
+                stats, held = _finalize_running_statistics(state), Attribute()
+                for key in sorted(locality.stat_keys):
+                    held[key] = np.asarray(stats[_STREAM_STATS[key]], dtype=np.float64)
+                self._measured_statistics[(a, id(stage))] = {key: held[key] for key in sorted(locality.stat_keys)}
+                del self._wanted_measurements[id(stage)][a]
+                measured = True
+        if measured:
+            self._awaiting_measurement.clear()
+            self._invalidate_stream_plans()
+        return measured
 
     def _store_seed(
         self,
@@ -746,7 +804,7 @@ class DatasetManager:
         sweep of a cache not materialized yet. A transform and a draw are planned alike.
         """
         evolved = Attribute(cache_attribute)
-        shape = [int(extent) for extent in source_spatial_shape]
+        shape = shape0 = [int(extent) for extent in source_spatial_shape]
         localities: list[PatchLocality] = []
         plans: list[_ReadStagePlan] = []
 
@@ -767,7 +825,8 @@ class DatasetManager:
                 # OUTPUT, which a patch read has no notion of. A stage that is whole-volume only
                 # because something was left undeclared says so itself (PatchLocality.reason).
                 return refuse(f"{label} declares {loc.kind.name}: {loc.reason or 'it needs the whole volume'}.")
-            if loc.kind is LocalityKind.GLOBAL_STAT:
+            if loc.kind is LocalityKind.GLOBAL_STAT or loc.stat_keys:
+                # A region stage may want a statistic of its input too (a B-spline clipped to its range).
                 # The seed is the STORED volume's statistic; otherwise ([Clip(-200, 400), Standardize()])
                 # every patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
                 identity = (a, _stage_identity(stage))
@@ -845,6 +904,14 @@ class DatasetManager:
                 f" {[int(extent) for extent in expected]}: a stage's shape map is missing or wrong."
             )
         if waiting:
+            self._waiting_chains[a] = (
+                list(stages),
+                source_dataset,
+                source_group,
+                source_entry,
+                Attribute(cache_attribute),
+                list(shape0),
+            )
             self._wait_for_a_pass(a, stages, localities)
             return refuse(
                 f"{waiting[0]} {STATISTIC_AFTER_A_VALUE_CHANGE}: the stored volume's statistic is not this"
@@ -881,7 +948,7 @@ class DatasetManager:
             )
             out = self._stage_out_shape(stage, shape, Attribute(evolved))
             folds_ahead = run_pull is None or not getattr(stage, "measures_from_data", True)
-            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull, folds_ahead)
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull, folds_ahead, seed, kept)
         stage.write_stream_cache_attribute(evolved, list(shape), self.name)
         return plan
 
@@ -2074,6 +2141,7 @@ class DatasetManager:
             if case_attribute is not None:
                 stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape), self.name)
                 self._check_region_geometry_reaches_the_case(stage, scoped, cache_attribute)
+            plan.unseed(cache_attribute, pushed)
             # The stages after it read the geometry this one leaves, as they do on the whole volume
             # (a Canonical reorients from the Direction a Permute restated).
             held = set(cache_attribute.keys())

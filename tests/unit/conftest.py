@@ -226,6 +226,7 @@ def _drive_tta(
         name = "CASE_000"
         patch = DummyPatch()
         shapes: ClassVar[list[list[int]]] = [list(volume.shape[1:]), list(volume.shape[1:])]
+        base_shape: ClassVar[list[int]] = list(volume.shape)
         cache_attributes: ClassVar[list[Attribute]] = [Attribute(), Attribute()]
 
     class DummyDatasetIter:
