@@ -688,7 +688,6 @@ def _masked_config(dest: dict, section: str, chain) -> dict:
         # A list of two masks, and the mapping it lands on disk as once the core reads it.
         ("before_reduction_transforms", [{"Mask": {"path": "BODY"}}, {"Mask": {"path": "BONE"}}]),
         ("before_reduction_transforms", {"Mask": {"path": "BODY"}, "Mask#2": {"path": "BONE"}}),
-        ("final_transforms", {"Mask": {"path": "BODY", "value_outside": -1024}}),
         ("transforms", {"Dilate": {"dilate": 1}, "Dilate#2": {"dilate": 2}}),
     ],
 )

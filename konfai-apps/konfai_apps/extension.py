@@ -122,6 +122,28 @@ def _close(name: str, what: str, konfai: Any, extension: Any) -> None:
         )
 
 
+class _Served:
+    """The run's datasets as a checked class reads them (``read_companion``): each group of the case it reads, a
+    random volume of one channel over ``shape``, the same each time it is read, recorded in the order it was."""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = shape
+        self.read: list[str] = []
+        self.volumes: dict[str, Any] = {}
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        import numpy as np
+
+        if group not in self.volumes:
+            self.read.append(group)
+            generator = np.random.default_rng(len(self.read))
+            self.volumes[group] = (generator.random((1, *self.shape)) * 100).astype(np.float32)
+        return True
+
+    def read_data(self, group: str, name: str) -> tuple[Any, None]:
+        return self.volumes[group], None
+
+
 def _geometry(rank: int) -> tuple[dict[str, Any], Any]:
     """A grid of ``rank`` axes, and the attribute konfai's class reads it from: a spacing and a direction no axis
     shares, so a class that reads the wrong one is told apart."""
@@ -160,10 +182,18 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     written = opened.get(written_at, (source.size,), "float64")
     _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
 
+    # The groups of the case the class read, in that order, each in a buffer listed with its channels.
+    served = stage.datasets[0]
+    groups = [served.volumes[group] for group in served.read]
+
     def run(values: Any, written: tuple[int, ...], inverse: bool) -> Any:
         out = opened.buffer(math.prod(written))
         at = opened.put(source, "float64")
-        if not opened.call("ext_apply_volume", opened.put(values), values.shape[0], at, rank, 1, out, int(inverse)):
+        read = (opened.put(values), values.shape[0], at, rank, 1)
+        if groups and not inverse:
+            table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
+            opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
+        elif not opened.call("ext_apply_volume", *read, out, int(inverse)):
             raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
         return opened.get(out, written)
 
@@ -197,6 +227,7 @@ def _check_transform(extension: Path, name: str, stage: Any, params: dict[str, A
     from konfai.data.transform import LocalityKind, TransformInverse
     from konfai.utils.dataset import Attribute
 
+    stage.set_datasets([_Served(shape)])
     volume = _taken(name, stage, shape)
     pixels = math.prod(shape)
     if stage.patch_locality(Attribute()).kind is not LocalityKind.POINTWISE:

@@ -465,8 +465,8 @@ def export_portable_into_bundle(
     if not ensemble:
         portable_assets.add(bundle / "manifest.json")
     # One model on the identity pass, masked by nothing, is its manifest: konfai's reduction of a single copy
-    # hands it back. The test-time copies and a mask ride on a program.
-    if not (ensemble or aux or len(passes) > 1):
+    # hands it back. The test-time copies, a mask and a final chain reading groups of the case ride on a program.
+    if not (ensemble or aux or len(passes) > 1) and len(program.get("steps", [])) <= 1:
         return _declare_portable_assets(bundle, written[-1], portable_assets)
     program_path = bundle / "program.json"
     program_path.write_text(json.dumps(program, indent=2))

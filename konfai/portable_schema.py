@@ -149,7 +149,8 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     # A transform of the app's own, run by its extension: the classpath the config names the class by, the keys
     # konfai binds it with (a test-time draw's `seed` among them), and the dtype it writes where that is not the one
     # it reads. It reads the voxel it writes, or, keeping the channels, the voxels `halo` away (konfai's HALO) or
-    # the `whole` volume, which it may leave on another grid.
+    # the `whole` volume, which it may leave on another grid or other channels, beside the `groups` of the case it
+    # reads as stored (konfai's `read_companion`).
     "extension": (
         {
             "class": _STRING,
@@ -157,6 +158,7 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
             "dtype": _STRING,
             "halo": _INTEGER,
             "whole": _BOOLEAN,
+            "groups": {"type": "array", "items": _STRING},
             **_ID,
         },
         ["class", "params"],
@@ -193,6 +195,18 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "merge_labels": ({"classes": _array(_INTEGER)}, ["classes"]),
     # A voxel-local reduction of the app's own, run by its extension.
     "extension_reduce": ({"class": _STRING, "dtype": _STRING}, ["class"]),
+    # A class of the app's own reading the whole volume, run by its extension on the program's first buffer with the
+    # case's groups it reads as the others: the end of an output chain from its first stage reading one.
+    "extension": (
+        {
+            "class": _STRING,
+            "params": {"type": "object"},
+            "dtype": _STRING,
+            "whole": _BOOLEAN,
+            "groups": _array(_STRING),
+        },
+        ["class", "params", "whole"],
+    ),
     # Aligned on the origin, the align, the spacing and the fill of the resample undone onto the reference buffer.
     "resample_linear": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
     "resample_nearest": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),

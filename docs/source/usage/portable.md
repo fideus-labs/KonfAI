@@ -277,6 +277,10 @@ volume, it may leave another grid, which the extension states as
 `transform_shape` does, and be undone after the model, or write other channels
 (labels out of posteriors) and not be undone; the case is then held whole. Each
 class is compiled on the channels and the axes its place in the chain hands it.
+At the end of the `final_transforms`, a class reading the whole volume may read
+groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
+the program runs that end of the chain on the prediction, and reads those groups
+with the case.
 Without an extension, a pointwise transform is folded into the model's graph and
 the other classes are refused. A reduction takes no parameter.
 
