@@ -35,6 +35,9 @@ _STREAM_STATS = {
     "MaxPerChannel": "max_per_channel",
     "MeanPerChannel": "mean_per_channel",
     "StdPerChannel": "std_per_channel",
+    # NaN left out, as scikit-image's resize takes the range it clips to.
+    "NanMinPerChannel": "nanmin_per_channel",
+    "NanMaxPerChannel": "nanmax_per_channel",
 }
 _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 

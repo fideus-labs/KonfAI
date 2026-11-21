@@ -131,19 +131,23 @@ def test_a_resample_on_the_faces_grid_counts_its_voxels_and_comes_back(
     assert tuple(restored.shape[1:]) == shape
 
 
-def test_a_spline_resample_declares_the_whole_volume_and_a_resample_onto_its_own_spacing_streams() -> None:
-    def kind(stage: Resample, spacing: list[float]) -> LocalityKind:
-        return stage.patch_locality(Attribute(geometry([0.0] * 3, spacing, None))).kind
+def test_a_spline_resample_streams_and_a_faces_b_spline_asks_for_its_input_s_range() -> None:
+    def declared(stage: Resample, spacing: list[float]) -> tuple[LocalityKind, frozenset[str]]:
+        locality = stage.patch_locality(Attribute(geometry([0.0] * 3, spacing, None)))
+        return locality.kind, locality.stat_keys
 
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 2.5]) == (
-        LocalityKind.WHOLE_VOLUME
-    )
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 3.0]) == (
-        LocalityKind.REGRID
-    )
-    # Linear on the faces grid is ITK's linear, until an axis is resampled apart.
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces"), [1.0, 1.0, 2.5]) == LocalityKind.REGRID
-    assert kind(Resample(spacing=[1.0, 1.0, 1.0], grid="faces"), [0.7, 0.7, 4.0]) == LocalityKind.WHOLE_VOLUME
+    ranged = (LocalityKind.REGRID, frozenset({"NanMinPerChannel", "NanMaxPerChannel"}))
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 2.5]) == ranged
+    plain = (LocalityKind.REGRID, frozenset())
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 3.0]) == plain
+    # scipy's zoom clips nothing; linear on the faces grid is ITK's, or slices resized apart, each clipped alone.
+    assert declared(Resample(spacing=[1.5, 1.5, 1.5], grid="zoom", interpolation="bspline"), [0.8, 0.8, 2.5]) == plain
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces"), [1.0, 1.0, 2.5]) == plain
+    linear = Resample(spacing=[1.0, 1.0, 1.0], grid="faces", interpolation="linear")
+    assert declared(linear, [0.7, 0.7, 4.0]) == plain
+    # Unstated, the interpolation is the dtype's, which only the tensor tells: held whole.
+    assert declared(Resample(spacing=[1.0, 1.0, 1.0], grid="faces"), [0.7, 0.7, 4.0])[0] == LocalityKind.WHOLE_VOLUME
+    assert declared(Resample(spacing=[1.0, 1.0, 1.0], grid="faces", interpolation="bspline"), [0.7, 0.7, 4.0]) == plain
 
 
 def test_zoom_counts_and_samples_as_scipy_and_records_the_zoomed_spacing() -> None:
