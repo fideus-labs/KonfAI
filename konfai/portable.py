@@ -720,11 +720,16 @@ def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int,
 
 class _GroupsRead:
     """The run's datasets as a probed class sees them: every group of the case it reads beside its volume
-    (``read_companion``), recorded in order, held as zeros of ``shape``."""
+    (``read_companion``), recorded in order, held as zeros of ``shape`` on the identity grid."""
 
     def __init__(self, shape: tuple[int, ...]) -> None:
         self.shape = shape
         self.read: list[str] = []
+        #: What a class memoizes per case, as on a dataset (konfai's ``Dataset.case_facts``).
+        self.case_facts: dict[Any, Any] = {}
+
+    def get_infos(self, group: str, name: str) -> tuple[list[int], Any]:
+        return list(self.shape), _probe_attribute(len(self.shape) - 1)
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
         # The probe's own group is the volume the class is handed, as stored: no other group of the case.
