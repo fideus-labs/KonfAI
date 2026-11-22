@@ -286,7 +286,7 @@ class is compiled on the channels and the axes its place in the chain hands it.
 The extension is handed float32 values; a transform reading past the voxel is
 also told the dtype they are held in. Such a transform may read the volume box by
 box from the runtime instead of being handed it, for a volume past the 4 GiB an
-extension's memory holds.
+extension's memory holds, and is then undone the same way.
 At the end of the `final_transforms`, a class reading the whole volume may read
 groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
 the program runs that end of the chain on the prediction, and reads those groups

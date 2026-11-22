@@ -262,15 +262,20 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
 
     at, flags = typed(volume)
     regions = opened.call("ext_reads_regions") == 1
-    if regions:
-        # Lent the volumes, held here, and writing to one held here too.
-        held = np.zeros((transformed.shape[0], *(int(extent) for extent in bound[:rank])), np.float32)
-        opened.lent = ([volume.numpy(), *groups], held)
-        counts = opened.put(np.array([channels, *(group.shape[0] for group in groups)], np.uint32), "uint32")
+
+    def by_regions(sources: list[Any], output: Any, at: int, flags: int, noted: tuple[int, int], inverse: int) -> int:
+        """``ext_apply_regions`` on ``sources`` (the volume, then the groups), held here and lent to the call with
+        ``output``, which it writes."""
+        opened.lent = (sources, output)
+        counts = opened.put(np.array([source.shape[0] for source in sources], np.uint32), "uint32")
         try:
-            opened.call("ext_apply_regions", at, rank, flags, counts, len(groups))
+            return opened.call("ext_apply_regions", at, rank, flags, counts, len(sources) - 1, *noted, inverse)
         finally:
             opened.lent = None
+
+    if regions:
+        held = np.zeros((transformed.shape[0], *(int(extent) for extent in bound[:rank])), np.float32)
+        by_regions([volume.numpy(), *groups], held, at, flags, (0, 0), 0)
     else:
         # The volume and what the class writes in its own memory, the groups listed with their channels.
         out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
@@ -293,12 +298,18 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     _close(name, "transform a volume", transformed, landed)
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
-        back = opened.buffer(channels * math.prod(shape))
         at, flags = typed(transformed)
-        read = (opened.put(transformed), transformed.shape[0], at, rank, flags)
-        if not opened.call("ext_apply_volume", *read, 0, 0, notes, count, back, 1):
+        if regions:
+            got = np.zeros((channels, *shape), np.float32)
+            done = by_regions([transformed.numpy()], got, at, flags, (notes, count), 1)
+        else:
+            back = opened.buffer(channels * math.prod(shape))
+            read = (opened.put(transformed), transformed.shape[0], at, rank, flags)
+            done = opened.call("ext_apply_volume", *read, 0, 0, notes, count, back, 1)
+            got = opened.get(back, (channels, *shape))
+        if not done:
             raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
-        _close(name, "undo itself", undone, opened.get(back, (channels, *shape)))
+        _close(name, "undo itself", undone, got)
 
 
 def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, attribute: Any) -> None:
