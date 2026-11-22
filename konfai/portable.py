@@ -2794,10 +2794,12 @@ def export_checkpoints(
             " extension, and none is given.",
             _or_konfai("Pass the extension that implements it (extension=...)", _PREDICT),
         )
+    # The output chain runs on the case's axes, which a patch with a singleton axis traced without has one more of.
+    rank = _spatial_rank(config, root)
     # What the app's own Fold leaves of one voxel of the head: the channels and the dtype the output chain reads.
     blended_channels, blended_dtype = 0, None
     if fold is not None:
-        left = fold.leave(fold.enter(torch.rand(head_channels(), *[1] * len(traced))))
+        left = fold.leave(fold.enter(torch.rand(head_channels(), *[1] * rank)))
         blended_channels, blended_dtype = int(left.shape[0]), str(left.dtype).split(".")[-1]
 
     def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
@@ -2809,10 +2811,10 @@ def export_checkpoints(
         # The app's own Fold hands the chain what it leaves.
         held = blended_channels or head_channels()
         for step in before:
-            held = _channels_after(step, held, len(traced))
+            held = _channels_after(step, held, rank)
         filename = f"{ids[0]}_post_{folded}.onnx"
         folded += 1
-        out_channels, out_dtype = export_folds(steps, out_dir / filename, held, len(traced), dtype)
+        out_channels, out_dtype = export_folds(steps, out_dir / filename, held, rank, dtype)
         return {"op": "onnx", "model": filename, "channels": out_channels, "dtype": out_dtype}
 
     def case_statistic(params: dict[str, Any]) -> dict[str, Any]:
