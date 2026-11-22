@@ -1290,7 +1290,6 @@ _STACK = {"InferenceStack": {"mode": "mean"}}
     [
         # A mask nothing applies: the program would write the unmasked prediction.
         ({}, {"before_reduction_transforms": _MASK}, "Mask"),
-        ({}, {"final_transforms": _MASK}, "Mask"),
         # A list-spelled chain binds a repeated stage under an occurrence key.
         ({"Mask#2": _MASK["Mask"]}, {}, "Mask#2"),
         # konfai folds the copies at a stack that opens the after-reduction chain, and nowhere else.
@@ -1771,8 +1770,10 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "from konfai.data.reduction import Reduction\n"
         "from konfai.data.transform import LocalityKind, PatchLocality, Transform, TransformInverse\n\n\n"
         "class Smooth(Transform):\n"
-        "    locality = LocalityKind.HALO\n"
-        "    halo = (1,)\n\n"
+        "    def patch_locality(self, cache_attribute):\n"
+        "        if 'Spacing' not in cache_attribute:\n"
+        "            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason='a halo in millimetres')\n"
+        "        return PatchLocality(LocalityKind.HALO, halo=(1,))\n\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        return torch.nn.functional.avg_pool3d(tensor.float()[None], 3, 1, 1, count_include_pad=False)[0]\n\n\n"
         "class Centered(Transform):\n"
@@ -1803,6 +1804,10 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
         "    voxel_local = True\n\n"
         "    def __call__(self, tensors):\n"
         "        return torch.stack(tensors).amax(0)\n\n\n"
+        "class Double(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n\n\n"
         "class Strongest(Transform):\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        if tensor.shape[0] != 2:\n"
@@ -1813,8 +1818,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     resolved = json.loads(config.read_text())
     predictor = resolved["Predictor"]
     # konfai undoes an input transform once the copies are folded, which a program does for a resample alone.
-    # A class reads the voxel it writes, its neighbours as far as the halo it declares, or, declaring nothing, the
-    # whole volume.
+    # A class reads the voxel it writes, its neighbours as far as the halo it declares for a grid, or, declaring
+    # nothing, the whole volume.
     own = {"Own:Scale": {"scale": 4.0, "inverse": False}, "Own:Smooth": {}, "Own:Centered": {}}
     predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
     predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}
@@ -1822,7 +1827,8 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     # whole volume may write fewer.
     predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {
         "reduction": "Own:Largest",
-        "before_reduction_transforms": {"Own:Strongest": {}},
+        # A pointwise class a graph carries is folded into one, extension or not.
+        "before_reduction_transforms": {"Own:Strongest": {}, "Own:Double": {}},
     }
     config.write_text(json.dumps(resolved))
     checkpoint = tmp_path / "fold_0.pt"
@@ -1854,6 +1860,71 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
     strongest = {"op": "extension", "class": "Own:Strongest", "params": {}, "whole": True}
     assert all(strongest in model["postprocessing"] for model in models)
+    assert '"Own:Double"' not in json.dumps(program)
+    assert all(model["postprocessing"][-1]["op"] == "onnx" for model in models)
+
+
+def test_a_final_chain_reading_groups_of_the_case_closes_the_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # konfai's final chain reads groups of the case as stored: a class of the app's (read_companion) and a Mask. The
+    # program runs that end of the chain on its buffers, the first group being its input and any other one read
+    # with the case.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+    from konfai.utils.dataset import Attribute, Dataset
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    for case in ("CASE_000", "CASE_001"):
+        Dataset(str(tmp_path / "Dataset"), "mha").write("BODY", case, np.ones((1, 1, 16, 16), np.uint8), Attribute())
+    (tmp_path / "OwnGroup.py").write_text(
+        "from konfai.data.transform import Transform\n\n\n"
+        "class ScaleOnto(Transform):\n"
+        "    def __init__(self, reference_group: str = 'MR') -> None:\n"
+        "        super().__init__()\n"
+        "        self.reference_group = reference_group\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        reference = self.read_companion(self.reference_group, name)\n"
+        "        return tensor.float() * float((tensor.float() * reference).sum() + 1)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    final = {
+        "OwnGroup:ScaleOnto": {"reference_group": "MR"},
+        "Mask": {"path": "BODY", "value_outside": -1},
+        "Argmax": {"dim": 0},
+    }
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["final_transforms"] = final
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+
+    assert program["input_group"] == ["MR", "BODY"]
+    model, scale, mask, argmax = program["outputs"][0]["program"]["steps"]
+    assert not any("extra" in step for step in model["manifest"]["postprocessing"])
+    assert scale == {
+        "op": "extension",
+        "class": "OwnGroup:ScaleOnto",
+        "params": {"reference_group": "MR"},
+        "whole": True,
+        "dtype": "float32",
+        "groups": ["MR"],
+        "in": [model["out"], "input"],
+        "out": "t0",
+    }
+    assert mask == {"op": "mask", "value_outside": -1.0, "in": ["t0", "BODY"], "out": "t1"}
+    assert argmax == {"op": "argmax", "in": ["t1"], "out": "output"}
 
 
 def test_an_own_class_that_moves_the_grid_is_undone_by_the_extension(

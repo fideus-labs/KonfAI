@@ -272,13 +272,25 @@ is copied beside it.
 The extension builds each class from the keys konfai binds it with, and is
 handed its volumes voxel by voxel. A transform that reads past the voxel it
 writes is handed the volume with its grid instead. With a halo it streams block
-by block, keeps the grid and the channels and is not undone. Reading the whole
+by block, keeps the grid and the channels and is not undone; its halo is the
+one it declares for a grid, which the extension states again for each case's
+grid when it depends on the spacing. Reading the whole
 volume, it may leave another grid, which the extension states as
-`transform_shape` does, and be undone after the model, or write other channels
+`transform_shape` does (one fitted to the values, bounded by another it states
+first), and be undone after the model with what it measured on the volume, or
+write other channels
 (labels out of posteriors) and not be undone; the case is then held whole. Each
 class is compiled on the channels and the axes its place in the chain hands it.
-Without an extension, a pointwise transform is folded into the model's graph and
-the other classes are refused. A reduction takes no parameter.
+The extension is handed float32 values; a transform reading past the voxel is
+also told the dtype they are held in.
+At the end of the `final_transforms`, a class reading the whole volume may read
+groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
+the program runs that end of the chain on the prediction, and reads those groups
+with the case.
+In an output chain, a pointwise transform that exports to ONNX is folded into a
+graph, with or without an extension. Without an extension, a pointwise
+transform before the model is folded into its graph and the other classes are
+refused. A reduction takes no parameter.
 
 `konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
 With `konfai-apps[extension]` installed, it also runs each class in Python and

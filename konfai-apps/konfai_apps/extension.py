@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,21 @@ from .errors import AppMetadataError
 
 #: The kinds an extension opens a class as, numbered as the extension numbers them.
 PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION, VOLUME_TRANSFORM = range(5)
+#: The dtypes a grid's code names, in the order of their codes, as KonfAI Edge lists them.
+_DTYPES = (
+    "bool",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "float32",
+    "float64",
+)
 #: The spatial extents of the volumes compared, the last ones for a case of fewer axes.
 _EXTENTS = (3, 4, 5)
 
@@ -41,6 +56,10 @@ class _Opened:
 
     def call(self, name: str, *arguments: int) -> int:
         return int(self.exports[name](self.store, *arguments) or 0)
+
+    def has(self, name: str) -> bool:
+        """Whether the extension exports ``name``."""
+        return self.exports.get(name) is not None
 
     def buffer(self, count: int) -> int:
         """``count`` float32 at zero in the extension's memory."""
@@ -122,16 +141,46 @@ def _close(name: str, what: str, konfai: Any, extension: Any) -> None:
         )
 
 
-def _geometry(rank: int) -> tuple[dict[str, Any], Any]:
+class _Served:
+    """The run's datasets as a checked class reads them (``read_companion``): each group of the case it reads, a
+    random volume of one channel over ``shape``, the same each time it is read, recorded in the order it was."""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = shape
+        self.read: list[str] = []
+        self.volumes: dict[str, Any] = {}
+        #: What a class memoizes per case, as on a dataset (konfai's ``Dataset.case_facts``).
+        self.case_facts: dict[Any, Any] = {}
+
+    def own(self, volume: Any) -> None:
+        """``volume`` as the checked group stored: what a class reads of its own case (``transform_shape``), what it
+        memoized of another forgotten."""
+        self.volumes["check"] = volume.numpy()
+        self.case_facts.clear()
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        import numpy as np
+
+        if group not in self.volumes:
+            self.read.append(group)
+            generator = np.random.default_rng(len(self.read))
+            self.volumes[group] = (generator.random((1, *self.shape)) * 100).astype(np.float32)
+        return True
+
+    def read_data(self, group: str, name: str) -> tuple[Any, None]:
+        return self.volumes[group], None
+
+
+def _geometry(rank: int, identity: bool = False) -> tuple[dict[str, Any], Any]:
     """A grid of ``rank`` axes, and the attribute konfai's class reads it from: a spacing and a direction no axis
-    shares, so a class that reads the wrong one is told apart."""
+    shares, so a class that reads the wrong one is told apart, or, with ``identity``, the identity grid."""
     import numpy as np
     from konfai.utils.dataset import Attribute
 
     geometry = {
-        "Spacing": np.array([0.5, 1.0, 2.0][:rank]),
-        "Origin": np.array([10.0, 20.0, 30.0][:rank]),
-        "Direction": np.diag([1.0, -1.0, 1.0][:rank]),
+        "Spacing": np.ones(rank) if identity else np.array([0.5, 1.0, 2.0][:rank]),
+        "Origin": np.zeros(rank) if identity else np.array([10.0, 20.0, 30.0][:rank]),
+        "Direction": np.eye(rank) if identity else np.diag([1.0, -1.0, 1.0][:rank]),
     }
     attribute = Attribute()
     for key, value in geometry.items():
@@ -148,6 +197,9 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     channels, *shape = volume.shape
     rank = len(shape)
     geometry, attribute = _geometry(rank)
+    # Its plan-time facts first, as konfai settles them, then the class.
+    stage.datasets[0].own(volume)
+    stage.transform_shape("check", "check", list(shape), attribute)
     transformed = stage("check", volume.clone(), attribute)
 
     def grid(shape: Any, read: Any) -> Any:
@@ -155,22 +207,76 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
 
     opened = _Opened(extension, VOLUME_TRANSFORM, name, params)
     source = grid(shape, geometry.__getitem__)
-    written_at = opened.put(source, "float64")
-    opened.call("ext_output_grid", written_at, rank, 1)
-    written = opened.get(written_at, (source.size,), "float64")
-    _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
+    _check_halo(opened, name, stage, source, rank, attribute)
 
-    def run(values: Any, written: tuple[int, ...], inverse: bool) -> Any:
-        out = opened.buffer(math.prod(written))
+    def stated(export: str, *notes: int) -> Any:
+        """The grid the extension states for the grid compared, given the notes at `notes` where there are."""
         at = opened.put(source, "float64")
-        if not opened.call("ext_apply_volume", opened.put(values), values.shape[0], at, rank, 1, out, int(inverse)):
-            raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
-        return opened.get(out, written)
+        opened.call(export, at, rank, 1, *notes)
+        return opened.get(at, (source.size,), "float64")
 
-    _close(name, "transform a volume", transformed, run(volume, tuple(transformed.shape), False))
+    # The groups of the case the class read, in that order, each in a buffer listed with its channels.
+    served = stage.datasets[0]
+    groups = [served.volumes[group] for group in served.read]
+    # The forward into the grid stated before the values are read, which bounds one the values settle.
+    bound = stated("ext_output_grid")
+
+    def typed(values: Any) -> tuple[int, int]:
+        """The grid compared with the code of the dtype of ``values`` after it, and the flags saying both follow."""
+        code = _DTYPES.index(str(values.dtype).removeprefix("torch."))
+        return opened.put(np.append(source, code), "float64"), 1 | 2
+
+    out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
+    at, flags = typed(volume)
+    read = (opened.put(volume), channels, at, rank, flags)
+    if groups:
+        table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
+        opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
+    else:
+        opened.call("ext_apply_volume", *read, out, 0)
+    # What it measured on the volume, and the grid it settled on.
+    count = opened.call("ext_notes_len") if opened.has("ext_notes_len") else 0
+    notes = opened.buffer(2 * count)
+    if count:
+        opened.call("ext_notes", notes)
+    written = stated("ext_output_grid_noted", notes, count) if count else bound
+    _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
+    _close(name, "transform a volume", transformed, opened.get(out, tuple(transformed.shape)))
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
-        _close(name, "undo itself", undone, run(transformed, (channels, *shape), True))
+        back = opened.buffer(channels * math.prod(shape))
+        at, flags = typed(transformed)
+        read = (opened.put(transformed), transformed.shape[0], at, rank, flags)
+        done = (
+            opened.call("ext_inverse_noted", *read, notes, count, back)
+            if count
+            else opened.call("ext_apply_volume", *read, back, 1)
+        )
+        if not done:
+            raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
+        _close(name, "undo itself", undone, opened.get(back, (channels, *shape)))
+
+
+def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, attribute: Any) -> None:
+    """A class that reads its neighbours: the halo the extension states for the grid compared, or, where it states
+    none, one the class keeps whatever the grid (the halo its step states)."""
+    from konfai.data.transform import LocalityKind
+
+    locality = stage.patch_locality(attribute)
+    if locality.kind is not LocalityKind.HALO:
+        return
+    halo = max(locality.halo or (0,))
+    # An int32 to wasmtime: `None`, the class's u32::MAX, is -1.
+    stated = opened.call("ext_halo", opened.put(source, "float64"), rank, 1) if opened.has("ext_halo") else -1
+    if stated == -1:
+        identity = stage.patch_locality(_geometry(rank, identity=True)[1])
+        if max(identity.halo or (0,)) != halo:
+            raise AppMetadataError(
+                f"'{name}' reads {halo} pixels around each on the grid compared and another count on another grid,"
+                " and its extension states no halo for the grid (VolumeTransform::halo)."
+            )
+    elif stated != halo:
+        raise AppMetadataError(f"The extension's '{name}' reads {stated} pixels around each, the Python class {halo}.")
 
 
 def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
@@ -182,8 +288,14 @@ def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
     refused: Exception | None = None
     for channels in range(1, 1025):
         volume = torch.rand((channels, *shape), generator=generator) * 100
+        # A first slab of zeros along each axis: a class that crops to the content crops.
+        for axis in range(1, volume.dim()):
+            volume.narrow(axis, 0, 1).zero_()
+        attribute = _geometry(len(shape))[1]
         try:
-            stage("check", volume.clone(), _geometry(len(shape))[1])
+            stage.datasets[0].own(volume)
+            stage.transform_shape("check", "check", list(shape), attribute)
+            stage("check", volume.clone(), attribute)
         except Exception as error:  # a count the class refuses is not the one its chain hands it
             refused = refused or error
             continue
@@ -197,6 +309,7 @@ def _check_transform(extension: Path, name: str, stage: Any, params: dict[str, A
     from konfai.data.transform import LocalityKind, TransformInverse
     from konfai.utils.dataset import Attribute
 
+    stage.set_datasets([_Served(shape)])
     volume = _taken(name, stage, shape)
     pixels = math.prod(shape)
     if stage.patch_locality(Attribute()).kind is not LocalityKind.POINTWISE:
@@ -285,11 +398,14 @@ def _check_criterion(
     _close(name, "score a case", [float(scored)], measured.astype(np.float32))
 
 
-def check_extension(extension: str | Path, configs: list[str | Path]) -> list[str]:
+def check_extension(
+    extension: str | Path, configs: Collection[str | Path], runs: dict[str, list[dict[str, Any]] | None] | None = None
+) -> list[str]:
     """Run every class of the app's own that ``configs`` name, in Python and from ``extension``, on the same random
     voxels: a transform and its inverse, a reduction, a ``patch_combine`` and a criterion. Returns the classpaths
     checked. A test-time draw is opened and not compared: the extension draws from the seed its step carries,
-    where konfai draws from torch's generator.
+    where konfai draws from torch's generator. ``runs``, the classes a compiled program runs by the extension
+    (:func:`classes_run`), leaves out those it folds into a graph.
 
     Raises ``AppMetadataError`` when the extension lacks a class, or returns other values than the Python class.
     """
@@ -299,7 +415,7 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
     from konfai.data.reduction import Reduction
     from konfai.data.transform import Transform
     from konfai.metric.measure import Criterion
-    from konfai.portable import inference_patch
+    from konfai.portable import clean, inference_patch
 
     checks = {
         Fold: _check_fold,
@@ -323,6 +439,11 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
             if (built := _built(name, given, tuple(checks))) is None:
                 continue
             instance, params = built
+            # A class, or a binding of it, the program does not run by the extension.
+            if runs is not None:
+                bindings = runs.get(name, [])
+                if bindings is not None and {k: clean(v) for k, v in given.items()} not in bindings:
+                    continue
             # A class bound twice with other parameters is two things to check.
             bound = (name, json.dumps(params, sort_keys=True, default=str))
             if bound in checked:
@@ -332,3 +453,34 @@ def check_extension(extension: str | Path, configs: list[str | Path]) -> list[st
             )
             checked[bound] = None
     return list(dict.fromkeys(name for name, _ in checked))
+
+
+def classes_run(program: Any) -> dict[str, list[dict[str, Any]] | None]:
+    """The classes of the app's own a compiled program (a prediction or an evaluation program, a manifest) runs by its
+    extension, each with the parameters each of its transform steps binds it with, or ``None`` for a class run with the
+    parameters its config binds: a draw, a reduction, a manifest's ``blend``, a criterion."""
+    from konfai.portable import own_class
+
+    found: dict[str, list[dict[str, Any]] | None] = {}
+    if isinstance(program, list):
+        for item in program:
+            for name, bound in classes_run(item).items():
+                _merge(found, name, bound)
+    if isinstance(program, dict):
+        for key, value in program.items():
+            if key in ("class", "blend") and isinstance(value, str) and own_class(value):
+                # A draw's step carries its own seed and no `prob`: any binding of it.
+                params = program.get("params") or {}
+                step = key == "class" and program.get("op") == "extension" and "seed" not in params
+                _merge(found, value, [params] if step else None)
+            for name, bound in classes_run(value).items():
+                _merge(found, name, bound)
+    return found
+
+
+def _merge(found: dict[str, list[dict[str, Any]] | None], name: str, bound: list[dict[str, Any]] | None) -> None:
+    """``name`` run with the bindings ``bound`` too (``None``: any)."""
+    if (name in found and found[name] is None) or bound is None:
+        found[name] = None
+    else:
+        found[name] = [*(found.get(name) or []), *bound]

@@ -718,12 +718,35 @@ def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int,
     return {"dtype": next(iter(got.values()))}
 
 
-def _own_stage(classpath: str, params: dict[str, Any]) -> Any:
-    """The app's own transform a chain names, built as konfai binds it."""
+class _GroupsRead:
+    """The run's datasets as a probed class sees them: every group of the case it reads beside its volume
+    (``read_companion``), recorded in order, held as zeros of ``shape``."""
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = shape
+        self.read: list[str] = []
+
+    def is_dataset_exist(self, group: str, name: str) -> bool:
+        # The probe's own group is the volume the class is handed, as stored: no other group of the case.
+        if group != "probe" and group not in self.read:
+            self.read.append(group)
+        return True
+
+    def read_data(self, group: str, name: str) -> tuple[Any, None]:
+        import numpy as np
+
+        return np.zeros(self.shape, np.float32), None
+
+
+def _own_stage(classpath: str, params: dict[str, Any], rank: int = 3) -> Any:
+    """The app's own transform a chain names, built as konfai binds it, the groups it reads at ``rank`` recorded
+    (:class:`_GroupsRead`)."""
     from konfai.utils.utils import get_module
 
     module, name = get_module(classpath, "konfai.data.transform")
-    return getattr(module, name)(**params)
+    stage = getattr(module, name)(**params)
+    stage.set_datasets([_GroupsRead((1, *[_PROBE_EXTENT] * rank))])
+    return stage
 
 
 #: The extent of the volume a class that reads past the voxel is probed on, along each axis: wider than a
@@ -757,22 +780,33 @@ def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[
     return probe
 
 
-def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE) -> dict[str, Any]:
+def _extension_step(
+    name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE, groups: bool = False
+) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
     ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; a ``WHOLE_VOLUME`` one
     the case (``whole``), which may leave another grid and be undone, or other channels and not be. The class is run
-    on ``probe``, the channels and rank its place in the chain hands it."""
+    on ``probe``, the channels and rank its place in the chain hands it. With ``groups`` (the final chain), a
+    WHOLE_VOLUME class may read groups of the case beside its volume, which the step names."""
     import numpy as np
     import torch
 
     from konfai.data.transform import LocalityKind, TransformInverse
-    from konfai.utils.dataset import Attribute
 
     classpath = base_name(name)
     kwargs = {key: clean(value) for key, value in _mapping(params).items()}
-    stage = _own_stage(classpath, kwargs)
-    locality = stage.patch_locality(Attribute())
+    rank = len(probe) - 1
+    stage = _own_stage(classpath, kwargs, rank)
+
+    def probed(volume: Any, attribute: Any) -> Any:
+        """The class on ``volume``, its plan-time facts first, as konfai settles them (``transform_shape``)."""
+        stage.transform_shape("probe", "probe", list(volume.shape[1:]), attribute)
+        return stage("probe", volume, attribute)
+
+    # Asked with a grid: a halo in millimetres needs the spacing. The runtime asks the extension again for each
+    # case's grid (its `halo`), the halo written here standing where the extension says none.
+    locality = stage.patch_locality(_probe_attribute(rank))
     reads: dict[str, Any] = {}
     if locality.kind is LocalityKind.HALO and locality.halo:
         reads = {"halo": max(locality.halo)}
@@ -784,11 +818,10 @@ def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PRO
             " POINTWISE class, a HALO one with its halo or a WHOLE_VOLUME one.",
             _or_konfai("Declare one of these three", _RUN),
         )
-    rank = len(probe) - 1
     if reads:
         attribute = _probe_attribute(rank)
         try:
-            returned = stage("probe", torch.zeros(probe), attribute)
+            returned = probed(torch.zeros(probe), attribute)
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -814,8 +847,17 @@ def _extension_step(name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PRO
                 ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
-    dtype = _own_dtype(classpath, lambda volume: stage("probe", volume, _probe_attribute(rank)), voxels)
-    return _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
+    dtype = _own_dtype(classpath, lambda volume: probed(volume, _probe_attribute(rank)), voxels)
+    step = _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
+    if read := stage.datasets[0].read:
+        if not groups or "whole" not in reads:
+            raise ConfigError(
+                f"transform '{name}' reads the case's groups {read}, which KonfAI Edge hands a WHOLE_VOLUME class of"
+                " the app's at the end of the final_transforms, where the program runs it.",
+                _or_konfai("Read the groups in a WHOLE_VOLUME class closing the final_transforms", _RUN),
+            )
+        step["groups"] = read
+    return step
 
 
 def _reduce_step(reduce: str) -> dict[str, Any]:
@@ -1571,6 +1613,24 @@ def try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
     return lambda tensor: inst("fold", tensor, Attribute())
 
 
+def _traces(folds: list[Callable[[Any], Any]], probe: tuple[int, ...], dtype: str = "float32") -> bool:
+    """Whether pointwise ``folds`` export to one ONNX graph on a volume of ``probe``'s channels and axes, in ``dtype``:
+    what a class of the app's own must do to be folded rather than run by its extension."""
+    import contextlib
+    import io
+    import tempfile
+
+    try:
+        from konfai.export import export_folds
+
+        # The exporter prints each attempt; a class that does not trace is an answer here, not news.
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            export_folds(folds, Path(directory) / "folds.onnx", probe[0], len(probe) - 1, dtype)
+    except Exception:  # nosec B110 - a class no graph carries is its extension's to run
+        return False
+    return True
+
+
 def declares_inverse(name: str, params: Any) -> bool:
     """Whether the predictor undoes this chain entry after the forward: a ``TransformInverse`` whose
     ``apply_inverse`` is set, read from the class so a user's transform is treated like a shipped one."""
@@ -1620,6 +1680,7 @@ def compile_pipeline(
     case_statistic: StatisticOut | None = None,
     extension: bool = False,
     probe: Probe | None = None,
+    groups: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``extension`` (the app carries its extension of
     KonfAI Edge), a transform of the app's own is the step its extension runs. With ``fold``, a POINTWISE transform with no op is
@@ -1630,7 +1691,9 @@ def compile_pipeline(
     ``fold_out`` (an output chain), each run of POINTWISE transforms with no op is one step, which ``fold_out``
     makes of them and the steps before them, where it stands in the chain. With ``case_statistic`` (the chain of a
     group the model reads past its first), a ``CaseStatistic`` is the step it makes. ``probe`` says what an app's own
-    class is run on to compile it, past the steps before it; one channel of a 3D volume without it."""
+    class is run on to compile it, past the steps before it; one channel of a 3D volume without it. With ``groups``
+    (the final chain), a stage reading a group of the case (a ``Mask``, a class of the app's) is a step naming the
+    group, which the program runs with the rest of the chain (:func:`_split_group_tail`)."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
@@ -1651,6 +1714,18 @@ def compile_pipeline(
         if records_only(name) or is_save(name):
             continue
         refuse_a_stage_konfai_does_not_carry(name, ConfigError)
+        if base == "Mask" and groups:
+            path = str(_mapping(params).get("path", "./default.mha"))
+            if path.endswith(".mha"):
+                raise ConfigError(
+                    f"transform '{name}' masks by the file '{path}', and a program masks by a group of the case.",
+                    _or_konfai("Name the mask's group (path: <group>)", _PREDICT),
+                )
+            path = _literal_group(path, ConfigError)
+            flush()
+            value_outside = float(clean(_mapping(params).get("value_outside", 0)))
+            steps.append(_admitted({"op": "mask", "mask_group": path, "value_outside": value_outside}))
+            continue
         if base in PROGRAM_TRANSFORMS:
             if base in consumed:
                 continue
@@ -1665,6 +1740,14 @@ def compile_pipeline(
             steps.append(_admitted(case_statistic(params)))
             continue
         own = extension and ":" in base
+        if own and fold_out is not None:
+            # A class of the app's own that a graph carries is folded into one, as without an extension; one the chain
+            # undoes stays its extension's, which undoes it. ponytail: output chains only; before the model the folds
+            # run after the test-time draws the program appends, so folding there would reorder an intensity draw.
+            read = getattr(fold_out, "reads", lambda _steps: "float32")(steps)
+            folded = None if declares_inverse(name, params) or read is None else try_fold(name, params)
+            traced = folded is not None and _traces([*pending, folded], probe(steps) if probe else _VOLUME_PROBE, read)
+            own = not traced
         if base in OP_MAP or own:
             flush()
             refuse_a_late_crop(name, moved, ConfigError, params=params)
@@ -1674,7 +1757,7 @@ def compile_pipeline(
                     "(pointwise custom) transforms to the end of the inference pipeline."
                 )
             if own:
-                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE)
+                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE, groups)
             else:
                 step = _admitted(_op_resample(params, roots=roots) if base == "Resample" else OP_MAP[base](params))
             # A Crop past the app's own transform finds its box in the values it changed.
@@ -1893,6 +1976,9 @@ def _post_chain(
                 )
             return fold_out(folds, [*done, *steps], held)
 
+        # The dtype a fold after `steps` reads, `None` where only the run knows it: a class of the app's own folds only
+        # where it is known, traced on it.
+        fold.reads = lambda steps: _dtype_after(steps, dtype)  # type: ignore[attr-defined]
         return fold
 
     copies = str(clean(spec.get("reduction")) or "Mean")
@@ -1934,7 +2020,15 @@ def _post_chain(
         fold_out=folding(concat, None if undone_cast else _dtype_after(after, folded)),
         extension=extension,
         probe=probe,
+        groups=True,
     )
+    nested = aux_mask_groups(config, root)
+    if group := next((step["mask_group"] for step in final if step.get("mask_group") in nested), None):
+        raise ConfigError(
+            f"a final Mask reads '{group}', which a nested model builds, and the program masks by such a group before"
+            " the reduction only.",
+            _or_konfai("Move the Mask to the before_reduction_transforms", _PREDICT),
+        )
     op_of = _op_of(pre)
     for name in inverted:
         if op_of[name] not in INVERTIBLE_OPS:
@@ -2172,6 +2266,7 @@ def assemble_program(
     fold_models: bool = False,
     stack: str | None = None,
     checkpoints: list[str] | None = None,
+    group_tail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The program: every model (``{"id", "manifest"}``) on every test-time pass, each into a buffer of its own,
     reduced once, then the tail the predictor runs once. A pass is the ops that make a copy from the input
@@ -2189,6 +2284,8 @@ def assemble_program(
     buffer ``stack``, one float32 channel per copy, each the copy as konfai stacks it (its label for ``Seg``) after
     the masks, its row taken as soon as the copy is written. ``checkpoints`` names each model's checkpoint, and
     the program's ``members`` maps each copy's buffer to its checkpoint and its pass, the runtime's selection.
+    ``group_tail`` closes the program: the end of the final chain, from its first stage reading a group of the case
+    (:func:`_split_group_tail`).
     """
     if not models:
         raise ConfigError("assemble_program: at least one model is required")
@@ -2245,7 +2342,8 @@ def assemble_program(
     rows = _stack_rows(steps, copies, len(aux), stack, masks, mask_buffers) if stacked else []
     if folded:
         copies = _fold_models(steps, copies, len(models), folded)
-    if len(copies) == 1 and not tail and not masks:
+    group_tail = group_tail or []
+    if len(copies) == 1 and not tail and not masks and not group_tail:
         if copies[0] in members:  # the one copy's buffer is the output; folded models keep their own
             members = {"output": members[copies[0]]}
         return {"steps": [*steps[:-1], {**steps[-1], "out": "output"}], "output": "output"} | (
@@ -2254,7 +2352,7 @@ def assemble_program(
 
     # A cast opening the tail is the dtype konfai folds the copies into, so it runs before the masks.
     casts = len(list(takewhile(lambda step: step["op"] == "cast", tail)))
-    ordered = [*tail[:casts], *({"mask": spec} for spec in masks), *tail[casts:]]
+    ordered = [*tail[:casts], *({"mask": spec} for spec in masks), *tail[casts:], *group_tail]
     cursor = copies[0]
     if len(copies) > 1:
         cursor = "r" if ordered else "output"
@@ -2263,6 +2361,12 @@ def assemble_program(
             op["classes"] = classes if classes is not None else [int(mf["output"]["channels"]) for mf in manifests]
         steps.append(op)
     _append_tail(steps, ordered, cursor, mask_buffers, "t", "output")
+    made = {step["out"] for step in steps} | ({"stack"} if rows else set())
+    if clash := next((group for step in group_tail for group in step.get("extra", []) if group in made), None):
+        raise ConfigError(
+            f"the final_transforms read the case's group '{clash}', which is the name of a buffer the program writes.",
+            _or_konfai("Rename the group", _PREDICT),
+        )
     program: dict[str, Any] = {"steps": steps, "output": "output"}
     if rows:
         steps.append({"op": "concat", "in": rows, "out": "stack"})
@@ -2807,7 +2911,8 @@ def _channels_after(step: dict[str, Any], held: int, rank: int = 3) -> int:
 
         extent = _PROBE_EXTENT if "halo" in step or "whole" in step else 1
         volume = torch.zeros((held, *[extent] * rank))
-        return int(_own_stage(step["class"], step["params"])("probe", volume, _probe_attribute(rank)).shape[0])
+        stage = _own_stage(step["class"], step["params"], rank)
+        return int(stage("probe", volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 
@@ -3005,6 +3110,9 @@ def compile_output(
         extension=extension,
     )
     names = [c.name for c in checkpoints if c is not None]
+    models, group_tail = _split_group_tail(
+        models, lambda: _literal_group(input_groups(config, root)[0][0], ConfigError)
+    )
     own = app_fold(config, root, output)
     if own is not None and averaged_per_patch(config, root, len(checkpoints), passes, output):
         # One model to the program, the mean of the exported ones: its id is theirs without the index.
@@ -3031,6 +3139,7 @@ def compile_output(
             aux=aux,
             masks=masks,
             per_copy=per_copy,
+            group_tail=group_tail,
         )
         return models, written, program | {"averaged": {mean: members}, "enter": {mean: enter}}
     reduce = program_reduction(config, root, len(checkpoints), passes, output)
@@ -3046,8 +3155,54 @@ def compile_output(
         fold_models=fold,
         stack=None if stack is None else str(stack.get("mode", "mean")),
         checkpoints=names if len(names) == len(checkpoints) else None,
+        group_tail=group_tail,
     )
     return models, written, program
+
+
+def _split_group_tail(
+    models: list[dict[str, Any]], first: Callable[[], str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The models with their output chain cut at its first step reading a group of the case (a mask's
+    ``mask_group``, an extension's ``groups``), and the rest, which the program runs on the prediction with the
+    case's groups as its ``extra`` buffers: the case's ``first`` group (named when there is a tail) is the program's
+    ``input``, as stored."""
+    post = models[0]["manifest"].get("postprocessing", [])
+
+    def read(step: dict[str, Any]) -> list[str]:
+        return [step["mask_group"]] if "mask_group" in step else step.get("groups", [])
+
+    at = next((index for index, step in enumerate(post) if read(step)), len(post))
+    if at == len(post):
+        return models, []
+    from konfai.portable_schema import BODY_OPS
+
+    input_group = first()
+    if "input" in (group for step in post[at:] for group in read(step) if group != input_group):
+        raise ConfigError(
+            "the final_transforms read a group of the case named 'input', the name of the program's first buffer.",
+            _or_konfai("Rename the group", _PREDICT),
+        )
+    tail = [
+        {key: value for key, value in step.items() if key != "mask_group"}
+        | {"extra": ["input" if group == input_group else group for group in read(step)]}
+        if read(step)
+        # A softmax or an argmax over the channels is the program's own, which names no axis.
+        else {key: value for key, value in step.items() if key != "dim"}
+        if step["op"] in ("softmax", "argmax") and step.get("dim", 0) == 0
+        else step
+        for step in post[at:]
+    ]
+    for step in tail:
+        keys, _ = BODY_OPS.get(step["op"], (None, None))
+        if keys is None or set(step) - {"op", "extra", *keys} or (step["op"] == "extension" and not step.get("whole")):
+            raise ConfigError(
+                f"the step '{step['op']}' follows a stage reading a group of the case in the final_transforms, and the"
+                " program, which runs that end of the chain on its buffers, runs no such step there.",
+                _or_konfai("Move the stage before the one reading the group", _PREDICT),
+            )
+    cut = [{**model, "manifest": {**model["manifest"], "postprocessing": post[:at]}} for model in models]
+    return cut, tail
 
 
 def _portable_root(path: str | Path) -> str:
@@ -3127,9 +3282,14 @@ def compile_prediction(
             resolved, root, predictor.outputs_dataset, weights, passes, aux, output.parent, extension is not None
         )
         predictor.dataset.prepare()
-        # What each case is read from: the model's first input group, then every group the manifest names,
-        # which is the order the runtime fills the program's buffers in.
+        # What each case is read from: the model's first input group, then every group the manifest names and
+        # every buffer a program reads and no step writes (a group its final chain reads), which is the order the
+        # runtime fills the program's buffers in.
         reads = [read["group"] for read in (exported[0]["manifest"].get("reads") or [])] if exported else []
+        for program in (head["program"] for head in written):
+            made = {"input", *(step["out"] for step in program["steps"])}
+            for step in program["steps"]:
+                reads += [group for group in _buffers_read(step) if group not in made and group not in reads]
         prediction = {
             "konfai_edge_prediction": PREDICTION_PROGRAM_VERSION,
             "name": predictor.name,
@@ -3147,6 +3307,12 @@ def compile_prediction(
         carry_extension(extension, prediction, output)
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
+
+
+def _buffers_read(step: dict[str, Any]) -> list[str]:
+    """The buffers a program step reads: one name or a list of them."""
+    read = step.get("in", [])
+    return [read] if isinstance(read, str) else list(read)
 
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:

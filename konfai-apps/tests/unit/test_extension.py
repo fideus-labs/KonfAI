@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from konfai_apps.errors import AppMetadataError
-from konfai_apps.extension import check_extension
+from konfai_apps.extension import check_extension, classes_run
 
 #: An extension holding one transform, whatever its name: each value doubled, and halved back.
 DOUBLE = """
@@ -70,3 +70,18 @@ def test_an_extension_is_compared_with_the_class_it_stands_for(tmp_path: Path, m
     config.write_text(chain % 3.0)
     with pytest.raises(AppMetadataError, match="'OwnScale:Scale' does not transform a volume as the Python class does"):
         check_extension(extension, [config])
+    # A class the compiled program runs otherwise (folded into a graph) is left out; one it runs by the extension
+    # is compared.
+    program = {"steps": [{"op": "extension", "class": "OwnScale:Scale", "params": {"scale": 3.0}}]}
+    assert classes_run(program) == {"OwnScale:Scale": [{"scale": 3.0}]}
+    assert check_extension(extension, [config], runs={}) == []
+    # Only the binding the program runs: the config's scale: 3.0 is not it.
+    assert check_extension(extension, [config], runs={"OwnScale:Scale": [{"scale": 2.0}]}) == []
+    with pytest.raises(AppMetadataError, match="does not transform a volume"):
+        check_extension(extension, [config], runs=classes_run(program))
+    # A pointwise class the program runs by the extension must be there, though a graph could carry it.
+    (tmp_path / "missing.wasm").write_bytes(
+        wasmtime.wat2wasm(DOUBLE.replace("(i32.const 0) (i32.const 2)", "(i32.const 1) (i32.const 1)"))
+    )
+    with pytest.raises(AppMetadataError, match="implements no such class"):
+        check_extension(tmp_path / "missing.wasm", [config], runs=classes_run(program))
