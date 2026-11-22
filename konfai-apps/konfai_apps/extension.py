@@ -200,6 +200,10 @@ class _Served:
     def read_data(self, group: str, name: str) -> tuple[Any, None]:
         return self.volumes[group], None
 
+    def get_infos(self, group: str, name: str) -> tuple[list[int], Any]:
+        self.is_dataset_exist(group, name)
+        return list(self.volumes[group].shape), _geometry(self.volumes[group].ndim - 1)[1]
+
 
 def _geometry(rank: int, identity: bool = False) -> tuple[dict[str, Any], Any]:
     """A grid of ``rank`` axes, and the attribute konfai's class reads it from: a spacing and a direction no axis
