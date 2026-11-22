@@ -22,6 +22,9 @@ from .errors import AppMetadataError
 PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION, VOLUME_TRANSFORM = range(5)
 #: The dtypes a grid's code names, in the order of their codes, as KonfAI Edge lists them.
 _DTYPES = "bool uint8 int8 uint16 int16 uint32 int32 uint64 int64 float16 float32 float64".split()
+#: The interface KonfAI Edge calls a module by (konfai-edge-ext's ``ABI``): a module built against another is
+#: refused there, so here, before a bundle carries it.
+_ABI = 2
 #: The spatial extents of the volumes compared, the last ones for a case of fewer axes.
 _EXTENTS = (3, 4, 5)
 
@@ -43,6 +46,12 @@ class _Opened:
         linker.define_func("konfai", "read", read, self._read, access_caller=True)
         linker.define_func("konfai", "write", write, self._write, access_caller=True)
         self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
+        built = self.call("ext_abi") if self.exports.get("ext_abi") is not None else None
+        if built != _ABI:
+            raise AppMetadataError(
+                f"The extension {extension.name} is built against interface {built or 'none'} of konfai-edge-ext,"
+                f" and KonfAI Edge calls interface {_ABI}: build it again against that konfai-edge-ext."
+            )
         refused = self.call("ext_open", kind, *self._text(name), *self._text(json.dumps(params)))
         if refused:
             reason = "implements no such class" if refused == 1 else "implements it as another kind"

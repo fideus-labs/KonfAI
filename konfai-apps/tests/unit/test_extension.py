@@ -12,6 +12,7 @@ DOUBLE = """
 (module
   (memory (export "memory") 1)
   (global $top (mut i32) (i32.const 1024))
+  (func (export "ext_abi") (result i32) (i32.const 2))
   (func (export "ext_buffer") (param $len i32) (result i32)
     (local $at i32)
     (local.set $at (global.get $top))
