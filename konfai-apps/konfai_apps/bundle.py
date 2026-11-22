@@ -545,10 +545,6 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
             print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
 
-    if args.get("extension"):
-        # The app's extension of KonfAI Edge rides in the bundle.
-        shutil.copy(args["extension"], bundle / Path(args["extension"]).name)
-
     runs = None
     if args.get("onnx"):
         artifact = export_portable_into_bundle(
@@ -560,17 +556,17 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             extension=bool(args.get("extension")),
         )
         print(f"[KonfAI-Apps] Portable model exported: {artifact}")
-        if args.get("extension"):
-            from .extension import classes_run
 
+    if args.get("extension"):
+        from .extension import check_extension, classes_run
+
+        # The app's extension of KonfAI Edge rides in the bundle.
+        shutil.copy(args["extension"], bundle / Path(args["extension"]).name)
+        if args.get("onnx"):
             # The classes the program runs by the extension: a class folded into a graph is no longer its.
             # A program, or the manifest beside the one model it would run.
             written = artifact if artifact.suffix == ".json" else bundle / "manifest.json"
             runs = classes_run(json.loads(written.read_text()))
-
-    if args.get("extension"):
-        from .extension import check_extension
-
         # Checked against the classes it stands for, as konfai imports them.
         sys.path.insert(0, str(bundle))
         try:

@@ -738,7 +738,7 @@ class _GroupsRead:
         return np.zeros(self.shape, np.float32), None
 
 
-def _own_stage(classpath: str, params: dict[str, Any], rank: int = 3) -> Any:
+def _own_stage(classpath: str, params: dict[str, Any], rank: int) -> Any:
     """The app's own transform a chain names, built as konfai binds it, the groups it reads at ``rank`` recorded
     (:class:`_GroupsRead`)."""
     from konfai.utils.utils import get_module
@@ -756,7 +756,7 @@ _PROBE_EXTENT = 8
 _VOLUME_PROBE = (1, *[_PROBE_EXTENT] * 3)
 
 
-def _probe_attribute(rank: int = 3) -> Any:
+def _probe_attribute(rank: int) -> Any:
     """The geometry a probed class may read: the identity grid of ``rank`` axes."""
     import numpy as np
 
@@ -766,6 +766,12 @@ def _probe_attribute(rank: int = 3) -> Any:
     attribute["Origin"], attribute["Spacing"] = np.zeros(rank), np.ones(rank)
     attribute["Direction"] = np.eye(rank).flatten()
     return attribute
+
+
+def _probed(stage: Any, volume: Any, attribute: Any) -> Any:
+    """An app's own ``stage`` on ``volume``, its plan-time facts first, as konfai settles them (``transform_shape``)."""
+    stage.transform_shape("probe", "probe", list(volume.shape[1:]), attribute)
+    return stage("probe", volume, attribute)
 
 
 def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[dict[str, Any]]] = list) -> Probe:
@@ -799,11 +805,6 @@ def _extension_step(
     rank = len(probe) - 1
     stage = _own_stage(classpath, kwargs, rank)
 
-    def probed(volume: Any, attribute: Any) -> Any:
-        """The class on ``volume``, its plan-time facts first, as konfai settles them (``transform_shape``)."""
-        stage.transform_shape("probe", "probe", list(volume.shape[1:]), attribute)
-        return stage("probe", volume, attribute)
-
     # Asked with a grid: a halo in millimetres needs the spacing. The runtime asks the extension again for each
     # case's grid (its `halo`), the halo written here standing where the extension says none.
     locality = stage.patch_locality(_probe_attribute(rank))
@@ -821,7 +822,7 @@ def _extension_step(
     if reads:
         attribute = _probe_attribute(rank)
         try:
-            returned = probed(torch.zeros(probe), attribute)
+            returned = _probed(stage, torch.zeros(probe), attribute)
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -847,7 +848,7 @@ def _extension_step(
                 ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
-    dtype = _own_dtype(classpath, lambda volume: probed(volume, _probe_attribute(rank)), voxels)
+    dtype = _own_dtype(classpath, lambda volume: _probed(stage, volume, _probe_attribute(rank)), voxels)
     step = _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
     if read := stage.datasets[0].read:
         if not groups or "whole" not in reads:
@@ -2897,7 +2898,7 @@ def export_checkpoints(
     return models, written, per_copy
 
 
-def _channels_after(step: dict[str, Any], held: int, rank: int = 3) -> int:
+def _channels_after(step: dict[str, Any], held: int, rank: int) -> int:
     """The channels a post step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis three each, a folded graph its own."""
     if step["op"] in ("argmax", "magnitude", "threshold_labels"):
@@ -2912,7 +2913,7 @@ def _channels_after(step: dict[str, Any], held: int, rank: int = 3) -> int:
         extent = _PROBE_EXTENT if "halo" in step or "whole" in step else 1
         volume = torch.zeros((held, *[extent] * rank))
         stage = _own_stage(step["class"], step["params"], rank)
-        return int(stage("probe", volume, _probe_attribute(rank)).shape[0])
+        return int(_probed(stage, volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 
@@ -3066,7 +3067,7 @@ def models_fold_first(config: dict[str, Any], root: str, models: int, output: st
     # Only whether the chain holds a step is read here: an app's own transform is one, with or without an extension,
     # and is not run.
     chain = bound_chain(spec.get("before_reduction_transforms"))
-    own = any(own_class(name) for name in chain)
+    own = any(own_class(name) and not (records_only(name) or is_save(name)) for name in chain)
     before, _, _ = compile_pipeline(
         {name: params for name, params in chain.items() if not own_class(name)}, consumed=("Mask",)
     )
@@ -3289,7 +3290,8 @@ def compile_prediction(
         for program in (head["program"] for head in written):
             made = {"input", *(step["out"] for step in program["steps"])}
             for step in program["steps"]:
-                reads += [group for group in _buffers_read(step) if group not in made and group not in reads]
+                ins = step.get("in", [])
+                reads += [group for group in ([ins] if isinstance(ins, str) else ins) if group not in made | {*reads}]
         prediction = {
             "konfai_edge_prediction": PREDICTION_PROGRAM_VERSION,
             "name": predictor.name,
@@ -3307,12 +3309,6 @@ def compile_prediction(
         carry_extension(extension, prediction, output)
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
-
-
-def _buffers_read(step: dict[str, Any]) -> list[str]:
-    """The buffers a program step reads: one name or a list of them."""
-    read = step.get("in", [])
-    return [read] if isinstance(read, str) else list(read)
 
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:
