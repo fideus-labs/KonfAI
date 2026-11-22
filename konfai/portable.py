@@ -2394,8 +2394,9 @@ def _stack_rows(
 ) -> list[str]:
     """Reorder ``steps`` (the ``nested`` models, the copies, then the ops building the masks' buffers on the first
     copy's grid) so each copy's stack row follows the copy, the masks' buffers built after the first, and name the
-    rows: the copy, each mask (konfai's ``Mask`` runs on every logit before the stack), its label for ``Seg``, in
-    float32. A copy is then held until its row is taken, not until the stack is."""
+    rows: the copy, each mask (konfai's ``Mask`` runs on every logit before the stack), then its label for ``Seg`` in
+    uint8, as konfai's stack keeps a label map, or the copy in float32. A copy is then held until its row is taken,
+    not until the stack is."""
     models, built = steps[nested : nested + len(copies)], steps[nested + len(copies) :]
     del steps[nested:]
     rows = []
@@ -2405,7 +2406,7 @@ def _stack_rows(
             steps.extend(built)
         ops: list[dict[str, Any]] = [{"mask": spec} for spec in masks]
         ops += [{"op": "argmax"}] if mode == "Seg" else []
-        ops.append({"op": "cast", "dtype": "float32"})
+        ops.append({"op": "cast", "dtype": "uint8" if mode == "Seg" else "float32"})
         rows.append(_append_tail(steps, ops, step["out"], mask_buffers, f"{step['out']}__s", None))
     return rows
 
