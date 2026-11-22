@@ -281,6 +281,8 @@ first), and be undone after the model with what it measured on the volume, or
 write other channels
 (labels out of posteriors) and not be undone; the case is then held whole. Each
 class is compiled on the channels and the axes its place in the chain hands it.
+The extension is handed float32 values; a transform reading past the voxel is
+also told the dtype they are held in.
 At the end of the `final_transforms`, a class reading the whole volume may read
 groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
 the program runs that end of the chain on the prediction, and reads those groups

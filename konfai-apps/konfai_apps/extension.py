@@ -20,6 +20,21 @@ from .errors import AppMetadataError
 
 #: The kinds an extension opens a class as, numbered as the extension numbers them.
 PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION, VOLUME_TRANSFORM = range(5)
+#: The dtypes a grid's code names, in the order of their codes, as KonfAI Edge lists them.
+_DTYPES = (
+    "bool",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "float32",
+    "float64",
+)
 #: The spatial extents of the volumes compared, the last ones for a case of fewer axes.
 _EXTENTS = (3, 4, 5)
 
@@ -205,8 +220,15 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     groups = [served.volumes[group] for group in served.read]
     # The forward into the grid stated before the values are read, which bounds one the values settle.
     bound = stated("ext_output_grid")
+
+    def typed(values: Any) -> tuple[int, int]:
+        """The grid compared with the code of the dtype of ``values`` after it, and the flags saying both follow."""
+        code = _DTYPES.index(str(values.dtype).removeprefix("torch."))
+        return opened.put(np.append(source, code), "float64"), 1 | 2
+
     out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
-    read = (opened.put(volume), channels, opened.put(source, "float64"), rank, 1)
+    at, flags = typed(volume)
+    read = (opened.put(volume), channels, at, rank, flags)
     if groups:
         table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
         opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
@@ -223,7 +245,8 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
         back = opened.buffer(channels * math.prod(shape))
-        read = (opened.put(transformed), transformed.shape[0], opened.put(source, "float64"), rank, 1)
+        at, flags = typed(transformed)
+        read = (opened.put(transformed), transformed.shape[0], at, rank, flags)
         done = (
             opened.call("ext_inverse_noted", *read, notes, count, back)
             if count
