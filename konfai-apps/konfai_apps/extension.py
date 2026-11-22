@@ -21,20 +21,7 @@ from .errors import AppMetadataError
 #: The kinds an extension opens a class as, numbered as the extension numbers them.
 PATCH_COMBINE, TRANSFORM, REDUCTION, CRITERION, VOLUME_TRANSFORM = range(5)
 #: The dtypes a grid's code names, in the order of their codes, as KonfAI Edge lists them.
-_DTYPES = (
-    "bool",
-    "uint8",
-    "int8",
-    "uint16",
-    "int16",
-    "uint32",
-    "int32",
-    "uint64",
-    "int64",
-    "float16",
-    "float32",
-    "float64",
-)
+_DTYPES = "bool uint8 int8 uint16 int16 uint32 int32 uint64 int64 float16 float32 float64".split()
 #: The spatial extents of the volumes compared, the last ones for a case of fewer axes.
 _EXTENTS = (3, 4, 5)
 
@@ -48,7 +35,14 @@ class _Opened:
         engine = wasmtime.Engine()
         self.store = wasmtime.Store(engine)
         module = wasmtime.Module.from_file(engine, str(extension))
-        self.exports: Any = wasmtime.Instance(self.store, module, []).exports(self.store)
+        # The functions a class reading by regions is lent, over the volumes `lent` holds for the call.
+        self.lent: tuple[list[Any], Any] | None = None
+        linker = wasmtime.Linker(engine)
+        word = wasmtime.ValType.i32()
+        read, write = wasmtime.FuncType([word] * 5, [word]), wasmtime.FuncType([word] * 4, [word])
+        linker.define_func("konfai", "read", read, self._read, access_caller=True)
+        linker.define_func("konfai", "write", write, self._write, access_caller=True)
+        self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
         refused = self.call("ext_open", kind, *self._text(name), *self._text(json.dumps(params)))
         if refused:
             reason = "implements no such class" if refused == 1 else "implements it as another kind"
@@ -57,9 +51,45 @@ class _Opened:
     def call(self, name: str, *arguments: int) -> int:
         return int(self.exports[name](self.store, *arguments) or 0)
 
-    def has(self, name: str) -> bool:
-        """Whether the extension exports ``name``."""
-        return self.exports.get(name) is not None
+    def _box(self, caller: Any, start: int, extents: int, rank: int) -> tuple[slice, ...]:
+        """The box at the addresses `start` and `extents` of the caller's memory, as slices."""
+        import numpy as np
+
+        memory = caller.get("memory")
+        read = [
+            np.frombuffer(bytes(memory.read(caller, at & 0xFFFFFFFF, (at & 0xFFFFFFFF) + 4 * rank)), np.uint32)
+            for at in (start, extents)
+        ]
+        return tuple(slice(int(first), int(first) + int(extent)) for first, extent in zip(*read, strict=True))
+
+    def _read(self, caller: Any, source: int, channel: int, start: int, extents: int, out: int) -> int:
+        import numpy as np
+
+        sources, _ = self.lent or ([], None)
+        if not 0 <= source < len(sources) or not 0 <= channel < sources[source].shape[0]:
+            return 0
+        volume = sources[source]
+        box = self._box(caller, start, extents, volume.ndim - 1)
+        values = np.ascontiguousarray(volume[(channel, *box)], np.float32)
+        if values.shape != tuple(part.stop - part.start for part in box):
+            return 0
+        caller.get("memory").write(caller, values.tobytes(), out & 0xFFFFFFFF)
+        return 1
+
+    def _write(self, caller: Any, channel: int, start: int, extents: int, at: int) -> int:
+        import numpy as np
+
+        _, output = self.lent or ([], None)
+        if output is None or not 0 <= channel < output.shape[0]:
+            return 0
+        box = self._box(caller, start, extents, output.ndim - 1)
+        shape = tuple(part.stop - part.start for part in box)
+        if output[(channel, *box)].shape != shape:
+            return 0
+        at &= 0xFFFFFFFF
+        read = bytes(caller.get("memory").read(caller, at, at + 4 * math.prod(shape)))
+        output[(channel, *box)] = np.frombuffer(read, np.float32).reshape(shape)
+        return 1
 
     def buffer(self, count: int) -> int:
         """``count`` float32 at zero in the extension's memory."""
@@ -209,50 +239,60 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
     source = grid(shape, geometry.__getitem__)
     _check_halo(opened, name, stage, source, rank, attribute)
 
-    def stated(export: str, *notes: int) -> Any:
-        """The grid the extension states for the grid compared, given the notes at `notes` where there are."""
+    def stated(notes: int = 0, count: int = 0) -> Any:
+        """The grid the extension states for the grid compared, given the ``count`` notes at ``notes``."""
         at = opened.put(source, "float64")
-        opened.call(export, at, rank, 1, *notes)
+        opened.call("ext_output_grid", at, rank, 1, notes, count)
         return opened.get(at, (source.size,), "float64")
 
     # The groups of the case the class read, in that order, each in a buffer listed with its channels.
     served = stage.datasets[0]
     groups = [served.volumes[group] for group in served.read]
     # The forward into the grid stated before the values are read, which bounds one the values settle.
-    bound = stated("ext_output_grid")
+    bound = stated()
 
     def typed(values: Any) -> tuple[int, int]:
         """The grid compared with the code of the dtype of ``values`` after it, and the flags saying both follow."""
         code = _DTYPES.index(str(values.dtype).removeprefix("torch."))
         return opened.put(np.append(source, code), "float64"), 1 | 2
 
-    out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
     at, flags = typed(volume)
-    read = (opened.put(volume), channels, at, rank, flags)
-    if groups:
-        table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
-        opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
+    regions = opened.call("ext_reads_regions") == 1
+    if regions:
+        # Lent the volumes, held here, and writing to one held here too.
+        held = np.zeros((transformed.shape[0], *(int(extent) for extent in bound[:rank])), np.float32)
+        opened.lent = ([volume.numpy(), *groups], held)
+        counts = opened.put(np.array([channels, *(group.shape[0] for group in groups)], np.uint32), "uint32")
+        try:
+            opened.call("ext_apply_regions", at, rank, flags, counts, len(groups))
+        finally:
+            opened.lent = None
     else:
-        opened.call("ext_apply_volume", *read, out, 0)
+        # The volume and what the class writes in its own memory, the groups listed with their channels.
+        out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
+        listed = [[opened.put(group), group.shape[0]] for group in groups]
+        table = opened.put(np.array(listed, np.uint32), "uint32") if groups else 0
+        opened.call("ext_apply_volume", opened.put(volume), channels, at, rank, flags, table, len(groups), 0, 0, out, 0)
     # What it measured on the volume, and the grid it settled on.
-    count = opened.call("ext_notes_len") if opened.has("ext_notes_len") else 0
+    count = opened.call("ext_notes_len")
     notes = opened.buffer(2 * count)
     if count:
         opened.call("ext_notes", notes)
-    written = stated("ext_output_grid_noted", notes, count) if count else bound
+    written = stated(notes, count)
     _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
-    _close(name, "transform a volume", transformed, opened.get(out, tuple(transformed.shape)))
+    # By regions, the grid the values settle is the first box of the one bounding it.
+    landed = (
+        held[(slice(None), *(slice(0, int(extent)) for extent in written[:rank]))]
+        if regions
+        else opened.get(out, tuple(transformed.shape))
+    )
+    _close(name, "transform a volume", transformed, landed)
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
         back = opened.buffer(channels * math.prod(shape))
         at, flags = typed(transformed)
         read = (opened.put(transformed), transformed.shape[0], at, rank, flags)
-        done = (
-            opened.call("ext_inverse_noted", *read, notes, count, back)
-            if count
-            else opened.call("ext_apply_volume", *read, back, 1)
-        )
-        if not done:
+        if not opened.call("ext_apply_volume", *read, 0, 0, notes, count, back, 1):
             raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
         _close(name, "undo itself", undone, opened.get(back, (channels, *shape)))
 
@@ -267,7 +307,7 @@ def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, 
         return
     halo = max(locality.halo or (0,))
     # An int32 to wasmtime: `None`, the class's u32::MAX, is -1.
-    stated = opened.call("ext_halo", opened.put(source, "float64"), rank, 1) if opened.has("ext_halo") else -1
+    stated = opened.call("ext_halo", opened.put(source, "float64"), rank, 1)
     if stated == -1:
         identity = stage.patch_locality(_geometry(rank, identity=True)[1])
         if max(identity.halo or (0,)) != halo:
@@ -462,25 +502,18 @@ def classes_run(program: Any) -> dict[str, list[dict[str, Any]] | None]:
     from konfai.portable import own_class
 
     found: dict[str, list[dict[str, Any]] | None] = {}
-    if isinstance(program, list):
-        for item in program:
-            for name, bound in classes_run(item).items():
-                _merge(found, name, bound)
-    if isinstance(program, dict):
-        for key, value in program.items():
+
+    def walk(node: Any) -> None:
+        for value in node if isinstance(node, list) else []:
+            walk(value)
+        for key, value in node.items() if isinstance(node, dict) else []:
             if key in ("class", "blend") and isinstance(value, str) and own_class(value):
                 # A draw's step carries its own seed and no `prob`: any binding of it.
-                params = program.get("params") or {}
-                step = key == "class" and program.get("op") == "extension" and "seed" not in params
-                _merge(found, value, [params] if step else None)
-            for name, bound in classes_run(value).items():
-                _merge(found, name, bound)
+                params = node.get("params") or {}
+                step = key == "class" and node.get("op") == "extension" and "seed" not in params
+                bound = found.get(value, [])
+                found[value] = [*bound, params] if step and bound is not None else None
+            walk(value)
+
+    walk(program)
     return found
-
-
-def _merge(found: dict[str, list[dict[str, Any]] | None], name: str, bound: list[dict[str, Any]] | None) -> None:
-    """``name`` run with the bindings ``bound`` too (``None``: any)."""
-    if (name in found and found[name] is None) or bound is None:
-        found[name] = None
-    else:
-        found[name] = [*(found.get(name) or []), *bound]
