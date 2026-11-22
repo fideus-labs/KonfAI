@@ -279,7 +279,9 @@ volume, it may leave another grid, which the extension states as
 `transform_shape` does (one fitted to the values, bounded by another it states
 first), and be undone after the model with what it measured on the volume, or
 write other channels
-(labels out of posteriors) and not be undone; the case is then held whole. Each
+(labels out of posteriors) and not be undone; the case is then held whole.
+Undone past the reduction of the test-time copies (an `InferenceStack`), it is
+replayed there with what it measured, and so is every other step undone there. Each
 class is compiled on the channels and the axes its place in the chain hands it.
 The extension is handed float32 values; a transform reading past the voxel is
 also told the dtype they are held in. Such a transform may read the volume box by
