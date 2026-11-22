@@ -216,8 +216,11 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "cast": ({"dtype": _STRING, "round": _BOOLEAN}, ["dtype"]),
     "mask": ({"value_outside": _NUMBER}, ["value_outside"]),
     "dilate": ({"radius": _INTEGER}, ["radius"]),
-    # A copy's Padding undone past the reduction, its margins taken back: the one program op that moves the grid.
+    # A copy's Padding undone past the reduction, its margins taken back.
     "pad": ({"padding": _array(_INTEGER), "mode": _STRING}, ["padding", "mode"]),
+    # A step of the models' input chain undone past the reduction, replaying what it recorded on the case (an app's
+    # own class with what it measured), onto the grid it read.
+    "inverse": CHAIN_OPS["inverse"],
 }
 
 

@@ -2169,10 +2169,16 @@ def hoist_ensemble_tail(
     runs once moves past the reduction as program ops, in the chain's order, and each fold keeps the rest.
     ``stacked``: konfai's ``InferenceStack`` takes each copy before the case's inverses, so an undone ``Padding``
     moves past the reduction too, as the ``pad`` of the margins it added taken back."""
+    from konfai.portable_schema import CHAIN_OPS
+
     post, preprocessing = manifests[0].get("postprocessing", []), manifests[0].get("preprocessing", [])
     op_of = _op_of(preprocessing)
     undone = {step["id"]: step for step in preprocessing if "id" in step}
     split = per_copy if stacked else split_post(post, preprocessing, per_copy)
+    # An app's own class is undone from what the models' input chain recorded on the case, what it measured
+    # included, and so is every other step undone past the reduction: each lands on the grid it read, which past
+    # the class is not the caller's.
+    replayed = any(step["op"] == "inverse" and op_of.get(step.get("of")) == "extension" for step in post[split:])
 
     tail: list[dict[str, Any]] = []
     for step in post[split:]:
@@ -2180,6 +2186,9 @@ def hoist_ensemble_tail(
         if op == "cast":
             # A cast sets the dtype the rest of the tail reads and the output is written in.
             tail.append({k: step[k] for k in ("op", "dtype", "round") if k in step})
+            continue
+        if op == "inverse" and replayed:
+            tail.append({key: value for key, value in step.items() if key == "op" or key in CHAIN_OPS["inverse"][0]})
             continue
         if op == "inverse":
             of = step.get("of")

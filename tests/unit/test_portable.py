@@ -474,6 +474,28 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
         assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
 
 
+def test_an_own_class_undone_past_the_reduction_is_replayed_with_every_inverse_there() -> None:
+    # The app's own class fitted the grid before the resample: its inverse, and the resample's, land where they read,
+    # which past the class is not the caller's grid, so both replay what the models' chain recorded.
+    fit = {"op": "extension", "id": "fit", "class": "app:FitBox", "params": {}, "whole": True}
+    manifest = {
+        "input": {"channels": 1},
+        "output": {"channels": 2},
+        "patch": {"size": [4, 4]},
+        "preprocessing": [fit, {"op": "resample", "spacing": [1.5, 1.5], "id": "r", "interpolation": "linear"}],
+        "postprocessing": [
+            {"op": "inverse", "of": "r", "interpolation": "linear"},
+            {"op": "inverse", "of": "fit"},
+            {"op": "argmax", "dim": 0},
+        ],
+    }
+    program = assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+    ops = [step for step in program["steps"] if "op" in step]
+    assert [step["op"] for step in ops] == ["mean", "inverse", "inverse", "argmax"]
+    assert {key: ops[1][key] for key in ("of", "interpolation")} == {"of": "r", "interpolation": "linear"}
+    assert ops[2]["of"] == "fit"
+
+
 def test_a_padding_the_runtime_cannot_fill_is_refused() -> None:
     with pytest.raises(TransformError, match="reflect"):
         OP_MAP["Padding"]({"padding": [1, 1], "mode": "reflect"})
