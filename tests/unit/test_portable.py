@@ -2042,7 +2042,8 @@ def test_a_pointwise_output_transform_with_no_op_compiles_to_a_graph_of_its_own(
     assert [step["op"] for step in post[2:]] == ["argmax", "cast"]
     session = ort.InferenceSession(str(tmp_path / "out" / "model_post_0.onnx"), providers=["CPUExecutionProvider"])
     assert session.get_inputs()[0].shape[1] == 1
-    blended = np.random.default_rng(0).random((1, 1, 5, 7), dtype=np.float32)
+    # On the case's three axes, which the output chain runs on, though the patch traced has two.
+    blended = np.random.default_rng(0).random((1, 1, 3, 5, 7), dtype=np.float32)
     np.testing.assert_array_equal(session.run(None, {"input": blended})[0], np.floor(blended[:, :1] * 10))
 
 
