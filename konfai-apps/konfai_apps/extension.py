@@ -48,7 +48,14 @@ class _Opened:
         engine = wasmtime.Engine()
         self.store = wasmtime.Store(engine)
         module = wasmtime.Module.from_file(engine, str(extension))
-        self.exports: Any = wasmtime.Instance(self.store, module, []).exports(self.store)
+        # The functions a class reading by regions is lent, over the volumes `lent` holds for the call.
+        self.lent: tuple[list[Any], Any] | None = None
+        linker = wasmtime.Linker(engine)
+        word = wasmtime.ValType.i32()
+        read, write = wasmtime.FuncType([word] * 5, [word]), wasmtime.FuncType([word] * 4, [word])
+        linker.define_func("konfai", "read", read, self._read, access_caller=True)
+        linker.define_func("konfai", "write", write, self._write, access_caller=True)
+        self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
         refused = self.call("ext_open", kind, *self._text(name), *self._text(json.dumps(params)))
         if refused:
             reason = "implements no such class" if refused == 1 else "implements it as another kind"
@@ -56,6 +63,46 @@ class _Opened:
 
     def call(self, name: str, *arguments: int) -> int:
         return int(self.exports[name](self.store, *arguments) or 0)
+
+    def _box(self, caller: Any, start: int, extents: int, rank: int) -> tuple[slice, ...]:
+        """The box at the addresses `start` and `extents` of the caller's memory, as slices."""
+        import numpy as np
+
+        memory = caller.get("memory")
+        read = [
+            np.frombuffer(bytes(memory.read(caller, at & 0xFFFFFFFF, (at & 0xFFFFFFFF) + 4 * rank)), np.uint32)
+            for at in (start, extents)
+        ]
+        return tuple(slice(int(first), int(first) + int(extent)) for first, extent in zip(*read, strict=True))
+
+    def _read(self, caller: Any, source: int, channel: int, start: int, extents: int, out: int) -> int:
+        import numpy as np
+
+        sources, _ = self.lent or ([], None)
+        if not 0 <= source < len(sources) or not 0 <= channel < sources[source].shape[0]:
+            return 0
+        volume = sources[source]
+        box = self._box(caller, start, extents, volume.ndim - 1)
+        values = np.ascontiguousarray(volume[(channel, *box)], np.float32)
+        if values.shape != tuple(part.stop - part.start for part in box):
+            return 0
+        caller.get("memory").write(caller, values.tobytes(), out & 0xFFFFFFFF)
+        return 1
+
+    def _write(self, caller: Any, channel: int, start: int, extents: int, at: int) -> int:
+        import numpy as np
+
+        _, output = self.lent or ([], None)
+        if output is None or not 0 <= channel < output.shape[0]:
+            return 0
+        box = self._box(caller, start, extents, output.ndim - 1)
+        shape = tuple(part.stop - part.start for part in box)
+        if output[(channel, *box)].shape != shape:
+            return 0
+        at &= 0xFFFFFFFF
+        read = bytes(caller.get("memory").read(caller, at, at + 4 * math.prod(shape)))
+        output[(channel, *box)] = np.frombuffer(read, np.float32).reshape(shape)
+        return 1
 
     def has(self, name: str) -> bool:
         """Whether the extension exports ``name``."""
@@ -226,10 +273,22 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
         code = _DTYPES.index(str(values.dtype).removeprefix("torch."))
         return opened.put(np.append(source, code), "float64"), 1 | 2
 
-    out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
     at, flags = typed(volume)
-    read = (opened.put(volume), channels, at, rank, flags)
-    if groups:
+    regions = opened.has("ext_reads_regions") and opened.call("ext_reads_regions") == 1
+    if not regions:
+        # The volume and what the class writes in its own memory.
+        out = opened.buffer(transformed.shape[0] * math.prod(int(extent) for extent in bound[:rank]))
+        read = (opened.put(volume), channels, at, rank, flags)
+    if regions:
+        # Lent the volumes, held here, and writing to one held here too.
+        held = np.zeros((transformed.shape[0], *(int(extent) for extent in bound[:rank])), np.float32)
+        opened.lent = ([volume.numpy(), *groups], held)
+        counts = opened.put(np.array([channels, *(group.shape[0] for group in groups)], np.uint32), "uint32")
+        try:
+            opened.call("ext_apply_regions", at, rank, flags, counts, len(groups))
+        finally:
+            opened.lent = None
+    elif groups:
         table = opened.put(np.array([[opened.put(group), group.shape[0]] for group in groups], np.uint32), "uint32")
         opened.call("ext_apply_volume_reading", *read, table, len(groups), out)
     else:
@@ -241,7 +300,13 @@ def _check_volume_transform(extension: Path, name: str, stage: Any, params: dict
         opened.call("ext_notes", notes)
     written = stated("ext_output_grid_noted", notes, count) if count else bound
     _close(name, "write the grid", grid(transformed.shape[1:], attribute.get_np_array), written.astype(np.float32))
-    _close(name, "transform a volume", transformed, opened.get(out, tuple(transformed.shape)))
+    # By regions, the grid the values settle is the first box of the one bounding it.
+    landed = (
+        held[(slice(None), *(slice(0, int(extent)) for extent in written[:rank]))]
+        if regions
+        else opened.get(out, tuple(transformed.shape))
+    )
+    _close(name, "transform a volume", transformed, landed)
     if isinstance(stage, TransformInverse) and stage.apply_inverse:
         undone = stage.inverse("check", transformed.clone(), attribute)
         back = opened.buffer(channels * math.prod(shape))
