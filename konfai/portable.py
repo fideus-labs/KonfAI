@@ -791,10 +791,10 @@ def _extension_step(
 ) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
-    ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; a ``WHOLE_VOLUME`` one
-    the case (``whole``), which may leave another grid and be undone, or other channels and not be. The class is run
-    on ``probe``, the channels and rank its place in the chain hands it. With ``groups`` (the final chain), a
-    WHOLE_VOLUME class may read groups of the case beside its volume, which the step names."""
+    ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; any other (``WHOLE_VOLUME``,
+    ``REGRID``, ...) the case (``whole``), which may leave another grid and be undone, or other channels and not be.
+    The class is run on ``probe``, the channels and rank its place in the chain hands it. With ``groups`` (the final
+    chain), a whole class may read groups of the case beside its volume, which the step names."""
     import numpy as np
     import torch
 
@@ -811,14 +811,9 @@ def _extension_step(
     reads: dict[str, Any] = {}
     if locality.kind is LocalityKind.HALO and locality.halo:
         reads = {"halo": max(locality.halo)}
-    elif locality.kind is LocalityKind.WHOLE_VOLUME:
-        reads = {"whole": True}
     elif locality.kind is not LocalityKind.POINTWISE:
-        raise ConfigError(
-            f"transform '{name}' declares the locality {locality.kind.name}, and an app's extension runs a"
-            " POINTWISE class, a HALO one with its halo or a WHOLE_VOLUME one.",
-            _or_konfai("Declare one of these three", _RUN),
-        )
+        # Any other locality (a grid it moves, a statistic, the whole volume) is served the whole volume.
+        reads = {"whole": True}
     if reads:
         attribute = _probe_attribute(rank)
         try:

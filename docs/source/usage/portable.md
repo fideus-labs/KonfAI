@@ -263,7 +263,7 @@ is copied beside it.
 |---|---|---|
 | `Transform` whose `patch_locality` is `POINTWISE` | an `extension` step | the volume, and what to undo when the stage is undone |
 | `Transform` whose `patch_locality` is `HALO` | an `extension` step carrying its `halo` | a block with its neighbours and its grid |
-| `Transform` whose `patch_locality` is `WHOLE_VOLUME` | an `extension` step marked `whole` | the whole volume and its grid, and what to undo |
+| `Transform` of any other `patch_locality` (`WHOLE_VOLUME`, `REGRID`, ...) | an `extension` step marked `whole` | the whole volume and its grid, and what to undo |
 | `DataAugmentation` whose `locality` is `POINTWISE`, as a test-time draw | an `extension` step carrying a `seed` | a copy to draw from the seed, then to undo |
 | `Reduction` that is `voxel_local`, as the copies' `reduction` | an `extension_reduce` step | the copies |
 | `Fold`, as the output's `patch_combine` | the manifest's `blend` | the patches, where they overlap |
