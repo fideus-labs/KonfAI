@@ -46,6 +46,7 @@ class _Opened:
         linker.define_func("konfai", "read", read, self._read, access_caller=True)
         linker.define_func("konfai", "write", write, self._write, access_caller=True)
         self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
+        self.name = name
         built = self.call("ext_abi") if self.exports.get("ext_abi") is not None else None
         if built != _ABI:
             raise AppMetadataError(
@@ -58,7 +59,22 @@ class _Opened:
             raise AppMetadataError(f"The extension {extension.name} {reason}: '{name}'.")
 
     def call(self, name: str, *arguments: int) -> int:
-        return int(self.exports[name](self.store, *arguments) or 0)
+        import wasmtime
+
+        try:
+            return int(self.exports[name](self.store, *arguments) or 0)
+        except wasmtime.Trap as trap:
+            raise AppMetadataError(f"The extension's '{self.name}' refuses: {self._told() or trap}") from trap
+
+    def _told(self) -> str | None:
+        """The message the class panicked with, which its module keeps where it is read after the trap
+        (konfai-edge-ext's panic hook); none for a module built before it."""
+        if self.exports.get("ext_panicked_len") is None:
+            return None
+        length = int(self.exports["ext_panicked_len"](self.store) or 0)
+        at = int(self.exports["ext_panicked"](self.store) or 0) & 0xFFFFFFFF
+        told = bytes(self.exports["memory"].read(self.store, at, at + length)).decode(errors="replace")
+        return told or None
 
     def _box(self, caller: Any, start: int, extents: int, rank: int) -> tuple[slice, ...]:
         """The box at the addresses `start` and `extents` of the caller's memory, as slices."""
