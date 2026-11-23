@@ -94,7 +94,8 @@ needed, private with `--private`, uploads the folder as `CT_SEG/`, removing ther
 the files an earlier publish left that the folder no longer holds, and sets
 `library_name: konfai` in the repository's model card. Hugging Face then shows the
 KonfAI library on the model page, with the commands to list and run its apps. Anyone
-who can read the repository runs it with `konfai-apps infer your-name/my-apps:CT_SEG`.
+who can read the repository runs it with
+`konfai-apps infer your-name/my-apps:CT_SEG -i ./Dataset/CASE_000/CT.mha`.
 
 An app can read another app's output. Declare it in `app.json` as `"needs": {"body": "CT_BODY_SEG"}`:
 before it predicts, the app runs the needed app on the same inputs (as many as that app declares) and
