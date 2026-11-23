@@ -385,10 +385,12 @@ def render_markdown(report: Report) -> str:
     seen: dict[str, str] = {}  # Scout's check of a box the model measured already holds the same values
     for m in report.measurements:
         if m.id in cited:
-            same = json.dumps([m.box_measured, m.values], sort_keys=True, default=str)  # exact, not as displayed
+            # exact, not as displayed; a failed measurement (no values) is shown on its own, at the box it asked for
+            same = json.dumps([m.box_measured, m.values], sort_keys=True, default=str) if m.values else None
             text = f"{_box_text(m.box_measured or m.box_requested)}: {_values_text(m.values)}"
             evidence.append(f"- {m.id} " + (f"same as {seen[same]}" if same in seen else text))
-            seen.setdefault(same, m.id)
+            if same:
+                seen.setdefault(same, m.id)
     if report.prior_evaluation:
         evidence.append(f"- prior evaluation (whole case): {_values_text(report.prior_evaluation)}")
     if evidence:
@@ -446,7 +448,7 @@ def export(report: Report, level: str) -> dict[str, Any]:
                         "reference": m.reference,
                         "box_measured": m.box_measured,
                         # numbers only: a statistic may carry text (a label's name), and text may name anything
-                        "values": {k: v for k, v in m.values.items() if not isinstance(v, str)},
+                        "values": {k: v for k, v in m.values.items() if v is None or isinstance(v, int | float)},
                     }
                     for m in (measurements.get(mid) for mid in o.measurements)
                     if m is not None
@@ -456,7 +458,3 @@ def export(report: Report, level: str) -> dict[str, Any]:
             for o in report.observations
         ],
     }
-
-
-def _overlap(a: dict[str, list[float]], b: dict[str, list[float]]) -> bool:
-    return all(a["min"][i] < b["max"][i] and b["min"][i] < a["max"][i] for i in range(3))
