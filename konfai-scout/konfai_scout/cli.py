@@ -46,7 +46,11 @@ def _parser() -> argparse.ArgumentParser:
         help="quick: a cheap first pass (10 calls, low effort); standard: 25 calls, high effort; deep: 40 calls and "
         "a blind second reading. The flags below override it.",
     )
-    p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="The model's reasoning effort: the anthropic, claude-code and codex providers read it, openai does not.",
+    )
     p.add_argument("--mode", choices=MODES)
     p.add_argument("--max-tool-calls", type=int)
     p.add_argument("--max-images", type=int)

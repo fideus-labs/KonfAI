@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from konfai.data.geometry import Grid, WorldBox
+from scipy import ndimage
 
 #: The planes, each named after the world axis its normal mostly follows (z, y, x).
 PLANES = ("axial", "coronal", "sagittal")
@@ -127,7 +128,6 @@ def box_to_dict(value: WorldBox) -> dict[str, list[float]]:
 
 def box_of(mask: np.ndarray, grid: Grid, offset_zyx: object = (0, 0, 0)) -> dict[str, list[float]]:
     """The box in mm of a mask's voxels on ``grid``, the mask's array starting at ``offset_zyx`` in it."""
-    from scipy import ndimage
 
     window = ndimage.find_objects(np.asarray(mask, dtype=np.uint8))[0]
     return box_to_dict(

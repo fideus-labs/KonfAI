@@ -153,10 +153,8 @@ Scout.
 konfai-scout export reports/case01 --level regions --out case01.regions.json
 ```
 
-`full` is the report as is; `regions` the verdict and the observations with their boxes, defects, severities and
-measured values, without the case's name, paths, images, descriptions or transcript; `counts` the verdict and the
-observations counted by kind, defect and severity. In Python: `konfai_scout.export(Report.load(dir), "regions")`.
-`docs/report.md` says what each level holds.
+The levels are `full`, `regions` and `counts`; `docs/report.md` says what each one holds. In Python:
+`konfai_scout.export(Report.load(dir), "regions")`.
 
 ## Development
 

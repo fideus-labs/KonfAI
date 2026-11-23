@@ -18,6 +18,7 @@ import numpy as np
 from konfai.data.geometry import Grid, WorldBox
 from konfai.utils.ITK import field_jacobian_determinant
 from PIL import Image, ImageDraw, ImageFont
+from scipy import ndimage
 
 from .case import InspectionCase, Volume
 from .config import ScoutConfig
@@ -152,7 +153,6 @@ def colormap(unit: np.ndarray, name: str) -> np.ndarray:
 
 def contours(mask: np.ndarray) -> np.ndarray:
     """The pixels of a mask that touch the outside of it, 4-connected; the image's edge is not an outside."""
-    from scipy import ndimage
 
     mask = np.asarray(mask, dtype=bool)
     return mask & ~ndimage.binary_erosion(mask, border_value=1)
