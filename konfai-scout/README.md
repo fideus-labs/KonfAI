@@ -6,22 +6,28 @@
 
 ---
 
-A score says how good a result is. Scout says where and why: it inspects one case at a viewer, slice by slice, zooms
-on what looks off, switches overlays to tell the image from the result, asks KonfAI Eval to measure the suspect
-region, and writes a report of localised defects with their type, severity, uncertainty, the views that show them
-and the measurements that support them.
+A score says how good a result is. Scout says where and why. It reads one case slice by slice, zooms on what looks
+off, measures the suspect region with KonfAI Eval, and writes a short report: each defect with its place, its type,
+its severity and the views that show it.
 
-## Quick start
+## Install
 
 ```bash
-pip install "konfai-scout[anthropic]"
+pip install "konfai-scout[anthropic]"     # Claude, with an Anthropic API key
+```
+
+Other models: `[openai]` for GPT or a local model behind an OpenAI-compatible server (vLLM, Ollama),
+`[claude-code]` or `[codex]` to use your Claude Code or ChatGPT login without an API key.
+
+## Inspect a case
+
+```bash
 konfai-scout inspect --task segmentation --name case01 \
     --input image=ct.nii.gz --input prediction=seg.nii.gz --labels 1=kidney \
     --out reports/case01 --provider anthropic --allow-cloud-images
 ```
 
-A few minutes and some fifteen tool calls later, `reports/case01/report.md` opens like this (a kidney whose upper half
-the method left out):
+A few minutes later, `reports/case01/report.md` opens with the verdict and the findings:
 
 ```markdown
 **Verdict: defective** (confidence 0.88, by model)
@@ -35,184 +41,57 @@ The left kidney label stops in a flat cut at z≈747 mm. The kidney's upper half
 | o002    | holes              | suspected | minor    | 0.60        | (-66, 188, 757) mm, 17 x 11 x 44 mm |
 ```
 
-Each finding then has its own section: what Scout saw, the views that show it (kept as images beside the report) and
-the measurements it cites. `report.json` holds the same, with every tool call, for a program to read. No API key at
-hand? `--provider mock` runs the whole loop with a heuristic model, and `--provider claude-code` or `codex` use your
-Claude Code or ChatGPT login.
+Each finding then has its own section, with the views that show it (saved beside the report) and the measurements
+it cites. A *firm* finding is one Scout stands behind; the others are doubts to check. `report.json` holds the same
+for a program.
 
-## How it works
+The other tasks take their own inputs:
 
-- **It explores.** Coverage first (a montage per plane), then targeted views: slices, zooms, checkerboards, difference
-  maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.
-- **It knows where to look first.** Before the model's first turn a deterministic survey lists leads, each a box and
-  why: a boundary the image does not support, a component unlike the main one, an enclosed cavity, a contour drawn
-  in steps or off its edge by a constant margin, a fold, a region where the warped image's edges stop following the
-  fixed one's, an error well above the case's typical one. A lead is not a finding; the model must look at each
-  before it concludes.
-- **It measures with KonfAI Eval, not with a scorer of its own.** A region is cropped and scored by `konfai.evaluate`
-  with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
-  and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
-  the agent and the report, nothing that KonfAI already does.
-- **It keeps its statements apart, and enforces it.** A *measured property*, a *suspected error* (seen, not proven)
-  and a *confirmed error* (a measured value past its criterion's threshold: Dice below 0.8, TRE above 3 mm, a
-  folded field...) are distinct, and without a truth nothing is confirmed from appearance. `note` refuses an error
-  that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken
-  elsewhere. Scout measures every flagged box itself with KonfAI Eval, records it on the observation, and
-  downgrades a confirmation that no measured value supports. The verdict is *defective* exactly when a major or
-  critical error is noted at confidence 0.5 or more; "insufficient evidence" is a legitimate conclusion. An error
-  Scout would stand behind is marked *firm* (`firm` on the observation, "(firm)" in the report); the others are
-  doubts to check, and reading only the firm ones is the cautious way to use a report. On
-  request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and
-  its answer stands in the report next to the first reader's.
-- **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
-  prior scores: it judges the images and its own measurements (`--no-blind` hands them over, for a study).
-- **It leaves a record.** A versioned JSON report with versions, configuration, prompts, every tool call, every view,
-  every measurement, cost and duration, and a Markdown rendition that opens with the verdict and the findings at a
-  glance, then each observation with its images. Two modes, fixed views and active exploration, for a study of what
-  exploration buys.
-- **It works with Claude, GPT, or a local vision model** through an OpenAI-compatible server, and sends images to a
-  cloud API only when told to.
+```bash
+konfai-scout inspect --task registration --name pair07 \
+    --input fixed=fixed.nii.gz --input moving=moving.nii.gz --input field=dvf.nii.gz \
+    --out reports/pair07 --provider anthropic --allow-cloud-images
+
+konfai-scout inspect --task synthesis --name ct01 \
+    --input source=mr.nii.gz --input synthetic=sct.nii.gz \
+    --out reports/ct01 --provider anthropic --allow-cloud-images
+```
 
 ## With or without a reference
 
-Scout inspects a result alone, or with what it is scored against. Give it what you have: it says in the report which
-one it was (`No reference given` or the truth's role among the inputs).
+- **Without one**, Scout judges the result against the image: a label the image's edges do not support, a structure
+  that is not in the source. Name each label with what it holds (`--labels "1=liver without its vessels"`).
+- **With one** (`--input truth=gt.nii.gz`, `target=` for a synthesis, labels or landmarks for a registration),
+  every disagreement is checked and measured against it, and an error can be *confirmed*.
 
-- **Without a reference** (`image` and `prediction`; `fixed`, `moving` and `field`; `source` and `synthetic`), Scout
-  judges the result against the image itself: a label the image's edges do not support, a structure that is not in
-  the source. Nothing is measured against a truth, and no error is *confirmed*. Label names help here: name each
-  label with what it holds and leaves out (`--labels "1=liver parenchyma without its vessels"`).
-- **With a reference** (`truth`, `target`, or a registration's labels and landmarks), every disagreement between
-  the result and the reference becomes a lead, read on three planes, and the measurements are KonfAI Eval's against
-  that reference: a contour off by a couple of millimetres, a leak, a bias or an erased bone that a result alone
-  does not show. A reference can be wrong too: where the result follows the image and the reference does not, Scout
-  notes a `reference_error`, which is never held against the result.
+## Useful options
 
-## Install
+- `--depth quick|standard|deep`: 10, 25 or 40 tool calls; `deep` adds a blind second reading of each error.
+- `--max-usd`, `--max-seconds`: stop an inspection at a cost or a time.
+- `--allow-cloud-images`: required to send images of the case to a cloud model. A local server (`--base-url
+  http://localhost:11434/v1`) needs none.
+- `--provider mock`: the whole loop with a heuristic model, no API at all.
 
-```bash
-pip install konfai-scout[anthropic]        # Claude through the Anthropic API
-pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)
-pip install konfai-scout[claude-code]      # Claude under your Claude Code login (the Claude Agent SDK), no API key
-pip install konfai-scout[codex]            # GPT under your ChatGPT login (the Codex CLI), no API key
-```
-
-Scout is a package of the [KonfAI](https://github.com/fideus-labs/KonfAI) family (`konfai-scout/` in its repository),
-pinned to the `konfai` release it ships with: every volume is read through KonfAI's dataset backends (image files,
-OME-Zarr stores, DICOM series, ITK transform files), a registration is warped by KonfAI's own `Resample`, and every
-measurement is KonfAI Eval's. From a checkout: `pip install -e ./konfai-scout[dev]` beside `pip install -e .`.
-
-## Inspect a case
-
-```bash
-konfai-scout inspect --task segmentation --name case01 \
-    --input image=ct.nii.gz --input prediction=seg.nii.gz --input truth=gt.nii.gz \
-    --labels 1=liver,2=spleen --evaluation Evaluations/run/Metric_TRAIN.json \
-    --out reports/case01 --provider anthropic --allow-cloud-images
-
-konfai-scout inspect --task registration --name pair07 \
-    --input fixed=fixed.nii.gz --input moving=moving.nii.gz --input field=dvf.nii.gz \
-    --input fixed_labels=fixed_seg.nii.gz --input moving_labels=moving_seg.nii.gz \
-    --out reports/pair07 --provider openai --base-url http://localhost:11434/v1 --model llava:34b
-
-konfai-scout inspect --case case.json --out reports/case --provider claude-code --allow-cloud-images  # Claude Code login
-konfai-scout inspect --case case.json --out reports/case --provider codex --allow-cloud-images        # Codex (ChatGPT) login
-konfai-scout inspect --case case.json --out reports/case --mode fixed --provider mock   # no API at all
-```
-
-Roles: segmentation `image`, `prediction`, `truth`, `mask`; registration `fixed`, `moving`, `field` or `transform`,
-`fixed_labels`, `moving_labels`, `warped_labels`, `fixed_landmarks`, `moving_landmarks`, `fixed_mask`; synthesis
-`source`, `synthetic`, `target`, `mask`. A field is a displacement image in millimetres on the fixed grid (ITK's
-reading: the fixed point `x` matches `x + u(x)` in the moving image); a transform is an ITK transform file.
-
-Then read `reports/case01/report.md`, or in Python:
+## From Python
 
 ```python
 from konfai_scout import InspectionCase, ScoutConfig, inspect
 
-case = InspectionCase("segmentation", "case01", {"image": "ct.nii.gz", "prediction": "seg.nii.gz", "truth": "gt.nii.gz"},
-                      labels={1: "liver", 2: "spleen"})
+case = InspectionCase("segmentation", "case01", {"image": "ct.nii.gz", "prediction": "seg.nii.gz"}, labels={1: "kidney"})
 report = inspect(case, ScoutConfig(provider="anthropic", allow_cloud_images=True), "reports/case01")
-for o in report.observations:
-    print(o.kind, o.defect, o.severity, o.box_mm, o.views, o.measurements)
+print(report.conclusion.verdict, [(o.defect, o.severity, o.box_mm) for o in report.observations])
 ```
 
-## What the model can do
+## Learn more
 
-| Tool | What it does |
-|---|---|
-| `view` | one slice: a plane, a position in mm or an index, a mode, a window, a zoom box, one label |
-| `montage` | equally spaced slices of a plane in one image |
-| `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria, named as KonfAI names them or by a result key; SSIM is left out of a box thinner than its 7-voxel window |
-| `region_stats` | what a box holds, described role by role: labels, volumes, pieces, intensities (inside the case's mask when it has one), landmarks; no comparison (that is `measure`); a measurement of kind `scout`, citable |
-| `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
-| `conclude` | the verdict |
+- [How it works](https://github.com/fideus-labs/KonfAI/blob/main/konfai-scout/docs/how-it-works.md): the inspection, the inputs of each task, the model's tools and views, the
+  budget, the providers and privacy.
+- [The report](https://github.com/fideus-labs/KonfAI/blob/main/konfai-scout/docs/report.md): every field, and `konfai-scout export --level regions|counts` to share a report
+  without the case's name or images.
+- [Integrations](https://github.com/fideus-labs/KonfAI/blob/main/konfai-scout/docs/integrations.md): KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt.
 
-Modes: segmentation `image`, `prediction`, `truth`, `both`, `contours`, `disagreement`; registration `fixed`, `moving`, `warped`,
-`before`, `checkerboard`, `overlay`, `difference`, `field_magnitude`, `field_arrows`, `grid`, `jacobian`, `labels`,
-`landmarks`; synthesis `synthetic`, `target`, `source`, `source_checkerboard`, `difference`, `side_by_side`,
-`checkerboard`. A view's window is the image's own 1st to 99.9th percentile unless the model asks for `[low, high]` or
-a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
-
-## Budget, privacy, cost
-
-`--depth` sets how far an inspection looks in one word; any flag below overrides what it sets:
-
-| Depth | Tool calls | Effort | Second reading | For |
-|---|---|---|---|---|
-| `quick` | 10 | low | no | a cheap first pass over many cases |
-| `standard` (default) | 25 | high | no | one case |
-| `deep` | 40 | high | yes | a case that matters, or a doubt to settle |
-
-The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
-flagged box are the same at every depth.
-
-`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
-model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
-call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
-never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
-are counted inside the served tools, and `claude-code`'s cost message by message; `codex` reports its cost only once
-its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price is unknown).
-`--second-reading` adds, after the inspection, one short session per error observation for the blind re-read.
-Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is local. The cost
-is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
-adds a model).
-
-The `claude-code` provider runs the Claude Agent SDK under your Claude Code login, no API key: the SDK drives the
-tool loop, Scout's tools are served to it as an in-process MCP server (images included) and no built-in tool is
-enabled. It is a cloud provider (`--allow-cloud-images`), and the CLI keeps the session, images included, under
-`~/.claude/projects`. The report records the same calls, views, measurements and budget as with the API providers.
-
-The `codex` provider does the same with the Codex CLI under your ChatGPT login: `codex exec` runs the loop, Scout's
-tools are served to it over a loopback MCP server, the case images are attached to the prompt; your own Codex
-configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the session under `~/.codex/sessions`.
-
-## Examples
-
-```bash
-python examples/inspect_synthetic.py                 # synthetic cases with planted defects, the free heuristic model
-```
-
-`docs/report.md` is the schema, `docs/integrations.md` how KonfAI Eval, konfai-mcp, KonfAI Studio and FidOpt use
-Scout.
-
-## Export at a confidentiality level
-
-```bash
-konfai-scout export reports/case01 --level regions --out case01.regions.json
-```
-
-The levels are `full`, `regions` and `counts`; `docs/report.md` says what each one holds. In Python:
-`konfai_scout.export(Report.load(dir), "regions")`.
-
-## Development
-
-From the KonfAI checkout, in its `dev` environment:
-
-```bash
-pixi run --environment dev python -m pip install -e "./konfai-scout[dev]"
-pixi run --environment dev python -m pytest konfai-scout/tests      # no API key: fake clients and a mock model
-pixi run --environment dev ruff check konfai-scout
-```
+Scout is part of the [KonfAI](https://github.com/fideus-labs/KonfAI) family and reads, warps and measures every
+volume through KonfAI. From a checkout: `pip install -e ".[dev]"` then `pip install -e "./konfai-scout[dev]"`, and
+`pytest konfai-scout/tests` (no API key needed).
 
 Apache-2.0. Copyright (c) 2026 Fideus Labs LLC.
