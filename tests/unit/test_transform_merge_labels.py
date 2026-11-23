@@ -28,7 +28,7 @@ def _attr(nb: list[int]) -> Attribute:
 
 
 def test_merge_labels_five_task_split_uses_cumulative_offsets() -> None:
-    # TotalSegmentator: 5 task-split heads (bg + organs / vertebrae / cardiac / muscles / ribs).
+    # Five task-split heads (bg + organs / vertebrae / cardiac / muscles / ribs).
     nb = [25, 27, 19, 24, 27]
     # Each model fires its LOCAL label 1 at its own voxel; everything else is background.
     tensor = torch.zeros(5, 5, dtype=torch.long)

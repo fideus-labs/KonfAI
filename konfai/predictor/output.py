@@ -18,6 +18,7 @@
 """The prediction sink: patches blended per case and copy, reduced, written whole or streamed by slabs."""
 
 import copy
+import functools
 import os
 import queue
 import threading
@@ -27,7 +28,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from fractions import Fraction
 from types import EllipsisType
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -217,11 +218,33 @@ class _RegionState:
 _STREAM_WORTH_MIN_FRACTION = 0.05
 
 
+def _records_oom(method: Callable[..., Any]) -> Callable[..., Any]:
+    """An out-of-memory error raised in an output's own stages (the blend, the reduction, the way back) is recorded
+    on the output before it rises: the restart then finishes on the host rather than shrinking the forward."""
+
+    @functools.wraps(method)
+    def recording(self: "OutputDataset", *args: Any, **kwargs: Any) -> Any:
+        try:
+            return method(self, *args, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            self._host_would_help = True
+            raise
+
+    return recording
+
+
 @config("OutputDataset")
 class OutputDataset(Dataset, NeedDevice):
     """The sink of one model output: accumulates a case's patches across its copies and models,
     mirrors the geometry and transform chain of the input group ``same_as_group``, and writes the
     result, streamed by slabs whenever that is byte-identical to the assembled path."""
+
+    #: Set by the out-of-memory restart (``finish_on_host``) and kept across ``reset``: every case then blends,
+    #: reduces and finishes on the host, the GPU running the forwards alone.
+    _host_only = False
+    #: Set when moving this output's stages to the host frees the device: an out-of-memory error rose in them, or
+    #: they held memory on it when the error rose in the forward. ``finish_on_host`` reads and clears it.
+    _host_would_help = False
 
     def __init__(
         self,
@@ -460,6 +483,7 @@ class OutputDataset(Dataset, NeedDevice):
     def __repr__(self) -> str:
         return str(self)
 
+    @_records_oom
     def add_layer(
         self,
         index_dataset: int,
@@ -1129,6 +1153,10 @@ class OutputDataset(Dataset, NeedDevice):
 
     def reset(self) -> None:
         """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
+        # A forward that ran out of memory beside this output's blend or reduction on the device (a whole case's
+        # accumulator, one window per class) fits once they move to the host.
+        held = (*self._accum_device.values(), *self._reduce_device.values())
+        self._host_would_help = self._host_would_help or any(device.type == "cuda" for device in held)
         # Abort each open sink so the backend removes the partial entry; the restart rewrites it.
         error = PredictorError("prediction restart: the partial streamed output is discarded")
         for sink in self._stream_sinks.values():
@@ -1253,7 +1281,7 @@ class OutputDataset(Dataset, NeedDevice):
         working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
         # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
-        if device.type != "cuda":
+        if device.type != "cuda" or self._host_only:
             return torch.device("cpu")
         # Every copy parks its transformed chunks here until the cross-copy fold, which then holds its
         # own working buffers and output (a Concat's is every copy again), and the after-reduction
@@ -1279,11 +1307,23 @@ class OutputDataset(Dataset, NeedDevice):
     # for fragmentation and a concurrent process.
     _ACCUMULATE_MARGIN = 0.9
 
+    def finish_on_host(self) -> bool:
+        """The out-of-memory restart's step for what the device gates do not price (a ``Resample`` inverse bringing
+        every channel back to the case's own grid, a weighted patch beside a resident accumulator): when the error
+        rose from this output's own stages on the device, or while they held memory on it, every case blends,
+        reduces and finishes on the host from now on. True when this changes where the cases finish; an error in a
+        forward beside nothing of this output's on the device changes nothing here."""
+        # ponytail: the gates could price the inverses at the case's own grid and keep a case that fits on the GPU.
+        changed = self._host_would_help and not self._host_only
+        self._host_would_help = False
+        self._host_only = self._host_only or changed
+        return changed
+
     def _accumulate_device(self, layer: torch.Tensor, accumulator: Accumulator) -> torch.device:
         """Device on which to blend a case's patches: the GPU when the accumulator fits alongside the
         memory a forward needs, decided once per case at the first patch; else the CPU."""
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
-        if device.type != "cuda" or layer.device.type != "cuda":
+        if device.type != "cuda" or layer.device.type != "cuda" or self._host_only:
             return torch.device("cpu")
         try:
             # A forward's transient footprint above the resident set, from the batch that just ran;
@@ -1319,6 +1359,7 @@ class OutputDataset(Dataset, NeedDevice):
             return first
         return None
 
+    @_records_oom
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
         accumulators = self.output_layer_accumulator[index]
 

@@ -29,6 +29,7 @@ seed, which is how the oracle varies rank and geometry without varying anything 
 """
 
 import inspect
+import platform
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,6 +135,16 @@ AUGMENTATION_ATOL = REGRID_ATOL
 # --------------------------------------------------------------------------------------
 # The case on disk: one volume per input kind, on a geometry the caller chooses.
 # --------------------------------------------------------------------------------------
+
+
+def assert_same_as_scipy(got: np.ndarray, want: np.ndarray) -> None:
+    """``got`` is scipy's (or scikit-image's, through scipy) result to the bit on x86-64. On arm64, scipy is built
+    with fused multiply-adds (clang contracts ``a * b + c`` there), so its sums round once where NumPy's separate
+    multiply and add round twice: there the two agree within 16 units of the last place of the largest value."""
+    if platform.machine().lower() not in ("arm64", "aarch64"):
+        np.testing.assert_array_equal(got, want)
+        return
+    np.testing.assert_allclose(got, want, rtol=0, atol=16 * np.finfo(want.dtype).eps * float(np.abs(want).max()))
 
 
 @dataclass(frozen=True)
@@ -605,6 +616,12 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
         # Landmarks pushed through a stored transform, not a volume: test_registration_evaluation.py proves it.
         "TransformPoints": [StageCase(TransformPoints({"transform": False}), sweep=False)],
+        # The three Ensemble channels hold 0, 1 and 2: at 0.7 a sigmoid of 1 or 2 is on, one of 0 is not.
+        "ThresholdLabels": [
+            StageCase(
+                transform_module.ThresholdLabels(labels=[1, 2, 4], priority=[2, 0, 1], threshold=0.7), group="Ensemble"
+            )
+        ],
         "Variance": [StageCase(Variance(), group="Ensemble")],
     }
 

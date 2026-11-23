@@ -26,7 +26,13 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from konfai.utils.dataset import Dataset
-from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
+from konfai_apps.app_repository import (
+    DataEntry,
+    LocalAppRepositoryFromDirectory,
+    VolumeType,
+    _parse_input_default,
+    _parse_needs,
+)
 from konfai_apps.errors import AppMetadataError
 from multipart_support import decode_multipart
 
@@ -54,6 +60,22 @@ def test_run_distributed_app_uses_requested_workspace_and_restores_cwd(
     assert visited["cwd"] == run_dir
     assert Path.cwd() == user_dir
     assert (run_dir / "result.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_an_app_does_not_read_the_model_py_of_the_app_before_it(tmp_path: Path) -> None:
+    """Two apps in one process (``needs``), each with a ``model.py``: the second imports its own."""
+    import importlib
+
+    @app_module.run_distributed_app
+    def run(tmp_dir: Path, name: str, seen: list[str]) -> None:
+        Path("model.py").write_text(f"NAME = {name!r}\n")
+        importlib.invalidate_caches()
+        seen.append(importlib.import_module("model").NAME)
+
+    seen: list[str] = []
+    run(tmp_path / "first", "first", seen)
+    run(tmp_path / "second", "second", seen)
+    assert seen == ["first", "second"]
 
 
 def test_run_distributed_app_cleans_auto_created_temporary_workspace(
@@ -1078,3 +1100,81 @@ def test_a_workspace_holding_the_output_is_not_copied_into_itself(tmp_path: Path
     assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == [
         "Evaluations/Run/Metric_TRAIN.json"
     ]
+
+
+def test_an_app_runs_the_app_it_needs_first_and_reads_its_output_as_a_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``needs: {total: <app>}``: the needed app runs on the same inputs (as many as it declares), and its output
+    of each case is staged beside that case's inputs as ``total``, where a stage (``Crop: {source: total}``) reads it."""
+    data = tmp_path / "data"
+    data.mkdir()
+    for name in ("a", "b"):
+        _write_volume(data / f"{name}.mha")
+    monkeypatch.chdir(tmp_path)
+    ran: list[tuple[str, list[list[Path]]]] = []
+
+    class Needed(app_module.KonfAIApp):
+        def __init__(self, app_id: str, download: bool, force_update: bool) -> None:
+            self.app_id = app_id
+            self._predicted = ["P000", "P001"]
+            self.app_repository = types.SimpleNamespace(
+                get_inputs=lambda: {"Volume": DataEntry("CT", VolumeType.VOLUME, True)},
+                get_outputs=lambda: {"Segmentation": DataEntry("Seg", VolumeType.SEGMENTATION, True)},
+            )
+
+        def infer(self, inputs: list[list[Path]], output: Path, **_: object) -> None:
+            ran.append((self.app_id, inputs))
+            for i in range(2):
+                (output / "Run" / f"P00{i}").mkdir(parents=True)
+                _write_volume(output / "Run" / f"P00{i}" / "Segmentation.mha", value=i + 1)
+                _write_volume(output / "Run" / f"P00{i}" / "Other.mha")
+
+    app = _app_with_inputs({})
+    app.app_repository.get_needs = lambda: {"total": "/apps/Total6mm"}  # type: ignore[attr-defined]
+    app._write_inputs_to_dataset([[data / "a.mha", data / "b.mha"], [data / "a.mha", data / "b.mha"]])
+    monkeypatch.setattr(app_module, "KonfAIApp", Needed)
+    app._run_needs([[data / "a.mha", data / "b.mha"], [data / "a.mha", data / "b.mha"]], [], 1, True)
+
+    assert ran == [("/apps/Total6mm", [[data / "a.mha", data / "b.mha"]])]
+    for i in range(2):
+        staged = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "Dataset" / f"P00{i}" / "total.mha")))
+        assert (staged == i + 1).all()
+
+
+def test_an_app_that_needs_itself_through_another_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A needs B, which needs A: the cycle is named, before a third app is fetched, and nothing is left running."""
+    from konfai_apps.errors import AppRepositoryError
+
+    monkeypatch.chdir(tmp_path)
+
+    class Needed(app_module.KonfAIApp):
+        def __init__(self, app_id: str, download: bool, force_update: bool) -> None:
+            other = "/apps/A" if app_id == "/apps/B" else "/apps/B"
+            self.app_repository = types.SimpleNamespace(get_needs=lambda: {"back": other}, get_inputs=lambda: {})
+
+        def infer(self, inputs: list[list[Path]], output: Path, **_: object) -> None:
+            self._run_needs(inputs, [], 1, True)
+
+    monkeypatch.setattr(app_module, "KonfAIApp", Needed)
+    with pytest.raises(AppRepositoryError, match="/apps/B -> /apps/A -> /apps/B"):
+        Needed("/apps/A", False, False)._run_needs([[]], [], 1, True)
+    assert Needed._running_needs == []
+
+
+def test_needs_names_a_sibling_by_its_bare_name(tmp_path: Path) -> None:
+    repository = LocalAppRepositoryFromDirectory.__new__(LocalAppRepositoryFromDirectory)
+    repository._app_directory = tmp_path
+    repository._needs = {"total": "Total6mm", "body": "VBoussot/Other:Body", "mask": "/opt/apps/Mask"}
+
+    assert repository.get_needs() == {
+        "total": str(tmp_path / "Total6mm"),
+        "body": "VBoussot/Other:Body",
+        "mask": "/opt/apps/Mask",  # a path, not a sibling's name
+    }
+
+
+@pytest.mark.parametrize("needs", [["total"], {"total": ""}, {"total": 3}])
+def test_parse_needs_refuses_what_is_not_a_group_to_app_map(needs: object) -> None:
+    with pytest.raises(AppMetadataError, match="'needs' must map each group"):
+        _parse_needs(needs)

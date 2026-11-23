@@ -1057,11 +1057,56 @@ def test_mid_blend_oom_stays_fatal() -> None:
     assert output_dataset._accum_device[0].type == "cuda"
 
 
+def test_an_out_of_memory_restart_finishes_on_the_host_only_after_an_error_in_the_outputs_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An error in a forward beside nothing of the output's on the device keeps the restart's other steps (members,
+    # batch, patch); one raised in the output's own stages, or beside their memory on the device, moves them to the
+    # host, once, for the rest of the run.
+    import konfai.predictor.output as output_module
+
+    monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: float("inf"))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device=None: 0)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device=None: 0)
+    output_dataset = OutputDataset(
+        same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+    )
+    output_dataset.device = 0
+    output_dataset.reduction = Mean()
+    layer = cast(
+        torch.Tensor, SimpleNamespace(device=torch.device("cuda:0"), shape=(2, 4, 4, 4), element_size=lambda: 4)
+    )
+    accumulator = cast(Any, SimpleNamespace(footprint_shape=[4, 4, 4]))
+    chunk = torch.zeros(2, 4, 4, 4)
+    assert not output_dataset.finish_on_host()  # an error in the forward: nothing recorded
+    assert output_dataset._accumulate_device(layer, accumulator).type == "cuda"
+
+    def out_of_memory(*args: object) -> torch.Tensor:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(OutputDataset, "_get_output", out_of_memory)
+    output_dataset.output_layer_accumulator[0] = {0: cast(Any, accumulator)}
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        output_dataset.get_output(0, [], cast(DatasetIter, None))
+    output_dataset.reset()  # the restart resets the output before it reads the record
+    assert output_dataset.finish_on_host() and not output_dataset.finish_on_host()  # taken once
+    assert output_dataset._accumulate_device(layer, accumulator).type == "cpu"
+    assert output_dataset._reduction_device(chunk).type == "cpu"
+
+    # A forward that ran out of memory while a case's accumulator sat on the device: the host frees it.
+    beside = OutputDataset(
+        same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+    )
+    beside._accum_device[0] = torch.device("cuda", 0)
+    beside.reset()
+    assert beside.finish_on_host()
+
+
 # ---------------------------------------------------------------------------
 # Device co-location of modules a per-model load() adds after placement
 # ---------------------------------------------------------------------------
 class _LateHeadNetwork(Network):
-    """Model whose load() appends a checkpoint-sized module, mimicking TotalSegmentator's Head.Conv."""
+    """Model whose load() appends a checkpoint-sized module: a head sized from the checkpoint."""
 
     def __init__(self) -> None:
         super().__init__(in_channels=1)
@@ -1084,7 +1129,7 @@ def test_colocate_is_a_safe_noop_when_model_is_all_cpu() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="device co-location only manifests on GPU")
 def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
-    # The TotalSegmentator pattern: the model is placed on the GPU, then a per-model load() appends
+    # A head added at load: the model is placed on the GPU, then a per-model load() appends
     # a Head on CPU. The forward must not hit "Input cuda, weight CPU".
     composite = ModelComposite(_LateHeadNetwork(), Mean())
     place_graph(composite, 0)  # place on cuda:0, exactly as the predictor does before inference

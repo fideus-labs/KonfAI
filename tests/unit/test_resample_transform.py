@@ -515,7 +515,7 @@ class TestSampling:
 class TestRefusals:
     def test_an_unknown_interpolation_is_refused_at_construction(self):
         with pytest.raises(TransformError, match="interpolation"):
-            Resample(transforms={"reg": False}, interpolation="bspline")
+            Resample(transforms={"reg": False}, interpolation="lanczos")
 
     def test_no_transforms_is_refused_at_construction(self):
         with pytest.raises(TransformError, match="empty 'transforms'"):

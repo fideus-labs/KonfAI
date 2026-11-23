@@ -146,7 +146,7 @@ def test_extensionless_dicom_series_directory_is_detected(tmp_path: Path) -> Non
 
 
 def test_label_statistics_cover_many_class_segmentations_and_flag_intensity_groups(tmp_path: Path) -> None:
-    # A whole-body segmentation (e.g. TotalSegmentator, ~117 classes) must still get per-label stats --
+    # A whole-body segmentation (~117 classes) must still get per-label stats --
     # a low cap would silently drop them. An intensity image stored as int16 (thousands of values) must NOT
     # produce a huge label dict; it is flagged as high-cardinality instead of silently omitted.
     sitk = pytest.importorskip("SimpleITK")

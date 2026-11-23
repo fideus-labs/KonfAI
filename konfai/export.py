@@ -40,7 +40,7 @@ from konfai.utils.utils import Placement
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
 
-MANIFEST_VERSION = 5  # 5: patch.stride under the monai and spread placements
+MANIFEST_VERSION = 5  # 5: patch.stride under the end and spread placements
 
 
 def _require(module: str) -> ModuleType:
@@ -264,7 +264,7 @@ def export_to_onnx(
     placement:
         The ``Patch.placement`` the config states, written into the manifest's patch.
     patch_stride:
-        Per-axis unrounded step between windows under placements ``monai`` and ``spread``, which ``patch_overlap``
+        Per-axis unrounded step between windows under placements ``end`` and ``spread``, which ``patch_overlap``
         rounds; written into the manifest's patch when given.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
@@ -328,8 +328,8 @@ def export_to_onnx(
             # What pads a patch past the volume (after it under placement pad, on both sides otherwise): 0 unless
             # the config pins a value, "edge" for the volume's edge voxel, or "min" for the minimum of the window read.
             "pad_value": pad_value if isinstance(pad_value, str) else float(pad_value or 0.0),
-            # Where the windows of an axis sit, konfai's Patch.placement: pad, monai or spread
-            # (konfai.utils.utils.get_patch_slices_from_shape). Under monai a Gaussian blend's weight is floored at
+            # Where the windows of an axis sit, konfai's Patch.placement: pad, end or spread
+            # (konfai.utils.utils.get_patch_slices_from_shape). Under end a Gaussian blend's weight is floored at
             # its min_weight, 1e-3.
             "placement": placement,
         },

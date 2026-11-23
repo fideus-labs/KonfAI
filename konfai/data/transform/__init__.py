@@ -61,6 +61,7 @@ from konfai.data.transform.labels import Otsu as Otsu
 from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
+from konfai.data.transform.labels import ThresholdLabels as ThresholdLabels
 from konfai.data.transform.resample import Displace as Displace
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
@@ -117,6 +118,7 @@ __all__ = [
     "Statistics",
     "Sum",
     "TensorCast",
+    "ThresholdLabels",
     "Transform",
     "TransformInverse",
     "TransformLoader",

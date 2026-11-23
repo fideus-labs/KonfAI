@@ -486,8 +486,8 @@ def test_the_host_blends_as_itk_a_chunk_at_a_time(monkeypatch) -> None:
 
 @pytest.mark.parametrize("mode", ["linear", "nearest"])
 def test_an_edge_fill_reads_the_edge_voxel_past_the_volume(mode: str) -> None:
-    """``fill: edge`` is MONAI's ``padding_mode: border``: a sample past the volume reads the edge voxel the taps
-    clamp to, where a number fills it. MONAI's Spacingd grid can end a voxel past an anisotropic CT."""
+    """``fill: edge``: a sample past the volume reads the edge voxel the taps clamp to, where a number fills it. A
+    grid that keeps voxel 0's center can end a voxel past an anisotropic CT."""
     from konfai.data.sampling import gather, gather_separable
     from konfai.utils.errors import TransformError
 
@@ -514,3 +514,22 @@ def test_an_edge_fill_clamps_a_cubic_sample_to_the_volume() -> None:
     assert torch.allclose(gather(source, coordinates, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)
     axes = [torch.zeros(1), torch.zeros(1), x]
     assert torch.allclose(gather_separable(source, axes, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)
+
+
+def test_a_zoom_grid_reads_as_scipys_zoom_to_the_bit_whole_and_by_regions() -> None:
+    # A cast to integers truncates scipy's float64 sum: 104.99999999 is 104, so the sum must be the same bits.
+    ndimage = pytest.importorskip("scipy.ndimage")
+    from konfai.data.spline import zoom_region
+
+    volume = np.random.default_rng(0).integers(-1024, 2000, size=(7, 9, 11)).astype(np.float64)
+    shape = (5, 14, 6)
+    # A NIfTI array's axes, (x, y, z), the reverse of KonfAI's: the order of scipy's sum, so of its rounding.
+    factors = [m / n for m, n in zip(shape, volume.shape, strict=True)][::-1]
+    expected = ndimage.zoom(volume.transpose(2, 1, 0), factors, order=1, mode="nearest").transpose(2, 1, 0)
+    assert expected.shape == shape
+    whole = zoom_region(volume, [0, 0, 0], list(volume.shape), shape, tuple(slice(0, m) for m in shape))
+    np.testing.assert_array_equal(whole, expected)
+    # A region off a window that starts inside the volume.
+    window, starts = volume[2:, 3:, :], [2, 3, 0]
+    part = (slice(2, 5), slice(7, 14), slice(0, 6))
+    np.testing.assert_array_equal(zoom_region(window, starts, list(volume.shape), shape, part), expected[part])

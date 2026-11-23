@@ -18,13 +18,14 @@
 """Value transforms: clipping, normalization, casting, histogram matching, statistics."""
 
 import warnings
+from typing import Any
 
 import numpy as np
 import torch
 
 from konfai.data.transform.base import LocalityKind, PatchLocality, Transform, TransformInverse, sitk
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
-from konfai.utils.dataset.statistics import read_masked_data_statistics
+from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
 from konfai.utils.ITK import _require_simpleitk
 
@@ -98,20 +99,21 @@ class _MaskedStatisticsSeed:
     """The masked whole-volume statistics of a stage's own group, per case, from the stores.
 
     A masked ``Clip``/``Standardize`` needs the case's statistic under the mask before its first
-    region: the two volumes are scanned once per case, streamed, and memoised here.
+    region: the two volumes are scanned once per case, streamed, and memoised here. With no mask
+    (``Standardize(nonzero=True)``) the selection is the volume's own non-zero voxels, per channel.
     ``transform_shape`` records the group the chain reads, which ``__call__`` is never told.
     """
 
-    def __init__(self, mask: str) -> None:
+    def __init__(self, mask: str | None) -> None:
         self.mask = mask
         self.group: str | None = None
-        self._by_case: dict[str, dict[str, float]] = {}
+        self._by_case: dict[str, dict[str, Any]] = {}
 
     def record_group(self, group_src: str) -> None:
         if group_src:
             self.group = group_src
 
-    def statistics(self, datasets: list[Dataset], name: str) -> dict[str, float]:
+    def statistics(self, datasets: list[Dataset], name: str) -> dict[str, Any]:
         cached = self._by_case.get(name)
         if cached is not None:
             return cached
@@ -120,15 +122,22 @@ class _MaskedStatisticsSeed:
                 "The masked statistic has no group to scan: the chain was never planned.",
                 "Report this: transform_shape() records the group before any region flows.",
             )
-        stats = read_masked_data_statistics(
-            _dataset_holding(datasets, self.group, name),
-            self.group,
-            _dataset_holding(datasets, self.mask, name),
-            self.mask,
-            name,
-        )
+        holder = _dataset_holding(datasets, self.group, name)
+        if self.mask is None:
+            stats = read_nonzero_data_statistics(holder, self.group, name)
+        else:
+            stats = read_masked_data_statistics(
+                holder, self.group, _dataset_holding(datasets, self.mask, name), self.mask, name
+            )
         self._by_case[name] = stats
         return stats
+
+
+def _stated(stated: list[float] | None, channel: int, measured: float) -> float:
+    """The number a stage states for ``channel`` (one for every channel, or one per channel), else ``measured``."""
+    if stated is None:
+        return measured
+    return float(stated[0] if len(stated) == 1 else stated[channel])
 
 
 def _masked_values(stage: "Clip | Standardize", name: str, tensor: torch.Tensor) -> torch.Tensor:
@@ -372,7 +381,12 @@ class UnNormalize(Transform):
 
 
 class Standardize(TransformInverse):
-    """Standardize tensors using cached or computed mean and standard deviation."""
+    """Standardize tensors using cached or computed mean and standard deviation.
+
+    ``nonzero`` standardizes each channel over its voxels that are not exactly 0: its mean and population
+    standard deviation (N, not N - 1; 0 taken as 1) over those voxels, applied to them alone, the zeros kept,
+    in float32. Per channel always: KonfAI states a ``Standardize``'s numbers per channel. Not invertible (a voxel at 0 and one at the mean both land on 0), so it takes ``inverse: false``.
+    """
 
     working_multiple = 1.0  # the float copy the statistics are taken on
 
@@ -383,13 +397,29 @@ class Standardize(TransformInverse):
         std: list[float] | None = None,
         mask: str | None = None,
         inverse: bool = True,
+        nonzero: bool = False,
     ) -> None:
         super().__init__(inverse)
+        if nonzero and mask is not None:
+            raise TransformError(
+                f"'Standardize' was given nonzero=True and mask={mask!r}.",
+                "The non-zero voxels are the mask: drop one of the two.",
+            )
+        if nonzero and inverse:
+            raise TransformError(
+                "'Standardize' with nonzero=True cannot be inverted: a voxel at 0 and one at the mean both land on 0.",
+                "Set inverse: false.",
+            )
         self.lazy = lazy
         self.mean = mean
         self.std = std
         self.mask = mask
-        self._masked_seed = _MaskedStatisticsSeed(mask) if mask is not None else None
+        self.nonzero = nonzero
+        self._masked_seed = _MaskedStatisticsSeed(mask) if mask is not None or nonzero else None
+
+    def case_working_multiple(self, name: str) -> float:
+        # The non-zero path holds, per channel, the mask, the gathered values and their centred copy.
+        return 2.5 if self.nonzero else self.working_multiple
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # Identity on the shape; a masked statistic records the group the masked disk scan needs.
@@ -398,8 +428,8 @@ class Standardize(TransformInverse):
         return shape
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Any of mean/std left unset is a global statistic: a seeded disk one, or under a mask a
-        # masked disk scan the stage seeds itself once per case. With both given, POINTWISE.
+        # Any of mean/std left unset is a global statistic: a seeded disk one, or under a mask (or over
+        # the non-zero voxels) a disk scan the stage seeds itself once per case. With both given, POINTWISE.
         stat_keys: set[str] = set()
         if self.mean is None:
             stat_keys.add("Mean")
@@ -407,11 +437,13 @@ class Standardize(TransformInverse):
             stat_keys.add("Std")
         if not stat_keys:
             return PatchLocality(LocalityKind.POINTWISE)
-        if self.mask is not None:
+        if self._masked_seed is not None:
             return PatchLocality(LocalityKind.GLOBAL_STAT)
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), takes_present=True)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if self.nonzero:
+            return self._nonzero(name, tensor, cache_attribute)
         if self.mask is not None and (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute:
             # A streamed region: the mask cannot be indexed against it, and a bare 'Mean' seed may be
             # an unmasked stage's, so the masked statistic is scanned from the stores once.
@@ -457,6 +489,36 @@ class Standardize(TransformInverse):
         if stat.numel() > 1:
             return stat.reshape(-1, *([1] * (tensor.dim() - 1)))
         return stat
+
+    def _nonzero(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        """Each channel over its non-zero voxels, the statistics in float32 (``torch.mean`` and the population
+        ``torch.std`` of the gathered values) or, on a streamed region,
+        seeded from the disk scan of the stored volume; what was applied is recorded per channel."""
+        scanned = (
+            self._masked_seed.statistics(self.datasets, name)  # type: ignore[union-attr]
+            if (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute
+            else None
+        )
+        out = tensor.to(torch.float32, copy=True)
+        means: list[float] = []
+        stds: list[float] = []
+        for index, channel in enumerate(out):
+            selected = channel != 0
+            values = channel[selected]
+            if scanned is not None:
+                mean, std = float(scanned["mean_per_channel"][index]), float(scanned["std_per_channel"][index])
+            elif values.numel():
+                mean, std = float(torch.mean(values)), float(torch.std(values, unbiased=False)) or 1.0
+            else:
+                mean, std = 0.0, 1.0  # applied to no voxel: such a channel is left as it is
+            mean, std = _stated(self.mean, index, mean), _stated(self.std, index, std)
+            means.append(mean)
+            stds.append(std)
+            if not self.lazy and values.numel():
+                channel[selected] = (values - mean).div_(std)
+        cache_attribute["Mean"] = torch.tensor(means)
+        cache_attribute["Std"] = torch.tensor(stds)
+        return tensor if self.lazy else out
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Mask or not, the inverse only pops the Mean/Std the forward stacked: a per-voxel affine map.

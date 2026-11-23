@@ -423,25 +423,51 @@ def read_masked_data_statistics(
             " volume's own grid (same extent, same channels).",
         )
 
-    entries = [(source, group), (mask_source, mask_group)]
+    state: dict[str, Any] | None = None
+    for volume, mask in _walk_slabs([(source, group), (mask_source, mask_group)], name, shape):
+        selected = volume[mask != 0]
+        if selected.size:
+            state = _update_running_statistics(state, selected.reshape(1, -1))
+    return _finalize_running_statistics(state)
+
+
+def read_nonzero_data_statistics(source: Any, group: str, name: str) -> dict[str, list[float]]:
+    """Each channel's mean and population standard deviation over its voxels that are not 0, streamed:
+    what ``Standardize(nonzero=True)`` seeds a streamed case with. A channel with no such voxel reads 0 and 1,
+    and a deviation of 0 reads 1, as the stage applies them."""
+    shape, _ = source.get_infos(group, name)
+    states: list[dict[str, Any] | None] = [None] * int(shape[0])
+    for (volume,) in _walk_slabs([(source, group)], name, shape):
+        for index, channel in enumerate(volume):
+            selected = channel[channel != 0]
+            if selected.size:
+                states[index] = _update_running_statistics(states[index], selected.reshape(1, -1))
+    means = [state["mean"] if state else 0.0 for state in states]
+    stds = [math.sqrt(state["m2"] / state["count"]) if state else 1.0 for state in states]
+    return {"mean_per_channel": means, "std_per_channel": [std or 1.0 for std in stds]}
+
+
+def _walk_slabs(entries: Sequence[tuple[Any, str]], name: str, shape: list[int]) -> Iterator[list[np.ndarray]]:
+    """The entries (``(dataset, group)``, duck typed) read at the same steps along the first spatial axis,
+    one slab of each per step, the step sized and refused as ``Dataset.iter_data_blocks`` sizes and
+    refuses its block, with the entries held together. A store that cannot serve bounded region reads
+    is read whole ONCE and sliced in memory, as ``Dataset.iter_data_blocks`` serves such stores."""
     by_region = [
-        (dataset, entry) for dataset, entry in entries if len(shape) >= 2 and dataset.bounded_region_reads(entry, name)
+        (dataset, group) for dataset, group in entries if len(shape) >= 2 and dataset.bounded_region_reads(group, name)
     ]
 
-    def slab_reader(dataset: Any, entry_group: str) -> Callable[[tuple[slice, ...]], np.ndarray]:
-        if (dataset, entry_group) in by_region:
-            return lambda slices: dataset.read_data_slice(entry_group, name, slices)[0]
-        resident = dataset.read_data(entry_group, name)[0]
+    def slab_reader(dataset: Any, group: str) -> Callable[[tuple[slice, ...]], np.ndarray]:
+        if (dataset, group) in by_region:
+            return lambda slices: dataset.read_data_slice(group, name, slices)[0]
+        resident = dataset.read_data(group, name)[0]
         return lambda slices: resident[slices]
 
-    read_volume = slab_reader(source, group)
-    read_mask = slab_reader(mask_source, mask_group)
+    readers = [slab_reader(dataset, group) for dataset, group in entries]
     if by_region:
         rows = _scan_rows(by_region, name, shape)
     else:
         rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
     extent = int(shape[1]) if len(shape) >= 2 else 1
-    state: dict[str, Any] | None = None
     for start in range(0, extent, rows):
         slices: tuple[slice, ...] = (
             slice(None),
@@ -450,10 +476,7 @@ def read_masked_data_statistics(
         )
         if len(shape) < 2:
             slices = (slice(None),)
-        selected = read_volume(slices)[read_mask(slices) != 0]
-        if selected.size:
-            state = _update_running_statistics(state, selected.reshape(1, -1))
-    return _finalize_running_statistics(state)
+        yield [read(slices) for read in readers]
 
 
 def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]:

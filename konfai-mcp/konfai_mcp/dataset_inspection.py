@@ -530,7 +530,7 @@ class DatasetInspectionMixin:
         sampled_names = self._sample_dataset_names(names, max_cases, seed)
         sampled_items: dict[str, dict[str, Any]] = {}
         per_case_labels: dict[str, dict[str, float]] = {}
-        # Cap separating a label map (a bounded class set: whole-body atlases like TotalSegmentator
+        # Cap separating a label map (a bounded class set: whole-body atlases
         # top out around 117 classes) from an intensity image stored as an integer (int16 CT -> thousands
         # of distinct values, for which per-label voxel fractions are meaningless and huge).
         label_stats_max_classes = 512

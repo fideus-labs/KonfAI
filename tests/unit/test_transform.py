@@ -49,6 +49,7 @@ from konfai.data.transform import (
     Statistics,
     Sum,
     TensorCast,
+    ThresholdLabels,
     Transform,
     Variance,
 )
@@ -350,6 +351,46 @@ def test_a_crop_behind_a_stage_that_moves_the_grid_is_refused_before_it_writes(
     assert not (tmp_path / "Out").exists()
 
 
+def test_a_handed_crop_measures_its_box_on_the_volume_the_stages_before_leave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``handed`` replays the stages before the Crop once on the stored volume and crops to the box it finds
+    there, as the portable runtime crops the volume it is handed: behind a Resample, the resampled volume's
+    box, which the stored-box Crop refuses. With ``nonzero`` the box is that of the voxels other than 0 (a
+    face of zeros is cut), where the 5th-percentile rule would
+    keep a voxel of 0.5 as foreground."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai import api
+    from konfai.data.transform import Write
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.full((24, 28, 32), 0.5, dtype=np.float32)
+    volume[:, :, :10] = 0.0  # a face of zeros along x
+    volume[6:20, 4:22, 12:26] = 1.0
+    image = sitk.GetImageFromArray(volume)
+    (tmp_path / "Raw" / "P000").mkdir(parents=True)
+    sitk.WriteImage(image, str(tmp_path / "Raw" / "P000" / "CT.mha"))
+    handed = sitk.Resample(image, [64, 56, 48], sitk.Transform(), sitk.sitkNearestNeighbor, [-0.25] * 3, [0.5] * 3)
+    z, y, x = np.nonzero(sitk.GetArrayFromImage(handed))
+    expected = sitk.RegionOfInterest(handed, [int(np.ptp(a)) + 1 for a in (x, y, z)], [int(a.min()) for a in (x, y, z)])
+    resample = Resample(spacing=[0.5] * 3, interpolation="nearest", inverse=False)
+    chains = {"CT": {"CT": [resample, Crop(nonzero=True, handed=True, inverse=False), Write(dataset="./Out:mha")]}}
+
+    api.transform("CROP", "./Raw:mha", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+
+    written = sitk.ReadImage(str(tmp_path / "Out" / "P000" / "CT.mha"))
+    assert written.GetSize() == expected.GetSize() == (44, 56, 48)
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(written), sitk.GetArrayFromImage(expected))
+    np.testing.assert_allclose(written.GetOrigin(), expected.GetOrigin(), rtol=0, atol=1e-9)
+
+
+def test_a_handed_crop_outside_a_chain_and_a_handed_source_crop_are_refused() -> None:
+    with pytest.raises(TransformError, match="both handed and source"):
+        Crop(source="SEG", handed=True)
+    with pytest.raises(TransformError, match="not bound in a group's chain"):
+        Crop(handed=True)._handed_box(Dataset("./Raw", "mha"), "CT", "CASE", [3, 3, 3])
+
+
 def test_crop_moves_a_read_cases_origin_to_its_box_near_corner(tmp_path: Path) -> None:
     """A read stacks the header as ``Origin_0``/``Spacing_0``/``Direction_0``. The whole-volume call and
     the hook the region routes call must both write ITK's ``RegionOfInterest`` header, and the inverse
@@ -493,6 +534,47 @@ def test_standardize_explicit_per_channel_stats():
     x[1] = 20.0
     out = t("c", x.clone(), Attribute())
     assert torch.allclose(out, torch.zeros_like(out), atol=1e-6)
+
+
+def _zero_backed_volume() -> torch.Tensor:
+    """Three channels with a zero background, a zero inside the foreground, and a channel at one value."""
+    rng = np.random.default_rng(3)
+    volume = (rng.standard_normal((3, 9, 11, 13)) * 300 + 50).astype(np.float32)
+    volume[:, :3] = 0
+    volume[1, 5, 5, 5] = 0
+    volume[2] = np.where(volume[2] != 0, 7.0, 0.0)
+    return torch.from_numpy(volume)
+
+
+def test_standardize_nonzero_standardizes_each_channel_over_its_non_zero_voxels_to_the_bit() -> None:
+    """Each channel over its own non-zero voxels: their float32 mean and population deviation (0 read as 1),
+    applied to them alone, the zeros kept; recorded per channel."""
+    volume = _zero_backed_volume()
+    attribute = Attribute()
+    out = Standardize(nonzero=True, inverse=False)("c", volume.clone(), attribute)
+    expected = volume.to(torch.float32, copy=True)
+    for channel in expected:
+        values = channel[channel != 0]
+        mean, std = float(torch.mean(values)), float(torch.std(values, unbiased=False)) or 1.0
+        channel[channel != 0] = (values - mean) / std
+    assert out.dtype is torch.float32
+    assert torch.equal(out, expected)
+    assert not out[volume == 0].any()
+    assert not out[2][volume[2] != 0].any()  # a deviation of 0 read as 1
+    assert attribute.get_tensor("Mean").shape == (3,)
+    assert float(attribute.get_tensor("Std")[2]) == 1.0
+    # A stated number applies to the non-zero voxels alone.
+    stated = Standardize(nonzero=True, inverse=False, mean=[0.0], std=[2.0])("c", volume.clone(), Attribute())
+    assert torch.equal(stated, torch.where(volume != 0, volume / 2.0, volume))
+    # A channel of zeros alone is left as it is.
+    assert not Standardize(nonzero=True, inverse=False)("c", torch.zeros(2, 4, 4), Attribute()).any()
+
+
+def test_standardize_nonzero_refuses_an_inverse_and_a_mask() -> None:
+    with pytest.raises(TransformError, match="cannot be inverted"):
+        Standardize(nonzero=True)
+    with pytest.raises(TransformError, match="nonzero=True and mask"):
+        Standardize(nonzero=True, inverse=False, mask="MASK")
 
 
 # --------------------------------------------------------------------------------------
@@ -1183,6 +1265,49 @@ def test_string_encoded_parameters_are_refused_with_their_spelling() -> None:
         SelectLabel(["1->2"])
     assert SelectLabel(["(1,2)", "(3,1)"]).labels == [(1, 2), (3, 1)]
     assert Permute(dims="2|0|1").dims == [0, 3, 1, 2]
+
+
+def _brats_labels(logits: torch.Tensor) -> torch.Tensor:
+    """The BraTS postprocessing written out by hand: sigmoid, 0.5, then 4 where ET is on, else 1 where TC is, else 2
+    where WT is."""
+    on = torch.sigmoid(logits.float()) >= 0.5
+    return torch.where(on[2], 4, torch.where(on[0], 1, torch.where(on[1], 2, 0))).unsqueeze(0).to(torch.uint8)
+
+
+def test_threshold_labels_is_the_brats_rule_as_a_configuration() -> None:
+    logits = torch.randn((3, 6, 7, 8), generator=torch.Generator().manual_seed(7)) * 3
+    logits[:, 0, 0, 0] = torch.tensor([0.0, -3.0, -3.0])  # sigmoid(0) is 0.5: TC on, alone
+    logits[:, 1, 1, 1] = float("nan")  # on nowhere
+    logits[2, 2, 2, 2] = float("nan")  # the other channels decide
+    out = ThresholdLabels(labels=[1, 2, 4], priority=[2, 0, 1])("logits", logits, Attribute())
+    assert out.dtype is torch.uint8
+    assert out.shape == (1, 6, 7, 8)
+    assert torch.equal(out, _brats_labels(logits))
+    assert (int(out[0, 0, 0, 0]), int(out[0, 1, 1, 1])) == (1, 0)
+    assert len({int(label) for label in out.unique()}) == 4
+    # The channels' own order when no priority is stated; without the sigmoid the values themselves, 0.5 on.
+    on = torch.sigmoid(logits) >= 0.5
+    in_order = torch.where(on[0], 1, torch.where(on[1], 2, torch.where(on[2], 4, 0))).unsqueeze(0).to(torch.uint8)
+    assert torch.equal(ThresholdLabels(labels=[1, 2, 4])("logits", logits, Attribute()), in_order)
+    raw = torch.tensor([[0.5, 0.49, float("nan"), 1.0]])
+    expected = torch.tensor([[7, 0, 0, 7]], dtype=torch.uint8)
+    assert torch.equal(ThresholdLabels(labels=[7], sigmoid=False)("p", raw, Attribute()), expected)
+    assert torch.equal(
+        ThresholdLabels(labels=[7], threshold=0.49, sigmoid=False)("p", raw, Attribute())[0, :2],
+        raw.new_tensor([7, 7], dtype=torch.uint8),
+    )
+    assert ThresholdLabels(labels=[1, 2]).output_channels(2) == 1
+
+
+def test_threshold_labels_refuses_what_a_uint8_map_of_the_channels_cannot_hold() -> None:
+    with pytest.raises(TransformError, match=r"\[0, 255\]"):
+        ThresholdLabels(labels=[1, 256])
+    with pytest.raises(TransformError, match=r"\[0, 255\]"):
+        ThresholdLabels(labels=[])
+    with pytest.raises(TransformError, match="priority"):
+        ThresholdLabels(labels=[1, 2], priority=[0, 0])
+    with pytest.raises(TransformError, match="2 channels"):
+        ThresholdLabels(labels=[1])("l", torch.zeros(2, 4), Attribute())
 
 
 def test_a_streamed_mask_refuses_a_mask_off_the_stage_input_grid(tmp_path: Path) -> None:

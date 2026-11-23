@@ -23,9 +23,10 @@ import numpy as np
 import pytest
 from konfai.data.transform import Clip, LocalityKind, Standardize
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.dataset.statistics import read_masked_data_statistics
+from konfai.utils.dataset.statistics import read_masked_data_statistics, read_nonzero_data_statistics
 from konfai.utils.errors import DatasetManagerError
 from oracle_support import (
+    CASE_NAME,
     GEOMETRIES,
     MAIN,
     ROUTES,
@@ -64,6 +65,23 @@ def test_the_masked_scan_matches_numpy_over_the_selected_values(tmp_path: Path) 
     assert stats["std"] == pytest.approx(float(selected.std(ddof=1, dtype=np.float64)), rel=1e-9)
 
 
+def test_the_nonzero_scan_is_each_channel_s_population_statistics_over_its_nonzero_voxels(tmp_path: Path) -> None:
+    rng = np.random.default_rng(11)
+    dataset = Dataset(tmp_path / "data", "h5")
+    volume = (rng.standard_normal((3, 13, 9, 11)) * 300.0).astype(np.float32)
+    volume[:, :4] = 0.0
+    volume[1] = np.where(volume[1] != 0, 5.0, 0.0)
+    volume[2] = 0.0
+    dataset.write("MR", "CASE", volume, Attribute())
+    stats = read_nonzero_data_statistics(dataset, "MR", "CASE")
+    selected = volume[0][volume[0] != 0]
+    assert stats["mean_per_channel"][0] == pytest.approx(float(selected.mean(dtype=np.float64)), rel=1e-12)
+    assert stats["std_per_channel"][0] == pytest.approx(float(selected.std(ddof=0, dtype=np.float64)), rel=1e-9)
+    # A deviation of 0 reads 1, and a channel with no non-zero voxel reads 0 and 1: applied to no voxel.
+    assert (stats["mean_per_channel"][1], stats["std_per_channel"][1]) == (5.0, 1.0)
+    assert (stats["mean_per_channel"][2], stats["std_per_channel"][2]) == (0.0, 1.0)
+
+
 def test_a_mask_stored_0_255_selects_what_its_0_1_twin_selects(tmp_path: Path) -> None:
     """Any value but 0 is inside: a 0/255 mask, as an 8-bit export writes it, selects its 0/1 twin's voxels."""
     dataset = _masked_pair(tmp_path / "data")
@@ -94,6 +112,9 @@ def test_masked_stages_declare_the_kind_their_configuration_makes_them() -> None
     assert not Standardize(mask="MASK").patch_locality(Attribute()).stat_keys
     # Both coefficients given: the mask selects nothing that is read.
     assert Standardize(mean=[0.0], std=[1.0], mask="MASK").patch_locality(Attribute()).kind is LocalityKind.POINTWISE
+    # The non-zero voxels are a mask of the volume's own: the same self-seeded kind.
+    nonzero = Standardize(nonzero=True, inverse=False).patch_locality(Attribute())
+    assert nonzero.kind is LocalityKind.GLOBAL_STAT and not nonzero.stat_keys
     clip = Clip(min_value="min", max_value="max", mask="MASK")
     assert clip.patch_locality(Attribute()).kind is LocalityKind.GLOBAL_STAT
     assert not clip.patch_locality(Attribute()).stat_keys
@@ -121,6 +142,27 @@ def test_a_masked_standardize_streams_and_matches_the_whole_volume(
     assert got.verdict.name == "STREAM"
     assert got.array.shape == want.array.shape
     np.testing.assert_allclose(got.array, want.array, rtol=0, atol=1e-4)
+
+
+@pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)
+def test_a_nonzero_standardize_streams_and_matches_the_whole_volume(
+    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The non-zero standardization streams the same way: the
+    per-channel statistics seeded once from the disk scan over the stored volume's non-zero voxels, the
+    zeros kept, within the two routes' rounding (float32 torch reductions against the float64 scan)."""
+    dataset = build_case(tmp_path / "case", GEOMETRIES[MAIN])
+    volume, attribute = dataset.read_data("Intensity", CASE_NAME)
+    volume = np.concatenate([volume, volume * 0.5], axis=0)
+    volume[:, : volume.shape[1] // 3] = 0.0
+    dataset.write("Intensity", CASE_NAME, volume, attribute)
+    stage = Standardize(nonzero=True, inverse=False)
+    got = sweep(dataset, "Intensity", stage, tmp_path / "streamed", route, monkeypatch)
+    want = whole_volume(dataset, "Intensity", Standardize(nonzero=True, inverse=False), tmp_path / "whole")
+    assert got.verdict.name == "STREAM"
+    assert got.array.shape == want.array.shape
+    np.testing.assert_allclose(got.array, want.array, rtol=0, atol=1e-4)
+    assert not got.array[volume == 0].any()
 
 
 @pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)

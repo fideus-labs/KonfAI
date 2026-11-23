@@ -96,6 +96,12 @@ the files an earlier publish left that the folder no longer holds, and sets
 KonfAI library on the model page, with the commands to list and run its apps. Anyone
 who can read the repository runs it with `konfai-apps infer your-name/my-apps:CT_SEG`.
 
+An app can read another app's output. Declare it in `app.json` as `"needs": {"body": "CT_BODY_SEG"}`:
+before it predicts, the app runs the needed app on the same inputs (as many as that app declares) and
+stages its output for each case as the group `body`, beside `Volume_0`. A stage of the config then reads it,
+for example `Crop: {source: body, labels: [10, 11], margin_mm: 20}`. A bare name is a sibling of the app (the
+same folder, or the same Hugging Face repository); `repo_id:app_name` or a path names any other.
+
 ## Fine-tune it
 
 The app includes `Config.yml`, which describes its training inputs and loss.

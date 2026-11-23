@@ -225,6 +225,11 @@ class Transform(NeedDevice, ABC):
     #: declares True turns the loader's workers off.
     single_process: bool = False
 
+    #: The stages before this one in the group chain it was bound in (``GroupTransform.prepare``), for a
+    #: stage whose plan-time fact is of the volume as they leave it (``Crop(handed=True)``); ``None`` outside
+    #: a chain.
+    preceding: "list[Transform] | None" = None
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         # Constructor arguments are recorded as given, so konfai.api can write the config tree back.
         super().__init_subclass__(**kwargs)

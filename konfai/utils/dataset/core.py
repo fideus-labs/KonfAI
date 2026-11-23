@@ -314,7 +314,7 @@ class Dataset:
         self._entry_paths: dict[str, str] = {}
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
         #: ``(group, name)``: computed once per volume.
-        self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
+        self.case_facts: dict[tuple[str, str], dict[object, Any]] = {}
         # A manifest's entries are handed to the backends, under the key they read ``resolved_paths`` by.
         if self.manifest is not None:
             for name, entries in self.manifest.items():

@@ -16,6 +16,7 @@
 
 """Local and remote execution helpers for packaged KonfAI Apps."""
 
+import importlib
 import inspect
 import json
 import os
@@ -29,7 +30,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.parse import quote
 
 import numpy as np
@@ -240,6 +241,13 @@ def run_distributed_app(
         finally:
             if added_to_syspath and str(workspace_dir) in sys.path:
                 sys.path.remove(str(workspace_dir))
+            # An app's own modules leave with its workspace: the next app in this process has a `model.py` too.
+            for module_name, module in list(sys.modules.items()):
+                source = getattr(module, "__file__", None)
+                # realpath, not resolve: a symlink loop must not raise here and hide the error being cleaned up.
+                if source and Path(os.path.realpath(source)).is_relative_to(workspace_dir):
+                    del sys.modules[module_name]
+            importlib.invalidate_caches()
             if Path(os.getcwd()).resolve() != Path(user_dir).resolve():
                 os.chdir(user_dir)
             if auto_created:
@@ -878,6 +886,9 @@ class KonfAIApp(AbstractKonfAIApp):
     `run_distributed_app`, which runs each operation in an isolated temporary
     workspace.
     """
+
+    #: The apps whose ``needs`` are running, outermost first: one met twice is a cycle.
+    _running_needs: ClassVar[list[str]] = []
 
     def __init__(self, app: str, download: bool, force_update: bool) -> None:
         """
@@ -1632,6 +1643,7 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
+        self._run_needs(inputs, gpu, cpu, quiet)
         models_path = self.app_repository.install_inference(
             tta,
             ensemble,
@@ -1672,6 +1684,38 @@ class KonfAIApp(AbstractKonfAIApp):
         output.mkdir(parents=True, exist_ok=True)
         record = self.app_repository.record(config_overrides)
         (output / RUN_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+    def _run_needs(self, inputs: list[list[Path | str]], gpu: list[int], cpu: int | None, quiet: bool) -> None:
+        """Run each app this one ``needs`` on the same cases first, and stage its output beside the case's inputs
+        as the group it is needed as (``./Dataset/P000/total.mha``), where a stage of this app's chain reads it
+        (``Crop: {source: total}``). The needed app takes as many of the inputs as it declares; it stages the
+        cases in the same order, so they carry the same names."""
+        for group, app_id in self.app_repository.get_needs().items():
+            if app_id in KonfAIApp._running_needs:
+                cycle = " -> ".join([*KonfAIApp._running_needs, app_id])
+                raise AppRepositoryError(
+                    f"The apps' needs form a cycle: {cycle}.", "An app cannot need itself, directly or through others."
+                )
+            KonfAIApp._running_needs.append(app_id)
+            try:
+                needed = KonfAIApp(app_id, download=True, force_update=False)
+                output = Path(f"./Needs/{group}").resolve()
+                declared = max(len(needed.app_repository.get_inputs()), 1)
+                needed.infer(inputs[:declared], output, gpu=gpu, cpu=cpu, quiet=quiet)
+                produced = next(iter(needed.app_repository.get_outputs()), None)
+                primary = self._detect_group_format(Path("Dataset"), "Volume_0")
+                for case, volumes in self._case_volumes(output, needed._predicted or []).items():
+                    named = [volume for volume in volumes if volume.name.startswith(f"{produced}.")]
+                    chosen = named or volumes
+                    if len(chosen) != 1:
+                        raise AppRepositoryError(
+                            f"'{app_id}', which this app needs as '{group}', wrote {len(volumes)} volume(s) for case"
+                            f" '{case}', and no single one of them is its output '{produced}'.",
+                            "Give the needed app one output volume per case, named after its first app.json output.",
+                        )
+                    self._stage(chosen[0], self._supported_suffix(chosen[0]), case, group, primary)
+            finally:
+                KonfAIApp._running_needs.pop()
 
     @run_distributed_app
     def evaluate(
