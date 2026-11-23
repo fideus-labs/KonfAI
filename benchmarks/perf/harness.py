@@ -321,6 +321,8 @@ class PeakSampler(threading.Thread):
     def stop(self) -> int:
         self._stop_event.set()
         self.join()
+        # A peak after the last poll: the kernel keeps it, 0 once the process has exited.
+        self.peak = max(self.peak, _high_water(self._process.pid))
         return self.peak
 
 
