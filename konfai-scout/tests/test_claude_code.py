@@ -199,16 +199,19 @@ def test_max_usd_and_max_seconds_stop_the_session_mid_loop(fixtures, tmp_path, m
     """The SDK runs the whole loop in one request: the cost of each message and the time are counted as it runs,
     inside the served tools, and an exploring call past a limit is refused while a note and the conclusion run."""
     case, _ = fixtures["segmentation"]
+    world = case.grid.world_box()  # a small box at the centre, which the central slice shows
+    centre = {"center": ((world.low_xyz + world.high_xyz) / 2).tolist(), "size": 6.0}
     calls = [
         ("view", VIEW),
         ("view", {**VIEW, "mode": "both"}),  # refused: two requests of 100k input tokens are $0.80 at $4/M
-        ("note", lambda views: {**NOTE, "views": views[:1]}),
+        ("note", lambda views: {**NOTE, "views": views[:1], "box_mm": centre}),
         ("conclude", CONCLUDE),
     ]
     provider, fake = _provider(monkeypatch, [{"calls": calls, "usage": {"input_tokens": 100_000}}])
     config = ScoutConfig(provider="claude-code", allow_cloud_images=True, budget=Budget(max_usd=0.5), max_px=200)
     report = inspect(case, config, tmp_path / "usd", provider=provider)
     assert [c.tool for c in report.tool_calls] == ["view", "note", "conclude"]
+    assert len(report.observations) == 1 and report.conclusion.by == "model"  # a note and the conclusion still run
     assert "Budget exhausted ($0.800 (limit $0.50))" in fake.results[1]["content"][0]["text"]
     assert report.budget["exhausted"] == "$1.600 (limit $0.50)" and report.budget["not_enforced"] is None
     assert report.usage.cost_usd == pytest.approx(

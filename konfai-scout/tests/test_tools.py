@@ -319,7 +319,7 @@ def test_the_measuring_tools_can_be_taken_away(fixtures, tmp_path):
     assert len(box.observations) == 1 and box.measurements == []  # Scout's own check of the box is a measure too
 
 
-def test_an_error_is_firm_from_its_tasks_confidence_and_a_doubt_under_it(fixtures, tmp_path):
+def test_an_error_is_firm_from_its_tasks_confidence_and_a_doubt_under_it(fixtures, tmp_path, monkeypatch):
     box = toolbox(fixtures, "segmentation", tmp_path)
     view = run(box, "view", plane="axial", mode="prediction")["view"]
 
@@ -340,5 +340,5 @@ def test_an_error_is_firm_from_its_tasks_confidence_and_a_doubt_under_it(fixture
         return box.observations[-1].firm
 
     assert not firm("minor", 0.85) and firm("moderate", 0.6)  # against a reference, the severity sorts
-    del box.case.inputs["truth"]
+    monkeypatch.delitem(box.case.inputs, "truth")  # the case is the session's
     assert not firm("moderate", 0.6) and firm("minor", 0.85)  # a segmentation's firm confidence is 0.8
