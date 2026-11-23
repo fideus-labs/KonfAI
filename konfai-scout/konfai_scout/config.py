@@ -80,6 +80,14 @@ class ScoutConfig:
     #: The model is not told the case's name, its notes (the method, the dataset) or its prior evaluation: it judges
     #: the images and its own measurements. Off (``--no-blind``) for a study of what that knowledge changes.
     blind: bool = True
+    #: The confidence from which an error holds up as written, task by task: `Observation.firm`. Set on development
+    #: cases, each with its control (the same result, the defect erased): at or above it, no error was written over a
+    #: defect's place with the defect erased. A model's confidence does not weigh the same in each task: under it an
+    #: error is a doubt to check, and counts as before in the verdict. Measured with Claude Opus; another model, its own.
+    #: A segmentation given with its reference is firm by its severity instead (moderate or more): `Toolbox._firm`.
+    firm: dict[str, float] = field(
+        default_factory=lambda: {"segmentation": 0.8, "registration": 0.3, "synthesis": 0.65}
+    )
     #: Free text appended to the system prompt (a site's own rules, a study's instructions).
     extra_instructions: str = ""
     #: After the inspection, a fresh session of the same model re-reads every error observation blind: crops of its

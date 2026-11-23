@@ -11,7 +11,7 @@ from .config import ScoutConfig
 from .planes import box_to_dict, plane_axes
 from .report import DEFECTS, value_text
 
-PROMPT_VERSION = "2.6"
+PROMPT_VERSION = "2.8"
 
 SYSTEM = """You are KonfAI Scout. You inspect one {task} result as a reader does at a viewer and report where and why \
 it is wrong, that it holds up, or that you cannot tell. KonfAI Eval already scores the case: you localise and explain.
@@ -66,7 +66,9 @@ GUIDANCE = {
     "registration": (
         "Look for residual misalignment at edges (`checkerboard`, `overlay`; `before` is the start), implausible "
         "deformation (`field_magnitude`, `jacobian` with folds in magenta, `grid`), and missing coverage where the "
-        "moving image ends. `labels` and `landmarks` show references carried by the field."
+        "moving image ends. `labels` and `landmarks` show references carried by the field. A misalignment can be small "
+        "and local: an edge of the fixed image that breaks or doubles across a `checkerboard` tile, even by a millimetre "
+        "or two, is a defect to note, however smooth the field and however well the rest aligns; say how far."
     ),
     "synthesis": (
         "Look for intensity bias, blur, invented or missing structures (lesions, bone, air), artefacts, and geometry "
@@ -76,7 +78,10 @@ GUIDANCE = {
         "registered to the source, off by millimetres in places, and the body may have changed between the two. A "
         "difference with the target where the synthetic follows the source is a suspected `reference_error`, not a "
         "defect. `source_checkerboard` alternates the source and the synthetic to check the anatomy; `side_by_side`, "
-        "`checkerboard` and `difference` compare with the target; `source` shows the input."
+        "`checkerboard` and `difference` compare with the target; `source` shows the input. Where the error against "
+        "the target is several times the volume's in one place, look at `source_checkerboard` there before calling the "
+        "anatomy preserved: an edge of the synthetic that lies off the source's by more than a voxel or two is a "
+        "`geometry_error`, however plausible the tissue looks."
     ),
 }
 

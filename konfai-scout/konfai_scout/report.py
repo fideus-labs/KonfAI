@@ -105,6 +105,8 @@ class Observation:
     notes: list[str] = field(default_factory=list)
     #: The blind second reading, when asked: ``{"answer": visible | not_visible | unsure | unparsed, "text", "views"}``.
     second_reading: dict[str, Any] | None = None
+    #: An error at or above its task's firm confidence (`ScoutConfig.firm`); False is a doubt to check, None a measure.
+    firm: bool | None = None
 
 
 @dataclass
@@ -299,7 +301,8 @@ def _findings_table(report: Report) -> list[str]:
         kind = "confirmed" if o.kind == "confirmed_error" else "suspected"
         reading = (o.second_reading or {}).get("answer", "")
         lines.append(
-            f"| {o.id} | {o.defect} | {kind} | {o.severity} | {o.confidence:.2f} | {_box_text(o.box_mm)} | {reading} |"
+            f"| {o.id} | {o.defect} | {kind} | {o.severity} | {o.confidence:.2f}{' (firm)' if o.firm else ''} | "
+            f"{_box_text(o.box_mm)} | {reading} |"
         )
     return [*lines, ""]
 

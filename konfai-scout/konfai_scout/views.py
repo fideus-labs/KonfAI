@@ -124,6 +124,9 @@ def to_unit(plane: np.ndarray, window: tuple[float, float]) -> np.ndarray:
 
 #: The roles a registration's warped labels come from: given warped, or moving ones the field carries.
 WARPED_LABEL_ROLES = {"warped_labels", "moving_labels"}
+#: The synthesis difference's range, in the image's units, either side of 0. ponytail: sized for a CT target in HU
+#: (soft-tissue errors are tens); a target in other units would want the slice's own spread.
+SYNTHESIS_DIFFERENCE = 100.0
 #: The band above every view that holds its header.
 HEADER_PX = 18
 #: The registration modes drawn over one image, and which.
@@ -338,11 +341,13 @@ class Renderer:
         )
         indices = sorted(set(indices))
         tiles = []
+        scales = []
         resolved_window: list[float] | None = None
         per_tile = max(160, self.config.max_px // max(1, int(np.ceil(np.sqrt(len(indices))))))
         for index in indices:
-            rgb, extra, resolved = self._compose(frame, index, mode, window, label, None)
+            rgb, shown, resolved = self._compose(frame, index, mode, window, label, None)
             resolved_window = resolved
+            scales.append(shown.get("scale"))
             image, mapping = self._display(rgb, frame, index, None, None, max_px=per_tile)
             position = self._position(frame, index)
             caption = f"{self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm #{index}"
@@ -371,11 +376,18 @@ class Renderer:
                 }
             )
         draw = ImageDraw.Draw(sheet)
-        extra = {"tiles": placed, "indices": indices}
+        # a legend says what the colours are on every tile; a scale stands for all only where every tile has the same
+        # (a mode scaled to each slice's own range has none to give the montage)
+        scale = scales[0] if isinstance(scales[0], dict) and all(s == scales[0] for s in scales) else None
+        extra = {"tiles": placed, "indices": indices, **({"legend": shown["legend"]} if "legend" in shown else {})}
+        if scale:
+            extra["scale"] = scale
         title = (
             f"{{id}} {self._plane_name(frame)} montage of {len(indices)} slices | {mode} | "
             f"window {self._window_text(resolved_window)}"
         )
+        if scale:
+            title += " | " + ", ".join(f"{k}={v}" for k, v in scale.items() if k != "legend")
         self._count += 1
         view_id = f"v{self._count:03d}"
         draw.text((4, 3), title.format(id=view_id), fill=(255, 255, 255), font=self.font)
@@ -529,16 +541,17 @@ class Renderer:
         else:  # synthesis
             if mode in ("synthetic", "target", "source"):
                 rgb = gray(mode)
-            elif mode == "difference":
+            elif mode == "difference":  # signed, on a fixed scale: a bias of 40 shows as a tint over the whole body
                 resolved = self.resolve_window(window, "synthetic")
-                rgb, scale = heat(
-                    np.abs(
-                        self._plane("synthetic", frame, index, crop).astype(np.float32)
-                        - self._plane("target", frame, index, crop)
-                    ),
-                    "hot",
+                signed = self._plane("synthetic", frame, index, crop).astype(np.float32) - self._plane(
+                    "target", frame, index, crop
                 )
-                extra["scale"] = {"difference_max": scale, "legend": "black 0 to white at the 99th percentile"}
+                rgb = colormap(0.5 + signed / (2 * SYNTHESIS_DIFFERENCE), "coolwarm")
+                extra["scale"] = {
+                    "difference_range": [-SYNTHESIS_DIFFERENCE, SYNTHESIS_DIFFERENCE],
+                    "legend": f"synthetic minus target: blue -{SYNTHESIS_DIFFERENCE:g} or less, grey 0, "
+                    f"red +{SYNTHESIS_DIFFERENCE:g} or more",
+                }
             elif mode == "checkerboard":  # one window, the target's: the comparison is of intensities
                 rgb = np.repeat(checkerboard(unit("synthetic", "target"), unit("target"))[..., None], 3, axis=-1)
                 extra["legend"] = "alternating tiles of the synthetic and the real target image"

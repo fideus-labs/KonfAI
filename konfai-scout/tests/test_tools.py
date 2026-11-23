@@ -317,3 +317,28 @@ def test_the_measuring_tools_can_be_taken_away(fixtures, tmp_path):
     note = {"defect": "spurious_structure", "severity": "minor", "confidence": 0.5, "description": "a blob"}
     run(box, "note", kind="suspected_error", views=[view], box_mm={"center": [4, 34, 29], "size": 8}, **note)
     assert len(box.observations) == 1 and box.measurements == []  # Scout's own check of the box is a measure too
+
+
+def test_an_error_is_firm_from_its_tasks_confidence_and_a_doubt_under_it(fixtures, tmp_path):
+    box = toolbox(fixtures, "segmentation", tmp_path)
+    view = run(box, "view", plane="axial", mode="prediction")["view"]
+
+    def firm(severity: str, confidence: float) -> bool:
+        note = run(
+            box,
+            "note",
+            kind="suspected_error",
+            defect="leak",
+            severity=severity,
+            confidence=confidence,
+            description="A leak into the tissue beside it.",
+            box_mm=view["box_mm"],
+            views=[view["id"]],
+            measurements=[],
+        )
+        assert "error" not in note, note
+        return box.observations[-1].firm
+
+    assert not firm("minor", 0.85) and firm("moderate", 0.6)  # against a reference, the severity sorts
+    del box.case.inputs["truth"]
+    assert not firm("moderate", 0.6) and firm("minor", 0.85)  # a segmentation's firm confidence is 0.8

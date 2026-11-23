@@ -327,6 +327,14 @@ class Toolbox:
         record.summary = f"{measurement.id}: stats of {out['voxels']} voxels"
         return {"region": out, "measurement": {"id": measurement.id}, "summary": record.summary}, []
 
+    def _firm(self, severity: str, confidence: float) -> bool:
+        """An error that holds up as written (`ScoutConfig.firm`). A segmentation read against its reference is said
+        at a middling confidence whatever it shows, since the disagreement does not say which of the two is wrong:
+        there the severity sorts, and an error is firm from moderate."""
+        if self.case.task == "segmentation" and self.case.truth_available:
+            return severity != "minor" and confidence >= 0.5
+        return confidence >= self.config.firm.get(self.case.task, 0.5)
+
     def _tool_note(
         self,
         record: ToolCallRecord,
@@ -466,6 +474,7 @@ class Toolbox:
             views=views,
             measurements=measurements,
             notes=notes,
+            firm=None if kind == "measured_property" else self._firm(severity, confidence),
         )
         self.observations.append(observation)
         record.observation = observation.id

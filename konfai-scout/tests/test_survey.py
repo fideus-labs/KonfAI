@@ -39,6 +39,35 @@ def test_a_box_shaped_hole_is_a_cavity_lead():
     assert [found[0] for _, found in _cavities(image, mask, np.ones(3), "organ")] == ["cavity"]
 
 
+def test_a_contour_too_wide_all_round_is_a_lead_and_an_exact_one_is_not():
+    import numpy as np
+    from konfai_scout.survey import _offset_border
+    from scipy import ndimage
+
+    grid = np.indices((40, 64, 64)) - np.array([20, 32, 32])[:, None, None, None]
+    organ = (grid**2).sum(0) < 15**2
+    image = ndimage.gaussian_filter(np.where(organ, 100.0, 0.0), 0.7).astype(np.float32)
+    assert _offset_border(image, organ, np.ones(3), "organ") == []
+    wide = ndimage.binary_dilation(organ, iterations=3)
+    ((offset, (kind, _, reason)),) = _offset_border(image, wide, np.ones(3), "organ")
+    assert kind == "offset_border" and 2.0 < offset < 4.0 and "too wide" in reason
+
+
+def test_an_outline_that_steps_from_slice_to_slice_is_a_lead_and_a_smooth_one_is_not():
+    import numpy as np
+    from konfai_scout.survey import _steps
+
+    grid = np.indices((40, 64, 64)) - np.array([20, 32, 32])[:, None, None, None]
+    organ = (grid**2).sum(0) < 15**2
+    planes = {0: "axial", 1: "coronal", 2: "sagittal"}
+    image = np.where(organ, 100.0, 0.0).astype(np.float32)
+    assert _steps(image, organ, np.ones(3), "organ", planes) == []
+    stepped = np.stack([np.roll(plane, 2 if z % 2 else -2, axis=1) for z, plane in enumerate(organ)])
+    ((step, (kind, _, reason)),) = _steps(image, stepped, np.ones(3), "organ", planes)
+    assert kind == "stepped_outline" and 1.5 < step < 2.5 and "axial" in reason
+    assert _steps(np.where(stepped, 100.0, 0.0).astype(np.float32), stepped, np.ones(3), "organ", planes) == []
+
+
 def test_a_map_of_more_than_512_slices_is_surveyed_label_by_label(tmp_path):
     import numpy as np
     from konfai_scout.survey import _extents
@@ -124,3 +153,21 @@ def test_a_displaced_edge_is_a_lead_and_the_source_says_which_image_moved(role, 
     sitk.WriteImage(moved, str(case.inputs[role]))
     leads = survey(toolbox({"moved": (case, {})}, "moved", tmp_path / "m").renderer)
     assert any(lead.kind == "displacement" and f"points at the {role}" in lead.reason for lead in leads)
+
+
+def test_a_bone_erased_is_a_lead_though_it_lies_on_the_strongest_edges(tmp_path, monkeypatch):
+    import SimpleITK as sitk
+    from konfai_scout import survey as module
+    from konfai_scout.synthetic import synthesis_case
+
+    case, _ = synthesis_case(tmp_path / "erased", clean=True)
+    image = sitk.ReadImage(str(case.inputs["synthetic"]))
+    array = sitk.GetArrayFromImage(image)
+    array[array > 300] = -100.0  # the small bone, drawn as what surrounds it
+    erased = sitk.GetImageFromArray(array)
+    erased.CopyInformation(image)
+    sitk.WriteImage(erased, str(case.inputs["synthetic"]))
+    renderer = toolbox({"erased": (case, {})}, "erased", tmp_path / "e").renderer
+    assert any(lead.kind == "error_cluster" and "darker" in lead.reason for lead in survey(renderer))
+    monkeypatch.setattr(module, "SLIP", float("inf"))  # the strongest edges dropped whole: the bone goes unseen
+    assert not survey(renderer)

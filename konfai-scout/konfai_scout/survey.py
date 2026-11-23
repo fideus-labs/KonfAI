@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where to look: a deterministic survey that hands the model leads, each a region and the reason it stands out.
 A lead is not a finding; the model looks at it and judges. Segmentation: label boundaries that run where the image
-has no edge, components unlike their label's main one, cavities a label encloses (its shape alone, no anatomy),
+has no edge, a border that lies off the image's edge all round, an outline that steps from slice to slice,
+components unlike their label's main one, cavities a label encloses (its shape alone, no anatomy),
 and with a reference the clusters of disagreement. Each kind gives its best lead in turn.
 Registration: folded voxels, and blocks where the edges of the warped and fixed images disagree. Synthesis: clusters
 of error against the target that are more than a seam along an edge. Volumes are read by blocks; a label map whole
@@ -18,7 +19,7 @@ from konfai.utils.ITK import field_jacobian_determinant
 from scipy import ndimage
 
 from .case import Volume
-from .planes import box_to_dict
+from .planes import PLANES, box_to_dict, plane_axis
 from .views import Renderer
 
 MAX_LEADS = 8
@@ -29,6 +30,11 @@ SHIFT_MM = 32.0  # the side of a cell in which a displacement is estimated: room
 REACH_MM = 8.0  # the longest displacement looked for
 GAIN = 0.02  # what a displaced overlay must gain in correlation over the overlay in place
 WEAK = 0.55  # a boundary voxel is edgeless below this fraction of the label's median boundary edge
+OFF_MM = 1.0  # a label's border this far from the image's edge, all round, is a lead
+SHARP = 1.7  # ... where that edge stands out this much of what lies across the border
+SLIP = 1.5  # voxels: an error at a strong edge of the target counts once a slip of that edge this far cannot explain it
+STEP_MM = 0.9  # a label's outline shifting this far sideways from slice to slice, one way then the other, is a lead
+ALTERNATES = 0.7  # ... when the shift changes side this often
 _FULL = np.ones((3, 3, 3), dtype=bool)
 
 
@@ -165,7 +171,10 @@ def _segmentation(r: Renderer) -> list[Found]:
         truth = r.volume("truth").region((0, 0, 0), size)[0]
     spacing = np.asarray(grid.spacing_xyz, dtype=np.float64)[::-1]
     margin = np.ceil(10.0 / spacing).astype(int)
-    kinds: dict[str, list[tuple[float, Found]]] = {"component": [], "cavity": [], "edgeless": []}
+    kinds: dict[str, list[tuple[float, Found]]] = {
+        k: [] for k in ("component", "cavity", "edgeless", "offset", "steps")
+    }
+    planes = {plane_axis(grid, plane): plane for plane in PLANES}
     for label, (start, stop) in _extents(r.volume("prediction"), size).items():
         name = case.labels.get(label, f"label {label}") if case.labels else f"label {label}"
         lo, hi = _zyx(np.maximum(start - margin, 0)), _zyx(np.minimum(stop + margin, size))
@@ -178,6 +187,8 @@ def _segmentation(r: Renderer) -> list[Found]:
             ("component", _components(image, mask, other, name)),
             ("cavity", _cavities(image, mask, spacing, name)),
             ("edgeless", _edgeless(image, mask, spacing, name)),
+            ("offset", _offset_border(image, mask, spacing, name)),
+            ("steps", _steps(image, mask, spacing, name, planes)),
         ):
             kinds[kind] += [(score, (k, _offset(w, lo), why)) for score, (k, w, why) in leads]
     ranked = [[f for _, f in sorted(leads, key=lambda c: -c[0])] for leads in kinds.values()]
@@ -304,6 +315,92 @@ def _edgeless(image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name
     return out
 
 
+def _offset_border(
+    image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name: str
+) -> list[tuple[float, Found]]:
+    """A contour too wide or too tight all round stands out against nothing along itself. Across the border, over
+    six shells inside and six outside (each a millimetre thick, or a voxel), the image's in-plane edge peaks where
+    the structure ends: a lead when that is ``OFF_MM`` off the border. Silent where no edge stands out, or none
+    within reach."""
+    if (mask & ~ndimage.binary_erosion(mask)).sum() < 30:
+        return []
+    voxel = float(spacing_zyx[1:].mean())
+    width = max(1.0, voxel)
+    signed = ndimage.distance_transform_edt(~mask, sampling=spacing_zyx)
+    signed -= ndimage.distance_transform_edt(mask, sampling=spacing_zyx)
+    signed -= np.where(mask, -0.5, 0.5) * voxel  # from voxel centres to the border between them
+    edge = np.sqrt(sum((ndimage.gaussian_filter1d(image, 1.0, axis=a, order=1) / spacing_zyx[a]) ** 2 for a in (1, 2)))
+    shell = np.digitize(signed, np.arange(-6, 7) * width) - 1
+    near = (shell >= 0) & (shell < 12)
+    count = np.bincount(shell[near], minlength=12)
+    if count.min() == 0:
+        return []
+    profile = np.bincount(shell[near], weights=edge[near], minlength=12) / count
+    peak = int(np.argmax(profile))
+    if peak in (0, 11) or profile[peak] < SHARP * float(np.median(profile)):
+        return []
+    a, b, c = profile[peak - 1 : peak + 2]
+    at = (peak - 5.5 + 0.5 * (a - c) / (a - 2 * b + c)) * width  # mm, negative inside the label
+    if abs(at) < OFF_MM:
+        return []
+    window = ndimage.find_objects(mask.astype(np.uint8))[0]
+    side, fault = ("inside", "too wide") if at < 0 else ("outside", "too tight")
+    reason = (
+        f"across the {name} border the image's edge lies {abs(at):.1f} mm ({abs(at) / voxel:.1f} voxels) {side} it, "
+        f"taken all round (the edge stands "
+        f"{profile[peak] / float(np.median(profile)):.1f} times above what lies across the border): the contour may be "
+        f"{fault} everywhere"
+    )
+    return [(abs(at), ("offset_border", window, reason))]
+
+
+def _bend(slices: np.ndarray, along: int, middle: np.ndarray) -> np.ndarray:
+    """How far each slice's centre, along one in-plane axis, lies from the middle of its two neighbours' (twice
+    that, in voxels): 4 steps where a shift alternates, next to nothing along a smooth shape."""
+    profile = slices.sum(2 - along, dtype=np.float64)  # summed along the other in-plane axis
+    centre = profile @ np.arange(profile.shape[1]) / np.maximum(profile.sum(1), 1e-6)
+    return centre[middle + 1] - 2 * centre[middle] + centre[middle - 1]
+
+
+def _steps(
+    image: np.ndarray, mask: np.ndarray, spacing_zyx: np.ndarray, name: str, planes: dict[int, str]
+) -> list[tuple[float, Found]]:
+    """An outline that shifts sideways from one slice to the next, one way then the other, over an image that does
+    not: a result made slice by slice. Each slice's centre against the middle of its two neighbours', over the slices
+    whose area holds from one to the next, for the label and for what the image holds there."""
+    best: tuple[float, float, int, int, float] | None = None
+    content = np.abs(image - np.median(image))
+    for axis in range(3):
+        slices = np.moveaxis(mask, axis, 0)
+        area = slices.sum((1, 2))
+        ratio = area[1:] / np.maximum(area[:-1], 1)
+        alike = (area[:-1] >= 20) & (ratio > 0.7) & (ratio < 1.43)
+        middle = np.flatnonzero(alike[:-1] & alike[1:]) + 1
+        if len(middle) < 6:
+            continue
+        run = np.diff(middle) == 1
+        for along, in_plane in enumerate(a for a in range(3) if a != axis):
+            bends = _bend(slices, along, middle) * spacing_zyx[in_plane]
+            step = float(np.median(np.abs(bends))) / 4
+            if step < STEP_MM or not run.any() or np.mean((bends[:-1] * bends[1:] < 0)[run]) < ALTERNATES:
+                continue
+            under = _bend(np.moveaxis(content, axis, 0), along, middle) * spacing_zyx[in_plane]
+            under = float(np.median(np.abs(under))) / 4
+            if under < 0.5 * step and (best is None or step > best[0]):  # an image that steps too explains it
+                best = (step, under, axis, len(middle), step / float(spacing_zyx[in_plane]))
+    if best is None:
+        return []
+    step, under, axis, count, voxels = best
+    reason = (
+        f"from one {planes[axis]} slice to the next the {name} outline shifts sideways by about {step:.1f} mm "
+        f"({voxels:.1f} voxels), one way "
+        f"then the other (over {count} slices), while what the image holds there shifts by {under:.1f} mm. Slice "
+        "thickness makes an outline step the same way over several slices, not back and forth at each: the contour "
+        "may be off its structure, one side then the other, on every slice"
+    )
+    return [(step, ("stepped_outline", ndimage.find_objects(mask.astype(np.uint8))[0], reason))]
+
+
 def _disagreement(
     prediction: np.ndarray, truth: np.ndarray, names: dict[int, str], spacing_zyx: np.ndarray
 ) -> list[Found]:
@@ -405,7 +502,8 @@ def _edge_disagreement(r: Renderer, spacing: np.ndarray, size: tuple[int, ...]) 
 
 def _synthesis(r: Renderer) -> list[Found]:
     """Clusters where the synthetic departs from the target by several times the case's typical error, smoothed so
-    that noise does not count, and off the target's strongest edges where a slight shift or blur is expected."""
+    that noise does not count, and off the target's strongest edges where a slight shift or blur is expected, unless
+    the error is more than a slip of that edge by ``SLIP`` voxels explains."""
     case, grid = r.case, r.grid
     if "target" not in case.inputs:
         raise SurveySkipped("a synthesis without a target has nothing to compare with")
@@ -446,7 +544,9 @@ def _synthesis(r: Renderer) -> list[Found]:
         inner = _inner(lo, hi, olo)
         window = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
         e, t, inside = error(olo, ohi)
-        hot[window] = ((np.abs(e) > threshold) & (_edges(t, spacing) < strong) & inside)[inner]
+        edge = _edges(t, spacing)
+        beyond = np.abs(e) > SLIP * float(spacing[1:].mean()) * edge  # a bone erased lies on the strongest edges
+        hot[window] = ((np.abs(e) > threshold) & ((edge < strong) | beyond) & inside)[inner]
         signed[window] = e[inner]
     hot = ndimage.binary_opening(hot, structure=_FULL)  # a seam one voxel thick is not a cluster
     out = _displacements(r, spacing, size)
