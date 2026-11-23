@@ -78,8 +78,9 @@ call budget counts the calls that explore (`view`, `montage`, `measure`, `region
 never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
 are counted inside the served tools, and `claude-code`'s cost message by message; `codex` reports its cost only once
 its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price is unknown).
-`--second-reading` adds, after the inspection, one short session per error observation for the blind re-read.
-Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is local. The cost
+`--second-reading` adds, after the inspection, one short session per error observation for the blind re-read. It
+runs past the limits above: its cost is added to the report's, not bounded by `--max-usd`.
+Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is taken as local (Scout cannot tell whether that server forwards what it receives). The cost
 is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
 adds a model).
 
