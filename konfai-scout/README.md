@@ -11,12 +11,44 @@ on what looks off, switches overlays to tell the image from the result, asks Kon
 region, and writes a report of localised defects with their type, severity, uncertainty, the views that show them
 and the measurements that support them.
 
+## Quick start
+
+```bash
+pip install "konfai-scout[anthropic]"
+konfai-scout inspect --task segmentation --name case01 \
+    --input image=ct.nii.gz --input prediction=seg.nii.gz --labels 1=kidney \
+    --out reports/case01 --provider anthropic --allow-cloud-images
+```
+
+A few minutes and some fifteen tool calls later, `reports/case01/report.md` opens like this (a kidney whose upper half
+the method left out):
+
+```markdown
+**Verdict: defective** (confidence 0.88, by model)
+
+The left kidney label stops in a flat cut at z≈747 mm. The kidney's upper half, visible up to z≈790, has no label
+(o001, major). Small hilar holes are left out (o002, minor). The right kidney otherwise follows the image.
+
+| Finding | Defect             | Kind      | Severity | Confidence  | Where                              |
+|---------|--------------------|-----------|----------|-------------|------------------------------------|
+| o001    | under_segmentation | suspected | major    | 0.90 (firm) | (98, 185, 771) mm, 75 x 70 x 48 mm |
+| o002    | holes              | suspected | minor    | 0.60        | (-66, 188, 757) mm, 17 x 11 x 44 mm |
+```
+
+Each finding then has its own section: what Scout saw, the views that show it (kept as images beside the report) and
+the measurements it cites. `report.json` holds the same, with every tool call, for a program to read. No API key at
+hand? `--provider mock` runs the whole loop with a heuristic model, and `--provider claude-code` or `codex` use your
+Claude Code or ChatGPT login.
+
+## How it works
+
 - **It explores.** Coverage first (a montage per plane), then targeted views: slices, zooms, checkerboards, difference
   maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.
 - **It knows where to look first.** Before the model's first turn a deterministic survey lists leads, each a box and
-  why: a boundary the image does not support, a component unlike the main one, a fold, a region where the warped
-  image's edges stop following the fixed one's, an error well above the case's typical one. A lead is not a
-  finding; the model must look at each before it concludes.
+  why: a boundary the image does not support, a component unlike the main one, an enclosed cavity, a contour drawn
+  in steps or off its edge by a constant margin, a fold, a region where the warped image's edges stop following the
+  fixed one's, an error well above the case's typical one. A lead is not a finding; the model must look at each
+  before it concludes.
 - **It measures with KonfAI Eval, not with a scorer of its own.** A region is cropped and scored by `konfai.evaluate`
   with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
   and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
@@ -27,7 +59,9 @@ and the measurements that support them.
   that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken
   elsewhere. Scout measures every flagged box itself with KonfAI Eval, records it on the observation, and
   downgrades a confirmation that no measured value supports. The verdict is *defective* exactly when a major or
-  critical error is noted at confidence 0.5 or more; "insufficient evidence" is a legitimate conclusion. On
+  critical error is noted at confidence 0.5 or more; "insufficient evidence" is a legitimate conclusion. An error
+  Scout would stand behind is marked *firm* (`firm` on the observation, "(firm)" in the report); the others are
+  doubts to check, and reading only the firm ones is the cautious way to use a report. On
   request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and
   its answer stands in the report next to the first reader's.
 - **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
@@ -38,6 +72,21 @@ and the measurements that support them.
   exploration buys.
 - **It works with Claude, GPT, or a local vision model** through an OpenAI-compatible server, and sends images to a
   cloud API only when told to.
+
+## With or without a reference
+
+Scout inspects a result alone, or with what it is scored against. Give it what you have: it says in the report which
+one it was (`No reference given` or the truth's role among the inputs).
+
+- **Without a reference** (`image` and `prediction`; `fixed`, `moving` and `field`; `source` and `synthetic`), Scout
+  judges the result against the image itself: a label the image's edges do not support, a structure that is not in
+  the source. Nothing is measured against a truth, and no error is *confirmed*. Label names help here: name each
+  label with what it holds and leaves out (`--labels "1=liver parenchyma without its vessels"`).
+- **With a reference** (`truth`, `target`, or a registration's labels and landmarks), every disagreement between
+  the result and the reference becomes a lead, read on three planes, and the measurements are KonfAI Eval's against
+  that reference: a contour off by a couple of millimetres, a leak, a bias or an erased bone that a result alone
+  does not show. A reference can be wrong too: where the result follows the image and the reference does not, Scout
+  notes a `reference_error`, which is never held against the result.
 
 ## Install
 
