@@ -1259,11 +1259,21 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     named = dict(program)
     carry_extension(beside, named, out)
     assert named["extension"] == "own.wasm"
-    # A name the program holds as no file (a label's) is no collision.
-    (tmp_path / "roi.wasm").write_bytes(b"\0asm")
-    labelled = {**program, "outputs": [{"labels": {"1": "roi.wasm"}}]}
-    carry_extension(tmp_path / "roi.wasm", labelled, out)
-    assert labelled["extension"] == "roi.wasm" and (out.parent / "roi.wasm").read_bytes() == b"\0asm"
+    # A name the program holds as no file (a label's, a group's) is no collision; a graph's spelled in other cases is.
+    for name in ("roi.wasm", "labels.onnx"):
+        (tmp_path / name).write_bytes(b"\0asm")
+        named = {
+            **program,
+            "outputs": [{"labels": {"1": "roi.wasm"}, "steps": [{"op": "mask", "group": "labels.onnx"}]}],
+        }
+        carry_extension(tmp_path / name, named, out)
+        assert named["extension"] == name and (out.parent / name).read_bytes() == b"\0asm"
+    (tmp_path / "MODEL.ONNX").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"MODEL\.ONNX"):
+        carry_extension(tmp_path / "MODEL.ONNX", dict(program), out)
+    (tmp_path / "fold_0.onnx").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"fold_0\.onnx"):
+        carry_extension(tmp_path / "fold_0.onnx", {"models": {"fold_0": "fold_0.onnx"}}, out)
 
 
 @pytest.mark.parametrize(

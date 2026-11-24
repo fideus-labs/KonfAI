@@ -3500,14 +3500,19 @@ def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> N
     only files a program names)."""
 
     def graphs(node: Any) -> Iterator[str]:
-        if isinstance(node, str) and node.endswith(".onnx"):
-            yield node
+        """The graph files ``node`` names: a ``model``, a ``partial`` or a ``finish`` file, the ``models`` a program
+        maps; each in lower case, a file system telling no case apart."""
+        for key, value in node.items() if isinstance(node, dict) else ():
+            if key in ("model", "partial", "finish") and isinstance(value, str) and value.endswith(".onnx"):
+                yield value.lower()
+            elif key == "models" and isinstance(value, dict):
+                yield from (str(file).lower() for file in value.values())
         for value in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
             yield from graphs(value)
 
     if not extension.is_file():
         raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
-    if extension.name == output.name or extension.name in graphs(program):
+    if extension.name.lower() == output.name.lower() or extension.name.lower() in graphs(program):
         raise ConfigError(
             f"The extension '{extension.name}' takes the name of a file the program writes beside it.",
             "Name the extension apart from the program and the graphs it names.",
