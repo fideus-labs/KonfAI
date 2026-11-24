@@ -2064,7 +2064,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
             return LocalAppRepositoryFromHF.download(repo_id, filename, True)
 
     def _download(self, filename: str) -> Path:
-        if not filename.startswith(self._app_name):
+        if not filename.startswith(f"{self._app_name}/"):
             filename = self._app_name + "/" + filename
         return LocalAppRepositoryFromHF.download(self._repo_id, filename, self._force_update)
 
@@ -2085,7 +2085,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         """
         paths: list[Path] = []
         for filename in filenames or self.get_app_filenames():
-            if not filename.startswith(self._app_name):
+            if not filename.startswith(f"{self._app_name}/"):
                 filename = f"{self._app_name}/{filename}"
             paths.append(LocalAppRepositoryFromHF.download(self._repo_id, filename, force_update))
         return paths
