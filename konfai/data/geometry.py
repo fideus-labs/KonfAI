@@ -430,6 +430,15 @@ def invert_remap(remap: AxisRemap) -> AxisRemap:
     return inverted
 
 
+def flip(tensor: torch.Tensor, dims: list[int] | tuple[int, ...]) -> torch.Tensor:
+    """``tensor.flip(dims)`` for every dtype: a uint16, uint32 or uint64 volume (an MR stored unsigned), which torch
+    does not flip, is flipped through the signed view of its width, bit for bit."""
+    import torch  # here, so that importing this module imports no torch
+
+    signed = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}.get(tensor.dtype)
+    return tensor.flip(dims) if signed is None else tensor.view(signed).flip(dims).view(tensor.dtype)
+
+
 def apply_remap(tensor: torch.Tensor, remap: AxisRemap) -> torch.Tensor:
     """The remap, materialised on a tensor whose trailing axes are the spatial ones. Leading axes are
     left in place. ``flip`` materialises the permuted view even for an empty mirror list, so the
@@ -437,7 +446,7 @@ def apply_remap(tensor: torch.Tensor, remap: AxisRemap) -> torch.Tensor:
     offset = tensor.dim() - len(remap)
     dims = list(range(offset)) + [offset + source for source, _ in remap]
     flips = [offset + axis for axis, (_, mirrored) in enumerate(remap) if mirrored]
-    return tensor.permute(dims).flip(flips)
+    return flip(tensor.permute(dims), flips)
 
 
 @dataclass(frozen=True)
