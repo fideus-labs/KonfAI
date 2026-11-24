@@ -583,6 +583,12 @@ def refuse_a_late_crop(
     )
 
 
+def _blended(manifest: dict[str, Any]) -> tuple[int, str]:
+    """What a model's chain starts from: what its app's own Fold leaves, else its head's float32 channels."""
+    blended = manifest.get("blended") or {}
+    return int(blended.get("channels") or manifest["output"]["channels"]), str(blended.get("dtype") or "float32")
+
+
 #: The evaluation's folds of a stack of members, each a float32 map.
 _MEMBER_FOLD_OPS = ("variance", "standard_deviation", "segmentation_disagreement")
 
@@ -590,8 +596,8 @@ _MEMBER_FOLD_OPS = ("variance", "standard_deviation", "segmentation_disagreement
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
-    if "manifest" in step:  # a nested model: what its own chain leaves of its float32 head
-        return _dtype_after(step["manifest"].get("postprocessing", []), "float32")
+    if "manifest" in step:  # a nested model: what its own chain leaves of what it blends
+        return _dtype_after(step["manifest"].get("postprocessing", []), _blended(step["manifest"])[1])
     op = step["op"]
     if op in ("cast", "onnx"):
         return str(step["dtype"])
@@ -3052,9 +3058,9 @@ def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | Non
     channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (float32 where
     only the run knows it), a spread of a stack of ``members`` one member's, a disagreement of them one."""
     if "manifest" in step:
-        made = int(step["manifest"]["output"]["channels"])
-        for post in step["manifest"].get("postprocessing", []):
-            made = _channels_after(post, made, rank)
+        made, blended = _blended(step["manifest"])
+        for post, handed in _handed(step["manifest"].get("postprocessing", []), blended):
+            made = _channels_after(post, made, rank, handed)
         return held * made if step.get("per_channel") else made
     if step["op"] in ("argmax", "magnitude", "threshold_labels", "segmentation_disagreement"):
         return 1

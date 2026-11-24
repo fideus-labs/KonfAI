@@ -266,6 +266,54 @@ def test_the_first_case_s_stacked_members_are_read_off_its_header(
     assert _first_case(SimpleNamespace(case_names=["P0"], datasets={"stacks": dataset}), "Stack") == (4, 3, count)
 
 
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"output": {"channels": 3}, "blended": {"channels": 2, "dtype": "uint8", "params": {}}},
+        {
+            "output": {"channels": 1},
+            "postprocessing": [
+                {"op": "cast", "dtype": "uint8"},
+                {"op": "extension", "class": "NestedChain:Repeat", "params": {}, "whole": True},
+            ],
+        },
+    ],
+    ids=["what-its-fold-leaves", "past-its-own-chain"],
+)
+def test_a_class_of_the_app_s_past_a_nested_model_is_probed_in_the_dtype_the_model_hands_on(
+    tmp_path: Path, monkeypatch, manifest: dict
+) -> None:
+    # The nested app's Fold leaves two uint8 channels; or its own chain casts its one to uint8, which a class of its
+    # own repeats into two, as it does integers only: two uint8 channels either way.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "NestedChain.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Repeat(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor if tensor.is_floating_point() else tensor[:1].repeat(2, 1, 1, 1)\n\n"
+        "class Bytes(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if str(tensor.dtype) != 'torch.uint8' or tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two uint8 channels, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    nested = {"model": "Seg.onnx", **manifest}
+    steps = _group_steps(
+        "Seg",
+        {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "NestedChain:Bytes": {}},
+        tmp_path,
+        {},
+        lambda group, _params, _out: {"id": group, "manifest": nested},
+        True,
+        (1, 3, 1),
+    )
+    assert steps[-1]["op"] == "extension"
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")
