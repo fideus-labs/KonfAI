@@ -788,7 +788,7 @@ def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[
 
 
 def _extension_step(
-    name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE, groups: bool = False
+    name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE, groups: bool = False, on_grid: bool = False
 ) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
@@ -826,14 +826,17 @@ def _extension_step(
             ) from error
         undone = isinstance(stage, TransformInverse) and stage.apply_inverse
         # A HALO class keeps the grid: the extents, and the geometry it could record without changing them.
-        moved = (
-            tuple(returned.shape) != probe
-            or undone
-            or any(
-                not np.array_equal(attribute.get_np_array(key), _probe_attribute(rank).get_np_array(key))
-                for key in ("Origin", "Spacing", "Direction")
-            )
+        regridded = tuple(returned.shape[1:]) != probe[1:] or any(
+            not np.array_equal(attribute.get_np_array(key), _probe_attribute(rank).get_np_array(key))
+            for key in ("Origin", "Spacing", "Direction")
         )
+        if on_grid and regridded:
+            raise ConfigError(
+                f"transform '{name}' returns {list(returned.shape)} for {list(probe)}, which moves its group off the"
+                " grid the model's first input lands on, and konfai patches every group of a case on one grid.",
+                _or_konfai("Drop the stage, put the same one on the first input group", _PREDICT),
+            )
+        moved = regridded or returned.shape[0] != probe[0] or undone
         if ("halo" in reads and moved) or (returned.shape[0] != probe[0] and undone):
             raise ConfigError(
                 f"transform '{name}' returns {list(returned.shape)} for {list(probe)}: an app's extension runs a"
@@ -1717,6 +1720,7 @@ def compile_pipeline(
     probe: Probe | None = None,
     groups: bool = False,
     planned: int | None = None,
+    on_grid: bool = False,
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``extension`` (the app carries its extension of
     KonfAI Edge), a transform of the app's own is the step its extension runs. With ``fold``, a POINTWISE transform with no op is
@@ -1731,7 +1735,8 @@ def compile_pipeline(
     (the final chain), a stage reading a group of the case (a ``Mask``, a class of the app's) is a step naming the
     group, which the program runs with the rest of the chain (:func:`_split_group_tail`). With ``planned`` (a group's
     chain, which konfai binds and plans as an output chain it does not), the chain is planned as konfai plans it on a
-    case of that rank first (:func:`_planned`)."""
+    case of that rank first (:func:`_planned`). With ``on_grid`` (a group read beside the first, on its grid), a class
+    of the app's own that moves the grid is refused."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
@@ -1804,7 +1809,7 @@ def compile_pipeline(
                     "(pointwise custom) transforms to the end of the inference pipeline."
                 )
             if own:
-                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE, groups)
+                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE, groups, on_grid)
             else:
                 step = _admitted(OP_MAP[base](params, roots=roots) if base == "Resample" else OP_MAP[base](params))
             # A Crop past the app's own transform finds its box in the values it changed.
@@ -1881,6 +1886,7 @@ def _group_chain(
         extension=extension,
         probe=_probe_after(rank, lambda: channels),
         planned=rank,
+        on_grid=True,
     )
     if (moved := next((step for step in steps if step["op"] in REGRIDS), None)) is not None:
         raise ConfigError(

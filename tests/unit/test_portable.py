@@ -1260,6 +1260,41 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     assert named["extension"] == "own.wasm"
 
 
+@pytest.mark.parametrize(
+    ("trim", "copies", "refused"),
+    [(1, 1, True), (0, 1, False), (0, 2, False)],
+    ids=["trims", "keeps-the-grid", "keeps-the-grid-in-two-channels"],
+)
+def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trim: int, copies: int, refused: bool
+) -> None:
+    # konfai patches every group of a case on the first one's grid: a whole-volume class of the app's own that trims
+    # the second is refused as konfai's own regridding stages are, and one that keeps the grid compiles, whatever
+    # channels it hands on.
+    (tmp_path / "OwnGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Trim(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, by: int = 1, copies: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.by, self.copies = by, copies\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return [extent - 2 * self.by for extent in shape]\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        kept = tensor[(slice(None), *[slice(self.by, extent - self.by) for extent in tensor.shape[1:]])]\n"
+        "        return kept.repeat(self.copies, *[1] * (kept.dim() - 1))\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _two_groups({"OwnGrid:Trim": {"by": trim, "copies": copies}})
+    if refused:
+        with pytest.raises(ConfigError, match="off the grid"):
+            transform_manifest(config, "Predictor", extension=True)
+    else:
+        assert transform_manifest(config, "Predictor", extension=True)[0]["reads"][0]["preprocessing"][0]["op"] == (
+            "extension"
+        )
+
+
 def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
     # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
     # konfai hands the stage as stored, as the first group's chain's own.
