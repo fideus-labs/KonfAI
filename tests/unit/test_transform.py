@@ -1091,6 +1091,19 @@ def test_canonical_round_trips_exactly(direction: np.ndarray) -> None:
     np.testing.assert_allclose(attributes.get_np_array("Direction"), direction.reshape(-1))
 
 
+def test_canonical_reorients_onto_the_orientation_it_is_given() -> None:
+    # A model trained on arrays in DICOM order wants LPS, the identity: a volume stored RAS, diag(-1, -1, 1), is
+    # mirrored on physical x and y (array axes 3 and 2), one already in LPS is left alone; a bad code is refused.
+    volume = _ct_like_volume()
+    attributes = _canonical_attributes(np.diag([-1.0, -1.0, 1.0]))
+
+    assert torch.equal(Canonical(orientation="LPS")("case", volume, attributes), volume.flip((3, 2)))
+    np.testing.assert_allclose(attributes.get_np_array("Direction"), np.eye(3).reshape(-1))
+    assert torch.equal(Canonical(orientation="lps")("case", volume, _canonical_attributes(np.eye(3))), volume)
+    with pytest.raises(TransformError, match="orientation"):
+        Canonical(orientation="RAL")
+
+
 def test_canonical_records_the_canonical_geometry_from_the_volume_extent() -> None:
     # The new origin is the corner the reorientation mirrors onto, so it is the far end of the extent
     # on each mirrored axis and untouched on the others. A mirroring moves no axis, so the spacing stays.
