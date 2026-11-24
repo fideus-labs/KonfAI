@@ -1260,6 +1260,11 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     named = dict(program)
     carry_extension(beside, named, out)
     assert named["extension"] == "own.wasm"
+    # A class's own parameters name no graph of the program's, a map of models among them.
+    (tmp_path / "variant.wasm").write_bytes(b"\0asm")
+    stepped = {**program, "outputs": [{"steps": [{"op": "extension", "params": {"models": {"v": "variant.wasm"}}}]}]}
+    carry_extension(tmp_path / "variant.wasm", stepped, out)
+    assert stepped["extension"] == "variant.wasm"
     # A name the program holds as no file (a label's, a group's) is no collision; a graph's spelled in other cases is.
     for name in ("roi.wasm", "labels.onnx"):
         (tmp_path / name).write_bytes(b"\0asm")
@@ -1344,7 +1349,13 @@ def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
 
 @pytest.mark.parametrize(
     "planted",
-    ["a link at the program", "a link at the manifest", "a missing extension", "a link at a statistic's finish graph"],
+    [
+        "a link at the program",
+        "a link at the manifest",
+        "a missing extension",
+        "a link where the extension lands",
+        "a link at a statistic's finish graph",
+    ],
 )
 def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
@@ -1371,6 +1382,10 @@ def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
         (out / ("manifest.json" if planted == "a link at the manifest" else "finish.onnx")).symlink_to(
             tmp_path / "elsewhere.json"
         )
+    elif planted == "a link where the extension lands":
+        extension = tmp_path / "engine.wasm"
+        extension.write_bytes(b"\0asm")
+        (out / "engine.wasm").symlink_to(tmp_path / "elsewhere.json")
     else:
         extension = tmp_path / "missing.wasm"
 
@@ -1532,6 +1547,25 @@ def test_a_class_of_the_app_s_taking_blocks_of_voxels_is_probed_on_a_volume_it_t
     monkeypatch.syspath_prepend(str(tmp_path))
     manifest = transform_manifest(_two_groups({"Blocks:Even": {}}), "Predictor", extension=True)[0]
     assert manifest["reads"][0]["preprocessing"][0]["op"] == "extension"
+
+
+def test_a_class_of_the_app_s_is_probed_for_its_dtype_on_each_as_a_case_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class keeping a case's first dtype returns the dtype each case holds: probed for it in each stored dtype on a
+    # fresh instance, it states no dtype of its own.
+    (tmp_path / "FirstDtype.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class First(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.to(self.datasets[0].case_facts.setdefault(name, tensor.dtype))\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    step = transform_manifest(_two_groups({"FirstDtype:First": {}}), "Predictor", extension=True)[0]["reads"][0][
+        "preprocessing"
+    ][0]
+    assert step["op"] == "extension" and "dtype" not in step
 
 
 def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(

@@ -956,9 +956,19 @@ def _extension_step(
                 ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
-    dtype = _own_dtype(classpath, lambda volume: _probed(stage, volume, _probe_attribute(rank)), voxels, handed)
+    read: list[str] = []
+
+    def on_a_case(volume: Any) -> Any:
+        """The class on ``volume``, a case of its own (a fresh instance), the groups it reads recorded."""
+        fresh = _own_stage(classpath, kwargs, rank)
+        try:
+            return _probed(fresh, volume, _probe_attribute(rank))
+        finally:
+            read.extend(group for group in fresh.datasets[0].read if group not in read)
+
+    dtype = _own_dtype(classpath, on_a_case, voxels, handed)
     step = _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
-    if read := stage.datasets[0].read:
+    if read:
         if not groups or "whole" not in reads:
             raise ConfigError(
                 f"transform '{name}' reads the case's groups {read}, which KonfAI Edge hands a WHOLE_VOLUME class of"
@@ -3563,6 +3573,8 @@ def compile_destinations(output: str | Path, extension: str | Path | None) -> tu
             f"The extension '{extension.name}' sits beside the program, named as a graph the export writes there.",
             "Name the extension apart from the graphs, or keep it in another folder.",
         )
+    if extension.parent != output.parent:  # where it is copied
+        owned_destination(output.parent / extension.name)
     return output, extension
 
 
@@ -3573,14 +3585,15 @@ def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> N
 
     def graphs(node: Any) -> Iterator[str]:
         """The graph files ``node`` names: a ``model``, a ``partial`` or a ``finish`` file, the ``models`` a program
-        maps; each in lower case, a file system telling no case apart."""
+        maps; each in lower case, a file system telling no case apart. A class's own ``params`` name none."""
         for key, value in node.items() if isinstance(node, dict) else ():
             if key in ("model", "partial", "finish") and isinstance(value, str) and value.endswith(".onnx"):
                 yield value.lower()
             elif key == "models" and isinstance(value, dict):
                 yield from (str(file).lower() for file in value.values())
-        for value in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
-            yield from graphs(value)
+        for key, value in node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ():
+            if key != "params":
+                yield from graphs(value)
 
     if extension.name.lower() == output.name.lower() or extension.name.lower() in graphs(program):
         raise ConfigError(
