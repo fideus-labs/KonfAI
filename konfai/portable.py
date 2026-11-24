@@ -586,6 +586,8 @@ def refuse_a_late_crop(
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
+    if "manifest" in step:  # a nested model: what its own chain leaves of its float32 head
+        return _dtype_after(step["manifest"].get("postprocessing", []), "float32")
     op = step["op"]
     if op in ("cast", "onnx"):
         return str(step["dtype"])
@@ -746,15 +748,22 @@ def _own_stage(classpath: str, params: dict[str, Any], rank: int) -> Any:
 
     module, name = get_module(classpath, "konfai.data.transform")
     stage = getattr(module, name)(**params)
-    stage.set_datasets([_GroupsRead((1, *[_PROBE_EXTENT] * rank))])
+    stage.set_datasets([_GroupsRead((1, *_probe_extents(rank)))])
     return stage
 
 
-#: The extent of the volume a class that reads past the voxel is probed on, along each axis: wider than a
-#: neighbourhood.
+#: The extent of the volume a class that reads past the voxel is probed on along its first axis, one more along each
+#: next: wider than a neighbourhood, and other along each axis, so a class that swaps two is seen to.
 _PROBE_EXTENT = 8
+
+
+def _probe_extents(rank: int) -> tuple[int, ...]:
+    """The extents of the volume of ``rank`` axes a class is probed on."""
+    return tuple(_PROBE_EXTENT + axis for axis in range(rank))
+
+
 #: What a class is probed on where its chain is not known: one channel of a 3D volume.
-_VOLUME_PROBE = (1, *[_PROBE_EXTENT] * 3)
+_VOLUME_PROBE = (1, *_probe_extents(3))
 
 
 def _probe_attribute(rank: int) -> Any:
@@ -782,7 +791,7 @@ def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[
         held = start()
         for step in [*before(), *steps]:
             held = _channels_after(step, held, rank)
-        return (held, *[_PROBE_EXTENT] * rank)
+        return (held, *_probe_extents(rank))
 
     return probe
 
@@ -1109,7 +1118,7 @@ def _planned(items: list[tuple[str, Any]], rank: int | None) -> Iterator[tuple[s
             continue
         stage.preceding = list(stages)
         stages.append(stage)
-    shape, attribute = [_PROBE_EXTENT] * rank, _probe_attribute(rank)
+    shape, attribute = list(_probe_extents(rank)), _probe_attribute(rank)
     for stage in stages:
         bound, stage.preceding = stage.preceding, []
         try:
@@ -3024,8 +3033,8 @@ def _channels_after(step: dict[str, Any], held: int, rank: int) -> int:
     if step["op"] == "extension":
         import torch
 
-        extent = _PROBE_EXTENT if "halo" in step or "whole" in step else 1
-        volume = torch.zeros((held, *[extent] * rank))
+        extents = _probe_extents(rank) if "halo" in step or "whole" in step else (1,) * rank
+        volume = torch.zeros((held, *extents))
         stage = _own_stage(step["class"], step["params"], rank)
         return int(_probed(stage, volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
