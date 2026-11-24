@@ -30,6 +30,7 @@ from konfai.data.geometry import (
     AxisRemap,
     Grid,
     apply_remap,
+    flip,
     invert_remap,
     remap_region,
     remap_shape,
@@ -753,11 +754,11 @@ class Flip(TransformInverse):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         self.transform_shape("", name, list(tensor.shape[1:]), cache_attribute)
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
-        return tensor.flip(tuple(self.dims))
+        return flip(tensor, tuple(self.dims))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         _pop_remap_geometry(cache_attribute, tensor.dim() - 1)
-        return tensor.flip(tuple(self.dims))
+        return flip(tensor, tuple(self.dims))
 
 
 class Canonical(TransformInverse):
