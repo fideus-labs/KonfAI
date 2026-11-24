@@ -1399,6 +1399,79 @@ def test_bytecode_the_bundle_holds_is_none_the_check_reads(tmp_path):
         _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
 
 
+@pytest.mark.parametrize("planted", ["a directory at the manifest", "a link at the drafted requirements"])
+def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_own(tmp_path, planted):
+    # What the update writes, beside the configs or once published, it writes whole: into no directory, through no
+    # link (konfai.utils.utils.owned_destination).
+    pytest.importorskip("onnxscript")
+    root, _config, exporting = _exporting(tmp_path)
+    bundle = _cli(root, **{key: value for key, value in exporting.items() if key != "onnx"})
+    (tmp_path / "elsewhere.txt").write_text("not the bundle's")
+    if planted == "a directory at the manifest":
+        (bundle / "manifest.json").mkdir()
+        with pytest.raises(AppMetadataError, match=r"manifest\.json' is a directory"):
+            _cli(root, **exporting)
+    else:
+        (root / "Model.py").write_text("import einops\n")
+        (bundle / "requirements.txt").symlink_to(tmp_path / "elsewhere.txt")
+        with pytest.raises(ConfigError, match=r"requirements\.txt' is a link"):
+            _cli(root, model_py=str(root / "Model.py"))
+    assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
+
+
+@pytest.mark.parametrize("group", ["aux/mask", "..", ""])
+def test_a_nested_app_s_group_is_one_name(tmp_path, group):
+    # Its graph lands beside the configs as <group>.onnx: a group that names a path is refused before anything is read.
+    from konfai_apps.bundle import export_nested_model
+
+    with pytest.raises(AppMetadataError, match="one name"):
+        export_nested_model(group, {"repo_id": "a", "model_name": "b"}, tmp_path)
+
+
+def test_the_import_path_of_a_bundle_s_check_is_the_update_s(tmp_path, monkeypatch):
+    # The empty entry is the caller's folder, an entry inside the bundle its counterpart in the update, every other
+    # entry absolute; the update comes first.
+    from konfai_apps.bundle import _import_path
+
+    bundle, update = tmp_path / "out" / "Seg", tmp_path / "out" / ".Seg.update-1"
+    (bundle / "lib").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(bundle / "lib")
+    monkeypatch.chdir(tmp_path)
+    entries = ["", "deps", str(tmp_path / "abs"), str(bundle), str(bundle / "lib"), str(tmp_path / "link")]
+    assert _import_path(entries, bundle, update) == [
+        str(update.absolute()),
+        str(tmp_path),
+        str(tmp_path / "deps"),
+        str(tmp_path / "abs"),
+        str(update.absolute()),
+        str(update.absolute() / "lib"),
+        str(update.absolute() / "lib"),
+    ]
+
+
+def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tmp_path):
+    # The update brings an Evaluation.yml and a new Model.py, which scales by 3, and no --onnx: the Prediction.yml the
+    # bundle keeps names that class, and the extension, which doubles, is refused for it.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+    (root / "Evaluation.yml").write_text("Evaluator: {}\n")
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(
+            root,
+            config=[str(root / "Evaluation.yml")],
+            model_py=str(root / "Model.py"),
+            extension=str(root / "own.wasm"),
+        )
+
+
 def test_an_extension_named_as_a_file_the_export_writes_is_refused(tmp_path):
     # The export would write its manifest over the extension, in any case: refused before anything is written.
     root = _support_workspace(tmp_path)

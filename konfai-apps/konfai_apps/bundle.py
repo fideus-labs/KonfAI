@@ -35,6 +35,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from konfai.portable import aux_mask_groups, compile_output, config_environment, tta_passes, warn_unportable_keys
+from konfai.utils.utils import owned_destination
 
 from .errors import AppMetadataError
 
@@ -342,6 +343,21 @@ def assemble_bundle(
     return bundle
 
 
+def _import_path(entries: list[str], bundle: Path, update: Path) -> list[str]:
+    """The import path a bundle's update is checked under: the update first, then each of ``entries`` absolute, the
+    empty one the caller's working folder, one inside the bundle its counterpart in the update."""
+    held = Path(os.path.realpath(bundle))
+    path = [str(update.absolute())]
+    for entry in entries:
+        real = Path(os.path.realpath(entry or "."))
+        path.append(
+            str(update.absolute() / real.relative_to(held))
+            if real.is_relative_to(held)
+            else str(Path(entry or ".").absolute())
+        )
+    return path
+
+
 def _exported(name: str) -> bool:
     """Whether the portable export writes a file of ``name`` beside the configs: its manifest, its program, a graph;
     in any case, a file system telling no case apart."""
@@ -362,12 +378,6 @@ def _finish_update(spec: dict[str, Any]) -> None:
     try:
         runs = None
         if spec["onnx"]:
-            # The export writes its graphs and manifest beside the configs: never through a link there.
-            if linked := sorted(path.name for path in update.iterdir() if path.is_symlink() and _exported(path.name)):
-                raise AppMetadataError(
-                    f"The bundle holds {', '.join(linked)} beside its configs as links, which the export would"
-                    " write through: replace them by the files they point to."
-                )
             artifact = export_portable_into_bundle(
                 update,
                 checkpoints=spec["checkpoints"],
@@ -383,10 +393,11 @@ def _finish_update(spec: dict[str, Any]) -> None:
                 written = artifact if artifact.suffix == ".json" else update / "manifest.json"
                 runs = classes_run(json.loads(written.read_text()))
         if spec["extension"]:
-            # The program is the bundle's Prediction.yml, passed or kept; the classes of the other configs passed
-            # are all checked. The bytes checked are the ones the bundle takes.
+            # Every config the bundle holds once updated, passed or kept, runs with the extension: the compiled
+            # program's classes of the Prediction.yml, every class of the others. The bytes checked are the ones the
+            # bundle takes.
             compiled = [update / "Prediction.yml"] if runs is not None else []
-            others = [update / name for name in spec["configs"] if runs is None or name != "Prediction.yml"]
+            others = [config for config in sorted(update.glob("*.yml")) if config not in compiled]
             extension = update / spec["extension"]
             try:
                 report["checked"] = check_extension(extension, compiled, runs) + check_extension(extension, others)
@@ -476,6 +487,9 @@ def export_nested_model(group_name: str, inference: dict[str, Any], out_dir: Pat
 
     from konfai_apps.app import KonfAIApp
 
+    # Its graph lands beside the configs as <group>.onnx: a group naming a path would land elsewhere.
+    if group_name in ("", ".", "..") or Path(group_name).name != group_name:
+        raise AppMetadataError(f"nested model group '{group_name}' is no one name, which its graph is written under.")
     # Several checkpoints would make the nested export emit `program.json` + per-fold onnx instead of the
     # `model.onnx` + `manifest.json` this step copies, so refuse it here rather than fail on a missing file.
     # KonfAIInference reads ["fold_0"] where the config names none: the same default, or the nested export
@@ -504,7 +518,7 @@ def export_nested_model(group_name: str, inference: dict[str, Any], out_dir: Pat
                 f"nested model '{group_name}' compiles to a program (test-time copies or a mask of its own); the"
                 " portable runtime nests one plain model."
             )
-        shutil.copy(artifact, out_dir / f"{group_name}.onnx")
+        shutil.copy(artifact, owned_destination(out_dir / f"{group_name}.onnx"))
         manifest = json.loads((nested_dir / "manifest.json").read_text(encoding="utf-8"))
     return {"id": group_name, "manifest": manifest}
 
@@ -593,7 +607,7 @@ def export_portable_into_bundle(
     if not (ensemble or aux or len(passes) > 1) and len(program.get("steps", [])) <= 1:
         return _declare_portable_assets(bundle, written[-1], portable_assets)
     program_path = bundle / "program.json"
-    program_path.write_text(json.dumps(program, indent=2))
+    owned_destination(program_path).write_text(json.dumps(program, indent=2))
     portable_assets.add(program_path)
     return _declare_portable_assets(bundle, program_path, portable_assets)
 
@@ -629,7 +643,7 @@ def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) 
         return artifact
     declared = [str(name) for name in metadata.get("portable_assets", [])]
     metadata["portable_assets"] = sorted(set(declared) | set(portable))
-    metadata_path.write_text(json.dumps(metadata, indent=2))
+    owned_destination(metadata_path).write_text(json.dumps(metadata, indent=2))
     return artifact
 
 
@@ -661,17 +675,14 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             "in_channels": args.get("in_channels"),
             "output_module": args.get("output_module"),
             "extension": Path(args["extension"]).name if args.get("extension") else None,
-            "configs": [Path(config).name for config in args["config"]],
         }
         with tempfile.TemporaryDirectory() as scratch:
             told = Path(scratch) / "report.json"
             spec["report"] = str(told)
-            # The app's modules are the update's: the process's import path, read from where it runs, but for the
-            # bundle; bytecode neither written into the update nor read from it, but under a folder of its own.
-            path = [os.path.abspath(entry) for entry in sys.path if entry]
-            path = [entry for entry in path if not Path(os.path.realpath(entry)).is_relative_to(os.path.realpath(out))]
+            # The app's modules are the update's (:func:`_import_path`); bytecode neither written into the update nor
+            # read from it, but under a folder of its own.
             env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode")}
-            env["PYTHONPATH"] = os.pathsep.join([str(update.resolve()), *path])
+            env["PYTHONPATH"] = os.pathsep.join(_import_path(sys.path, out, update))
             code = "import json, sys; from konfai_apps.bundle import _finish_update; _finish_update(json.loads(sys.argv[1]))"
             done = subprocess.run([sys.executable, "-c", code, json.dumps(spec)], cwd=update, env=env, check=False)  # nosec B603
             if told.is_file():
@@ -717,5 +728,5 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         }
         drafted = [name for name in drafted if name.replace("-", "_") not in local_modules]
         if drafted:
-            (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
+            owned_destination(bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
             print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
