@@ -381,14 +381,15 @@ def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, 
 
 
 def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
-    """A random volume of ``shape`` holding the first count of channels, up to 1024, the class takes: what its place
-    in a chain hands it, which no config states."""
+    """A random volume of ``shape`` holding the first count of channels, up to 1024, the class takes, in float32 or,
+    where it takes none, in int64 labels (past an Argmax): what its place in a chain hands it, which no config
+    states."""
     import torch
 
     generator = torch.Generator().manual_seed(0)
     refused: Exception | None = None
-    for channels in range(1, 1025):
-        volume = torch.rand((channels, *shape), generator=generator) * 100
+    for dtype, channels in ((dtype, channels) for dtype in (torch.float32, torch.int64) for channels in range(1, 1025)):
+        volume = (torch.rand((channels, *shape), generator=generator) * 100).to(dtype)
         # A first slab of zeros along each axis: a class that crops to the content crops.
         for axis in range(1, volume.dim()):
             volume.narrow(axis, 0, 1).zero_()
@@ -402,7 +403,8 @@ def _taken(name: str, stage: Any, shape: tuple[int, ...]) -> Any:
             continue
         return volume
     raise AppMetadataError(
-        f"'{name}' takes no volume of 1 to 1024 channels over {list(shape)}, so it is not checked: {refused}"
+        f"'{name}' takes no volume of 1 to 1024 channels over {list(shape)}, in float32 or int64, so it is not"
+        f" checked: {refused}"
     )
 
 

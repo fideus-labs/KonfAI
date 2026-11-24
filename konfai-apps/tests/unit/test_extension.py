@@ -138,7 +138,9 @@ def _app(tmp_path: Path, monkeypatch, module: str, source: str, wat: str, config
 
 
 def _transform(module: str, name: str) -> str:
-    return f"Predictor:\n  Model:\n    classpath: {module}:Net\n  Dataset:\n    transforms:\n      {module}:{name}: {{}}\n"
+    return (
+        f"Predictor:\n  Model:\n    classpath: {module}:Net\n  Dataset:\n    transforms:\n      {module}:{name}: {{}}\n"
+    )
 
 
 def test_a_class_taking_keywords_it_forwards_is_built_as_konfai_builds_it(tmp_path: Path, monkeypatch) -> None:
@@ -181,6 +183,28 @@ class Planned(Scale):
     assert check_extension(extension, [config]) == [f"{module}:Planned"]
 
 
+def test_a_class_taking_labels_only_is_compared_on_labels(tmp_path: Path, monkeypatch) -> None:
+    # Past an Argmax a class is handed int64 labels, the only dtype it takes: it is compared on them.
+    labels = """
+
+import torch
+
+
+class Labels(Scale):
+    def __call__(self, name, tensor, cache_attribute):
+        if tensor.dtype != torch.int64:
+            raise TypeError(f"labels, not {tensor.dtype}")
+        return tensor * 2
+
+    def inverse(self, name, tensor, cache_attribute):
+        return tensor // 2
+"""
+    module = "OwnLabels"
+    extension, config = _app(tmp_path, monkeypatch, module, labels, DOUBLE, _transform(module, "Labels"))
+
+    assert check_extension(extension, [config]) == [f"{module}:Labels"]
+
+
 def test_a_patch_combine_is_compared_on_one_patch_as_on_several(tmp_path: Path, monkeypatch) -> None:
     # One that leaves the first patch out returns the last of three as the class does, and nothing of a lone one.
     last = """
@@ -197,14 +221,21 @@ class Last(Fold):
 
     assert check_extension(extension, [config_file]) == ["OwnLast:Last"]
     late = tmp_path / "late.wasm"
-    late.write_bytes(pytest.importorskip("wasmtime").wat2wasm(LAST.replace("$from (mut i32) (i32.const 0)", "$from (mut i32) (i32.const 1)")))
+    late.write_bytes(
+        pytest.importorskip("wasmtime").wat2wasm(
+            LAST.replace("$from (mut i32) (i32.const 0)", "$from (mut i32) (i32.const 1)")
+        )
+    )
     with pytest.raises(AppMetadataError, match="'OwnLast:Last' does not combine one patch"):
         check_extension(late, [config_file])
 
 
 @pytest.mark.parametrize(
     ("module", "refused"),
-    [(b"\0asm, and no module", "is no WebAssembly module"), (DOUBLE.replace("(i32.const 2))", "(i32.const 1))", 1), "interface 1")],
+    [
+        (b"\0asm, and no module", "is no WebAssembly module"),
+        (DOUBLE.replace("(i32.const 2))", "(i32.const 1))", 1), "interface 1"),
+    ],
     ids=["no module", "another interface"],
 )
 def test_the_module_is_checked_when_the_configs_name_no_class_of_the_app(tmp_path: Path, module, refused) -> None:

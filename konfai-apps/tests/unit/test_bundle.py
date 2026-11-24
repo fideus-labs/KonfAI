@@ -1328,14 +1328,48 @@ def test_a_bundle_whose_previous_copy_stays_is_still_updated(tmp_path, monkeypat
 
 def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path):
     # A manifest the bundle holds as a link elsewhere: the export would write the new one there, so it is refused.
-    root = _support_workspace(tmp_path)
-    bundle = _cli(root)
+    # A link the export does not write (an icon) is the bundle's own, and the export runs beside it.
+    pytest.importorskip("onnxscript")
+    root, _config, exporting = _exporting(tmp_path)
+    bundle = _cli(root, **{key: value for key, value in exporting.items() if key != "onnx"})
     (tmp_path / "elsewhere.json").write_text("not the bundle's")
+    (tmp_path / "icon.png").write_bytes(b"png")
+    (bundle / "icon.png").symlink_to(tmp_path / "icon.png")
+    assert (_cli(root, **exporting) / "model.onnx").is_file()
+    (bundle / "manifest.json").unlink()
     (bundle / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
 
     with pytest.raises(AppMetadataError, match="manifest.json"):
-        _cli(root, onnx=True)
+        _cli(root, **exporting)
     assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
+
+
+def test_an_extension_named_as_a_file_the_export_writes_is_refused(tmp_path):
+    # The export would write its manifest over the extension, in any case: refused before anything is written.
+    root = _support_workspace(tmp_path)
+    (root / "Manifest.json").write_bytes(b"\0asm")
+
+    with pytest.raises(AppMetadataError, match="Manifest.json"):
+        _cli(root, extension=str(root / "Manifest.json"), onnx=True)
+    assert not (tmp_path / "out" / "Seg").exists()
+
+
+def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path):
+    # Alias.py links to the bundle's Model.py by its absolute path: the check reads the Model.py the update brings,
+    # which scales by 3, as the published bundle will.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Alias:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "Alias.py").symlink_to((bundle / "Model.py").resolve())
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Alias:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
 
 
 def test_a_copy_an_earlier_update_left_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
@@ -1370,22 +1404,18 @@ def test_a_bundle_left_only_as_its_previous_copy_is_put_back_first(tmp_path):
     assert not list(bundle.parent.glob(".Seg.*"))
 
 
-def test_an_export_whose_model_needs_what_is_missing_fails_the_update(tmp_path):
-    # The extension's check alone stands down without wasmtime: an export whose model needs it fails.
-    root = _support_workspace(tmp_path)
+def test_an_export_whose_model_needs_what_is_missing_fails_the_update(tmp_path, capfd):
+    # The extension's check alone stands down without wasmtime: an export whose model needs it fails, on that import.
+    root, config, exporting = _exporting(tmp_path)
     (root / "Missing.py").write_text("raise ModuleNotFoundError(\"No module named 'wasmtime'\", name='wasmtime')\n")
-    config = {"Predictor": {"Model": {"classpath": "Missing:Net"}, "outputs_dataset": {"Head": {"OutputDataset": {}}}}}
+    config["Predictor"]["Model"]["classpath"] = "Missing:TinySegNet"
     (root / "Prediction.yml").write_text(json.dumps(config))
     (root / "own.wasm").write_bytes(b"\0asm")
+    exporting["support_file"].append("Missing.py=Missing.py")
 
     with pytest.raises(AppMetadataError):
-        _cli(
-            root,
-            extension=str(root / "own.wasm"),
-            onnx=True,
-            support_file=["Missing.py=Missing.py"],
-            support_root=str(root),
-        )
+        _cli(root, extension=str(root / "own.wasm"), **exporting)
+    assert "Missing.py" in capfd.readouterr().err
     assert not (tmp_path / "out" / "Seg").exists()
 
 

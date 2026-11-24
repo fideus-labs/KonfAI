@@ -314,6 +314,14 @@ def assemble_bundle(
         # every file the export reads beside the staged ones, none of those the update drops.
         if bundle.exists():
             shutil.copytree(bundle, update, symlinks=True, copy_function=lambda src, dst: _carried(bundle, src, dst))
+            # A link into the bundle by its absolute path reads the update's file there, as the bundle published will.
+            for link in [path for path in update.rglob("*") if path.is_symlink()]:
+                target = Path(os.readlink(link))
+                for spelled in {bundle.absolute(), bundle.resolve()}:
+                    if target.is_absolute() and target.is_relative_to(spelled):
+                        link.unlink()
+                        link.symlink_to(os.path.relpath(update / target.relative_to(spelled), link.parent))
+                        break
         _replace_bundle(staging, update, metadata["models"])
         finish(update)
         if bundle.exists():
@@ -333,6 +341,12 @@ def assemble_bundle(
     return bundle
 
 
+def _exported(name: str) -> bool:
+    """Whether the portable export writes a file of ``name`` beside the configs: its manifest, its program, a graph;
+    in any case, a file system telling no case apart."""
+    return name.lower() in ("manifest.json", "program.json") or name.lower().endswith(".onnx")
+
+
 def _finish_update(spec: dict[str, Any]) -> None:
     """The portable export and the extension's check of a bundle's update (:func:`run_bundle_cli`), run in an
     interpreter of its own whose working folder is the update: the app's modules are the update's, none another
@@ -348,7 +362,7 @@ def _finish_update(spec: dict[str, Any]) -> None:
         runs = None
         if spec["onnx"]:
             # The export writes its graphs and manifest beside the configs: never through a link there.
-            if linked := sorted(path.name for path in update.iterdir() if path.is_symlink()):
+            if linked := sorted(path.name for path in update.iterdir() if path.is_symlink() and _exported(path.name)):
                 raise AppMetadataError(
                     f"The bundle holds {', '.join(linked)} beside its configs as links, which the export would"
                     " write through: replace them by the files they point to."
@@ -630,6 +644,11 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         support[destination] = source
     out = Path(args["out"]) / args["name"]
     report: dict[str, Any] = {}
+    if args.get("onnx") and args.get("extension") and _exported(Path(args["extension"]).name):
+        raise AppMetadataError(
+            f"The extension {Path(args['extension']).name} takes the name of a file the portable export writes.",
+            "Name the extension apart from the manifest, the program and the graphs.",
+        )
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their
