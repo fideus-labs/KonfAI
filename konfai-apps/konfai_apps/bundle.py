@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess  # nosec B404
 import sys
 import tempfile
 from collections.abc import Callable
@@ -288,7 +289,13 @@ def assemble_bundle(
         previous.rename(bundle)  # an earlier update left the bundle only there
     for scratch in (staging, update, previous):
         if scratch.exists():
-            shutil.rmtree(scratch)
+            try:
+                shutil.rmtree(scratch)
+            except OSError as error:
+                raise AppMetadataError(
+                    f"{scratch} is left from an earlier update and cannot be removed ({error}).",
+                    "Remove it, then package again.",
+                ) from error
     staging.mkdir(parents=True)
     try:
         (staging / "app.json").write_text(json.dumps(metadata, indent=2))
@@ -326,14 +333,57 @@ def assemble_bundle(
     return bundle
 
 
-def _under(module: Any, folder: Path) -> bool:
-    """Whether ``module`` was imported from a file below ``folder``, however either is spelled."""
-    return Path(getattr(module, "__file__", None) or "/").resolve().is_relative_to(folder.resolve())
+def _finish_update(spec: dict[str, Any]) -> None:
+    """The portable export and the extension's check of a bundle's update (:func:`run_bundle_cli`), run in an
+    interpreter of its own whose working folder is the update: the app's modules are the update's, none another
+    process imported. Writes to ``spec["report"]`` the artifact exported, the classes checked (``None``: not checked,
+    wasmtime missing) or the refusal."""
+    from konfai.utils.errors import KonfAIError
 
+    from .extension import check_extension, classes_run
 
-def _same(entry: str, folder: Path) -> bool:
-    """Whether the import path ``entry`` (``""``: the working folder) is ``folder``."""
-    return Path(entry or ".").resolve() == folder.resolve()
+    update = Path.cwd()
+    report: dict[str, Any] = {}
+    try:
+        runs = None
+        if spec["onnx"]:
+            # The export writes its graphs and manifest beside the configs: never through a link there.
+            if linked := sorted(path.name for path in update.iterdir() if path.is_symlink()):
+                raise AppMetadataError(
+                    f"The bundle holds {', '.join(linked)} beside its configs as links, which the export would"
+                    " write through: replace them by the files they point to."
+                )
+            artifact = export_portable_into_bundle(
+                update,
+                checkpoints=spec["checkpoints"],
+                patch_size=spec["patch_size"],
+                in_channels=spec["in_channels"],
+                output_module=spec["output_module"],
+                extension=spec["extension"] is not None,
+            )
+            report["artifact"] = artifact.relative_to(update).as_posix()
+            if spec["extension"]:
+                # The classes the program runs by the extension: a class folded into a graph is no longer its.
+                # A program, or the manifest beside the one model it would run.
+                written = artifact if artifact.suffix == ".json" else update / "manifest.json"
+                runs = classes_run(json.loads(written.read_text()))
+        if spec["extension"]:
+            # The program is the bundle's Prediction.yml, passed or kept; the classes of the other configs passed
+            # are all checked. The bytes checked are the ones the bundle takes.
+            compiled = [update / "Prediction.yml"] if runs is not None else []
+            others = [update / name for name in spec["configs"] if runs is None or name != "Prediction.yml"]
+            extension = update / spec["extension"]
+            try:
+                report["checked"] = check_extension(extension, compiled, runs) + check_extension(extension, others)
+            except ModuleNotFoundError as error:
+                if error.name != "wasmtime":
+                    raise
+                report["checked"] = None
+    except KonfAIError as error:
+        report["refused"] = [str(part) for part in error.args]
+        raise SystemExit(1) from error
+    finally:
+        Path(spec["report"]).write_text(json.dumps(report))
 
 
 def _carried(bundle: Path, source: str, target: str) -> None:
@@ -579,74 +629,33 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             raise AppMetadataError(f"Conflicting --support-file mappings for {destination!r}.")
         support[destination] = source
     out = Path(args["out"]) / args["name"]
+    report: dict[str, Any] = {}
 
-    def export_and_check(staged: Path) -> None:
-        """The portable program and the extension's check, on the bundle the update makes: the bundle takes neither
-        until both are done."""
-        from .extension import check_extension, classes_run
-
-        # The app's classes as konfai imports them, from this update alone: a module of one of its names imported
-        # before is set aside and comes back after, the update's own go with it, and no bytecode is written into it.
-        # The bundle's own names too: a module the update drops may have been imported from the bundle.
-        own = {
-            path.stem if path.suffix == ".py" else path.name
-            for folder in (staged, out)
-            if folder.is_dir()
-            for path in folder.iterdir()
-            if path.suffix == ".py" or path.is_dir()
+    def export_and_check(update: Path) -> None:
+        """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their
+        own (:func:`_finish_update`): the bundle takes neither until both are done."""
+        spec: dict[str, Any] = {
+            "onnx": bool(args.get("onnx")),
+            "checkpoints": [Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
+            "patch_size": args.get("patch_size"),
+            "in_channels": args.get("in_channels"),
+            "output_module": args.get("output_module"),
+            "extension": Path(args["extension"]).name if args.get("extension") else None,
+            "configs": [Path(config).name for config in args["config"]],
         }
-        displaced = {name: sys.modules.pop(name) for name in list(sys.modules) if name.partition(".")[0] in own}
-        # Nor from the bundle on the import path (a PYTHONPATH, the folder the command runs in).
-        path = list(sys.path)
-        sys.path[:] = [str(staged), *(entry for entry in path if not out.is_dir() or not _same(entry, out))]
-        writes, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-        try:
-            runs = None
-            if args.get("onnx"):
-                # The export writes its graphs and manifest beside the configs: never through a link there.
-                if linked := sorted(path.name for path in staged.iterdir() if path.is_symlink()):
-                    raise AppMetadataError(
-                        f"The bundle holds {', '.join(linked)} beside its configs as links, which the export would"
-                        " write through: replace them by the files they point to."
-                    )
-                artifact = export_portable_into_bundle(
-                    staged,
-                    checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
-                    patch_size=args.get("patch_size"),
-                    in_channels=args.get("in_channels"),
-                    output_module=args.get("output_module"),
-                    extension=bool(args.get("extension")),
-                )
-                print(f"[KonfAI-Apps] Portable model exported: {out / artifact.relative_to(staged)}")
-                # The classes the program runs by the extension: a class folded into a graph is no longer its.
-                # A program, or the manifest beside the one model it would run.
-                written = artifact if artifact.suffix == ".json" else staged / "manifest.json"
-                runs = classes_run(json.loads(written.read_text())) if args.get("extension") else None
-            if not args.get("extension"):
-                return
-            # Checked against the classes it stands for: the bytes the bundle takes.
-            configs = [staged / Path(config).name for config in args["config"]]
-            # The program is the prediction config's: the classes of the other configs are all checked.
-            compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
-            others = [config for config in configs if config not in compiled]
-            extension = staged / Path(args["extension"]).name
-            try:
-                checked = check_extension(extension, compiled, runs) + check_extension(extension, others)
-            except ModuleNotFoundError as error:
-                if error.name != "wasmtime":
-                    raise
-                print(
-                    "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
-                )
-                return
-            names = ", ".join(dict.fromkeys(checked)) or "no class of the app"
-            print(f"[KonfAI-Apps] Extension checked against: {names}")
-        finally:
-            sys.path[:] = path
-            sys.dont_write_bytecode = writes
-            for name in [name for name, module in sys.modules.items() if _under(module, staged)]:
-                del sys.modules[name]
-            sys.modules.update(displaced)
+        with tempfile.TemporaryDirectory() as scratch:
+            told = Path(scratch) / "report.json"
+            spec["report"] = str(told)
+            # The app's modules are the update's: the process's import path, but for the bundle, and no bytecode.
+            path = [entry for entry in sys.path if entry and os.path.realpath(entry) != os.path.realpath(out)]
+            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            env["PYTHONPATH"] = os.pathsep.join([str(update.resolve()), *path])
+            code = "import json, sys; from konfai_apps.bundle import _finish_update; _finish_update(json.loads(sys.argv[1]))"
+            done = subprocess.run([sys.executable, "-c", code, json.dumps(spec)], cwd=update, env=env, check=False)  # nosec B603
+            if told.is_file():
+                report.update(json.loads(told.read_text()))
+        if done.returncode:
+            raise AppMetadataError(*report.get("refused", ["The update's export or check failed, as told above."]))
 
     bundle = assemble_bundle(
         name=args["name"],
@@ -663,6 +672,15 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         finish=export_and_check if args.get("onnx") or args.get("extension") else None,
     )
     print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
+    if "artifact" in report:
+        print(f"[KonfAI-Apps] Portable model exported: {bundle / report['artifact']}")
+    if "checked" in report:
+        names = ", ".join(dict.fromkeys(report["checked"] or [])) or "no class of the app"
+        print(
+            f"[KonfAI-Apps] Extension checked against: {names}"
+            if report["checked"] is not None
+            else "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
+        )
 
     # If no requirements.txt was provided, draft one from the custom Model.py imports.
     if not args.get("requirements") and (bundle / "Model.py").exists():
