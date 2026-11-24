@@ -3542,6 +3542,11 @@ def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> N
             f"The extension '{extension.name}' takes the name of a file the program writes beside it.",
             "Name the extension apart from the program and the graphs it names.",
         )
+    if (output.parent / extension.name).is_symlink():
+        raise ConfigError(
+            f"'{output.parent / extension.name}' is a link, which the extension would be copied through.",
+            "Remove the link, then compile again.",
+        )
     if extension.parent != output.parent:
         shutil.copy(extension, output.parent / extension.name)
     program["extension"] = extension.name

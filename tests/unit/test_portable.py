@@ -1274,6 +1274,12 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     (tmp_path / "fold_0.onnx").write_bytes(b"\0asm")
     with pytest.raises(ConfigError, match=r"fold_0\.onnx"):
         carry_extension(tmp_path / "fold_0.onnx", {"models": {"fold_0": "fold_0.onnx"}}, out)
+    # A link left where it would land is not written through.
+    (out.parent / "engine.wasm").symlink_to(out.parent / "model.onnx")
+    (tmp_path / "engine.wasm").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match="link"):
+        carry_extension(tmp_path / "engine.wasm", dict(program), out)
+    assert (out.parent / "model.onnx").read_bytes() == b"graph"
 
 
 @pytest.mark.parametrize(
