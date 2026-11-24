@@ -150,9 +150,18 @@ def resolve_support_files(
 
 
 def _check_file_layout(files: dict[str, Any]) -> None:
+    """Refuse two bundle files that one file system would hold as one: a file that is another's folder, or two
+    names telling apart by case alone (a file system may tell no case apart)."""
+    folded: dict[str, str] = {}
+    for name in files:
+        if folded.setdefault(name.lower(), name) != name:
+            raise AppMetadataError(
+                f"Bundle paths collide: {folded[name.lower()]!r} and {name!r} are one file on a file system telling"
+                " no case apart."
+            )
     for name in files:
         for parent in Path(name).parents:
-            if parent.as_posix() in files:
+            if parent.as_posix().lower() in folded:
                 raise AppMetadataError(f"Bundle paths collide: {parent.as_posix()!r} is both a file and a directory.")
 
 
@@ -232,8 +241,8 @@ def assemble_bundle(
     references are not recursively inferred. The manifest records the expanded managed files.
     ``extension``, the app's extension of KonfAI Edge, lands under its own name. ``finish`` runs on the bundle the
     export makes, a copy beside it that then takes its place: what it writes there goes in with it, and what it raises
-    leaves the bundle as it was. The copy links the checkpoints and the files below the top level, which ``finish``
-    reads or replaces whole, never writes in place. Returns the bundle directory.
+    leaves the bundle as it was. The copy links the checkpoints, which ``finish`` reads or replaces whole, never
+    writes in place, and copies every other file. Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -419,9 +428,11 @@ def _finish_update(spec: dict[str, Any]) -> None:
 
 
 def _run_by_konfai_edge(config: Path) -> bool:
-    """Whether ``config`` is one KonfAI Edge runs: a Predictor's or an Evaluator's, told by its root."""
+    """Whether ``config`` is one KonfAI Edge runs: a file, a Predictor's or an Evaluator's, told by its root."""
     import yaml
 
+    if not config.is_file():
+        return False
     try:
         loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
     except yaml.YAMLError:
@@ -430,13 +441,12 @@ def _run_by_konfai_edge(config: Path) -> bool:
 
 
 def _carried(bundle: Path, source: str, target: str) -> None:
-    """A file of ``bundle`` into the update an export finishes: a copy where the export may write it in place (a
-    manifest, a program, a graph beside the configs), else a link (a checkpoint, a file below the top level, which it
-    only reads), or a copy where the system makes no link."""
+    """A file of ``bundle`` into the update an export finishes: a link for a checkpoint, which the export and the
+    check only read, a copy for any other file, which the app's code they run may write in place, or a copy where
+    the system makes no link."""
     from konfai_apps.app_repository import WEIGHTS
 
-    # ponytail: an export writing in place below the top level would write through a link; copy those too then.
-    if Path(source).parent != bundle or Path(source).name.endswith(WEIGHTS):
+    if Path(source).name.endswith(WEIGHTS):
         try:
             os.link(source, target)
             return
@@ -687,12 +697,11 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     # does not execute code to discover dependencies: the draft is reviewed.
     requirements = args.get("requirements") or None
     drafted: list[str] = []
-    model = args.get("model_py") or (
-        Path(args.get("support_root") or ".") / support["Model.py"] if "Model.py" in support else out / "Model.py"
-    )
+    planned = resolve_support_files(support, args.get("support_root"))
+    model = args.get("model_py") or planned.get("Model.py") or out / "Model.py"
     if requirements is None and Path(model).is_file():
         kept = [path.name for path in out.iterdir()] if out.is_dir() else []
-        local = {Path(name).parts[0].removesuffix(".py") for name in [*support, "Model.py", *kept]}
+        local = {Path(name).parts[0].removesuffix(".py") for name in [*planned, "Model.py", *kept]}
         drafted = [name for name in derive_requirements([model]) if name.replace("-", "_") not in local]
 
     def export_and_check(update: Path) -> None:

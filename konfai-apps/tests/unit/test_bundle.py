@@ -19,6 +19,7 @@
 import codecs
 import json
 import locale
+import re
 import shutil
 import sys
 
@@ -1424,7 +1425,7 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
         given = (
             {"model_py": str(root / "Model.py")}
             if planted == "a link at the drafted requirements"
-            else {"support_file": ["Model.py=Model.py"], "support_root": str(root)}
+            else {"support_file": ["./Model.py=Model.py"], "support_root": str(root)}
         )
         with pytest.raises(AppMetadataError, match=r"symlink: .*requirements\.txt"):
             _cli(root, **given)
@@ -1491,12 +1492,14 @@ def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tm
         "Trainer:\n  Dataset:\n    transforms:\n      Model:Boxed: {}\n",
         "- notes of the app's, no config\n",
         "Predictor: [a file that does not parse\n",
+        None,
     ],
     ids=[
         "a training class the extension does not stand for",
         "a training class bound by no value",
         "no config",
         "no YAML",
+        "a folder named as a config",
     ],
 )
 def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_path, kept):
@@ -1511,7 +1514,9 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
     )
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
-    (root / "Config.yml").write_text(kept)
+    (root / "Config.yml").write_text(kept or "Trainer: {}\n")
+    if kept is None:  # a folder the bundle keeps
+        (_cli(root) / "notes.yaml").mkdir()
 
     bundle = _cli(
         root,
@@ -1519,19 +1524,47 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
         model_py=str(root / "Model.py"),
         extension=str(root / "own.wasm"),
     )
-    assert (bundle / "Config.yml").read_text() == kept
+    assert (bundle / "Config.yml").read_text() == (kept or "Trainer: {}\n")
     assert (bundle / "own.wasm").exists()
 
 
-@pytest.mark.parametrize("name", ["Manifest.json", "Requirements.txt"])
-def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_path, name):
-    # The export would write its manifest over the extension, the draft its requirements, in any case: refused
-    # before anything is written.
+def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path):
+    # The app's code the check runs writes a file the bundle keeps below its top level, in place, and the update is
+    # refused: the bundle's file is as it was, the update holding a copy of every file but the weights.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    (bundle / "docs").mkdir()
+    (bundle / "docs" / "notes.txt").write_text("the bundle's")
+    written = 'with open("docs/notes.txt", "r+") as notes:\n    notes.write("in place")\n'
+    (root / "Model.py").write_text(written + OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / "docs" / "notes.txt").read_text() == "the bundle's"
+
+
+@pytest.mark.parametrize(
+    ("name", "refusal"),
+    [
+        ("Manifest.json", "Manifest.json takes the name of a file"),
+        ("Requirements.txt", "Requirements.txt takes the name of a file"),
+        ("APP.JSON", "'app.json' and 'APP.JSON' are one file"),
+    ],
+)
+def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_path, name, refusal):
+    # The export would write its manifest over the extension, the draft its requirements, the command its app.json,
+    # in any case: refused before anything is written.
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text("import einops\n")
     (root / name).write_bytes(b"\0asm")
 
-    with pytest.raises(AppMetadataError, match=rf"{name} takes the name of a file"):
+    with pytest.raises(AppMetadataError, match=re.escape(refusal)):
         _cli(root, model_py=str(root / "Model.py"), extension=str(root / name), onnx=name == "Manifest.json")
     assert not (tmp_path / "out" / "Seg").exists()
 
