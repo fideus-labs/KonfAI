@@ -2191,6 +2191,61 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     assert value.shape == () and value == ScaledRoughness(0.9).finish(torch.from_numpy(total)).item()
 
 
+def test_a_whole_class_of_the_app_s_is_probed_in_the_dtype_its_chain_hands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past an Argmax konfai hands the class int64 labels, which a bitwise test takes and a float32 volume does not.
+    (tmp_path / "Labels.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _prediction({}, {"after_reduction_transforms": {"Argmax": {}, "Labels:Odd": {}}})
+    manifest, _folds, _per_copy = transform_manifest(config, "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["argmax", "extension"]
+
+
+@pytest.mark.parametrize(
+    ("transforms", "phase", "module", "body", "folded"),
+    [
+        ({}, "before_reduction_transforms", "Integers", "tensor & 1", True),
+        ({}, "after_reduction_transforms", "Votes", "tensor & 1", True),
+        ({"TensorCast#2": {"dtype": "int16", "inverse": True}}, "final_transforms", "Doubles", "tensor * 2", False),
+    ],
+    ids=["in-the-dtype-the-fold-leaves", "in-the-dtype-a-vote-keeps", "past-an-undone-cast"],
+)
+def test_a_pointwise_class_of_the_app_s_folds_in_the_dtype_its_chain_hands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transforms: dict, phase: str, module: str, body: str, folded: bool
+) -> None:
+    # Past the app's Fold, which leaves uint8, and a vote of the copies, which keeps it, a class taking integer labels
+    # traces and folds into a graph; past the inverse of a cast only the run knows the dtype, and a class that would
+    # trace in any stays its extension's step.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # a class folds where its graph exports and checks
+    (tmp_path / f"{module}.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Own(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        f"        return {body}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    handed: list[str] = []
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
+        handed.append(dtype)
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": dtype}
+
+    config = _prediction(transforms, {phase: {f"{module}:Own": {}}, "reduction": "Vote"})
+    manifest, _, _ = transform_manifest(config, "Predictor", fold_out=fold_out, blended="uint8", extension=True)
+    ops = [step["op"] for step in manifest["postprocessing"]]
+    assert (handed, "onnx" in ops, "extension" in ops) == ((["uint8"], True, False) if folded else ([], False, True))
+
+
 def test_an_output_chain_folds_an_apps_own_class_through_a_plain_fold_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

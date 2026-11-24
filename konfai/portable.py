@@ -788,13 +788,19 @@ def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[
 
 
 def _extension_step(
-    name: str, params: Any, probe: tuple[int, ...] = _VOLUME_PROBE, groups: bool = False, on_grid: bool = False
+    name: str,
+    params: Any,
+    probe: tuple[int, ...] = _VOLUME_PROBE,
+    groups: bool = False,
+    on_grid: bool = False,
+    handed: str | None = None,
 ) -> dict[str, Any]:
     """An app's own transform as the step its extension of KonfAI Edge runs, under the classpath the config names
     it by and with the keys konfai binds it with. A ``POINTWISE`` class is handed a volume voxel by voxel; a
     ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; any other (``WHOLE_VOLUME``,
     ``REGRID``, ...) the case (``whole``), which may leave another grid and be undone, or other channels and not be.
-    The class is run on ``probe``, the channels and rank its place in the chain hands it. With ``groups`` (the final
+    The class is run on ``probe``, the channels and rank its place in the chain hands it, in the dtype ``handed`` (the
+    stored one, float32 where only the run knows it). With ``groups`` (the final
     chain), a whole class may read groups of the case beside its volume, which the step names."""
     import numpy as np
     import torch
@@ -818,7 +824,7 @@ def _extension_step(
     if reads:
         attribute = _probe_attribute(rank)
         try:
-            returned = _probed(stage, torch.zeros(probe), attribute)
+            returned = _probed(stage, torch.zeros(probe, dtype=getattr(torch, handed or "float32")), attribute)
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -1721,6 +1727,7 @@ def compile_pipeline(
     groups: bool = False,
     planned: int | None = None,
     on_grid: bool = False,
+    dtype: str | None = "float32",
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]], list[str]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``extension`` (the app carries its extension of
     KonfAI Edge), a transform of the app's own is the step its extension runs. With ``fold``, a POINTWISE transform with no op is
@@ -1736,7 +1743,8 @@ def compile_pipeline(
     group, which the program runs with the rest of the chain (:func:`_split_group_tail`). With ``planned`` (a group's
     chain, which konfai binds and plans as an output chain it does not), the chain is planned as konfai plans it on a
     case of that rank first (:func:`_planned`). With ``on_grid`` (a group read beside the first, on its grid), a class
-    of the app's own that moves the grid is refused."""
+    of the app's own that moves the grid is refused. ``dtype`` is the one konfai hands the chain (``None``: the stored
+    one, which only the run knows), which a class of the app's own is folded and probed in past the steps before it."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
@@ -1794,11 +1802,14 @@ def compile_pipeline(
             # A class of the app's own that a graph carries is folded into one, as without an extension; one the chain
             # undoes stays its extension's, which undoes it. ponytail: output chains only; before the model the folds
             # run after the test-time draws the program appends, so folding there would reorder an intensity draw.
-            # The dtype a fold after the steps reads, `None` where only the run knows it; a fold_out that does not say
-            # (_post_chain's does) is handed float32, as konfai hands a fold its input.
-            read = getattr(fold_out, "reads", lambda _steps: "float32")(steps)
+            # A class folds only where the dtype it reads is known, traced on it.
+            read = _dtype_after(steps, dtype)
             folded = None if declares_inverse(name, params) or read is None else try_fold(name, params)
-            traced = folded is not None and _traces([*pending, folded], probe(steps) if probe else _VOLUME_PROBE, read)
+            traced = (
+                folded is not None
+                and read is not None
+                and _traces([*pending, folded], probe(steps) if probe else _VOLUME_PROBE, read)
+            )
             own = not traced
         if base in OP_MAP or own:
             flush()
@@ -1809,7 +1820,8 @@ def compile_pipeline(
                     "(pointwise custom) transforms to the end of the inference pipeline."
                 )
             if own:
-                step = _extension_step(name, params, probe(steps) if probe else _VOLUME_PROBE, groups, on_grid)
+                probed = probe(steps) if probe else _VOLUME_PROBE
+                step = _extension_step(name, params, probed, groups, on_grid, _dtype_after(steps, dtype))
             else:
                 step = _admitted(OP_MAP[base](params, roots=roots) if base == "Resample" else OP_MAP[base](params))
             # A Crop past the app's own transform finds its box in the values it changed.
@@ -2044,9 +2056,6 @@ def _post_chain(
                 )
             return fold_out(folds, [*done, *steps], held)
 
-        # The dtype a fold after `steps` reads, `None` where only the run knows it: a class of the app's own folds only
-        # where it is known, traced on it.
-        fold.reads = lambda steps: _dtype_after(steps, dtype)  # type: ignore[attr-defined]
         return fold
 
     copies = str(clean(spec.get("reduction")) or "Mean")
@@ -2072,6 +2081,7 @@ def _post_chain(
         fold_out=folding(False, blended),
         extension=extension,
         probe=probe,
+        dtype=blended,
     )
     done += before
     # The reduction between the per-copy ops and the rest settles the dtype the rest reads.
@@ -2080,15 +2090,19 @@ def _post_chain(
     restored = [step["id"] for step in pre if step["op"] == "cast" and "id" in step]
     # The stack or the label merge that opens the chain is the reduce op `derive_reduction` names.
     stack, after_stack = _split_stack(config, root, spec)
-    after, _, _ = compile_pipeline(after_stack, fold_out=folding(concat, folded), extension=extension, probe=probe)
+    after, _, _ = compile_pipeline(
+        after_stack, fold_out=folding(concat, folded), extension=extension, probe=probe, dtype=folded
+    )
     done += after
     undone_cast = set(inverted) & set(restored)
+    held = None if undone_cast else _dtype_after(after, folded)
     final, _, _ = compile_pipeline(
         bound_chain(spec.get("final_transforms")),
-        fold_out=folding(concat, None if undone_cast else _dtype_after(after, folded)),
+        fold_out=folding(concat, held),
         extension=extension,
         probe=probe,
         groups=True,
+        dtype=held,
     )
     nested = aux_mask_groups(config, root)
     if group := next((step["mask_group"] for step in final if step.get("mask_group") in nested), None):
