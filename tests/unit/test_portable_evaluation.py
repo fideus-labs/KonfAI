@@ -321,6 +321,41 @@ def test_a_class_of_the_app_s_past_a_nested_model_is_probed_in_the_dtype_the_mod
     assert steps[-1]["op"] == "extension"
 
 
+def test_a_class_of_the_app_s_past_a_nested_model_undoing_its_cast_is_probed_in_what_the_run_stores(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The nested chain casts the case to uint8 and undoes it: what it hands on is the stored dtype, which only the run
+    # knows, not uint8; a class taking floats is probed in float32.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "UndoneNested.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if not tensor.is_floating_point():\n"
+        "            raise ValueError(f'floats, not {tensor.dtype}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    nested = {
+        "model": "Seg.onnx",
+        "output": {"channels": 1},
+        "preprocessing": [{"op": "cast", "dtype": "uint8", "id": "Cast"}],
+        "postprocessing": [{"op": "cast", "dtype": "uint8"}, {"op": "inverse", "of": "Cast"}],
+    }
+    steps = _group_steps(
+        "Seg",
+        {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "UndoneNested:Floats": {}},
+        tmp_path,
+        {},
+        lambda group, _params, _out: {"id": group, "manifest": nested},
+        True,
+        (1, 3, None),
+    )
+    assert steps[-1]["op"] == "extension"
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")
