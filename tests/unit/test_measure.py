@@ -1557,6 +1557,36 @@ class TestDiceLabelDtypes:
         got = Dice()(prediction.to(dtype), reference.to(dtype))[1]
         assert got == expected
 
+    @pytest.mark.parametrize(
+        "device",
+        ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA"))],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bool, torch.uint16, torch.uint32, torch.uint64])
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_every_criterion_of_the_pair_scores_a_map_as_its_int64_twin(self, dtype, masked, device):
+        # torch has no CUDA product, no maximum, and in 2.5 no CPU index for uint16, uint32 and uint64, and no
+        # difference of two bool maps: the masked pair, the Dice map and MissingLabels' lookup each met one of them.
+        from konfai.metric.measure import DiceSaveMap, Jaccard, MissingLabels
+
+        reference = torch.tensor(np.random.default_rng(5).integers(0, 4, (2, 1, 6, 6)), device=device)
+        prediction = reference.clone()
+        prediction[..., :2, :] = (prediction[..., :2, :] + 1) % 4
+        if dtype is torch.bool:
+            reference, prediction = reference % 2, prediction % 2
+        masks = (reference.new_tensor(np.arange(6) > 1).expand(2, 1, 6, 6),) if masked else ()
+        for criterion in (Dice(), DiceSaveMap(), Jaccard(), MissingLabels()):
+            want = criterion(prediction, reference, *masks)
+            got = criterion(prediction.to(dtype), reference.to(dtype), *(mask.to(dtype) for mask in masks))
+            assert got[1] == want[1], type(criterion).__name__
+            if isinstance(criterion, DiceSaveMap):
+                assert torch.equal(got[2], want[2])
+
+    @pytest.mark.parametrize("dtype", [torch.bool, torch.uint8])
+    def test_a_narrow_map_scores_beside_a_reference_with_a_negative_label(self, dtype):
+        # The bins are shifted by the smallest label of either map, past what a narrow map's own type holds.
+        prediction, reference = torch.tensor([[[[1, 0, 1]]]]), torch.tensor([[[[1, -300, 1]]]])
+        assert Dice()(prediction.to(dtype), reference)[1] == Dice()(prediction, reference)[1]
+
     def test_identical_uint16_maps_score_one(self):
         labels = torch.tensor(np.random.default_rng(4).integers(0, 3, (1, 1, 5, 5)).astype(np.uint16))
         value = Dice()(labels, labels)[1]
@@ -1566,6 +1596,9 @@ class TestDiceLabelDtypes:
         labels = torch.tensor(np.array([[[[1, 2], [3, 2**63]]]], dtype=np.uint64))
         with pytest.raises(MeasureError, match="2\\^63"):
             Dice()(labels, labels)
+        # Outside the mask it is no label, as for any other dtype.
+        mask = torch.tensor([[[[1, 1], [1, 0]]]])
+        assert Dice()(labels, labels, mask)[1] == {1: pytest.approx(1.0), 2: pytest.approx(1.0), 3: pytest.approx(1.0)}
 
     def test_a_one_channel_float_label_map_scores_as_labels(self):
         labels = torch.tensor([[[[0.0, 1.0], [2.0, float("nan")]]]])
