@@ -792,14 +792,17 @@ def _probe_extents(rank: int) -> tuple[int, ...]:
 _VOLUME_PROBE = (1, *_probe_extents(3))
 
 
-def _probe_attribute(rank: int) -> Any:
-    """The geometry a probed class may read: the identity grid of ``rank`` axes."""
+def _probe_attribute(rank: int, placed: bool = False) -> Any:
+    """The geometry a probed class may read: the identity grid of ``rank`` axes, or, ``placed``, one with an origin
+    and a spacing of its own along each axis."""
     import numpy as np
 
     from konfai.utils.dataset import Attribute
 
     attribute = Attribute()
     attribute["Origin"], attribute["Spacing"] = np.zeros(rank), np.ones(rank)
+    if placed:
+        attribute["Origin"], attribute["Spacing"] = np.array([3.0, -2.0, 7.0][:rank]), np.array([1.5, 0.75, 2.5][:rank])
     attribute["Direction"] = np.eye(rank).flatten()
     return attribute
 
@@ -882,11 +885,20 @@ def _extension_step(
                 _or_konfai("Take the channels its place in the chain hands it", _RUN),
             ) from error
         undone = isinstance(stage, TransformInverse) and stage.apply_inverse
+
         # A HALO class keeps the grid: the extents, and the geometry it could record without changing them.
-        regridded = tuple(returned.shape[1:]) != probe[1:] or any(
-            not np.array_equal(attribute.get_np_array(key), _probe_attribute(rank).get_np_array(key))
-            for key in ("Origin", "Spacing", "Direction")
-        )
+        def moves(returned: Any, attribute: Any, placed: Any) -> bool:
+            return tuple(returned.shape[1:]) != probe[1:] or any(
+                not np.array_equal(attribute.get_np_array(key), placed.get_np_array(key))
+                for key in ("Origin", "Spacing", "Direction")
+            )
+
+        regridded = moves(returned, attribute, _probe_attribute(rank))
+        if on_grid and not regridded:
+            # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one.
+            elsewhere = _probe_attribute(rank, placed=True)
+            again = _probed(stage, torch.zeros(probe, dtype=getattr(torch, handed or "float32")), elsewhere)
+            regridded = moves(again, elsewhere, _probe_attribute(rank, placed=True))
         if on_grid and regridded:
             raise ConfigError(
                 f"transform '{name}' returns {list(returned.shape)} for {list(probe)}, which moves its group off the"

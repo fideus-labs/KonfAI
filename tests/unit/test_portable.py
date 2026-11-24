@@ -1329,6 +1329,28 @@ def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(
         transform_manifest(_two_groups({"SwappedGrid:Swap": {}}), "Predictor", extension=True)
 
 
+def test_a_class_of_the_app_s_shifting_a_second_input_by_its_spacing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A shift by the spacing less one voxel's millimetre is none on a grid of unit spacing: the class is probed on
+    # another grid too.
+    (tmp_path / "ShiftedGrid.py").write_text(
+        "import numpy as np\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Shift(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        spacing = cache_attribute.get_np_array('Spacing')\n"
+        "        cache_attribute['Origin'] = cache_attribute.get_np_array('Origin') + spacing - 1\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"ShiftedGrid:Shift": {}}), "Predictor", extension=True)
+
+
 def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
     # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
     # konfai hands the stage as stored, as the first group's chain's own.
