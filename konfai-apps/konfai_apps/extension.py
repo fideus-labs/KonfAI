@@ -35,7 +35,10 @@ _FUEL = 10**10
 class _Opened:
     """One class of an extension, opened in an instance of its own: the calls of the extension's interface."""
 
-    def __init__(self, extension: Path, kind: int, name: str, params: dict[str, Any]) -> None:
+    def __init__(
+        self, extension: Path, kind: int | None = None, name: str = "", params: dict[str, Any] | None = None
+    ) -> None:
+        """Without ``kind``, the module alone: it loads, starts and calls the interface KonfAI Edge calls."""
         import wasmtime
 
         config = wasmtime.Config()
@@ -43,7 +46,10 @@ class _Opened:
         engine = wasmtime.Engine(config)
         self.store = wasmtime.Store(engine)
         self.store.set_fuel(_FUEL)
-        module = wasmtime.Module.from_file(engine, str(extension))
+        try:
+            module = wasmtime.Module.from_file(engine, str(extension))
+        except wasmtime.WasmtimeError as error:
+            raise AppMetadataError(f"The extension {extension.name} is no WebAssembly module: {error}") from error
         # The functions a class reading by regions is lent, over the volumes `lent` holds for the call.
         self.lent: tuple[list[Any], Any] | None = None
         linker = wasmtime.Linker(engine)
@@ -62,6 +68,8 @@ class _Opened:
                 f"The extension {extension.name} is built against interface {built or 'none'} of konfai-edge-ext,"
                 f" and KonfAI Edge calls interface {_ABI}: build it again against that konfai-edge-ext."
             )
+        if kind is None:
+            return
         refused = self.call("ext_open", kind, *self._text(name), *self._text(json.dumps(params)))
         if refused:
             reason = "implements no such class" if refused == 1 else "implements it as another kind"
@@ -191,7 +199,10 @@ def _built(classpath: str, given: dict[str, Any], kinds: tuple[type, ...]) -> tu
         return None
     bound = signature.bind_partial(**{key: clean(value) for key, value in given.items() if key in signature.parameters})
     bound.apply_defaults()
-    return cls(**bound.arguments), dict(bound.arguments)
+    # A `*args` or `**options` is no parameter konfai binds: it takes nothing, and the extension is handed none.
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    named = {key: value for key, value in bound.arguments.items() if signature.parameters[key].kind not in variadic}
+    return cls(*bound.args, **bound.kwargs), named
 
 
 def _close(name: str, what: str, konfai: Any, extension: Any) -> None:
@@ -414,7 +425,10 @@ def _check_transform(extension: Path, name: str, stage: Any, params: dict[str, A
             raise AppMetadataError(f"The extension's '{name}' has no inverse, and the Python class is undone.")
         return opened.get(out, (channels, *shape))
 
-    attribute = Attribute()  # one for both ways: a stage may record on it what its inverse reads back
+    # The case planned as konfai plans it, one attribute for both ways: a stage may record on it what its call and its
+    # inverse read back.
+    attribute = _geometry(len(shape))[1]
+    stage.transform_shape("check", "check", list(shape), attribute)
     transformed = stage("check", volume.clone(), attribute)
     _close(name, "transform a volume", transformed, run(volume, False))
     if isinstance(stage, TransformInverse) and stage.apply_inverse and transformed.shape == volume.shape:
@@ -450,17 +464,19 @@ def _check_fold(extension: Path, name: str, fold: Any, params: dict[str, Any], s
             continue
     else:
         raise AppMetadataError(f"'{name}' enters no patch of 2 to 1024 channels, so its extension is not checked.")
-    held = torch.zeros_like(patches[0])
-    opened = _Opened(extension, PATCH_COMBINE, name, params)
-    pixels, channels = math.prod(shape), int(held.shape[0])
-    held_at, runs = opened.buffer(channels * pixels), opened.put(np.zeros(2), "uint32")
-    for patch in patches:
-        held = fold.fold(held, patch)
-        opened.call("ext_fold", held_at, pixels, opened.put(patch.float()), pixels, channels, runs, 1, pixels)
-    written = opened.call("ext_output", channels, 1)
-    out = opened.buffer(written * pixels)
-    opened.call("ext_leave", held_at, pixels, out, pixels, channels, pixels)
-    _close(name, "combine the patches", fold.leave(held), opened.get(out, (written, *shape)))
+    # A lone patch, as a case of one patch folds, and three, each from nothing held.
+    for count, what in ((1, "combine one patch"), (len(patches), "combine the patches")):
+        held = torch.zeros_like(patches[0])
+        opened = _Opened(extension, PATCH_COMBINE, name, params)
+        pixels, channels = math.prod(shape), int(held.shape[0])
+        held_at, runs = opened.buffer(channels * pixels), opened.put(np.zeros(2), "uint32")
+        for patch in patches[:count]:
+            held = fold.fold(held, patch)
+            opened.call("ext_fold", held_at, pixels, opened.put(patch.float()), pixels, channels, runs, 1, pixels)
+        written = opened.call("ext_output", channels, 1)
+        out = opened.buffer(written * pixels)
+        opened.call("ext_leave", held_at, pixels, out, pixels, channels, pixels)
+        _close(name, what, fold.leave(held), opened.get(out, (written, *shape)))
 
 
 def _check_criterion(
@@ -497,7 +513,8 @@ def check_extension(
     where konfai draws from torch's generator. ``runs``, the classes a compiled program runs by the extension
     (:func:`classes_run`), leaves out those it folds into a graph.
 
-    Raises ``AppMetadataError`` when the extension lacks a class, or returns other values than the Python class.
+    Raises ``AppMetadataError`` when the extension is no module KonfAI Edge calls, whatever class the configs name,
+    when it lacks a class, or returns other values than the Python class.
     """
     import yaml
     from konfai.data.augmentation import DataAugmentation
@@ -518,6 +535,7 @@ def check_extension(
         ),
     }
     extension = Path(extension)
+    _Opened(extension)  # the module, whatever class the configs name
     checked: dict[tuple[str, str], None] = {}
     for config in configs:
         loaded = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
