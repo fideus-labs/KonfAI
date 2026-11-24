@@ -297,6 +297,80 @@ def test_two_exports_to_one_destination_stage_their_graphs_apart(tmp_path, monke
     assert sorted(path.name for path in tmp_path.iterdir()) == ["manifest.json", "model.onnx"]
 
 
+def test_the_check_of_the_free_axes_reads_the_trace_through_no_deprecated_name(tmp_path):
+    # torch 2.12 renamed the shape environment's var_to_val backed_var_to_val and warns on the old name.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    import warnings
+
+    from konfai.export import export_to_onnx
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export_to_onnx(_Conv().eval(), tmp_path, torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+    assert not [str(w.message) for w in caught if "var_to_val" in str(w.message)]
+
+
+class _Wide(_Conv):  # weights past the 256 bytes torch's exporter keeps inline when it moves the others out
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 8, 3, padding=1)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_weights_past_torchs_limit_for_one_file_stay_inline_in_the_one_file_the_bundle_holds(
+    tmp_path, monkeypatch, dynamic
+):
+    # Past 1536 MB (MedicalSAM3's 1.9 GB) torch moves the weights to a file beside the graph, which no consumer of
+    # the bundle carries: the export keeps them inline, in a file as readable as any the user makes, twice over.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import os
+    import shutil
+
+    import onnx
+
+    program = pytest.importorskip("torch.onnx._internal.exporter._onnx_program")
+    if not hasattr(program, "_LARGE_MODEL_THRESHOLD"):
+        pytest.skip("this torch keeps no size limit for one file")
+    monkeypatch.setattr(program, "_LARGE_MODEL_THRESHOLD", 0)  # a small conv stands for 1.9 GB of weights
+    from konfai.export import export_to_onnx
+
+    example = torch.randn(1, 1, 8, 10, 12)
+    bundle = tmp_path / "bundle"
+    for _ in range(2):
+        export_to_onnx(_Wide().eval(), bundle, example, "head", dynamic=dynamic)
+    assert sorted(path.name for path in bundle.iterdir()) == ["manifest.json", "model.onnx"]
+    graph = onnx.load(str(bundle / "model.onnx"), load_external_data=False)
+    assert not [t.name for t in graph.graph.initializer if t.external_data]
+    umask = os.umask(0)
+    os.umask(umask)
+    assert (bundle / "model.onnx").stat().st_mode & 0o777 == 0o666 & ~umask
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    shutil.copy2(bundle / "model.onnx", moved / "model.onnx")
+    session = ort.InferenceSession(str(moved / "model.onnx"), providers=["CPUExecutionProvider"])
+    assert session.run(None, {session.get_inputs()[0].name: example.numpy()})[0].shape == (1, 8, 8, 10, 12)
+
+
+def test_a_graph_past_what_one_onnx_file_holds_is_refused_and_leaves_the_bundle_as_it_was(tmp_path, monkeypatch):
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    from konfai import export
+    from konfai.utils.errors import PredictorError
+
+    example = torch.randn(1, 1, 8, 10, 12)
+    export.export_to_onnx(_Conv().eval(), tmp_path, example, "head")
+    before = (tmp_path / "model.onnx").read_bytes()
+    monkeypatch.setattr(export, "ONE_FILE", 1600)  # between the conv's graph (1297 bytes) and the wider one's (1969)
+    with pytest.raises(PredictorError, match="past the 2 GiB one ONNX file holds"):
+        export.export_to_onnx(_Wide().eval(), tmp_path, example, "head")
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["manifest.json", "model.onnx"]
+    assert (tmp_path / "model.onnx").read_bytes() == before
+
+
 @pytest.mark.parametrize(("eager", "exported"), [(float("nan"), 2.0), (float("-inf"), float("inf"))])
 def test_a_nonfinite_value_the_graph_moves_is_refused_and_one_it_keeps_is_not(tmp_path, eager, exported):
     # A NaN torch writes where the graph writes a number, or an infinity of the other sign, is a gap a maximum over
