@@ -1314,3 +1314,24 @@ def test_a_fold_stays_on_a_grid_of_one_patch(tmp_path) -> None:
     for overlap in ("20%", None):
         output.set_patch_config([0, 0, 0], overlap, 1)
         assert output.patch_combine is fold
+
+
+def test_a_fold_enters_each_patch_once_also_the_first_of_a_case() -> None:
+    # The case opens on what the fold holds, and an enter may work in place: the patch blended is entered once.
+    from konfai.data.patching import Fold
+
+    class Raised(Fold):
+        def enter(self, patch: torch.Tensor) -> torch.Tensor:
+            return patch.add_(1)
+
+        def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+            return patch
+
+    output_dataset = OutputDataset(
+        same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+    )
+    output_dataset.patch_combine = Raised()
+    dataset = _single_patch_dataset_iter()
+    output_dataset.add_layer(0, 0, 0, torch.zeros(2, 2, 2), dataset, Attribute())
+
+    assert torch.equal(output_dataset._get_output(0, 0, [2], dataset), torch.ones(1, 2, 2, 2))

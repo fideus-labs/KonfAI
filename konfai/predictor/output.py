@@ -518,13 +518,17 @@ class OutputDataset(Dataset, NeedDevice):
     ):
         with PREDICTION_CLOCK.phase("blend"):
             fold = self.patch_combine if isinstance(self.patch_combine, Fold) else None
-            # The case opens on what the fold holds; a patch inverse keeps the patch's shape, so the first patch
-            # entered as it came sizes it.
+            # The case opens on what the fold holds; a patch inverse keeps the patch's shape, so one voxel of the
+            # first patch entered as it came sizes it, a copy: an enter may work in place, and the patch enters once.
             opening = index_augmentation not in self.output_layer_accumulator.get(index_dataset, {})
             self._ensure_case_state(
                 index_dataset,
                 index_augmentation,
-                fold.enter(layer) if fold is not None and opening else layer,
+                (
+                    fold.enter(layer[(slice(None),) + (slice(0, 1),) * (layer.dim() - 1)].clone())
+                    if fold is not None and opening
+                    else layer
+                ),
                 dataset,
                 attribute,
                 number_of_channels_per_model,
