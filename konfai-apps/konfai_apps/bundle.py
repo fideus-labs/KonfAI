@@ -535,26 +535,29 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         are done."""
         from .extension import check_extension, classes_run
 
-        runs = None
-        if args.get("onnx"):
-            artifact = export_portable_into_bundle(
-                staged,
-                checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
-                patch_size=args.get("patch_size"),
-                in_channels=args.get("in_channels"),
-                output_module=args.get("output_module"),
-                extension=bool(args.get("extension")),
-            )
-            print(f"[KonfAI-Apps] Portable model exported: {out / artifact.relative_to(staged)}")
-            # The classes the program runs by the extension: a class folded into a graph is no longer its.
-            # A program, or the manifest beside the one model it would run.
-            written = artifact if artifact.suffix == ".json" else staged / "manifest.json"
-            runs = classes_run(json.loads(written.read_text())) if args.get("extension") else None
-        if not args.get("extension"):
-            return
-        # Checked against the classes it stands for, as konfai imports them: the bytes the bundle takes.
+        # The app's classes as konfai imports them: the staged files first, then those the bundle keeps and the
+        # update does not write (a Model.py it already holds).
         sys.path.insert(0, str(staged))
+        sys.path.append(str(out))
         try:
+            runs = None
+            if args.get("onnx"):
+                artifact = export_portable_into_bundle(
+                    staged,
+                    checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
+                    patch_size=args.get("patch_size"),
+                    in_channels=args.get("in_channels"),
+                    output_module=args.get("output_module"),
+                    extension=bool(args.get("extension")),
+                )
+                print(f"[KonfAI-Apps] Portable model exported: {out / artifact.relative_to(staged)}")
+                # The classes the program runs by the extension: a class folded into a graph is no longer its.
+                # A program, or the manifest beside the one model it would run.
+                written = artifact if artifact.suffix == ".json" else staged / "manifest.json"
+                runs = classes_run(json.loads(written.read_text())) if args.get("extension") else None
+            if not args.get("extension"):
+                return
+            # Checked against the classes it stands for: the bytes the bundle takes.
             configs = [staged / Path(config).name for config in args["config"]]
             # The program is the prediction config's: the classes of the other configs are all checked.
             compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
@@ -569,6 +572,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
         finally:
             sys.path.remove(str(staged))
+            sys.path.remove(str(out))
 
     bundle = assemble_bundle(
         name=args["name"],

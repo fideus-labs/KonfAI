@@ -1201,6 +1201,26 @@ def test_a_bundle_takes_an_update_only_once_its_export_and_its_extension_are_che
     assert not list(bundle.parent.glob(".Seg.staging-*"))
 
 
+def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
+    # The Model.py a first packaging carried stays in the bundle when the next one names none: the classes the next
+    # config names from it are the app's, and the staged update reads them there.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    monkeypatch.delitem(sys.modules, "Model", raising=False)
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (root / "Model.py").unlink()
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+
+    capsys.readouterr()
+    assert (_cli(root, extension=str(root / "own.wasm")) / "own.wasm").is_file()
+    assert "Extension checked against: Model:Scale" in capsys.readouterr().out
+    assert (bundle / "Model.py").read_text() == OWN
+
+
 def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):
     # Its name beside a support file of another source is refused before anything is written, a symlink in the
     # bundle under its name is not written through, and an extension of its own name lands.
