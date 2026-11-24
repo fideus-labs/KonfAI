@@ -3400,7 +3400,22 @@ def compile_prediction(
 
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:
-    """Name the app's ``extension`` of KonfAI Edge in ``program``, copied beside it where ``output`` is written."""
+    """Name the app's ``extension`` of KonfAI Edge in ``program``, copied beside it where ``output`` is written: a
+    file that is there, under a name neither ``output`` nor a file ``program`` names takes (a graph it exports)."""
+
+    def names(node: Any) -> Iterator[str]:
+        if isinstance(node, str):
+            yield node
+        for value in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
+            yield from names(value)
+
+    if not extension.is_file():
+        raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
+    if extension.name == output.name or extension.name in names(program):
+        raise ConfigError(
+            f"The extension '{extension.name}' takes the name of a file the program writes beside it.",
+            "Name the extension apart from the program and the graphs it names.",
+        )
     if extension.parent != output.parent:
         shutil.copy(extension, output.parent / extension.name)
     program["extension"] = extension.name

@@ -1237,6 +1237,29 @@ def test_a_model_reading_two_groups_names_the_second_and_the_chain_that_prepares
     assert program["steps"][0]["in"] == ["input", "MASK"]
 
 
+def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(tmp_path: Path) -> None:
+    # A program names its extension beside it: a file that is there, never one of the files it names otherwise
+    # (an exported graph copied over), nor the program itself. One already beside it is reused under its own name.
+    from konfai.portable import carry_extension
+
+    out = tmp_path / "out" / "prediction.json"
+    out.parent.mkdir()
+    (out.parent / "model.onnx").write_bytes(b"graph")
+    program = {"models": {"model": "model.onnx"}}
+    with pytest.raises(ConfigError, match=r"missing\.wasm"):
+        carry_extension(out.parent / "missing.wasm", dict(program), out)
+    for name in ("model.onnx", "prediction.json"):
+        (tmp_path / name).write_bytes(b"\0asm")
+        with pytest.raises(ConfigError, match=re.escape(name)):
+            carry_extension(tmp_path / name, dict(program), out)
+    assert (out.parent / "model.onnx").read_bytes() == b"graph"
+    beside = out.parent / "own.wasm"
+    beside.write_bytes(b"\0asm")
+    named = dict(program)
+    carry_extension(beside, named, out)
+    assert named["extension"] == "own.wasm"
+
+
 def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
     # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
     # konfai hands the stage as stored, as the first group's chain's own.
