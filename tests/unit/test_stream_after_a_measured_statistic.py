@@ -637,9 +637,9 @@ def test_a_case_statistic_of_a_store_read_whole_folds_it_by_slabs(tmp_path, monk
 
 @pytest.mark.parametrize(("extension", "grain"), [("mha", None), ("mha", 8), ("gipl", None)])
 def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_path, monkeypatch, extension, grain):
-    # Three float32 blocks in flight fit the budget at 19 rows, and at the grain of 8 the scan is raised to; the fold
-    # holds each block in float64 and the class's partial three float64 copies more, 32 B an element over the 12 the
-    # blocks in flight cost.
+    # Three float32 blocks in flight fit the budget at 26 rows, and at 24 on the grain of 8; the fold holds each block
+    # in float64 and the class's partial three float64 copies more, 32 B an element over the 12 the blocks in flight
+    # cost, beside the volume a store read whole holds.
     import konfai.utils.dataset.statistics as statistics
     from konfai.utils.budget import set_per_rank_budget
     from oracle_support import Roughness
@@ -653,14 +653,15 @@ def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_pa
     sizes: list[int] = []
     partial = Roughness.partial
     monkeypatch.setattr(Roughness, "partial", lambda self, block: sizes.append(block.numel()) or partial(self, block))
-    stage, budget = CaseStatistic("oracle_support:Roughness"), 300_000
+    stage, budget = CaseStatistic("oracle_support:Roughness"), 400_000
     set_per_rank_budget(budget)
     try:
         stage._measure(dataset, "CT", CASE_NAME)
     finally:
         set_per_rank_budget(None)
 
-    assert sizes and max(sizes) * (3 * 4 + 4 * 8) <= budget, f"blocks of {max(sizes)} elements"
+    resident = volume.nbytes if extension == "gipl" else 0
+    assert sizes and max(sizes) * (3 * 4 + 4 * 8) + resident <= budget, f"blocks of {max(sizes)} elements"
 
 
 @pytest.mark.parametrize("extension", ["mha", "gipl"])
@@ -678,10 +679,31 @@ def test_a_case_statistic_whose_shortest_block_and_fold_exceed_the_budget_is_ref
     try:
         with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
             CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
-        # The moments of a store read whole keep their rule: one row of 12,288 B over 10,000 B is read.
+        # The moments of a store read whole keep their rule: one row of 12,288 B over 10,000 B is read, and blocks of
+        # 24 rows in 300,000 B, the volume unpriced.
         set_per_rank_budget(10_000)
         if extension == "gipl":
             assert dataset.read_data_statistics("CT", CASE_NAME)["mean"] == 0.0
+            set_per_rank_budget(300_000)
+            assert statistics._block_rows([], CASE_NAME, [1, 40, 32, 32]) == 24
+    finally:
+        set_per_rank_budget(None)
+
+
+def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budget(tmp_path, monkeypatch):
+    # Read whole, the store holds the volume (163,840 B) beside the shortest block and its fold (152,592 B): over
+    # 200,000 B together, the scan is refused, though the block alone fits.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.float32), geometry())
+    set_per_rank_budget(200_000)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
     finally:
         set_per_rank_budget(None)
 

@@ -143,16 +143,18 @@ def _block_rows(
     if entries:
         return _scan_rows(entries, name, shape, piece, halo, fold_bytes)
     padded = _padded(shape, halo)
-    rows = _statistics_chunk_length(padded, 1, _statistics_block_elements(fold_bytes=fold_bytes)) - 2 * halo
-    rows = max(piece, rows // piece * piece)
-    # A fold's block over the budget is refused as a scan by regions refuses it; ordinary scans keep their rule.
+    # A fold's scan holds the volume read whole beside its blocks, and is refused as a scan by regions is where the
+    # shortest block does not fit beside it; ordinary scans keep their rule.
+    resident = int(np.prod(shape, dtype=np.int64)) * _STATISTICS_ELEMENT_BYTES if fold_bytes else 0
+    elements = _statistics_block_elements(fold_bytes=fold_bytes, reserved=resident)
+    rows = max(piece, (_statistics_chunk_length(padded, 1, elements) - 2 * halo) // piece * piece)
     held = (rows + 2 * halo) * _statistics_plane_elements(padded, 1)
-    held *= _STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES + fold_bytes
+    held = held * (_STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES + fold_bytes) + resident
     budget = per_rank_budget_bytes()
     if fold_bytes and budget is not None and held > budget:
         raise DatasetManagerError(
-            f"'{name}': the shortest block a whole-volume scan can read holds {format_bytes(held)} with its fold,"
-            f" over the per-rank memory budget ({format_bytes(budget)}).",
+            f"'{name}': the shortest block a whole-volume scan can read holds {format_bytes(held)} with its fold and"
+            f" the volume read whole, over the per-rank memory budget ({format_bytes(budget)}).",
             "Raise 'memory_budget'.",
         )
     return rows
@@ -209,16 +211,18 @@ def _scan_rows(
     return rows
 
 
-def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES, fold_bytes: int = 0) -> int:
+def _statistics_block_elements(
+    element_bytes: int = _STATISTICS_ELEMENT_BYTES, fold_bytes: int = 0, reserved: int = 0
+) -> int:
     """Elements one block of a whole-volume scan may hold: its share of the budget this rank
-    published, :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them being in flight at the peak, each
-    ``element_bytes`` an element, and the fold holding ``fold_bytes`` an element of the one it takes. Without a
+    published past the ``reserved`` bytes, :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them being in flight at the peak,
+    each ``element_bytes`` an element, and the fold holding ``fold_bytes`` an element of the one it takes. Without a
     declared budget, the grain that keeps a chunked store's decode whole."""
     budget = per_rank_budget_bytes()
     if budget is None:
         return _STATISTICS_CHUNK_ELEMENTS
     held = _STATISTICS_BLOCKS_IN_FLIGHT * element_bytes + fold_bytes
-    return max(1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / held)))
+    return max(1, min(_STATISTICS_CHUNK_ELEMENTS, int((budget - reserved) / held)))
 
 
 def _statistics_plane_elements(shape: list[int] | tuple[int, ...], axis: int) -> int:
