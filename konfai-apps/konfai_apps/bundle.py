@@ -212,7 +212,7 @@ def assemble_bundle(
     support_files: dict[str, str] | None = None,
     support_root: str | Path | None = None,
     extension: str | Path | None = None,
-    finish: Callable[[Path, Path], None] | None = None,
+    finish: Callable[[Path], None] | None = None,
 ) -> Path:
     """Assemble ``<out_dir>/<name>/`` in the standard app-bundle layout.
 
@@ -228,10 +228,9 @@ def assemble_bundle(
     ``support_files`` explicitly maps bundle-relative destinations to files/directories below
     ``support_root`` (required with this option). Only these paths are copied; imports and asset
     references are not recursively inferred. The manifest records the expanded managed files.
-    ``extension``, the app's extension of KonfAI Edge, lands under its own name. ``finish`` runs on the staged
-    export before it replaces the bundle, with a folder linking the Python files the bundle keeps past it: what it
-    writes in the staged export goes in with it, and what it raises leaves the bundle as it was. Returns the bundle
-    directory.
+    ``extension``, the app's extension of KonfAI Edge, lands under its own name. ``finish`` runs on the bundle the
+    export makes, a copy beside it that then takes its place: what it writes there goes in with it, and what it raises
+    leaves the bundle as it was. Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -282,8 +281,10 @@ def assemble_bundle(
     metadata["support_files"] = sorted(support)
     bundle = Path(out_dir) / name
     staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
-    if staging.exists():
-        shutil.rmtree(staging)
+    update = bundle.with_name(f".{name}.update-{os.getpid()}")
+    for scratch in (staging, update):
+        if scratch.exists():
+            shutil.rmtree(scratch)
     staging.mkdir(parents=True)
     try:
         (staging / "app.json").write_text(json.dumps(metadata, indent=2))
@@ -295,41 +296,51 @@ def assemble_bundle(
                     _publish_weights(staged, target)
                 else:
                     shutil.copy(staged, target)
-        if finish is not None:
-            kept = Path(tempfile.mkdtemp(prefix=f".{name}.kept-", dir=bundle.parent))
-            try:
-                _link_kept(staging, bundle, kept)
-                finish(staging, kept)
-            finally:
-                shutil.rmtree(kept, ignore_errors=True)
-        _replace_bundle(staging, bundle, metadata["models"])
+        if finish is None:
+            _replace_bundle(staging, bundle, metadata["models"])
+            return bundle
+        # The update is finished on the bundle it makes, which then takes the bundle's place: the bundle as it was,
+        # every file the export reads beside the staged ones, none of those the update drops.
+        if bundle.exists():
+            shutil.copytree(bundle, update, symlinks=True, copy_function=lambda src, dst: _carried(bundle, src, dst))
+        _replace_bundle(staging, update, metadata["models"])
+        finish(update)
+        if bundle.exists():
+            previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
+            bundle.rename(previous)
+            update.rename(bundle)
+            shutil.rmtree(previous)
+        else:
+            update.rename(bundle)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(update, ignore_errors=True)
     return bundle
 
 
-def _link_kept(staging: Path, bundle: Path, kept: Path) -> None:
-    """Link into ``kept`` the Python files of ``bundle`` that replacing it by ``staging`` keeps, all but those it drops
-    (:func:`_obsolete`); one the update writes anew comes first from ``staging``. A copy where the system makes no
-    link."""
-    if not bundle.is_dir():
-        return
-    dropped = set(_obsolete(staging, bundle))
-    for path in bundle.rglob("*.py"):
-        relative = path.relative_to(bundle)
-        if not path.is_file() or path.resolve() in dropped:
-            continue
-        link = kept / relative
-        link.parent.mkdir(parents=True, exist_ok=True)
+def _carried(bundle: Path, source: str, target: str) -> None:
+    """A file of ``bundle`` into the update an export finishes: a copy where the export may write it in place (a
+    manifest, a program, a graph beside the configs), else a link (a checkpoint, a file below the top level, which it
+    only reads), or a copy where the system makes no link."""
+    from konfai_apps.app_repository import WEIGHTS
+
+    # ponytail: an export writing in place below the top level would write through a link; copy those too then.
+    if Path(source).parent != bundle or Path(source).name.endswith(WEIGHTS):
         try:
-            link.symlink_to(path.resolve())
+            os.link(source, target)
+            return
         except OSError:
-            shutil.copy2(path, link)
+            pass
+    shutil.copy2(source, target)
 
 
-def _obsolete(staging: Path, bundle: Path) -> dict[Path, Path]:
-    """The files of ``bundle`` its previous ``app.json`` declares (checkpoints, support files) that ``staging`` no
-    longer writes, by resolved path: two spellings of one file unlink once."""
+def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
+    """Move the staged export over ``bundle``: a fresh bundle is the staging directory renamed; an
+    existing one takes every staged file and loses the checkpoints its previous ``app.json``
+    declared that ``models`` no longer does."""
+    if not bundle.exists():
+        staging.rename(bundle)
+        return
     previous: list[str] = []
     try:
         old_metadata = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
@@ -338,8 +349,9 @@ def _obsolete(staging: Path, bundle: Path) -> dict[Path, Path]:
         ]
     except (OSError, ValueError):
         pass
-    retained = {(bundle / path.relative_to(staging)).resolve() for path in staging.rglob("*") if path.is_file()}
-    obsolete: dict[Path, Path] = {}
+    staged_files = sorted(path for path in staging.rglob("*") if path.is_file())
+    retained = {(bundle / path.relative_to(staging)).resolve() for path in staged_files}
+    obsolete: dict[Path, Path] = {}  # by resolved path: two spellings of one file unlink once
     for name in sorted(set(previous)):
         target = bundle / name
         if Path(name).is_absolute() or not target.resolve().is_relative_to(bundle.resolve()):
@@ -351,18 +363,6 @@ def _obsolete(staging: Path, bundle: Path) -> dict[Path, Path]:
             continue  # './model.pt' and 'model.pt' can name the same retained checkpoint.
         if target.is_file():
             obsolete.setdefault(target.resolve(), target)
-    return obsolete
-
-
-def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
-    """Move the staged export over ``bundle``: a fresh bundle is the staging directory renamed; an
-    existing one takes every staged file and loses the checkpoints its previous ``app.json``
-    declared that ``models`` no longer does."""
-    if not bundle.exists():
-        staging.rename(bundle)
-        return
-    staged_files = sorted(path for path in staging.rglob("*") if path.is_file())
-    obsolete = _obsolete(staging, bundle)
     removable = set(obsolete)
     # Preflight the entire update: never write through a destination's symlink or replace a user's
     # file or directory. A managed file this export no longer declares may become a directory.
@@ -562,15 +562,13 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         support[destination] = source
     out = Path(args["out"]) / args["name"]
 
-    def export_and_check(staged: Path, kept: Path) -> None:
-        """The portable program and the extension's check, on the staged update: the bundle takes neither until both
-        are done."""
+    def export_and_check(staged: Path) -> None:
+        """The portable program and the extension's check, on the bundle the update makes: the bundle takes neither
+        until both are done."""
         from .extension import check_extension, classes_run
 
-        # The app's classes as konfai imports them: the staged files first, then those the bundle keeps past the
-        # update (a Model.py it already holds).
+        # The app's classes as konfai imports them.
         sys.path.insert(0, str(staged))
-        sys.path.append(str(kept))
         try:
             runs = None
             if args.get("onnx"):
@@ -604,7 +602,6 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
         finally:
             sys.path.remove(str(staged))
-            sys.path.remove(str(kept))
 
     bundle = assemble_bundle(
         name=args["name"],
@@ -618,7 +615,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         support_root=args.get("support_root"),
         # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
         extension=args.get("extension"),
-        finish=export_and_check,
+        finish=export_and_check if args.get("onnx") or args.get("extension") else None,
     )
     print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
 

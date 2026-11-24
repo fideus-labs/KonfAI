@@ -1183,22 +1183,36 @@ def _cli(root, **more):
 
 
 def test_a_bundle_takes_an_update_only_once_its_export_and_its_extension_are_checked(tmp_path, monkeypatch):
-    # The update is assembled, exported and checked beside the bundle: an extension that does not load leaves the
-    # bundle the config and the program it ran before.
+    # The update is exported and checked on the bundle it makes, beside the bundle: an extension that does not load
+    # leaves the bundle the config and the program it ran before, the manifest the refused export wrote anew included.
+    import konfai.export as exporter
+    import konfai.metric.measure  # noqa: F401  # the check imports it, which builds networks: before they are stubbed
+
     wasmtime = pytest.importorskip("wasmtime")
     root = _support_workspace(tmp_path)
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
-    bundle = _cli(root, extension=str(root / "own.wasm"))
-    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
     config = {"Predictor": {"Model": {"classpath": "Probe"}, "outputs_dataset": {"Head": {"OutputDataset": {}}}}}
     (root / "Prediction.yml").write_text(json.dumps(config))
-    (root / "own.wasm").write_bytes(b"\0asm, and no module")
     _stub_export(monkeypatch)
+    stub, exports = exporter.export_to_onnx, []
+
+    def numbered(*args, **kwargs):
+        exports.append(None)
+        return stub(*args, **{**kwargs, "extra_manifest": {"export": len(exports)}})
+
+    monkeypatch.setattr(exporter, "export_to_onnx", numbered)
+    onnx = {"onnx": True, "patch_size": [4, 4], "in_channels": 1, "output_module": "Head"}
+    bundle = _cli(root, extension=str(root / "own.wasm"), **onnx)
+    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+    config["Predictor"]["Model"]["classpath"] = "Probe2"
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    (root / "own.wasm").write_bytes(b"\0asm, and no module")
 
     with pytest.raises(AppMetadataError, match="is no WebAssembly module"):
-        _cli(root, extension=str(root / "own.wasm"), onnx=True, patch_size=[4, 4], in_channels=1, output_module="Head")
+        _cli(root, extension=str(root / "own.wasm"), **onnx)
+    assert len(exports) == 2 and json.loads(before["manifest.json"])["export"] == 1
     assert {path.name: path.read_bytes() for path in bundle.iterdir()} == before
-    assert not list(bundle.parent.glob(".Seg.staging-*"))
+    assert not list(bundle.parent.glob(".Seg.*"))
 
 
 def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
@@ -1208,17 +1222,20 @@ def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkey
 
     wasmtime = pytest.importorskip("wasmtime")
     root = _support_workspace(tmp_path)
-    (root / "Model.py").write_text(OWN)
+    # It reads a file beside it, which the next packaging ships.
+    (root / "Model.py").write_text(f"from pathlib import Path\n\nTWICE = Path(__file__).with_name('twice.txt').read_text()\n{OWN}")
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     monkeypatch.delitem(sys.modules, "Model", raising=False)
-    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (root / "twice.txt").write_text("2")
+    support = {"support_file": ["twice.txt=twice.txt"], "support_root": str(root)}
+    bundle = _cli(root, model_py=str(root / "Model.py"), **support)
     (root / "Model.py").unlink()
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
 
     capsys.readouterr()
-    assert (_cli(root, extension=str(root / "own.wasm")) / "own.wasm").is_file()
+    assert (_cli(root, extension=str(root / "own.wasm"), **support) / "own.wasm").is_file()
     assert "Extension checked against: Model:Scale" in capsys.readouterr().out
-    assert (bundle / "Model.py").read_text() == OWN
+    assert (bundle / "Model.py").read_text().endswith(OWN)
 
 
 def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monkeypatch):
