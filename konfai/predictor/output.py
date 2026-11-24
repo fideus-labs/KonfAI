@@ -517,14 +517,26 @@ class OutputDataset(Dataset, NeedDevice):
         number_of_channels_per_model: list[int] | None = None,
     ):
         with PREDICTION_CLOCK.phase("blend"):
-            if isinstance(self.patch_combine, Fold):
-                layer = self.patch_combine.enter(layer)
+            fold = self.patch_combine if isinstance(self.patch_combine, Fold) else None
+            inverses = self._inverses(dataset, patch=True)
+            if fold is not None and not inverses:
+                layer = fold.enter(layer)
+            # The case opens on what the fold holds; a patch inverse keeps the patch's shape, so the first patch
+            # entered as it came sizes it.
+            opening = index_augmentation not in self.output_layer_accumulator.get(index_dataset, {})
             self._ensure_case_state(
-                index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
+                index_dataset,
+                index_augmentation,
+                fold.enter(layer) if fold is not None and inverses and opening else layer,
+                dataset,
+                attribute,
+                number_of_channels_per_model,
             )
             attributes = self.attributes[index_dataset][index_augmentation]
-            for transform in self._inverses(dataset, patch=True):
+            for transform in inverses:  # the model's output, undone before the fold takes it
                 layer = transform.inverse(self.names[index_dataset], layer, attributes[index_patch])
+            if fold is not None and inverses:
+                layer = fold.enter(layer)
             accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
             slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
         if not self._stream_plans.get(index_dataset):
