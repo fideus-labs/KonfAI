@@ -27,6 +27,9 @@ _DTYPES = "bool uint8 int8 uint16 int16 uint32 int32 uint64 int64 float16 float3
 _ABI = 2
 #: The spatial extents of the volumes compared, the last ones for a case of fewer axes.
 _EXTENTS = (3, 4, 5)
+#: The instructions one opened class may run on those volumes, its module's start included: a class that never
+#: returns is refused instead of holding the bundle command.
+_FUEL = 10**10
 
 
 class _Opened:
@@ -35,8 +38,11 @@ class _Opened:
     def __init__(self, extension: Path, kind: int, name: str, params: dict[str, Any]) -> None:
         import wasmtime
 
-        engine = wasmtime.Engine()
+        config = wasmtime.Config()
+        config.consume_fuel = True
+        engine = wasmtime.Engine(config)
         self.store = wasmtime.Store(engine)
+        self.store.set_fuel(_FUEL)
         module = wasmtime.Module.from_file(engine, str(extension))
         # The functions a class reading by regions is lent, over the volumes `lent` holds for the call.
         self.lent: tuple[list[Any], Any] | None = None
@@ -45,8 +51,11 @@ class _Opened:
         read, write = wasmtime.FuncType([word] * 5, [word]), wasmtime.FuncType([word] * 4, [word])
         linker.define_func("konfai", "read", read, self._read, access_caller=True)
         linker.define_func("konfai", "write", write, self._write, access_caller=True)
-        self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
         self.name = name
+        try:
+            self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
+        except wasmtime.Trap as trap:
+            raise AppMetadataError(f"The extension {extension.name} does not start: {trap}") from trap
         built = self.call("ext_abi") if self.exports.get("ext_abi") is not None else None
         if built != _ABI:
             raise AppMetadataError(
@@ -121,10 +130,10 @@ class _Opened:
         return self.call("ext_buffer", count) & 0xFFFFFFFF
 
     def _text(self, text: str) -> tuple[int, int]:
+        import numpy as np
+
         data = text.encode()
-        at = self.buffer(-(-len(data) // 4))
-        self.exports["memory"].write(self.store, data, at)
-        return at, len(data)
+        return self.put(np.frombuffer(data, np.uint8), "uint8"), len(data)
 
     def put(self, values: Any, dtype: str = "float32") -> int:
         """``values`` in a buffer of the extension's memory."""
@@ -230,16 +239,16 @@ class _Served:
         return list(self.volumes[group].shape), _geometry(self.volumes[group].ndim - 1)[1]
 
 
-def _geometry(rank: int, identity: bool = False) -> tuple[dict[str, Any], Any]:
+def _geometry(rank: int) -> tuple[dict[str, Any], Any]:
     """A grid of ``rank`` axes, and the attribute konfai's class reads it from: a spacing and a direction no axis
-    shares, so a class that reads the wrong one is told apart, or, with ``identity``, the identity grid."""
+    shares, so a class that reads the wrong one is told apart."""
     import numpy as np
     from konfai.utils.dataset import Attribute
 
     geometry = {
-        "Spacing": np.ones(rank) if identity else np.array([0.5, 1.0, 2.0][:rank]),
-        "Origin": np.zeros(rank) if identity else np.array([10.0, 20.0, 30.0][:rank]),
-        "Direction": np.eye(rank) if identity else np.diag([1.0, -1.0, 1.0][:rank]),
+        "Spacing": np.array([0.5, 1.0, 2.0][:rank]),
+        "Origin": np.array([10.0, 20.0, 30.0][:rank]),
+        "Direction": np.diag([1.0, -1.0, 1.0][:rank]),
     }
     attribute = Attribute()
     for key, value in geometry.items():
@@ -341,6 +350,7 @@ def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, 
     """A class that reads its neighbours: the halo the extension states for the grid compared, or, where it states
     none, one the class keeps whatever the grid (the halo its step states)."""
     from konfai.data.transform import LocalityKind
+    from konfai.portable import _probe_attribute
 
     locality = stage.patch_locality(attribute)
     if locality.kind is not LocalityKind.HALO:
@@ -349,7 +359,7 @@ def _check_halo(opened: _Opened, name: str, stage: Any, source: Any, rank: int, 
     # An int32 to wasmtime: `None`, the class's u32::MAX, is -1.
     stated = opened.call("ext_halo", opened.put(source, "float64"), rank, 1)
     if stated == -1:
-        identity = stage.patch_locality(_geometry(rank, identity=True)[1])
+        identity = stage.patch_locality(_probe_attribute(rank))
         if max(identity.halo or (0,)) != halo:
             raise AppMetadataError(
                 f"'{name}' reads {halo} pixels around each on the grid compared and another count on another grid,"
@@ -472,7 +482,7 @@ def _check_criterion(
     opened.call("ext_measure", opened.put(output), 1, table, len(targets), math.prod(shape))
     value = opened.buffer(2)
     opened.call("ext_value", value)
-    measured = np.frombuffer(bytes(opened.exports["memory"].read(opened.store, value, value + 8)), np.float64)
+    measured = opened.get(value, (1,), "float64")
     scored = criterion(output[None], *(target[None] for target in targets))
     scored = scored[0] if isinstance(scored, tuple) else scored
     _close(name, "score a case", [float(scored)], measured.astype(np.float32))
