@@ -475,7 +475,7 @@ TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]], str],
 StatisticOut = Callable[[dict[str, Any]], dict[str, Any]]
 #: The volume an app's own class is probed on past the steps of its chain before it: the channels they leave, at the
 #: rank of the case.
-Probe = Callable[[list[dict[str, Any]]], tuple[int, ...]]
+Probe = Callable[[list[dict[str, Any]], str | None], tuple[int, ...]]
 
 
 def _built_as_konfai(stage: str, op: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
@@ -787,20 +787,28 @@ def _probed(stage: Any, volume: Any, attribute: Any) -> Any:
 def _probe_after(
     rank: int,
     start: Callable[[], int],
-    before: Callable[[], list[dict[str, Any]]] = list,
-    dtype: str | None = "float32",
+    before: Callable[[], list[tuple[dict[str, Any], str | None]]] = list,
 ) -> Probe:
-    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists, a class
-    of the app's own among them run again in the dtype its place hands it of ``dtype`` (``None``: the stored one)."""
+    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists, each step
+    with the dtype konfai hands it (:func:`_handed`), then the chain's steps, the first handed the dtype the probe is
+    asked with (``None``: the stored one): a class of the app's own among them is run again in its own."""
 
-    def probe(steps: list[dict[str, Any]]) -> tuple[int, ...]:
-        held, handed = start(), dtype
-        for step in [*before(), *steps]:
+    def probe(steps: list[dict[str, Any]], dtype: str | None) -> tuple[int, ...]:
+        held = start()
+        for step, handed in [*before(), *_handed(steps, dtype)]:
             held = _channels_after(step, held, rank, handed)
-            handed = _result_dtype(step, handed)
         return (held, *_probe_extents(rank))
 
     return probe
+
+
+def _handed(steps: list[dict[str, Any]], dtype: str | None) -> list[tuple[dict[str, Any], str | None]]:
+    """Each of ``steps`` with the dtype konfai hands it, the first one handed ``dtype``."""
+    pairs = []
+    for step in steps:
+        pairs.append((step, dtype))
+        dtype = _result_dtype(step, dtype)
+    return pairs
 
 
 def _extension_step(
@@ -1804,7 +1812,7 @@ def compile_pipeline(
                 " bundle export. Otherwise predict this config with konfai itself.",
             )
         if base == "CaseStatistic" and case_statistic is not None:
-            held = (probe(steps) if probe else _VOLUME_PROBE)[0]
+            held = (probe(steps, dtype) if probe else _VOLUME_PROBE)[0]
             if held != 1:
                 raise ConfigError(
                     f"transform '{name}' is handed {held} channels, and its class is exported on one, a scalar"
@@ -1824,7 +1832,7 @@ def compile_pipeline(
             traced = (
                 folded is not None
                 and read is not None
-                and _traces([*pending, folded], probe(steps) if probe else _VOLUME_PROBE, read)
+                and _traces([*pending, folded], probe(steps, dtype) if probe else _VOLUME_PROBE, read)
             )
             own = not traced
         if base in OP_MAP or own:
@@ -1836,7 +1844,7 @@ def compile_pipeline(
                     "(pointwise custom) transforms to the end of the inference pipeline."
                 )
             if own:
-                probed = probe(steps) if probe else _VOLUME_PROBE
+                probed = probe(steps, dtype) if probe else _VOLUME_PROBE
                 step = _extension_step(name, params, probed, groups, on_grid, _dtype_after(steps, dtype))
             else:
                 step = _admitted(OP_MAP[base](params, roots=roots) if base == "Resample" else OP_MAP[base](params))
@@ -2055,7 +2063,9 @@ def _post_chain(
     models or copies, which changes what a voxel holds. ``head`` is the rank of the case and the channels the chain
     starts from, which an app's own class is run on past the steps before it."""
     done: list[dict[str, Any]] = []
-    probe = _probe_after(*head, before=lambda: done)
+    # The phases compiled, each with the dtype konfai hands it: a class of the app's own in one is run again in it.
+    phases: list[tuple[list[dict[str, Any]], str | None]] = []
+    probe = _probe_after(*head, before=lambda: [pair for steps, dtype in phases for pair in _handed(steps, dtype)])
 
     def folding(concatenated: bool, dtype: str | None) -> FoldOut | None:
         """``fold_out`` in a phase konfai hands ``dtype`` (``None``: the stored one)."""
@@ -2100,6 +2110,7 @@ def _post_chain(
         dtype=blended,
     )
     done += before
+    phases.append((before, blended))
     # The reduction between the per-copy ops and the rest settles the dtype the rest reads.
     dtype = resolve_interpolation(before, blended) or blended
     folded = _reduced_dtype(dtype, copies)
@@ -2110,6 +2121,7 @@ def _post_chain(
         after_stack, fold_out=folding(concat, folded), extension=extension, probe=probe, dtype=folded
     )
     done += after
+    phases.append((after, folded))
     undone_cast = set(inverted) & set(restored)
     held = None if undone_cast else _dtype_after(after, folded)
     final, _, _ = compile_pipeline(

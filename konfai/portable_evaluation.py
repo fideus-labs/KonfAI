@@ -239,7 +239,7 @@ def _group_steps(
                 )
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif extension and ":" in stage and not records_only(name):
-            probe = _probe_after(held[1], lambda: held[0], dtype=None)(steps)
+            probe = _probe_after(held[1], lambda: held[0])(steps, None)
             # The dtype the steps before it set, float32 where only the run knows it (the stored one).
             steps.append(_extension_step(name, params, probe, handed=_dtype_after(steps, None)))
             moved = moved or name

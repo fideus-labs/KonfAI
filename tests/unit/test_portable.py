@@ -2252,6 +2252,60 @@ def test_a_class_of_the_app_s_past_a_case_statistic_is_probed_in_float32(
     assert [step["op"] for step in steps] == ["cast", "case_statistic", "extension"]
 
 
+@pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
+def test_a_class_of_the_app_s_past_the_reduction_is_run_again_in_the_dtype_the_reduction_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # The copies' labels averaged are float32 again: the class after the reduction, run again to count what it hands
+    # the next one, in its phase or the final one, splits them into two channels as konfai's run does, which it would
+    # not of int64 labels.
+    (tmp_path / "Phases.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Split(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.repeat(2, *[1] * (tensor.dim() - 1)) if tensor.is_floating_point() else tensor\n\n"
+        "class Pair(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    outputs = {"before_reduction_transforms": {"Argmax": {}}, "after_reduction_transforms": {"Phases:Split": {}}}
+    outputs[phase] = {**outputs.get(phase, {}), "Phases:Pair": {}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction({}, outputs), "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["extension", "extension"]
+
+
+@pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
+def test_a_class_of_the_app_s_past_a_vote_is_run_again_in_the_labels_the_vote_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # A vote of the copies' labels keeps them int64: a class taking labels only, after it, is run again in them.
+    (tmp_path / "VotedPhases.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Whole(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    outputs = {
+        "before_reduction_transforms": {"Argmax": {}},
+        "after_reduction_transforms": {"VotedPhases:Odd": {}},
+        "reduction": "Vote",
+    }
+    outputs[phase] = {**outputs.get(phase, {}), "VotedPhases:Whole": {}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction({}, outputs), "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["extension", "extension"]
+
+
 @pytest.mark.parametrize(
     ("transforms", "phase", "module", "body", "folded"),
     [
