@@ -56,6 +56,7 @@ from konfai.portable import (
     records_only,
     refuse_a_late_crop,
     refuse_a_stage_konfai_does_not_carry,
+    refuse_an_extension_the_graphs_overwrite,
     source_of,
     warn_unportable_keys,
 )
@@ -320,6 +321,7 @@ def compile_evaluation(
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     extension = None if extension is None else Path(extension).resolve()
+    refuse_an_extension_the_graphs_overwrite(extension, output)
     root = "Evaluator"
     with _built(
         evaluation_file, lambda file: build_evaluate(evaluations_file=file, evaluations_dir=Path(evaluations_dir))

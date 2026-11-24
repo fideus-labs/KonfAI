@@ -1351,6 +1351,26 @@ def test_a_class_of_the_app_s_shifting_a_second_input_by_its_spacing_is_refused(
         transform_manifest(_two_groups({"ShiftedGrid:Shift": {}}), "Predictor", extension=True)
 
 
+def test_a_class_of_the_app_s_straightening_a_second_input_s_grid_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class that sets the direction to the identity keeps an identity grid: it is probed on an oblique one too.
+    (tmp_path / "StraightGrid.py").write_text(
+        "import numpy as np\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Straight(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        cache_attribute['Direction'] = np.eye(len(shape)).flatten()\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"StraightGrid:Straight": {}}), "Predictor", extension=True)
+
+
 def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
     # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
     # konfai hands the stage as stored, as the first group's chain's own.
@@ -1841,6 +1861,29 @@ def test_a_class_of_the_app_s_before_a_folded_graph_is_run_again_in_the_dtype_it
     )
     (model,) = program["outputs"][0]["program"]["steps"]
     assert [step["op"] for step in model["manifest"]["postprocessing"]][-3:] == ["argmax", "extension", "onnx"]
+
+
+def test_an_extension_beside_the_program_named_as_a_graph_is_refused_before_a_graph_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The export would write its model.onnx over the extension: refused first, the extension as it was.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    out = tmp_path / "out" / "prediction.json"
+    out.parent.mkdir()
+    extension = out.parent / "model.onnx"
+    extension.write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"model\.onnx"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+    assert extension.read_bytes() == b"\0asm" and not out.exists()
 
 
 def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(

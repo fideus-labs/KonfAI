@@ -794,16 +794,18 @@ _VOLUME_PROBE = (1, *_probe_extents(3))
 
 def _probe_attribute(rank: int, placed: bool = False) -> Any:
     """The geometry a probed class may read: the identity grid of ``rank`` axes, or, ``placed``, one with an origin
-    and a spacing of its own along each axis."""
+    and a spacing of its own along each axis and its axes in the other order."""
     import numpy as np
 
     from konfai.utils.dataset import Attribute
 
     attribute = Attribute()
-    attribute["Origin"], attribute["Spacing"] = np.zeros(rank), np.ones(rank)
     if placed:
         attribute["Origin"], attribute["Spacing"] = np.array([3.0, -2.0, 7.0][:rank]), np.array([1.5, 0.75, 2.5][:rank])
-    attribute["Direction"] = np.eye(rank).flatten()
+        attribute["Direction"] = np.eye(rank)[::-1].flatten()
+    else:
+        attribute["Origin"], attribute["Spacing"] = np.zeros(rank), np.ones(rank)
+        attribute["Direction"] = np.eye(rank).flatten()
     return attribute
 
 
@@ -3434,6 +3436,7 @@ def compile_prediction(
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoints = [Path(model).resolve() for model in models or []]
     extension = None if extension is None else Path(extension).resolve()
+    refuse_an_extension_the_graphs_overwrite(extension, output)
 
     with (
         _sources_staged_at_run_time(),
@@ -3504,6 +3507,16 @@ def compile_prediction(
         carry_extension(extension, prediction, output)
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
+
+
+def refuse_an_extension_the_graphs_overwrite(extension: Path | None, output: Path) -> None:
+    """Refuse, before a graph is written, an extension beside ``output`` named as a graph: the export would write the
+    graph over it (a file system may tell no case apart)."""
+    if extension is not None and extension.parent == output.parent and extension.name.lower().endswith(".onnx"):
+        raise ConfigError(
+            f"The extension '{extension.name}' sits beside the program, named as a graph the export writes there.",
+            "Name the extension apart from the graphs, or keep it in another folder.",
+        )
 
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:
