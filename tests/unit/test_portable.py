@@ -1237,6 +1237,15 @@ def test_a_model_reading_two_groups_names_the_second_and_the_chain_that_prepares
     assert program["steps"][0]["in"] == ["input", "MASK"]
 
 
+def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
+    # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
+    # konfai hands the stage as stored, as the first group's chain's own.
+    second = {"Clip": {"min_value": "min", "max_value": "max", "mask": "BODY"}}
+    manifest, _folds, _per_copy = transform_manifest(_two_groups(second), "Predictor")
+    assert manifest["reads"][0]["preprocessing"][0]["mask_group"] == "BODY"
+    assert manifest["reads"][1:] == [{"group": "BODY", "channels": 1, "preprocessing": []}]
+
+
 def test_a_test_time_copy_is_drawn_on_every_group_the_model_reads() -> None:
     # konfai shares one draw across the groups of a case, so a copy flips them all; only the first is
     # undone, since the output chain undoes that group's chain alone.

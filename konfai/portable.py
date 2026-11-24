@@ -2153,9 +2153,9 @@ def _reads_of(
     extension: bool = False,
 ) -> list[dict[str, Any]]:
     """Every group the model reads past the first, with the chain that prepares it, in the order konfai hands
-    them to the network; then the groups the input chain's own stages read beside the case (a masked bound or
-    statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them as stored, so
-    the program runs nothing on them."""
+    them to the network; then the groups the stages of those chains and the first one's read beside the case (a
+    masked bound or statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them
+    as stored, so the program runs nothing on them."""
     reads = [
         _group_chain(group_src, group, channels, case_statistic, extension, _spatial_rank(config, root))
         for (group_src, group), channels in zip(
@@ -2164,7 +2164,7 @@ def _reads_of(
     ]
     named = {read["group"] for read in reads}
     companions: dict[str, int] = {}
-    for step in pre:
+    for step in [*pre, *(step for read in reads for step in read["preprocessing"])]:
         if group := step.get("mask_group") or step.get("reference_group") or step.get("source_group"):
             companions.setdefault(group, 1)
         elif group := step.get("field_group"):
