@@ -301,8 +301,11 @@ refused. A reduction takes no parameter.
 `konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
 With `konfai-apps[extension]` installed, it also runs each class in Python and
 from the extension on the same random voxels, and refuses a bundle whose two
-halves disagree, on the values or on the grid a transform leaves. A test-time
-draw is opened and not compared: the extension
+halves disagree, on the values or on the grid a transform leaves. It checks
+every config the bundle holds once updated, passed or kept, that KonfAI Edge
+runs: a `Predictor` or an `Evaluator` config (`Prediction.yml`,
+`Evaluation.yml`, `Uncertainty.yml`), never the `Trainer` one (`Config.yml`).
+A test-time draw is opened and not compared: the extension
 draws from the seed, konfai from torch's generator.
 
 What a `Fold` enters a patch as is part of the model's graph. Several models

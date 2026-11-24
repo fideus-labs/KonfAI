@@ -369,6 +369,7 @@ def _finish_update(spec: dict[str, Any]) -> None:
     interpreter of its own whose working folder is the update: the app's modules are the update's, none another
     process imported. Writes to ``spec["report"]`` the artifact exported, the classes checked (``None``: not checked,
     wasmtime missing) or the refusal."""
+    import yaml
     from konfai.utils.errors import KonfAIError
 
     from .extension import check_extension, classes_run
@@ -393,11 +394,21 @@ def _finish_update(spec: dict[str, Any]) -> None:
                 written = artifact if artifact.suffix == ".json" else update / "manifest.json"
                 runs = classes_run(json.loads(written.read_text()))
         if spec["extension"]:
-            # Every config the bundle holds once updated, passed or kept, runs with the extension: the compiled
-            # program's classes of the Prediction.yml, every class of the others. The bytes checked are the ones the
-            # bundle takes.
+            # Every config KonfAI Edge runs that the bundle holds once updated, passed or kept, runs with the
+            # extension: the compiled program's classes of the Prediction.yml, every class of the others. A config
+            # is told by its root: a Predictor's or an Evaluator's (Evaluation.yml, Uncertainty.yml) is run, a
+            # Trainer's (Config.yml) never. The bytes checked are the ones the bundle takes.
             compiled = [update / "Prediction.yml"] if runs is not None else []
-            others = [config for config in sorted(update.glob("*.yml")) if config not in compiled]
+            held = {
+                config: yaml.safe_load(config.read_text(encoding="utf-8")) for config in sorted(update.glob("*.yml"))
+            }
+            others = [
+                config
+                for config, loaded in held.items()
+                if config not in compiled
+                and isinstance(loaded, dict)
+                and ("Predictor" in loaded or "Evaluator" in loaded)
+            ]
             extension = update / spec["extension"]
             try:
                 report["checked"] = check_extension(extension, compiled, runs) + check_extension(extension, others)
@@ -659,11 +670,15 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         support[destination] = source
     out = Path(args["out"]) / args["name"]
     report: dict[str, Any] = {}
-    if args.get("onnx") and args.get("extension") and _exported(Path(args["extension"]).name):
+    named = Path(args["extension"]).name if args.get("extension") else None
+    if named is not None and (named.lower() == "requirements.txt" or (args.get("onnx") and _exported(named))):
         raise AppMetadataError(
-            f"The extension {Path(args['extension']).name} takes the name of a file the portable export writes.",
-            "Name the extension apart from the manifest, the program and the graphs.",
+            f"The extension {named} takes the name of a file the bundle command writes.",
+            "Name the extension apart from the requirements, the manifest, the program and the graphs.",
         )
+    # The requirements drafted below are written once the bundle takes the update: their file is refused before.
+    if not args.get("requirements") and (args.get("model_py") or (out / "Model.py").exists()):
+        owned_destination(out / "requirements.txt")
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their

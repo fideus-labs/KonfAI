@@ -1186,18 +1186,17 @@ def _cli(root, **more):
 def _exporting(tmp_path, transforms: dict | None = None) -> tuple:
     """A workspace whose app the bundle command exports for real: the tests' two-class segmentation network, its
     checkpoint, and the arguments that ship and export it."""
+    import importlib.util
     from pathlib import Path
 
     root = _support_workspace(tmp_path)
     shutil.copy(Path(__file__).resolve().parents[3] / "tests" / "assets" / "Workflows" / "TinySeg.py", root)
-    sys.path.insert(0, str(root))
-    try:
-        from TinySeg import TinySegNet
-
-        torch.save({"Model": TinySegNet().network_states()}, root / "CV_0.pt")
-    finally:
-        sys.path.remove(str(root))
-        sys.modules.pop("TinySeg", None)
+    # Under a name of its own: a TinySeg another test imported stays its.
+    spec = importlib.util.spec_from_file_location("_exported_tinyseg", root / "TinySeg.py")
+    assert spec is not None and spec.loader is not None
+    tinyseg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tinyseg)
+    torch.save({"Model": tinyseg.TinySegNet().network_states()}, root / "CV_0.pt")
     group = {"transforms": transforms or "None", "patch_transforms": "None", "is_input": True}
     config = {
         "Predictor": {
@@ -1339,7 +1338,7 @@ def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path):
     (bundle / "manifest.json").unlink()
     (bundle / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
 
-    with pytest.raises(AppMetadataError, match="manifest.json"):
+    with pytest.raises(AppMetadataError, match=r"manifest\.json"):
         _cli(root, **exporting)
     assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
 
@@ -1416,6 +1415,7 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
         (bundle / "requirements.txt").symlink_to(tmp_path / "elsewhere.txt")
         with pytest.raises(ConfigError, match=r"requirements\.txt' is a link"):
             _cli(root, model_py=str(root / "Model.py"))
+        assert not (bundle / "Model.py").exists()  # refused before the bundle takes the update
     assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
 
 
@@ -1449,36 +1449,71 @@ def test_the_import_path_of_a_bundle_s_check_is_the_update_s(tmp_path, monkeypat
     ]
 
 
-def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tmp_path):
-    # The update brings an Evaluation.yml and a new Model.py, which scales by 3, and no --onnx: the Prediction.yml the
-    # bundle keeps names that class, and the extension, which doubles, is refused for it.
+@pytest.mark.parametrize("naming", ["Prediction.yml", "Evaluation.yml", "Uncertainty.yml"])
+def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tmp_path, naming):
+    # The update brings a new Model.py, which scales by 3, and no --onnx: a config KonfAI Edge runs names that class,
+    # the Prediction.yml the bundle keeps or the Evaluator's config the update brings, and the extension, which
+    # doubles, is refused for it.
     from test_extension import DOUBLE, OWN
 
     wasmtime = pytest.importorskip("wasmtime")
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text(OWN)
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
-    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    scaled = "  Dataset:\n    transforms:\n      Model:Scale: {}\n"
+    (root / "Prediction.yml").write_text("Predictor:\n" + (scaled if naming == "Prediction.yml" else "  {}\n"))
     _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
     (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
-    (root / "Evaluation.yml").write_text("Evaluator: {}\n")
+    brought = "Evaluation.yml" if naming == "Prediction.yml" else naming
+    (root / brought).write_text("Evaluator:\n" + (scaled if brought == naming else "  {}\n"))
 
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
-        _cli(
-            root,
-            config=[str(root / "Evaluation.yml")],
-            model_py=str(root / "Model.py"),
-            extension=str(root / "own.wasm"),
-        )
+        _cli(root, config=[str(root / brought)], model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
 
 
-def test_an_extension_named_as_a_file_the_export_writes_is_refused(tmp_path):
-    # The export would write its manifest over the extension, in any case: refused before anything is written.
+@pytest.mark.parametrize(
+    "kept",
+    [
+        "Trainer:\n  Dataset:\n    transforms:\n      Model:Scale: {scale: 3.0}\n",
+        "Trainer:\n  Dataset:\n    transforms:\n      Model:Boxed: {}\n",
+        "- notes of the app's, no config\n",
+    ],
+    ids=["a training class the extension does not stand for", "a training class bound by no value", "no config"],
+)
+def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_path, kept):
+    # KonfAI Edge runs a Predictor's or an Evaluator's config, never a Trainer's: the training config, its classes
+    # bound by values only training gives, is the bundle's and no check's.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
     root = _support_workspace(tmp_path)
-    (root / "Manifest.json").write_bytes(b"\0asm")
+    (root / "Model.py").write_text(
+        OWN + "\n\nclass Boxed(Scale):\n    def __init__(self, source: str) -> None:\n        super().__init__()\n"
+    )
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    (root / "Config.yml").write_text(kept)
 
-    with pytest.raises(AppMetadataError, match="Manifest.json"):
-        _cli(root, extension=str(root / "Manifest.json"), onnx=True)
+    bundle = _cli(
+        root,
+        config=[str(root / "Prediction.yml"), str(root / "Config.yml")],
+        model_py=str(root / "Model.py"),
+        extension=str(root / "own.wasm"),
+    )
+    assert (bundle / "Config.yml").read_text() == kept
+    assert (bundle / "own.wasm").exists()
+
+
+@pytest.mark.parametrize("name", ["Manifest.json", "Requirements.txt"])
+def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_path, name):
+    # The export would write its manifest over the extension, the draft its requirements, in any case: refused
+    # before anything is written.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    (root / name).write_bytes(b"\0asm")
+
+    with pytest.raises(AppMetadataError, match=rf"{name} takes the name of a file"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / name), onnx=name == "Manifest.json")
     assert not (tmp_path / "out" / "Seg").exists()
 
 
