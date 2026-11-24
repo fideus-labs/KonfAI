@@ -226,7 +226,8 @@ def _write_onnx(
     """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
     inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
     which a model handed to others does not carry. ``dynamic``: every axis of every input from ``free_from`` on (the
-    spatial axes of ``[N, C, ...]``) is left free."""
+    spatial axes of ``[N, C, ...]``) is left free, and the graph is checked on other sizes of those axes
+    (:func:`_check_free_axes`)."""
     _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
     from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
@@ -249,25 +250,28 @@ def _write_onnx(
         )
     ClearMetadataAndDocStringPass()(program.model)
     program.save(onnx_path, external_data=False)
+    if dynamic:
+        _check_free_axes(module, examples, onnx_path, input_names, free_from)
 
 
-def _smooth(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
-    """An input of ``shape`` that varies slowly: a product of cosines along the spatial axes, on every channel. A model
-    with hard decisions (an argmax between networks) gives ONNX and torch the same answer on it, as on an image."""
+def _smooth(shape: list[int], dtype: torch.dtype, free_from: int) -> torch.Tensor:
+    """An input of ``shape`` that varies slowly: a product of cosines along the axes from ``free_from`` on, the same
+    on the axes before. A model with hard decisions (an argmax between networks) gives ONNX and torch the same answer
+    on it, as on an image."""
     value = torch.ones(())
-    for axis, extent in enumerate(shape[2:]):
+    for axis, extent in enumerate(shape[free_from:]):
         line = torch.cos(torch.arange(extent, dtype=torch.float64) / (7.0 + 3.0 * axis))
         value = value.unsqueeze(-1) * line
     return value.expand(shape).to(dtype).contiguous()
 
 
 def _check_free_axes(
-    module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str]
+    module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str], free_from: int
 ) -> None:
-    """Refuse a graph exported with free axes that answers for the example's shape alone: on smooth inputs of other
-    shapes (16 voxels more along the last axis, 32 along the one before, and so on; then the same with one axis at a
-    time twice as long, past a size the forward floors or caps at export) it must give torch's shape, and torch's
-    values as closely as on a smooth input of the example's own shape."""
+    """Refuse a graph exported with the axes from ``free_from`` on free that answers for the example's shape alone: on
+    smooth inputs of other shapes (16 voxels more along the last axis, 32 along the one before, and so on; then the
+    same with one axis at a time twice as long, past a size the forward floors or caps at export) it must give torch's
+    shape, and torch's values as closely as on a smooth input of the example's own shape."""
     ort = _require("onnxruntime")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
 
@@ -283,18 +287,18 @@ def _check_free_axes(
             return None, list(want.shape), f"gives {list(got.shape)}"
         return float(np.abs(got.astype(np.float64) - want).max(initial=0.0)), list(want.shape), ""
 
-    own, _, _ = gap([_smooth(list(example.shape), example.dtype) for example in examples])
+    own, _, _ = gap([_smooth(list(example.shape), example.dtype, free_from) for example in examples])
     own = 0.0 if own is None else own
     rank = examples[0].dim()
-    for doubled in (None, *range(2, rank)):  # one axis at a time, so the probe holds twice the example at most
+    for doubled in (None, *range(free_from, rank)):  # one axis at a time, so the probe holds twice the example at most
         other = []
         for example in examples:
             shape = list(example.shape)
-            shape[2:] = [
+            shape[free_from:] = [
                 (2 if axis == doubled else 1) * extent + 16 * (len(shape) - axis)
-                for axis, extent in enumerate(shape[2:], 2)
+                for axis, extent in enumerate(shape[free_from:], free_from)
             ]
-            other.append(_smooth(shape, example.dtype))
+            other.append(_smooth(shape, example.dtype, free_from))
         there, shape, answer = gap(other)
         if there is None or there > max(1e-4, 10.0 * own):
             answer = answer or f"lands {there:.3g} from torch where it lands {own:.3g} at the example's shape"
@@ -342,7 +346,6 @@ def export_folds(
     module = _Folds(folds, getattr(torch, dtype)).eval()
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     _write_onnx(module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True)
-    _check_free_axes(module, (example,), onnx_path, ["input"])
     return int(out.shape[0]), str(out.dtype).removeprefix("torch.")
 
 
@@ -362,11 +365,11 @@ def export_case_statistic(statistic: Any, partial_path: Path, finish_path: Path,
     *spatial]``, its ``rank`` spatial axes free, to ``partial`` ``[K]``; ``finish_path`` takes ``total`` ``[K]`` to
     the 0-d ``statistic``."""
     # ponytail: traced on one channel, a stored scalar volume; a multichannel group needs its stored count here.
-    block = torch.rand(1, *([8] * rank), dtype=torch.float64)
+    # A region of 8 voxels and the halo on both sides, as the streamed fold hands it.
+    block = torch.rand(1, *([8 + 2 * int(statistic.halo)] * rank), dtype=torch.float64)
     partial = _Function(statistic.partial).eval()
     partial_path.parent.mkdir(parents=True, exist_ok=True)
     _write_onnx(partial, (block,), partial_path, ["block"], ["partial"], opset, dynamic=True, free_from=1)
-    _check_free_axes(partial, (block,), partial_path, ["block"])
     with torch.no_grad():
         total = partial(block)
     _write_onnx(_Function(statistic.finish).eval(), (total,), finish_path, ["total"], ["statistic"], opset)
@@ -474,8 +477,6 @@ def export_to_onnx(
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre, fold_post=fold_post).eval()
     names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]
     _write_onnx(wrapper, examples, onnx_path, names, [output_name], opset, dynamic)
-    if dynamic:
-        _check_free_axes(wrapper, examples, onnx_path, names)
 
     input_shape = tuple(int(s) for s in examples[0].shape)
     spatial = list(input_shape[2:])

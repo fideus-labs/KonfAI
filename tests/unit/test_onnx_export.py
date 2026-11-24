@@ -253,6 +253,46 @@ def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_r
     export_to_onnx(Decided().eval(), tmp_path / "decided", example, "head", dynamic=True)
 
 
+def test_a_case_statistic_is_traced_past_its_halo_and_checked_on_every_spatial_axis(tmp_path):
+    # Its partial takes ``[1, *spatial]``, the region and ``halo`` voxels on both sides: a 9-voxel stencil (halo 4)
+    # has a region to trace on, and a partial right on the first spatial axis 48 voxels longer and wrong on it twice as
+    # long is refused, on an input that varies along that axis (a mean is the same over a replicated edge otherwise).
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+
+    from konfai.export import export_case_statistic
+    from konfai.utils.errors import PredictorError
+
+    class Peak:  # the mean of each region voxel's 9-voxel box maximum
+        halo = 4
+
+        def partial(self, block):
+            peak = torch.nn.functional.max_pool3d(block[None], 9, stride=1)
+            return torch.stack([peak.sum(), torch.ones_like(peak).sum()])
+
+        def finish(self, total):
+            return total[0] / total[1]
+
+    class Floored(
+        Peak
+    ):  # replicates the first axis' edge up to 60 voxels in a branch on its size, which the export keeps
+        halo = 0
+
+        def partial(self, block):
+            if block.shape[1] < 60:
+                block = torch.nn.functional.pad(block[None], (0, 0, 0, 0, 0, 60 - block.shape[1]), "replicate")[0]
+            return torch.stack([block.mean(), block.new_ones(())])
+
+    partial, finish = tmp_path / "partial.onnx", tmp_path / "finish.onnx"
+    export_case_statistic(Peak(), partial, finish, rank=3)
+    block = torch.from_numpy(np.random.default_rng(0).random((1, 11, 14, 12)))
+    got = ort.InferenceSession(str(partial), providers=["CPUExecutionProvider"]).run(None, {"block": block.numpy()})[0]
+    np.testing.assert_allclose(got, Peak().partial(block).numpy(), rtol=1e-12)
+    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_case_statistic(Floored(), partial, finish, rank=3)
+
+
 def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_stated_blend(tmp_path):
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
