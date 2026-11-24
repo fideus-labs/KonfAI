@@ -17,7 +17,7 @@
 """One training step of a catalog model, phase by phase, under fp32, autocast and channels_last.
 
     python benchmarks/perf/bench_train_step.py [--model-yaml examples/Segmentation/UNet.yml] [--shape 8,1,256,256]
-                                              [--steps 40] [--force] [--quick]
+                                              [--steps 200] [--force] [--quick]
 
 In-process, on the model the shipped Segmentation example trains (built by the YAML builder, its
 logits head selected the way ONNX export selects it), with a synthetic batch of the example's patch
@@ -26,15 +26,23 @@ pinned batch, forward, loss (cross-entropy on the logits; the example's second t
 softmax head, is not reproduced here and the audit measured the whole criteria phase at 4 % of the
 step), backward, optimizer step. Six variants: fp32, autocast (fp16 with a GradScaler),
 channels_last, both, and over both ``cudnn`` (benchmarked kernels) and ``compile`` (``torch.compile``,
-its compilation paid in the warmup). ``torch.profiler`` then splits the CUDA kernel time of fp32 and autocast by
-family (``harness.kernel_families`` counts every kernel event once) and lists the ten heaviest kernels.
+its compilation paid in the warmup, on an inductor cache of its own: a process that loads a cached
+compilation steps faster than the one that compiled it). ``torch.profiler`` then splits the CUDA kernel
+time of fp32 and autocast by family (``harness.kernel_families`` counts every kernel event once) and
+lists the ten heaviest kernels.
+
+The step, its forward and its backward are the metrics compared to a baseline. The copy, the loss and
+the optimizer are each under a millisecond, which two processes do not reproduce to a tenth: their
+medians are in ``medians_ms``.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
+import tempfile
 from pathlib import Path
 
 from harness import REPO, fingerprint, kernel_families, machine_gate, write_result
@@ -209,7 +217,7 @@ def main() -> None:
     parser.add_argument("--model-classpath", default=None, help="module:Class of a Python model instead of the YAML")
     parser.add_argument("--sys-path", default=None, help="colon-separated directories the classpath imports from")
     parser.add_argument("--tag", default=None, help="a name for the result file (default: the model's)")
-    parser.add_argument("--steps", type=int, default=40)
+    parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--profile-steps", type=int, default=10)
     parser.add_argument("--variants", default="fp32,autocast,channels_last,both,cudnn,compile")
@@ -219,6 +227,8 @@ def main() -> None:
     args = parser.parse_args()
     gate = machine_gate(force=args.force)
     fp = fingerprint()
+    cache = tempfile.TemporaryDirectory(prefix="konfai_perf_inductor_", ignore_cleanup_errors=True)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache.name
 
     import torch
 
@@ -262,7 +272,7 @@ def main() -> None:
         result[variant] = out
         medians: dict[str, float] = out["medians_ms"]  # type: ignore[assignment]
         metrics[f"step_ms_{variant}"] = medians["step"]
-        for phase in PHASES:
+        for phase in ("forward", "backward"):  # the others are under a millisecond
             metrics[f"{phase}_ms_{variant}"] = medians[phase]
         if "peak_alloc_mib" in out:
             metrics[f"peak_alloc_mib_{variant}"] = float(out["peak_alloc_mib"])  # type: ignore[arg-type]

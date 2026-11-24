@@ -16,15 +16,18 @@
 
 """The dev loop's wall and CPU-seconds with and without a thread pin.
 
-    python benchmarks/perf/bench_tests.py [--force] [--quick] [--with-full] [--skip-unpinned]
+    python benchmarks/perf/bench_tests.py [--repeats 3] [--force] [--quick] [--with-full] [--skip-unpinned]
 
 Runs ``pytest -n auto --dist loadfile -m "not slow and not integration" tests/`` twice from the
 repository root: pinned (``OMP_NUM_THREADS=1``, ``MKL_NUM_THREADS=1``, what the pixi test tasks set)
 and unpinned (both unset, a bare ``pytest``), and records the wall, the CPU-seconds of the whole worker
 tree (``RUSAGE_CHILDREN``, which counts the waited-for descendants pytest-xdist leaves behind) and the
 failures. Unpinned, every worker runs torch with every core: the audit of 2026-09-06 measured the pin
-at 8.4x on a quiet 24-core machine. ``--with-full`` adds the full suite, pinned. The unpinned run takes
-minutes.
+at 8.4x on a quiet 24-core machine. ``--with-full`` adds the full suite, pinned.
+
+The pinned run is the median of ``--repeats`` and the metric compared to a baseline. The unpinned
+run takes minutes, so it runs once, and its workers oversubscribe every core, so two of its walls
+differ by a tenth: it is reported in ``unpinned`` and through ``pin_speedup``.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import json
 import os
 import re
 import resource
+import statistics
 import subprocess
 import sys
 import time
@@ -91,7 +95,7 @@ def run_pytest(target: list[str], *, pinned: bool, marker: str | None) -> dict[s
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repeats", type=int, default=1, help="one run per state (the runs take minutes)")
+    parser.add_argument("--repeats", type=int, default=3, help="pinned runs; the unpinned one runs once")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--with-full", action="store_true", help="also run the full suite, pinned")
@@ -105,19 +109,18 @@ def main() -> None:
     result: dict[str, object] = {"gate_warnings": gate.warnings, "target": target, "cpu_count": os.cpu_count()}
     metrics: dict[str, float] = {}
 
-    pinned = run_pytest(target, pinned=True, marker=marker)
+    pinned = [run_pytest(target, pinned=True, marker=marker) for _ in range(1 if args.quick else args.repeats)]
     result["pinned"] = pinned
-    metrics["testfast_pinned_wall_s"] = pinned["wall_s"]  # type: ignore[assignment]
-    metrics["testfast_pinned_cpu_s"] = pinned["cpu_s"]  # type: ignore[assignment]
-    metrics["testfast_pinned_failed"] = float(pinned["failed"])  # type: ignore[arg-type]
+    metrics["testfast_pinned_wall_s"] = statistics.median(run["wall_s"] for run in pinned)  # type: ignore[type-var]
+    metrics["testfast_pinned_cpu_s"] = statistics.median(run["cpu_s"] for run in pinned)  # type: ignore[type-var]
+    metrics["testfast_pinned_failed"] = float(max(run["failed"] for run in pinned))  # type: ignore[type-var, arg-type]
+    unpinned: dict[str, object] = {}
     if not args.skip_unpinned:
         unpinned = run_pytest(target, pinned=False, marker=marker)
         result["unpinned"] = unpinned
-        metrics["testfast_unpinned_wall_s"] = unpinned["wall_s"]  # type: ignore[assignment]
-        metrics["testfast_unpinned_cpu_s"] = unpinned["cpu_s"]  # type: ignore[assignment]
         metrics["testfast_unpinned_failed"] = float(unpinned["failed"])  # type: ignore[arg-type]
-        if pinned["wall_s"]:
-            metrics["pin_speedup"] = round(unpinned["wall_s"] / pinned["wall_s"], 2)  # type: ignore[operator]
+        if metrics["testfast_pinned_wall_s"]:
+            metrics["pin_speedup"] = round(unpinned["wall_s"] / metrics["testfast_pinned_wall_s"], 2)  # type: ignore[operator]
     if args.with_full and not args.quick:
         full = run_pytest(["tests/"], pinned=True, marker=None)
         result["full_pinned"] = full
@@ -131,9 +134,9 @@ def main() -> None:
         f"test-fast pinned {metrics['testfast_pinned_wall_s']} s ({metrics['testfast_pinned_cpu_s']} CPU-s, "
         f"{int(metrics['testfast_pinned_failed'])} failed)"
         + (
-            f" | unpinned {metrics['testfast_unpinned_wall_s']} s ({metrics['testfast_unpinned_cpu_s']} CPU-s, "
+            f" | unpinned {unpinned['wall_s']} s ({unpinned['cpu_s']} CPU-s, "
             f"{int(metrics['testfast_unpinned_failed'])} failed) | {metrics.get('pin_speedup', 0)}x"
-            if "testfast_unpinned_wall_s" in metrics
+            if unpinned
             else ""
         )
         + (f" | full pinned {metrics['full_pinned_wall_s']} s" if "full_pinned_wall_s" in metrics else "")
