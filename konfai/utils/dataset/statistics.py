@@ -73,6 +73,7 @@ def _scan_block_on_the_store_grid(
     companions: Sequence[tuple[Sequence[int] | None, int]] = (),
     piece: int = 1,
     halo: int = 0,
+    fold_bytes: int = 0,
 ) -> tuple[int, int]:
     """The rows one scan block reads, and what reading it holds.
 
@@ -85,7 +86,8 @@ def _scan_block_on_the_store_grid(
     A block raised to the grain stays a whole number of ``piece`` (their common multiple), so the fold sees the same
     pieces; where that multiple is taller than the grain and than the block the scan reads anyway, the block keeps
     its own height, a whole number of pieces too, and the grain is decoded again where a block straddles it.
-    A block read with ``halo`` rows more on both sides holds them too, on a ``plane`` its caller pads.
+    A block read with ``halo`` rows more on both sides holds them too, on a ``plane`` its caller pads. The fold holds
+    ``fold_bytes`` an element of the block it takes, over the blocks in flight.
     """
     grain = max(1, int(granularity[0])) if granularity else 0
     block = math.lcm(grain, piece) if grain else 0
@@ -107,7 +109,7 @@ def _scan_block_on_the_store_grid(
     def held_for(step: int) -> int:
         """Blocks in flight, plus what the read in flight decodes above the step it serves."""
         read = step + 2 * halo
-        return sum(
+        return read * plane * fold_bytes + sum(
             int((read * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step, grain) - read)) * plane * nbytes)
             for grain, nbytes in sources
         )
@@ -126,18 +128,22 @@ def _scan_block_on_the_store_grid(
     return rows, held
 
 
-def _block_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], halo: int = 0) -> int:
+def _block_rows(
+    entries: Sequence[tuple[Any, str]], name: str, shape: list[int], halo: int = 0, fold_bytes: int = 0
+) -> int:
     """The rows one block of a scan of an entry of ``shape`` reads along its first spatial axis: a whole number of
     update pieces, so the fold sees the same pieces whatever the read grain. Sized and refused by :func:`_scan_rows`
     for ``entries``, the entries read by bounded regions; on the budget alone without them, probing a store read
     whole for its element size decoding it once more. ``halo`` rows on both sides of a block, and around its plane,
-    are read and held with it. An entry shorter than a piece is one block, one piece."""
+    are read and held with it, and ``fold_bytes`` an element of a block by the fold that takes it. An entry shorter
+    than a piece is one block, one piece."""
     if len(shape) < 2:
         return 1
     piece = min(int(shape[1]), _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS))
     if entries:
-        return _scan_rows(entries, name, shape, piece, halo)
-    rows = _statistics_chunk_length(_padded(shape, halo), 1, _statistics_block_elements()) - 2 * halo
+        return _scan_rows(entries, name, shape, piece, halo, fold_bytes)
+    rows = _statistics_chunk_length(_padded(shape, halo), 1, _statistics_block_elements(fold_bytes=fold_bytes))
+    rows -= 2 * halo
     return max(piece, rows // piece * piece)
 
 
@@ -146,12 +152,19 @@ def _padded(shape: list[int], halo: int) -> list[int]:
     return [*shape[:2], *(int(extent) + 2 * halo for extent in shape[2:])]
 
 
-def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], piece: int = 1, halo: int = 0) -> int:
+def _scan_rows(
+    entries: Sequence[tuple[Any, str]],
+    name: str,
+    shape: list[int],
+    piece: int = 1,
+    halo: int = 0,
+    fold_bytes: int = 0,
+) -> int:
     """The rows one step of a whole-volume scan reads along the first spatial axis, for ``entries``
     read at the same steps (a volume and its mask; ``Dataset``s, duck typed): a whole number of
     ``piece``, sized against the budget this rank published and put on the first entry's grain
-    where that fits, ``halo`` rows more read on both sides of a step and its plane padded by it. A
-    budget the shortest step still exceeds is refused."""
+    where that fits, ``halo`` rows more read on both sides of a step and its plane padded by it, the fold holding
+    ``fold_bytes`` an element of it. A budget the shortest step still exceeds is refused."""
     budget = per_rank_budget_bytes()
     # Only a declared budget pays the probe.
     element_bytes = [
@@ -159,7 +172,7 @@ def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], 
         for dataset, group in entries
     ]
     padded = _padded(shape, halo)
-    rows = _statistics_chunk_length(padded, 1, _statistics_block_elements(sum(element_bytes))) - 2 * halo
+    rows = _statistics_chunk_length(padded, 1, _statistics_block_elements(sum(element_bytes), fold_bytes)) - 2 * halo
     grains = []
     for dataset, group in entries:
         granularity = dataset.read_granularity(group, name)
@@ -174,6 +187,7 @@ def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], 
         list(zip(grains[1:], element_bytes[1:], strict=True)),
         piece,
         halo,
+        fold_bytes,
     )
     if budget is not None and held > budget:
         raise DatasetManagerError(
@@ -184,15 +198,16 @@ def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], 
     return rows
 
 
-def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES) -> int:
+def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES, fold_bytes: int = 0) -> int:
     """Elements one block of a whole-volume scan may hold: its share of the budget this rank
     published, :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them being in flight at the peak, each
-    ``element_bytes`` an element. Without a declared budget, the grain that keeps a chunked store's
-    decode whole."""
+    ``element_bytes`` an element, and the fold holding ``fold_bytes`` an element of the one it takes. Without a
+    declared budget, the grain that keeps a chunked store's decode whole."""
     budget = per_rank_budget_bytes()
     if budget is None:
         return _STATISTICS_CHUNK_ELEMENTS
-    return max(1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / (_STATISTICS_BLOCKS_IN_FLIGHT * element_bytes))))
+    held = _STATISTICS_BLOCKS_IN_FLIGHT * element_bytes + fold_bytes
+    return max(1, min(_STATISTICS_CHUNK_ELEMENTS, int(budget / held)))
 
 
 def _statistics_plane_elements(shape: list[int] | tuple[int, ...], axis: int) -> int:

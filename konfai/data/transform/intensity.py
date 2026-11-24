@@ -759,6 +759,8 @@ class CaseStatistic(Transform):
     # A float64 copy of the volume padded by the halo, and what the class's partial makes of it in float64 (a
     # Laplacian residual and its square hold three volumes more).
     working_multiple = 6.0
+    #: What the fold holds an element of a scanned block: the block in float64 and three float64 copies more.
+    _FOLD_BYTES = 4 * 8
 
     def __init__(self, statistic: str) -> None:
         super().__init__()
@@ -796,7 +798,7 @@ class CaseStatistic(Transform):
         return float(self.statistic.finish(sum(partials)))
 
     def _measure(self, dataset: Dataset, group: str, entry: str) -> float:
-        return self._fold(dataset.iter_data_blocks(group, entry, int(self.statistic.halo))())
+        return self._fold(dataset.iter_data_blocks(group, entry, int(self.statistic.halo), self._FOLD_BYTES)())
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "StatisticsSeeded" in cache_attribute and self.key in cache_attribute:

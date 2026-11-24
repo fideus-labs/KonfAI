@@ -613,14 +613,17 @@ class Dataset:
         with contextlib.suppress(DatasetManagerError):
             self._resolve_entry(groups, name, lambda file, _group, entry: file.plan_region_reads(entry, windows))
 
-    def iter_data_blocks(self, groups: str, name: str, halo: int = 0) -> Callable[[], Iterator[np.ndarray]]:
+    def iter_data_blocks(
+        self, groups: str, name: str, halo: int = 0, fold_bytes: int = 0
+    ) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
         quantile scan iterate. A store that cannot serve bounded region reads (GIPL) is read whole
         once, as each region read of it decodes it whole, and kept for every pass, which take it by
         the same blocks: a fold holds the volume as stored and one block of its own. With ``halo``,
         each block carries ``halo`` voxels more on both sides of every spatial axis: its neighbours
-        where the volume has them, its edge replicated past the volume's border."""
+        where the volume has them, its edge replicated past the volume's border. A caller holding ``fold_bytes`` an
+        element of the block it takes gets blocks that fit the budget with it."""
         shape, _ = self.get_infos(groups, name)
         bounded = len(shape) >= 2 and self.bounded_region_reads(groups, name)
         resident: list[np.ndarray] = []
@@ -635,7 +638,7 @@ class Dataset:
         if len(shape) < 2:
             return lambda: iter([read((slice(None),))])
         # The budget never changes what the running mean and std answer: the fold sees the same pieces.
-        rows = _block_rows([(self, groups)] if bounded else [], name, shape, halo)
+        rows = _block_rows([(self, groups)] if bounded else [], name, shape, halo, fold_bytes)
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):

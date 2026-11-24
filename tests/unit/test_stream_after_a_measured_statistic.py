@@ -635,6 +635,34 @@ def test_a_case_statistic_of_a_store_read_whole_folds_it_by_slabs(tmp_path, monk
     assert torch.equal(region, stage(CASE_NAME, torch.from_numpy(volume), Attribute())[:, 3:9])
 
 
+@pytest.mark.parametrize(("extension", "grain"), [("mha", None), ("mha", 8), ("gipl", None)])
+def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_path, monkeypatch, extension, grain):
+    # Three float32 blocks in flight fit the budget at 19 rows, and at the grain of 8 the scan is raised to; the fold
+    # holds each block in float64 and the class's partial three float64 copies more, 32 B an element over the 12 the
+    # blocks in flight cost.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from oracle_support import Roughness
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    if grain:
+        monkeypatch.setattr(Dataset, "read_granularity", lambda self, groups, name: (1, grain, 32, 32))
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", extension)
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    sizes: list[int] = []
+    partial = Roughness.partial
+    monkeypatch.setattr(Roughness, "partial", lambda self, block: sizes.append(block.numel()) or partial(self, block))
+    stage, budget = CaseStatistic("oracle_support:Roughness"), 300_000
+    set_per_rank_budget(budget)
+    try:
+        stage._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+
+    assert sizes and max(sizes) * (3 * 4 + 4 * 8) <= budget, f"blocks of {max(sizes)} elements"
+
+
 class AlongX:
     """A ``CaseStatistic`` class that tells the axes apart: the RMS of the difference of each voxel's two neighbours
     along x."""
