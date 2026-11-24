@@ -1419,7 +1419,7 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
         with pytest.raises(AppMetadataError, match=r"manifest\.json' is a directory"):
             _cli(root, **exporting)
     else:
-        # The draft is staged with the bundle's other files, whichever way the Model.py it reads comes.
+        # The draft is written in the update, whichever way the Model.py it reads comes.
         (root / "Model.py").write_text("import einops\n")
         (bundle / "requirements.txt").symlink_to(tmp_path / "elsewhere.txt")
         given = (
@@ -1427,7 +1427,7 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
             if planted == "a link at the drafted requirements"
             else {"support_file": ["./Model.py=Model.py"], "support_root": str(root)}
         )
-        with pytest.raises(AppMetadataError, match=r"symlink: .*requirements\.txt"):
+        with pytest.raises(ConfigError, match=r"requirements\.txt' is a link"):
             _cli(root, **given)
         assert not (bundle / "Model.py").exists()  # refused before the bundle takes the update
     assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
@@ -1492,6 +1492,7 @@ def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tm
         "Trainer:\n  Dataset:\n    transforms:\n      Model:Boxed: {}\n",
         "- notes of the app's, no config\n",
         "Predictor: [a file that does not parse\n",
+        b"Predictor: \xff\n",
         None,
     ],
     ids=[
@@ -1499,6 +1500,7 @@ def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tm
         "a training class bound by no value",
         "no config",
         "no YAML",
+        "no text",
         "a folder named as a config",
     ],
 )
@@ -1514,7 +1516,8 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
     )
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
-    (root / "Config.yml").write_text(kept or "Trainer: {}\n")
+    held = kept if isinstance(kept, bytes) else (kept or "Trainer: {}\n").encode()
+    (root / "Config.yml").write_bytes(held)
     if kept is None:  # a folder the bundle keeps
         (_cli(root) / "notes.yaml").mkdir()
 
@@ -1524,8 +1527,34 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
         model_py=str(root / "Model.py"),
         extension=str(root / "own.wasm"),
     )
-    assert (bundle / "Config.yml").read_text() == (kept or "Trainer: {}\n")
+    assert (bundle / "Config.yml").read_bytes() == held
     assert (bundle / "own.wasm").exists()
+
+
+@pytest.mark.parametrize("made", ["a support file's requirements", "a module the update drops", "a bundle left aside"])
+def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_path, made):
+    # The draft reads the bundle the update makes: no draft over the requirements a support file brings, an import
+    # of a module the update drops is a requirement, and a bundle an earlier update left aside is the one updated.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    (root / "einops.py").write_text("")
+    (root / "listed.txt").write_text("numpy-stl\n")
+    if made == "a support file's requirements":
+        support = {"support_file": ["requirements.txt=listed.txt"], "support_root": str(root)}
+        bundle = _cli(root, model_py=str(root / "Model.py"), **support)
+        assert (bundle / "requirements.txt").read_text() == "numpy-stl\n"
+        return
+    if made == "a module the update drops":
+        bundle = _cli(
+            root, model_py=str(root / "Model.py"), support_file=["einops.py=einops.py"], support_root=str(root)
+        )
+        assert not (bundle / "requirements.txt").exists()  # einops is the bundle's own module
+    else:
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        bundle.rename(bundle.with_name(".Seg.previous"))
+    _cli(root)
+    assert (bundle / "requirements.txt").read_text() == "einops\n"
 
 
 def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path):

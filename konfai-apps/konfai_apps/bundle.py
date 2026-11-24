@@ -435,7 +435,7 @@ def _run_by_konfai_edge(config: Path) -> bool:
         return False
     try:
         loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
+    except (UnicodeDecodeError, yaml.YAMLError):  # no text, or no YAML: nothing KonfAI Edge reads
         return False
     return isinstance(loaded, dict) and ("Predictor" in loaded or "Evaluator" in loaded)
 
@@ -692,17 +692,27 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             f"The extension {named} takes the name of a file the bundle command writes.",
             "Name the extension apart from the requirements, the manifest, the program and the graphs.",
         )
-    # Without a requirements.txt, one is drafted from the imports of the Model.py the bundle will hold (passed, a
-    # support file, or kept), less the bundle's own modules, and staged with its other files. Packaging deliberately
-    # does not execute code to discover dependencies: the draft is reviewed.
-    requirements = args.get("requirements") or None
+    # Without a requirements.txt, passed or a support file, one is drafted on the bundle the update makes from the
+    # imports of its Model.py (passed, a support file, or kept), less its own modules. Packaging deliberately does not
+    # execute code to discover dependencies: the draft is reviewed.
+    planned = {name.lower() for name in resolve_support_files(support, args.get("support_root"))}
+    left = out.with_name(f".{out.name}.previous")  # the bundle an earlier update left aside, which it takes back
+    drafting = not args.get("requirements") and "requirements.txt" not in planned
+    drafting = drafting and bool(
+        args.get("model_py") or "model.py" in planned or (out / "Model.py").is_file() or (left / "Model.py").is_file()
+    )
     drafted: list[str] = []
-    planned = resolve_support_files(support, args.get("support_root"))
-    model = args.get("model_py") or planned.get("Model.py") or out / "Model.py"
-    if requirements is None and Path(model).is_file():
-        kept = [path.name for path in out.iterdir()] if out.is_dir() else []
-        local = {Path(name).parts[0].removesuffix(".py") for name in [*planned, "Model.py", *kept]}
-        drafted = [name for name in derive_requirements([model]) if name.replace("-", "_") not in local]
+
+    def draft(update: Path) -> None:
+        if (update / "Model.py").is_file():
+            local = {path.stem for path in update.glob("*.py")} | {
+                path.name for path in update.iterdir() if path.is_dir()
+            }
+            drafted[:] = [
+                name for name in derive_requirements([update / "Model.py"]) if name.replace("-", "_") not in local
+            ]
+        if drafted:
+            owned_destination(update / "requirements.txt").write_text("\n".join(drafted) + "\n")
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their
@@ -732,24 +742,28 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         if (spec["onnx"] and "artifact" not in report) or (spec["extension"] and "checked" not in report):
             raise AppMetadataError("The update's export or check did not finish: the bundle is as it was.")
 
-    with tempfile.TemporaryDirectory() as scratch:
-        if drafted:
-            requirements = Path(scratch) / "requirements.txt"
-            requirements.write_text("\n".join(drafted) + "\n")
-        bundle = assemble_bundle(
-            name=args["name"],
-            out_dir=args["out"],
-            app_json=args["app_json"],
-            configs=args["config"],
-            checkpoints=args["checkpoint"],
-            model_py=args.get("model_py"),
-            requirements=requirements,
-            support_files=support,
-            support_root=args.get("support_root"),
-            # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
-            extension=args.get("extension"),
-            finish=export_and_check if args.get("onnx") or args.get("extension") else None,
-        )
+    checking = bool(args.get("onnx") or args.get("extension"))
+
+    def finish(update: Path) -> None:
+        if drafting:
+            draft(update)
+        if checking:
+            export_and_check(update)
+
+    bundle = assemble_bundle(
+        name=args["name"],
+        out_dir=args["out"],
+        app_json=args["app_json"],
+        configs=args["config"],
+        checkpoints=args["checkpoint"],
+        model_py=args.get("model_py"),
+        requirements=args.get("requirements"),
+        support_files=support,
+        support_root=args.get("support_root"),
+        # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
+        extension=args.get("extension"),
+        finish=finish if drafting or checking else None,
+    )
     print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
     if "artifact" in report:
         print(f"[KonfAI-Apps] Portable model exported: {bundle / report['artifact']}")
