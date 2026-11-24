@@ -129,14 +129,19 @@ def _scan_block_on_the_store_grid(
 
 
 def _block_rows(
-    entries: Sequence[tuple[Any, str]], name: str, shape: list[int], halo: int = 0, fold_bytes: int = 0
+    entries: Sequence[tuple[Any, str]],
+    name: str,
+    shape: list[int],
+    halo: int = 0,
+    fold_bytes: int = 0,
+    element_bytes: int = _STATISTICS_ELEMENT_BYTES,
 ) -> int:
     """The rows one block of a scan of an entry of ``shape`` reads along its first spatial axis: a whole number of
     update pieces, so the fold sees the same pieces whatever the read grain. Sized and refused by :func:`_scan_rows`
     for ``entries``, the entries read by bounded regions; on the budget alone without them, probing a store read
     whole for its element size decoding it once more. ``halo`` rows on both sides of a block, and around its plane,
-    are read and held with it, and ``fold_bytes`` an element of a block by the fold that takes it. An entry shorter
-    than a piece is one block, one piece."""
+    are read and held with it, and ``fold_bytes`` an element of a block by the fold that takes it; a store read whole
+    holds ``element_bytes`` an element. An entry shorter than a piece is one block, one piece."""
     if len(shape) < 2:
         return 1
     piece = min(int(shape[1]), _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS))
@@ -145,11 +150,11 @@ def _block_rows(
     padded = _padded(shape, halo)
     # A fold's scan holds the volume read whole beside its blocks, and is refused as a scan by regions is where the
     # shortest block does not fit beside it; ordinary scans keep their rule.
-    resident = int(np.prod(shape, dtype=np.int64)) * _STATISTICS_ELEMENT_BYTES if fold_bytes else 0
-    elements = _statistics_block_elements(fold_bytes=fold_bytes, reserved=resident)
+    resident = int(np.prod(shape, dtype=np.int64)) * element_bytes if fold_bytes else 0
+    elements = _statistics_block_elements(element_bytes, fold_bytes, resident)
     rows = max(piece, (_statistics_chunk_length(padded, 1, elements) - 2 * halo) // piece * piece)
     held = (rows + 2 * halo) * _statistics_plane_elements(padded, 1)
-    held = held * (_STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES + fold_bytes) + resident
+    held = held * (_STATISTICS_BLOCKS_IN_FLIGHT * element_bytes + fold_bytes) + resident
     budget = per_rank_budget_bytes()
     if fold_bytes and budget is not None and held > budget:
         raise DatasetManagerError(

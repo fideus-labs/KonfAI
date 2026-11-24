@@ -690,17 +690,21 @@ def test_a_case_statistic_whose_shortest_block_and_fold_exceed_the_budget_is_ref
         set_per_rank_budget(None)
 
 
-def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budget(tmp_path, monkeypatch):
-    # Read whole, the store holds the volume (163,840 B) beside the shortest block and its fold (152,592 B): over
-    # 200,000 B together, the scan is refused, though the block alone fits.
+@pytest.mark.parametrize(("dtype", "budget"), [(np.float32, 200_000), (np.float64, 400_000)])
+def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budget(
+    tmp_path, monkeypatch, dtype, budget
+):
+    # Read whole, the store holds the volume (163,840 B in float32) beside the shortest block and its fold (152,592 B):
+    # over 200,000 B together, the scan is refused, though the block alone fits. A float64 store holds twice as much,
+    # and its blocks in flight too: over 400,000 B, which the float32 pricing fits.
     import konfai.utils.dataset.statistics as statistics
     from konfai.utils.budget import set_per_rank_budget
     from konfai.utils.errors import DatasetManagerError
 
     monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
     dataset = Dataset(tmp_path / "src", "gipl")
-    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.float32), geometry())
-    set_per_rank_budget(200_000)
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), dtype), geometry())
+    set_per_rank_budget(budget)
     try:
         with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
             CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
