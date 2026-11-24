@@ -3,7 +3,23 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
-## v1.8.9 (2026-11-09)
+## v1.9.0 (2026-11-26)
+
+### 🌟 Highlights
+
+- **KonfAI Scout**, the new `konfai-scout` package: a vision-language model inspects one segmentation, registration or
+  synthesis result as a person would at a viewer, and writes a report of localised defects, each resting on a measured
+  value it checks itself.
+- **KonfAI Edge programs**: `konfai.portable` compiles a TRANSFORM, PREDICTION or Evaluation config into a program that
+  runs without Python, natively or in the browser from Studio's Deploy pane, and refuses by name what it cannot
+  reproduce.
+- **The ported apps in full**: the stages TotalSegmentator's tasks, SynthSeg and the other ported apps need, streamed
+  and compiled, every op's dtype matched to konfai's.
+- **Prompted models and interactive segmentation**: models that segment from clicks and boxes as 3D Slicer writes
+  them, and sessions that keep an app's model loaded between corrections, locally or on a konfai-apps server.
+- **IMPACT-Reg out of core**: `--out-of-core sampled` registers a pair larger than memory at its native resolution.
+- **Apps and agents**: app presets, ensembles of apps and apps that need another's output, `konfai-apps publish` to
+  Hugging Face, and konfai-mcp in 50 tools, one per object.
 
 ### 💥 Breaking changes
 
@@ -25,7 +41,7 @@ scale/translation stores still read.
 #### KonfAI Edge manifests at version 5
 
 An exported model's manifest is keyed `konfai_edge_manifest`, must be the current version, 5, and states
-`patch.placement` (and `patch.stride` under `monai` and `spread`). A manifest or a program exported before this
+`patch.placement` (and `patch.stride` under `end` and `spread`). A manifest or a program exported before this
 version is refused: export the model again with this version (`konfai-apps bundle --onnx`).
 konfai-apps' `export_onnx_into_bundle` is replaced by `export_portable_into_bundle`. Studio's Deploy pane no longer
 runs a bare `model.onnx`: `/api/apps/manifest` and `/api/apps/model` are removed, and an app without a `web/` folder
@@ -171,38 +187,58 @@ members (`InferenceStack.<ext>`) when there are members to stack, two or more pr
 a 3-D pair registered whole; a 2-D or tiled run of one preset keeps none and says so. `uncertainty --dvf FIELDS`
 becomes `uncertainty -i STACK` on that stack, and its measures go under `<output>/<case>/Uncertainty/`.
 
+#### impact-reg: large pairs by boxes
+
+`--max-voxels` is gone: `IMPACT_REG_MAX_VOXELS` sets the size above which `--out-of-core auto`, the default,
+registers a pair by boxes. FireANTs' `feature_overlap` is gone. ConvexAdam drops its affine pre-alignment:
+`linear`, `linear_iterations` and `linear_sampling` are refused by name and `moments_init` takes their place; on 27
+public pairs the composite preset gives the same TRE in 0.55 of the time. The presets are read at a revision that
+needs itk-impact 0.2.2 and elastix-IMPACT 1.2.0, which they install, and `FireANTs#impact` compares l2-normalised
+features by local correlation (TRE 0.82 mm instead of 2.03 on three PsCBCTThorax cases, 1.27 before registration).
+The IMPACT feature models move to `6d9a85f`, re-exported to take their normalisation statistics from outside, their
+features unchanged.
+
 ### ✨ Features
 
-- scout: KonfAI Scout, the new `konfai-scout` package, inspects one segmentation, registration or synthesis result as
-  a person would at a viewer. A vision-language model receives coverage montages, asks for slices, zooms and overlays
+- scout: KonfAI Scout, the new `konfai-scout` package, inspects one segmentation, registration or synthesis result as a
+  person would at a viewer. A vision-language model receives coverage montages, asks for slices, zooms and overlays
   (checkerboard, difference, field magnitude, Jacobian, deformed grid, labels, landmarks), measures regions through
   `konfai.evaluate`, and writes a versioned report of localised defects in millimetres, each citing its views and
-  measurements. Without a reference nothing is confirmed from appearance, and `--second-reading` re-reads blind every
-  error that names its box. Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and, without an API key, Claude
-  Code (`claude-code`) and the Codex CLI (`codex`). Images go to a cloud provider only under `--allow-cloud-images`
-  (`allow_cloud_images` in a config file or a konfai-mcp call); a server named by `--base-url` receives them without
-  it when its address is loopback or when `--local-provider` declares it local, which may be another machine of your
-  network. konfai-mcp runs it (`konfai-mcp[scout]`) and Studio shows its report. With Claude through Claude Code, two
-  passes of synthetic controls found 17 of 18 planted defects and invented no error in six clean inspections.
+  measurements. A deterministic survey first gives the model leads (a boundary the image does not support, a fold, a
+  cluster of error), and the report closes only once each has been looked at. A confirmed error rests on a measured
+  value past its criterion's threshold, which Scout checks itself; the model does not see the case's name, notes or
+  prior scores. `--depth quick|standard|deep` trades cost against thoroughness (`deep` adds a blind second reading of
+  every error that names its box). Providers: the Anthropic and OpenAI APIs, any OpenAI-compatible local server, and,
+  without an API key, Claude Code (`claude-code`) and the Codex CLI (`codex`). Images go to a cloud provider only under
+  `--allow-cloud-images` (`allow_cloud_images` in a config file or a konfai-mcp call); a server named by `--base-url`
+  receives them without it when its address is loopback or when `--local-provider` declares it local, which may be
+  another machine of your network. konfai-mcp runs it (`konfai-mcp[scout]`, `run_scout_inspection(depth=...)`) and
+  Studio shows its report. On 70 defects planted in held-out public images (ISLES 2022, Yale brain metastases, SynthRAD
+  2023) and 22 clean controls, Scout at `standard` with Claude through Claude Code found 61 of 70 and called no clean
+  control defective, in 49 s and $0.19 a case; `examples/benchmark.py` reproduces it.
+- scout: a view can be framed on a lead by its id: `zoom` and `box_mm` take it, and the view shows the lead with 1.3
+  times its box around it, 100 mm at the least, the slice going through it. `--max-context-tokens`
+  (`max_context_tokens`) gives a local model's window: the model is told to conclude before a request overflows it.
 - portable: `konfai.portable` compiles a TRANSFORM or PREDICTION config, and `konfai.portable_evaluation` an
   `Evaluation.yml` or an `Uncertainty.yml`, into a versioned JSON program that KonfAI Edge, the native and browser
   runtime, runs without Python; a prediction's checkpoints are exported to ONNX beside it, a model that reads several
-  groups included. The workflow is built first, so every refusal KonfAI makes happens before a program exists; a stage
-  or parameter the runtime does not reproduce, or a model that runs Python on the case, is refused by name, and a key
-  with no counterpart is warned about. A program records its members, the inference stack, the window placement, the
-  edge pad and fill, and the precision KonfAI blends at: on a CT through CT-FM's whole-body model, 0 of 2,951,889
-  labels differ from KonfAI's CPU prediction, where 411 did, all on class boundaries, when the program blended at
-  float32. `konfai.portable_schema` is the contract as a JSON Schema. Compiling never writes the caller's config.
+  groups included. The workflow is built first, so every refusal KonfAI makes happens before a program exists; a stage,
+  a parameter or an output sink the runtime does not reproduce, or a model that runs Python on the case, is refused by
+  name, and a key with no counterpart is warned about. A program records its members, the inference stack, the window
+  placement, the edge pad and fill, and the precision KonfAI blends at: on a CT through CT-FM's whole-body model, 0 of
+  2,951,889 labels differ from KonfAI's CPU prediction, where 411 did, all on class boundaries, when the program blended
+  at float32. `konfai.portable_schema` is the contract as a JSON Schema. Compiling never writes the caller's config.
   `docs/source/usage/portable.md` says what compiles.
 - studio: the Deploy pane runs an app on KonfAI Edge in the browser (WebGPU), with the engine and the compiled
   programs of the app's `web/` folder; it takes the members of the chosen ensemble from the app, shows the output
   over the input in NiiVue and offers it as a download. `onnxruntime-web` is dropped.
-- patching: `Patch.placement` chooses where the windows of an axis sit: `pad` (the default, as before), `monai` (the
-  last window ends on the volume's last voxel, as MONAI's sliding window, and a `Gaussian` blend is floored at 1e-3)
-  or `spread` (nnU-Net's `compute_steps_for_sliding_window`). Under `monai` and `spread`, an axis shorter than the
-  window is padded on both sides. `Patch.pad_value: edge` and `Resample(fill: edge)` pad with the border value, as
-  MONAI's `replicate` and `border`. MONAI's wholeBody CT bundle ported with `placement: monai` differs from
-  `monai.bundle run` on 0.001 to 0.02 % of the labels. Published apps keep `pad`: no output changes.
+- patching: `Patch.placement` chooses where the windows of an axis sit: `pad` (the default, as before), `end` (the
+  last window moved back to end on the volume's last voxel, and a `Gaussian` blend floored at 1e-3) or `spread` (the
+  windows spread evenly from the first voxel to the last). Under `end` and `spread`, an axis shorter than the window
+  is padded on both sides. `Patch.pad_value: edge` and `Resample(fill: edge)` pad with the border value. MONAI's
+  wholeBody CT bundle ported with `placement: end` differs from `monai.bundle run` on 0.001 to 0.02 % of the labels.
+  Published apps keep `pad`: no output changes. `GaussianFloat16` multiplies each patch by a float16 Gaussian window
+  and keeps the sum and the sum of the windows in float16, one divided by the other at the end, whole or streamed.
 - network: `konfai.network.external.ExternalNet` runs code that is not a PyTorch module (a package, a repository at
   a commit, a command-line tool, a binary release) as a KonfAI model: an app's `model.py` writes a function of the
   case's images, and the tool gets KonfAI's readers, writers and patching. `konfai_apps.pinned` fetches what it needs
@@ -268,12 +304,87 @@ becomes `uncertainty -i STACK` on that stack, and its measures go under `<output
   warp lost), and `TRE(percentile=...)` reports that percentile of a case's landmark errors. New stages: `Otsu()`, a
   body mask from ITK's Otsu threshold; `KeepLabels(group)`, the labels another group of the case also holds, read
   block by block; `Displace(field_group)`, landmarks moved by the case's displacement field.
-- impact-reg: ConvexAdam's `deformable_masked: false` keeps the masks for the affine pre-alignment only and
-  registers the whole image, as the authors' `convex_adam_MIND` does: on an AbdomenMRCT pair, Dice 0.721 masked,
+- impact-reg: `register --out-of-core sampled` registers a pair larger than memory at its native resolution, in one
+  pass, never resampled nor held whole. The inputs are read once, by bands, into uncompressed twins the engines map
+  or read by boxes, and each engine scores the pair by boxes: elastix through elastix-IMPACT 1.2.0's `-out-of-core`,
+  ConvexAdam through itk-impact 0.2.2, FireANTs box by box with its warps on the device, in host memory or in files.
+  `--out-of-core auto`, the default, registers a pair whole where it fits and by boxes where it does not, case by
+  case; `--samples`, `--region-size` and `--epochs` set the sampled mode. One-slice and oblique planes, `--seed`,
+  `--output-format`, `--host` and `--tta` work on every route.
+- measure: a network run in float16 with gradients scales them so they neither underflow nor overflow; the Static
+  IMPACT presets run their networks in float16.
+- apps: `POST /apps/{app}/run` runs a runner an installed package declares (entry point `konfai_apps.runners`), as
+  impact-reg's `--host` does for the sampled route; `--set` writes apply in the order given.
+- impact-reg: ConvexAdam's `deformable_masked: false` registers the whole image, its masks unread, as the
+  authors' `convex_adam_MIND` does: on an AbdomenMRCT pair, Dice 0.721 masked,
   0.805 unmasked, 0.804 for the authors' code. It defaults to `true`: the presets run as before.
+- transform: `Resample(grid: konfai | faces | zoom | centers)` sets how a new spacing counts and places the voxels:
+  `faces` keeps the outer faces where the case's are, `zoom` aligns the corners as scipy's `zoom`, `centers` keeps
+  voxel 0's center. `interpolation: bspline` is scipy's prefiltered cubic B-spline and `nearest_even` a nearest
+  neighbour whose ties go to the even voxel; `inverse_interpolation` brings a prediction back by an interpolation of
+  its own (logits linearly after an image resampled by B-spline); `antialias: triangle | gaussian` filters a
+  downsampling as torchvision and PIL, or scikit-image, do. Neither scipy nor scikit-image becomes a dependency.
+- transform: `Crop` takes its box from another group of the case (another app's output, its `labels`, a `margin_mm`
+  and a `fill`), from the non-zero voxels of the volume (`nonzero`), or from the volume as the stages before it
+  leave it (`handed`). `Standardize(nonzero=True)` standardizes over the voxels that are not 0; `ThresholdLabels`
+  decides a sigmoid head's labels by threshold and priority.
+- transform: `Canonical(orientation=...)` reorients onto any three-letter orientation (`RAS` stays the default): a model
+  trained on arrays in DICOM order takes `LPS`, where a volume stored RAS reached it mirrored. And
+  `Canonical(resample=False)` permutes and flips an oblique volume onto its nearest axes instead of resampling it.
+- konfai-apps: an app's `app.json` `needs` another app's output as one of its groups: `konfai-apps infer` runs that
+  app first on the same cases, and a cycle is refused by name. An app without weights bundles (`--checkpoint` is
+  optional).
+- konfai-apps: `konfai-apps publish FOLDER REPO [--private]` uploads an app folder to a Hugging Face model
+  repository. The folder is loaded as an app first, so a missing weight is refused before anything is sent; the
+  repository is created if needed and its card declares `library_name: konfai` (KonfAI is a registered Hub library);
+  the remote app folder becomes a copy of the local one, other apps of the repository untouched.
+- network: models that segment from prompts. `konfai.network.prompted.PromptedNet` runs an engine on one object
+  and hands it the image, the prompts (points in voxels of the image it is handed, their kinds, the last mask) and the
+  device. A prompt is a fiducial file as 3D Slicer writes it, each point labelled `positive`, `negative` or `box`:
+  `read_landmarks` returns the labels and `write_landmarks` takes them. A set of points is handed whole, never cut into
+  patches. `KONFAI_KEEP_MODEL=1` keeps the last prediction's model loaded in the process, for a session that predicts
+  one correction after another.
+- transform: prompts as data in the chain. `DrawPrompts` draws a case's prompts and its last mask as channels of the
+  image, `PointsOnGrid` puts points on the grid the chain leaves, and `Crop(points=..., onto=...)` takes a window
+  around the points and pastes its result back onto a group. KonfAI Edge runs them in the chain of the first group a
+  model reads: an nnInteractive case comes out 0 voxels apart from KonfAI's.
+- konfai-apps: interactive sessions. `python -m konfai_apps.interactive APP` keeps an app's model loaded and predicts
+  again on each request it reads, for a front end that predicts after every prompt (3D Slicer's interactive mode).
+  With `--host` the session lives on a `konfai-apps-server`: the image is sent once, and each prediction sends only
+  the prompts and the last mask. The server gains `POST /apps/{app}/sessions`, `POST /sessions/{id}/predict` and
+  `DELETE /sessions/{id}`; a prediction holds its GPU only while it runs, and `KONFAI_APPS_MAX_SESSIONS` (4) and
+  `KONFAI_APPS_SESSION_IDLE_SECONDS` (900) bound how many stay open and for how long.
+- transform: `Crop(shape=...)` crops and pads the volume's centre to that many voxels per axis, streamed, as is its
+  inverse. `Clip` to a `percentile:<p>` streams, the percentile measured on the stored volume. `KeepLargestComponent`
+  keeps the largest component of a foreground, found slab by slab. `TensorCast(round: true)` rounds half to even
+  before the cast, and `Resample(inverse_fill=...)` sets the value its inverse reads outside the grid.
+- predictor: a `patch_size` of 0 on every axis makes the whole case one window, and the output streams along the axis
+  its grid is swept.
+- portable: the compiler takes these stages and the ported apps' chains, and every op's result dtype is konfai's: a
+  table of 468 op and dtype pairs, the same on torch 2.12 and 2.15, names the 46 a stage refuses. The pointwise stages
+  of an output chain export as a graph of their own.
+- konfai-apps: `konfai-apps bundle` builds its update on a copy that replaces the bundle only once the export and the
+  check of its KonfAI Edge extension pass. An app's `app.json` `"parameters"` maps names to paths of its config, for
+  `--set`.
+- impact-seg: `impact-seg-konfai` runs the IMPACT-Seg apps of `HCedric/IMPACTSeg` (`fine-3d`, `fine-2.5d`,
+  `coarse`), where it ran the body app of `VBoussot/ImpactSeg`.
 
 ### 🐛 Bug Fixes
 
+- dataset: a fiducial file stored under the same entry as another file of its group (`CT.fcsv` beside `CT.mha`)
+  stood in for the image in silence, since `.fcsv` is looked for first. Such an entry is now refused, naming both
+  files, on every read and on every write, a streamed write included.
+- transform: `Flip` of a uint16 or uint32 volume raised on the CPU, where torch has no flip for them, so a uint16 MR
+  failed at the apps' `Canonical`; both are now flipped.
+- portable: a test-time copy flipped the group a stage alone reads beside the case (the mask of
+  `Clip: {mask: MASK}`, which konfai hands the stage as stored), so on KonfAI Edge the clip read a flipped mask. A copy
+  now draws only the groups the model takes. A group the model reads as stored that a stage also reads is refused by
+  name: the program cannot tell the two apart.
+- network: the weights of a network held by a plain module were not loaded, without an error, strict load included.
+- reduction: a statistic stage after a `Reduce` (a percentile `Clip`, a `CaseStatistic`) measured each region alone.
+  It is refused by name unless it reads only the statistics the pass over the reduction measures (Min, Max, Mean, Std).
+- portable: a cast from a float to an integer or bool dtype is no longer folded into an exported graph, where backends
+  saturate what torch wraps; it stays a step of the program.
 - metric: a masked SSIM averages its map over the mask's voxels in the cropped extent, as SynthRAD's evaluation
   does. Every voxel outside the mask compared two zeros and scored 1 (a constant image scored 0.93 on an AutoPET
   case), so a masked SSIM reported before is higher than the same SSIM now.
@@ -290,6 +401,21 @@ becomes `uncertainty -i STACK` on that stack, and its measures go under `<output
   `:omezarr` backend and in impact-reg's `apply` and `eval`, where it raised `KeyError: 'affine'`.
 - runtime: a DDP rank no longer aborts or hangs at exit: `cleanup()` collects the DistributedDataParallel wrapper
   before destroying its process group (on two cores, 0 of 30 runs failed, 9 of 30 before).
+- predictor: a case that runs the GPU out of memory after its forwards (a `Resample` inverse bringing every channel
+  back to the case's grid, 2.7 GiB on a 512 x 512 x 135 CT, or a case's accumulator beside the next forward) failed
+  even at batch 1. Its blend, reduction and finish now move to the host for the rest of the run; any other
+  out-of-memory error restarts as before.
+- predictor: in `resample` mode, a run whose groups differ per axis (a fixed 89 x 512 x 512 and a moving
+  202 x 512 x 512) restarted on the same voxel count after its first out-of-memory error, until a timeout ended it;
+  each restart now halves the largest group of one case.
+- omezarr: a store whose axes carry an orientation other than the six LPS terms (`dorsal-to-ventral`, as the Allen
+  CCF atlases write) raised on opening; it reads with an identity direction.
+- apps: a private or gated Hugging Face repository was reported as a missing one. The errors now say to log in
+  (`hf auth login`, `huggingface-cli login` before huggingface_hub 0.34) or set `HF_TOKEN` on the machine that
+  resolves the app, the server's with `--host`. A download error carries the original error, without the signed query
+  of a CDN URL.
+- runtime: an `auto` memory budget is measured once, before the ranks spawn, and each rank takes its share less what
+  it holds itself.
 
 ### ⚡ Performance
 
@@ -305,6 +431,8 @@ becomes `uncertainty -i STACK` on that stack, and its measures go under `<output
 - New pages and sections: running a workflow without Python (`usage/portable.md`), "Run code you already have" in the
   adoption guide, "Sharing a block between files" in the config guide, a manifest of explicit entries and the
   OME-Zarr geometry KonfAI writes in the storage backends reference, and the design notes on presets and ensembles.
+- The landing site, the README and Read the Docs show the KonfAI family in one identity: the life of a method from
+  your images to KonfAI Edge, each stage with the command a person types, and Read the Docs themed on the site.
 
 ## v1.8.8 (2026-11-02)
 
