@@ -2783,6 +2783,9 @@ def export_checkpoints(
     placement = derive_placement(patch)
     stride = None if placement == "pad" or whole else derive_stride(patch, patch_size)
     classpath = config[root]["Model"]["classpath"]
+    # The input channel count is intrinsic to the architecture when the config does not state it: the chain is
+    # probed with it as the model is exported with it.
+    channels = channels or getattr(_loaded_model(classpath, None), "in_channels", None)
     traced = [64] * len(patch_size) if whole else patch_size
     folded = statistics = 0
     blend = derive_blend(config, root, output)
@@ -2809,7 +2812,16 @@ def export_checkpoints(
     # What the app's own Fold leaves of one voxel of the head: the channels and the dtype the output chain reads.
     blended_channels, blended_dtype = 0, None
     if fold is not None:
-        left = fold.leave(fold.enter(torch.rand(head_channels(), *[1] * rank)))
+        entered = fold.enter(torch.rand(head_channels(), *[1] * rank))
+        # The runtime holds a Fold's patches in float32, which keeps every value of these types only.
+        exact = (torch.float32, torch.float16, torch.bfloat16, torch.bool, torch.uint8, torch.int8, torch.int16)
+        if entered.dtype not in exact:
+            raise ConfigError(
+                f"the output's patch_combine '{blend}' holds its patches in {str(entered.dtype).split('.')[-1]},"
+                " and KonfAI Edge holds them in float32, which would round them.",
+                _or_konfai("Enter the patches as float32, or as integers of 16 bits or less", _PREDICT),
+            )
+        left = fold.leave(entered)
         blended_channels, blended_dtype = int(left.shape[0]), str(left.dtype).split(".")[-1]
 
     def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
@@ -3124,7 +3136,7 @@ def compile_output(
     )
     names = [c.name for c in checkpoints if c is not None]
     models, group_tail = _split_group_tail(
-        models, lambda: _literal_group(input_groups(config, root)[0][0], ConfigError)
+        models, lambda: _literal_group(input_groups(config, root)[0][0], ConfigError), per_copy
     )
     own = app_fold(config, root, output)
     if own is not None and averaged_per_patch(config, root, len(checkpoints), passes, output):
@@ -3174,18 +3186,18 @@ def compile_output(
 
 
 def _split_group_tail(
-    models: list[dict[str, Any]], first: Callable[[], str]
+    models: list[dict[str, Any]], first: Callable[[], str], per_copy: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The models with their output chain cut at its first step reading a group of the case (a mask's
-    ``mask_group``, an extension's ``groups``), and the rest, which the program runs on the prediction with the
-    case's groups as its ``extra`` buffers: the case's ``first`` group (named when there is a tail) is the program's
-    ``input``, as stored."""
+    """The models with their output chain cut at its first step past the ``per_copy`` ones reading a group of the
+    case (a mask's ``mask_group``, an extension's ``groups``), and the rest, which the program runs on the prediction
+    with the case's groups as its ``extra`` buffers: the case's ``first`` group (named when there is a tail) is the
+    program's ``input``, as stored. A per-copy step reading a group stays in the model's chain, which runs it."""
     post = models[0]["manifest"].get("postprocessing", [])
 
     def read(step: dict[str, Any]) -> list[str]:
         return [step["mask_group"]] if "mask_group" in step else step.get("groups", [])
 
-    at = next((index for index, step in enumerate(post) if read(step)), len(post))
+    at = next((index for index, step in enumerate(post) if index >= per_copy and read(step)), len(post))
     if at == len(post):
         return models, []
     from konfai.portable_schema import BODY_OPS

@@ -97,7 +97,8 @@ class _NamedHead(torch.nn.Module):
                 out = tensor
         for post in self.fold_post:
             out = post(out)
-        return out
+        # An argmax's labels as the float the manifest declares; a float head keeps the graph's precision.
+        return out if out.is_floating_point() else out.float()
 
 
 def list_output_modules(model: torch.nn.Module, *example_input: torch.Tensor) -> list[tuple[str, tuple[int, ...]]]:
