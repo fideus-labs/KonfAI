@@ -22,20 +22,28 @@ import pytest
 from konfai.utils.errors import ConfigError, EvaluatorError
 
 
-def _evaluation(tmp_path: Path, metrics: str, groups: str = "", validation: str = "None") -> Path:
-    """An Evaluation.yml over two small MetaImage cases, each ``Volume_0``, ``Reference_0``, ``Mask_0`` and
-    ``Unread_0``."""
+def _evaluation(
+    tmp_path: Path,
+    metrics: str,
+    groups: str = "",
+    validation: str = "None",
+    shape: tuple[int, ...] = (8, 9, 10),
+    chain: str = "              Statistics: {}\n              TensorCast: {dtype: float32}\n",
+) -> Path:
+    """An Evaluation.yml over two small MetaImage cases of ``shape``, each ``Volume_0``, ``Reference_0``, ``Mask_0``
+    and ``Unread_0``, the output prepared by ``chain``."""
     import numpy as np
 
     sitk = pytest.importorskip("SimpleITK")
 
+    count = int(np.prod(shape))
     for case in ("P000", "P001"):
         (tmp_path / "Dataset" / case).mkdir(parents=True)
         for name, array in [
-            ("Volume_0", np.arange(720, dtype=np.float32).reshape(8, 9, 10) % 7),
-            ("Reference_0", np.arange(720, dtype=np.float32).reshape(8, 9, 10) % 5),
-            ("Mask_0", np.ones((8, 9, 10), np.uint8)),
-            ("Unread_0", np.zeros((8, 9, 10), np.uint8)),
+            ("Volume_0", np.arange(count, dtype=np.float32).reshape(shape) % 7),
+            ("Reference_0", np.arange(count, dtype=np.float32).reshape(shape) % 5),
+            ("Mask_0", np.ones(shape, np.uint8)),
+            ("Unread_0", np.zeros(shape, np.uint8)),
         ]:
             sitk.WriteImage(sitk.GetImageFromArray(array), str(tmp_path / "Dataset" / case / f"{name}.mha"))
     config = tmp_path / "Evaluation.yml"
@@ -44,7 +52,7 @@ def _evaluation(tmp_path: Path, metrics: str, groups: str = "", validation: str 
         f"        Reference;Mask:\n          criterions_loader:\n{metrics}"
         "  Dataset:\n    groups_src:\n"
         "      Volume_0:\n        groups_dest:\n          Output:\n            transforms:\n"
-        "              Statistics: {}\n              TensorCast: {dtype: float32}\n"
+        f"{chain}"
         "      Reference_0:\n        groups_dest:\n          Reference:\n            transforms: None\n"
         "      Mask_0:\n        groups_dest:\n          Mask:\n            transforms: None\n"
         f"{groups}"
@@ -98,6 +106,30 @@ def test_an_evaluation_compiles_its_groups_criteria_and_maps_under_konfais_keys(
     import jsonschema
 
     jsonschema.validate(program, program_schema())
+
+
+def test_a_class_of_the_app_s_is_probed_on_what_its_chain_hands_it_of_the_case(tmp_path: Path, monkeypatch) -> None:
+    # A OneHot hands the class two channels, of a case of two axes: it is probed on them, not on one channel of three.
+    from konfai.portable_evaluation import compile_evaluation
+
+    (tmp_path / "PairOfPlanes.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Background(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tuple(tensor.shape[:1]) != (2,) or tensor.dim() != 3:\n"
+        "            raise ValueError(f'two channels of a plane, not {list(tensor.shape)}')\n"
+        "        return tensor[:1]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    chain = "              OneHot: {num_classes: 2}\n              PairOfPlanes:Background: {}\n"
+    config = _evaluation(tmp_path, "            Dice: {labels: [1]}\n", shape=(9, 10), chain=chain)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_evaluation(
+        config, tmp_path / "Evaluations", tmp_path / "program" / "evaluation.json", extension=extension
+    )
+    assert [step["op"] for step in program["groups"][0]["steps"]] == ["one_hot", "extension"]
 
 
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:

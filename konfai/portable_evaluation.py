@@ -43,6 +43,7 @@ from konfai.portable import (
     _literal_group,
     _or_konfai,
     _portable_root,
+    _probe_after,
     _write_target,
     base_name,
     carry_extension,
@@ -209,8 +210,10 @@ def _group_steps(
     nested: dict[str, dict[str, Any]],
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None,
     extension: bool = False,
+    held: tuple[int, int] = (1, 3),
 ) -> list[dict[str, Any]]:
-    """A ``groups_dest`` chain as the steps the runtime runs on the case it reads: the chain ops, a ``statistics``
+    """A ``groups_dest`` chain as the steps the runtime runs on the case it reads, which ``held`` holds (its channels
+    and spatial rank): a class of the app's own is probed on what the steps before it make of it. the chain ops, a ``statistics``
     where konfai's ``Statistics`` records the volume's on the case, a model step for a ``KonfAIInference``, the
     nested app's model exported once however many groups run it, and a ``save`` where a ``Save`` writes what
     reaches it (konfai reads that entry back on a later run in place of the stages before it; the runtime runs
@@ -235,7 +238,7 @@ def _group_steps(
                 )
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif extension and ":" in stage and not records_only(name):
-            steps.append(_extension_step(name, params))
+            steps.append(_extension_step(name, params, _probe_after(held[1], lambda: held[0])(steps)))
             moved = moved or name
         elif not records_only(name):
             refuse_a_stage_konfai_does_not_carry(name, EvaluatorError)
@@ -279,6 +282,17 @@ def _inference(
         nested[key] = nested_exporter(next(name for name in names if name not in taken), params, out)
     step = {"model": nested[key]["id"], "manifest": nested[key]["manifest"]}
     return step | ({"per_channel": True} if clean(params.get("per_channel")) else {})
+
+
+def _first_case(dataset: Any, group: str) -> tuple[int, int]:
+    """What the first case holds in ``group``, read off its header: its channels and spatial rank; one channel of a
+    3D volume where no dataset of the run holds it (a group a nested model makes)."""
+    name = next(iter(dataset.case_names), None)
+    holder = next((held for held in dataset.datasets.values() if held.is_dataset_exist(group, name)), None)
+    if name is None or holder is None:
+        return 1, 3
+    shape, _ = holder.get_infos(group, name)
+    return int(shape[0]), len(shape) - 1
 
 
 def compile_evaluation(
@@ -330,6 +344,7 @@ def compile_evaluation(
                         nested,
                         nested_exporter,
                         extension is not None,
+                        _first_case(evaluator.dataset, group_src),
                     )
                     groups.append({"group_src": group_src, "group_dest": group_dest, "steps": steps})
         dests = {group["group_dest"] for group in groups}
