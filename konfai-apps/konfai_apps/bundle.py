@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -566,22 +567,26 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             # A program, or the manifest beside the one model it would run.
             written = artifact if artifact.suffix == ".json" else bundle / "manifest.json"
             runs = classes_run(json.loads(written.read_text()))
-        # Checked against the classes it stands for, as konfai imports them.
-        sys.path.insert(0, str(bundle))
-        try:
-            configs = [bundle / Path(config).name for config in args["config"]]
-            # The program is the prediction config's: the classes of the other configs are all checked.
-            compiled = [config for config in configs if config.name == "Prediction.yml"] if runs is not None else []
-            others = [config for config in configs if config not in compiled]
-            checked = check_extension(source, compiled, runs) + check_extension(source, others)
-            print(
-                f"[KonfAI-Apps] Extension checked against: {', '.join(dict.fromkeys(checked)) or 'no class of the app'}"
-            )
-        except ModuleNotFoundError as error:
-            if error.name != "wasmtime":
-                raise
-            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
-        finally:
-            sys.path.remove(str(bundle))
-        # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
-        shutil.copy(source, bundle / source.name)
+        with tempfile.TemporaryDirectory() as scratch:
+            # A copy is checked and carried: the bytes the bundle gets are the ones checked, whatever the source does.
+            staged = Path(shutil.copy(source, scratch))
+            # Checked against the classes it stands for, as konfai imports them.
+            sys.path.insert(0, str(bundle))
+            try:
+                configs = [bundle / Path(config).name for config in args["config"]]
+                # The program is the prediction config's: the classes of the other configs are all checked.
+                compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
+                others = [config for config in configs if config not in compiled]
+                checked = check_extension(staged, compiled, runs) + check_extension(staged, others)
+                names = ", ".join(dict.fromkeys(checked)) or "no class of the app"
+                print(f"[KonfAI-Apps] Extension checked against: {names}")
+            except ModuleNotFoundError as error:
+                if error.name != "wasmtime":
+                    raise
+                print(
+                    "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
+                )
+            finally:
+                sys.path.remove(str(bundle))
+            # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
+            shutil.copy(staged, bundle / source.name)
