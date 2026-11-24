@@ -1741,6 +1741,10 @@ def test_keep_largest_component_keeps_scipys_largest_label_whatever_the_slabs(
     kept = KeepLargestComponent(mask=1, rows=rows)("case", tensor, Attribute())
 
     assert torch.equal(kept, torch.where(torch.from_numpy(wanted), labels, 0))
+    # Without per_label, one component whatever the values it holds.
+    from konfai.data.transform.labels import largest_component
+
+    assert largest_component(np.array([[1, 0, 2], [1, 0, 0]]), rows).tolist() == [[True, False, False]] * 2
     with pytest.raises(TransformError, match="from -2 to 1"):  # never wrapped onto channel 0
         KeepLargestComponent(mask=2, rows=rows)("case", tensor, Attribute())
     pair = np.zeros((1, 2, 2), dtype=bool)
@@ -1774,6 +1778,56 @@ def test_keep_largest_component_per_label_is_monais_keep_largest_connected_compo
         pair = torch.cat([labels * 10, labels])
         stage = KeepLargestComponent(mask=1, rows=rows, per_label=True, connectivity=connectivity)
         assert torch.equal(stage("case", pair, Attribute()), wanted * 10)
+
+
+@pytest.mark.parametrize(("per_label", "connectivity"), [(False, 6), (False, 26), (True, 6), (True, 26)])
+def test_keep_largest_component_holds_what_it_declares_on_the_most_broken_map(
+    per_label: bool, connectivity: int
+) -> None:
+    # One record per component of the volume, beside one slab's numbers: on a map broken into as many components as
+    # the configuration allows (every other voxel face to face, one in eight touching, per label a value per voxel and
+    # 8 bytes each, every first byte the same), what the numbers, the records and the sort take stays inside the
+    # declaration, in one slab and in several.
+    import tracemalloc
+
+    pytest.importorskip("SimpleITK")
+    from konfai.data.patching.budget import CASE_ELEMENT_BYTES
+    from konfai.data.transform import KeepLargestComponent
+    from konfai.data.transform.labels import largest_component
+
+    z, y, x = np.indices((32, 32, 32))
+    if per_label:
+        labels = 256 * np.arange(1, z.size + 1, dtype=np.int64).reshape(z.shape)
+    else:
+        labels = (z % 2 == 0) & (y % 2 == 0) & (x % 2 == 0) if connectivity == 26 else (z + y + x) % 2 == 0
+    stage = KeepLargestComponent(per_label=per_label, connectivity=connectivity)
+    tracemalloc.start()
+    try:
+        for rows in (stage.rows, 4):
+            largest_component(labels, rows, per_label, stage.full)
+        held = tracemalloc.get_traced_memory()[1] / (labels.size * CASE_ELEMENT_BYTES)
+    finally:
+        tracemalloc.stop()
+    # And the foreground the stage hands it, a bool per voxel that torch holds and the tracer does not see (per_label,
+    # the map itself).
+    assert held + (0 if per_label else 1 / CASE_ELEMENT_BYTES) <= stage.case_working_multiple("case")
+
+
+@pytest.mark.parametrize("per_label", [False, True])
+def test_keep_largest_component_sends_every_voxel_outside_it_to_0(per_label: bool) -> None:
+    # The background is no component, also when the foreground is empty: the values outside are 0.
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    labels = torch.zeros((1, 2, 3, 3), dtype=torch.int16)
+    labels[0, 0, 0, :2] = 4
+    values = torch.full_like(labels, 7)
+    stage = KeepLargestComponent(mask=1, per_label=per_label)
+    assert torch.equal(stage("case", torch.cat([values, labels]), Attribute()), values * (labels == 4))
+    assert not stage("case", torch.cat([values, torch.zeros_like(labels)]), Attribute()).any()
+    # A float label of any value is one, also one whose remainder rounds up to the divisor (-1e-7 % 16 is 16.0).
+    floats = torch.tensor([[[[-1e-7, -1e-7, 0.0], [0.0, 0.0, 2.5]]]])
+    assert torch.equal(KeepLargestComponent(per_label=True)("case", floats, Attribute()), floats)
 
 
 @pytest.mark.parametrize("rows", [1, 64])

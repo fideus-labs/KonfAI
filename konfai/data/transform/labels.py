@@ -19,6 +19,7 @@
 
 import contextlib
 import itertools
+from array import array
 from collections.abc import Sequence
 
 import numpy as np
@@ -337,10 +338,12 @@ def largest_component(labels: np.ndarray, rows: int, per_label: bool = False, fu
     largest of each value; of two of one size, the first in scan order, as ``scipy.ndimage.label`` numbers them.
     Two passes over slabs of ``rows`` planes along the first axis: the first numbers each slab's components, joins
     them across the slab's face with the slab before, voxels of one value facing each other or, ``full``, touching
-    (a union-find whose root is the lowest number, the first in scan order) and sums their sizes; the second
-    numbers each slab again and keeps the voxels of the kept roots. Memory: one slab's numbers beside the answer."""
-    parent = [0]
-    sizes, values = [np.zeros(1, dtype=np.int64)], [np.zeros(1, dtype=labels.dtype)]
+    (a union-find whose root is the lowest number, the first in scan order, and holds its component's size); the
+    second numbers each slab again and keeps the voxels of the kept roots. Memory: one slab's numbers beside the
+    answer, and per component of the volume its parent and its size (8 bytes each) and its value, up to one
+    component per voxel."""
+    parent, sizes = array("q", [0]), array("q", [0])
+    values = [np.zeros(1, dtype=labels.dtype)]
     offsets, face = [], None
     plane = labels.shape[1:]
     shifts = list(itertools.product((-1, 0, 1), repeat=len(plane))) if full else [(0,) * len(plane)]
@@ -357,7 +360,8 @@ def largest_component(labels: np.ndarray, rows: int, per_label: bool = False, fu
         offset, count = len(parent) - 1, int(local.max())
         offsets.append(offset)
         parent.extend(range(offset + 1, offset + count + 1))
-        sizes.append(np.bincount(local.ravel(), minlength=count + 1)[1:])
+        counts = np.bincount(local.ravel(), minlength=count + 1)[1:].astype(np.int64, copy=False)
+        sizes.frombytes(memoryview(counts).cast("B"))
         value = np.zeros(count + 1, dtype=labels.dtype)
         value[local] = slab
         values.append(value[1:])
@@ -372,23 +376,33 @@ def largest_component(labels: np.ndarray, rows: int, per_label: bool = False, fu
                 pairs.update(zip(a[touching].tolist(), b[touching].tolist(), strict=True))
             for a, b in pairs:
                 low, high = sorted((root(a), root(b)))
-                parent[high] = low
+                if low != high:  # the root takes the size of the tree it joins
+                    parent[high], sizes[low], sizes[high] = low, sizes[low] + sizes[high], 0
         face = local[-1].copy()  # a view would hold the whole slab past it
-    roots = np.array([root(label) for label in range(len(parent))])
-    totals = np.bincount(roots[1:], weights=np.concatenate(sizes)[1:], minlength=len(parent))
+    del slab, local, face, value, counts
+    for label in range(len(parent)):  # parent[label] <= label: each root is resolved before its members
+        parent[label] = parent[parent[label]]
+    roots, totals = np.frombuffer(parent, dtype=np.int64), np.frombuffer(sizes, dtype=np.int64)  # 0 but at a root
+    keep = np.zeros(len(roots), dtype=bool)
+    if per_label:
+        # Of each value's roots, the largest; of two of one size, the lowest, the sort being stable.
+        value = np.concatenate(values)
+        del values
+        candidates = np.flatnonzero(totals)
+        if len(candidates):
+            order = candidates[np.lexsort((-totals[candidates], value[candidates]))]
+            keep[order[np.r_[True, value[order][1:] != value[order][:-1]]]] = True
+    else:
+        keep[np.argmax(totals)] = True  # the largest root, the lowest of two of one size
+        keep[0] = False  # no foreground at all
+    keep = keep[roots]  # per component, whether its root is kept; 0's root is 0, never kept
+    del roots, totals
+    parent, sizes = array("q"), array("q")  # the records freed: the second pass holds a slab of ITK's numbers
     kept = np.zeros(labels.shape, dtype=bool)
-    if not totals.any():
-        return kept
-    # Of each value's roots (one value without per_label), the largest; of two of one size, the lowest.
-    value = np.concatenate(values)
-    candidates = np.flatnonzero(totals)
-    order = candidates[np.lexsort((candidates, -totals[candidates], value[candidates]))]
-    keep = np.zeros(len(parent), dtype=bool)
-    keep[order[np.r_[True, value[order][1:] != value[order][:-1]]]] = True
     for start, offset in zip(range(0, labels.shape[0], rows), offsets, strict=True):
         local = _components(labels[start : start + rows], full, per_label)
         np.add(local, offset, out=local, where=local > 0)
-        kept[start : start + rows] = keep[roots[local]]  # roots[0] is 0, never kept
+        kept[start : start + rows] = keep[local]
     return kept
 
 
@@ -406,8 +420,9 @@ class KeepLargestComponent(Transform):
     needs the whole volume."""
 
     # The foreground, the kept voxels and a slab's int64 numbers, two slabs' worth with ITK's while one is read:
-    # measured 5.3 for a case of ``rows`` planes or fewer, one slab.
-    working_multiple = 5.5
+    # measured 5.3 for a case of ``rows`` planes or fewer, one slab. Beside the numbers, a parent, a size and a value
+    # per component of the volume: 5.75 on one broken into every other voxel, the most a foreground can be.
+    working_multiple = 6.0
 
     def __init__(self, mask: int | None = None, rows: int = 64, per_label: bool = False, connectivity: int = 6) -> None:
         super().__init__()
@@ -420,6 +435,11 @@ class KeepLargestComponent(Transform):
         self.rows = int(rows)
         self.per_label = bool(per_label)
         self.full = connectivity in (8, 26)
+
+    def case_working_multiple(self, name: str) -> float:
+        """``per_label``, up to a component per voxel, each with its value, and a sort of their roots to find each
+        value's largest: 15.25 measured on an int64 map of a value per voxel."""
+        return 16.0 if self.per_label else self.working_multiple
 
     def output_channels(self, channels: int) -> int:
         return channels - 1 if self.mask is not None else channels
