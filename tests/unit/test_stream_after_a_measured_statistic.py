@@ -712,6 +712,24 @@ def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budg
         set_per_rank_budget(None)
 
 
+def test_a_store_read_whole_over_the_budget_at_a_byte_an_element_is_refused_before_it_is_read(tmp_path, monkeypatch):
+    # 40,960 voxels do not fit 30,000 B whatever the element size: refused before the store is decoded whole.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.uint8), geometry())
+    monkeypatch.setattr(Dataset, "read_data", lambda *args, **kwargs: pytest.fail("the store was decoded whole"))
+    set_per_rank_budget(30_000)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+
+
 class AlongX:
     """A ``CaseStatistic`` class that tells the axes apart: the RMS of the difference of each voxel's two neighbours
     along x."""

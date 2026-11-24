@@ -639,6 +639,9 @@ class Dataset:
             return lambda: iter([read((slice(None),))])
         # The budget never changes what the running mean and std answer: the fold sees the same pieces.
         # A fold's scan of a store read whole reads it first, as its first block would: its element size prices it.
+        # Over the budget at a byte an element, the volume is refused before it is decoded.
+        if fold_bytes and not bounded:
+            _block_rows([], name, shape, halo, fold_bytes, 1)
         stored = read((slice(None),) * len(shape)).dtype.itemsize if fold_bytes and not bounded else None
         rows = _block_rows([(self, groups)] if bounded else [], name, shape, halo, fold_bytes, *filter(None, [stored]))
 
