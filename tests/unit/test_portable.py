@@ -1763,6 +1763,48 @@ def _tiny_prediction(
     return config
 
 
+def test_a_class_of_the_app_s_before_a_folded_graph_is_run_again_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The graph a pointwise class folds into is exported on the channels the steps before it leave: a whole class
+    # taking the argmax's int64 labels is run again in them to count its own.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "FoldedAfter.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Double(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n"
+    )
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["final_transforms"] = {
+        "Argmax": {"dim": 0},
+        "FoldedAfter:Odd": {},
+        "FoldedAfter:Double": {},
+    }
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+    (model,) = program["outputs"][0]["program"]["steps"]
+    assert [step["op"] for step in model["manifest"]["postprocessing"]][-3:] == ["argmax", "extension", "onnx"]
+
+
 def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

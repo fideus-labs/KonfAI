@@ -470,7 +470,7 @@ def _admitted(step: dict[str, Any]) -> dict[str, Any]:
 #: Exports a run of pointwise output transforms, handed the post steps before it, as one graph: the step that runs it.
 FoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]]], dict[str, Any]]
 #: A ``FoldOut`` handed, past the steps, the dtype konfai hands the run.
-TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[dict[str, Any]], str], dict[str, Any]]
+TypedFoldOut = Callable[[list[Callable[[Any], Any]], list[tuple[dict[str, Any], str | None]], str], dict[str, Any]]
 #: Exports the two graphs of a ``CaseStatistic``, handed its parameters: the step that runs them.
 StatisticOut = Callable[[dict[str, Any]], dict[str, Any]]
 #: The volume an app's own class is probed on past the steps of its chain before it: the channels they leave, at the
@@ -583,6 +583,10 @@ def refuse_a_late_crop(
     )
 
 
+#: The evaluation's folds of a stack of members, each a float32 map.
+_MEMBER_FOLD_OPS = ("variance", "standard_deviation", "segmentation_disagreement")
+
+
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
@@ -597,7 +601,7 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
         return "int64"
     if op == "threshold_labels":
         return "uint8"
-    if op in ("one_hot", "brightness", "norm", "case_statistic"):
+    if op in ("one_hot", "brightness", "norm", "case_statistic", *_MEMBER_FOLD_OPS):
         return "float32"
     if op in ("standardize", "normalize", "unnormalize", "softmax") and dtype not in (None, "float64"):
         return "float32"
@@ -788,15 +792,17 @@ def _probe_after(
     rank: int,
     start: Callable[[], int],
     before: Callable[[], list[tuple[dict[str, Any], str | None]]] = list,
+    members: int = 1,
 ) -> Probe:
-    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists, each step
-    with the dtype konfai hands it (:func:`_handed`), then the chain's steps, the first handed the dtype the probe is
-    asked with (``None``: the stored one): a class of the app's own among them is run again in its own."""
+    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, a stack of ``members``, past what
+    ``before`` lists, each step with the dtype konfai hands it (:func:`_handed`), then the chain's steps, the first
+    handed the dtype the probe is asked with (``None``: the stored one): a class of the app's own among them is run
+    again in its own."""
 
     def probe(steps: list[dict[str, Any]], dtype: str | None) -> tuple[int, ...]:
         held = start()
         for step, handed in [*before(), *_handed(steps, dtype)]:
-            held = _channels_after(step, held, rank, handed)
+            held = _channels_after(step, held, rank, handed, members)
         return (held, *_probe_extents(rank))
 
     return probe
@@ -2065,7 +2071,11 @@ def _post_chain(
     done: list[dict[str, Any]] = []
     # The phases compiled, each with the dtype konfai hands it: a class of the app's own in one is run again in it.
     phases: list[tuple[list[dict[str, Any]], str | None]] = []
-    probe = _probe_after(*head, before=lambda: [pair for steps, dtype in phases for pair in _handed(steps, dtype)])
+
+    def replayed() -> list[tuple[dict[str, Any], str | None]]:
+        return [pair for steps, dtype in phases for pair in _handed(steps, dtype)]
+
+    probe = _probe_after(*head, before=replayed)
 
     def folding(concatenated: bool, dtype: str | None) -> FoldOut | None:
         """``fold_out`` in a phase konfai hands ``dtype`` (``None``: the stored one)."""
@@ -2080,7 +2090,7 @@ def _post_chain(
                     " which only the run knows.",
                     "Move the transform before the inverses, or set inverse: false on the cast.",
                 )
-            return fold_out(folds, [*done, *steps], held)
+            return fold_out(folds, [*replayed(), *_handed(steps, dtype)], held)
 
         return fold
 
@@ -2935,16 +2945,18 @@ def export_checkpoints(
         left = fold.leave(entered)
         blended_channels, blended_dtype = int(left.shape[0]), str(left.dtype).split(".")[-1]
 
-    def fold_out(steps: list[Callable[[Any], Any]], before: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
+    def fold_out(
+        steps: list[Callable[[Any], Any]], before: list[tuple[dict[str, Any], str | None]], dtype: str
+    ) -> dict[str, Any]:
         """A run of pointwise output transforms as one graph beside the model's, on what the post steps before it
-        leave of the head's channels, in the ``dtype`` konfai hands it."""
+        leave of the head's channels, each handed its dtype, in the ``dtype`` konfai hands it."""
         nonlocal folded
         from konfai.export import export_folds
 
         # The app's own Fold hands the chain what it leaves.
         held = blended_channels or head_channels()
-        for step in before:
-            held = _channels_after(step, held, rank)
+        for step, handed in before:
+            held = _channels_after(step, held, rank, handed)
         filename = f"{ids[0]}_post_{folded}.onnx"
         folded += 1
         out_channels, out_dtype = export_folds(steps, out_dir / filename, held, rank, dtype)
@@ -3033,19 +3045,21 @@ def export_checkpoints(
     return models, written, per_copy
 
 
-def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | None = None) -> int:
+def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | None = None, members: int = 1) -> int:
     """The channels a step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis one each per spatial axis of the
     ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
     channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (float32 where
-    only the run knows it)."""
+    only the run knows it), a spread of a stack of ``members`` one member's, a disagreement of them one."""
     if "manifest" in step:
         made = int(step["manifest"]["output"]["channels"])
         for post in step["manifest"].get("postprocessing", []):
             made = _channels_after(post, made, rank)
         return held * made if step.get("per_channel") else made
-    if step["op"] in ("argmax", "magnitude", "threshold_labels"):
+    if step["op"] in ("argmax", "magnitude", "threshold_labels", "segmentation_disagreement"):
         return 1
+    if step["op"] in ("variance", "standard_deviation"):
+        return held // members
     if step["op"] == "gradient" and step["per_dim"]:
         return held * rank
     if step["op"] == "keep_largest_component" and "mask" in step:

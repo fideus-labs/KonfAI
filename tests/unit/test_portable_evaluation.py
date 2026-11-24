@@ -157,7 +157,7 @@ def test_a_class_of_the_app_s_past_a_nested_model_is_probed_on_what_the_model_ha
     inference = {"repo_id": "a", "model_name": "b", "per_channel": per_channel}
     chain = {"KonfAIInference": inference, "AfterNested:Labels": {"channels": 2 if per_channel else 1}}
     steps = _group_steps(
-        "Seg", chain, tmp_path, {}, lambda group, _params, _out: {"id": group, "manifest": manifest}, True, (2, 3)
+        "Seg", chain, tmp_path, {}, lambda group, _params, _out: {"id": group, "manifest": manifest}, True, (2, 3, 1)
     )
     assert steps[-1]["op"] == "extension"
 
@@ -190,7 +190,7 @@ def test_a_class_of_the_app_s_in_an_evaluation_chain_is_probed_in_the_dtype_it_i
         {},
         lambda group, _params, _out: {"id": group, "manifest": manifest},
         True,
-        (1, 2),
+        (1, 2, 1),
     )
     assert steps[-1]["op"] == "extension"
 
@@ -214,8 +214,56 @@ def test_a_class_of_the_app_s_run_again_to_count_its_channels_is_run_in_the_dtyp
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     chain = {"Argmax": {}, "EvaluatedBits:Odd": {}, "EvaluatedBits:Whole": {}}
-    steps = _group_steps("Seg", chain, tmp_path, {}, None, True, (2, 2))
+    steps = _group_steps("Seg", chain, tmp_path, {}, None, True, (2, 2, 1))
     assert [step["op"] for step in steps] == ["argmax", "extension", "extension"]
+
+
+@pytest.mark.parametrize(
+    ("fold", "members", "channels"),
+    [("StandardDeviation", 3, 2), ("Variance", 1, 6), ("SegmentationDisagreement", 3, 1)],
+)
+def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_fold_leaves(
+    tmp_path: Path, monkeypatch, fold: str, members: int, channels: int
+) -> None:
+    # A stack of members of two channels cast to int16: a spread leaves one member's, a disagreement one channel,
+    # each in float32.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "AfterMembers.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Count(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, channels: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.channels = channels\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != self.channels or not tensor.is_floating_point():\n"
+        "            raise ValueError(f'{self.channels} float channels, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    chain = {"TensorCast": {"dtype": "int16"}, fold: {}, "AfterMembers:Count": {"channels": channels}}
+    steps = _group_steps("Spread", chain, tmp_path, {}, None, True, (2 * members if members > 1 else 6, 3, members))
+    assert steps[-1]["op"] == "extension"
+
+
+@pytest.mark.parametrize(("members", "count"), [(2, 2), (None, 4)])
+def test_the_first_case_s_stacked_members_are_read_off_its_header(
+    tmp_path: Path, image_attributes, members, count
+) -> None:
+    # As konfai counts them: the header's count, else one member a channel.
+    from types import SimpleNamespace
+
+    import numpy as np
+    from konfai.portable_evaluation import _first_case
+    from konfai.utils.dataset import Dataset
+
+    attribute = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    if members is not None:
+        attribute["konfai_members"] = members
+    dataset = Dataset(tmp_path / "Stacks", "mha")
+    dataset.write("Stack", "P0", np.zeros((4, 3, 5, 6), np.float32), attribute)
+    assert _first_case(SimpleNamespace(case_names=["P0"], datasets={"stacks": dataset}), "Stack") == (4, 3, count)
 
 
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:

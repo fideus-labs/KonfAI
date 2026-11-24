@@ -211,14 +211,14 @@ def _group_steps(
     nested: dict[str, dict[str, Any]],
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None,
     extension: bool = False,
-    held: tuple[int, int] = (1, 3),
+    held: tuple[int, int, int] = (1, 3, 1),
 ) -> list[dict[str, Any]]:
     """A ``groups_dest`` chain as the steps the runtime runs on the case it reads: the chain ops, a ``statistics``
     where konfai's ``Statistics`` records the volume's on the case, a model step for a ``KonfAIInference``, the
     nested app's model exported once however many groups run it, and a ``save`` where a ``Save`` writes what
     reaches it (konfai reads that entry back on a later run in place of the stages before it; the runtime runs
     them again). A class of the app's own is probed on what the steps before it make of ``held``, the case's
-    channels and spatial rank."""
+    channels, spatial rank and stacked members."""
     steps: list[dict[str, Any]] = []
     moved = None  # the first stage that may move the grid or the values a Crop finds its box in
     for name, params in chain_items(chain):
@@ -239,7 +239,7 @@ def _group_steps(
                 )
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif extension and ":" in stage and not records_only(name):
-            probe = _probe_after(held[1], lambda: held[0])(steps, None)
+            probe = _probe_after(held[1], lambda: held[0], members=held[2])(steps, None)
             # The dtype the steps before it set, float32 where only the run knows it (the stored one).
             steps.append(_extension_step(name, params, probe, handed=_dtype_after(steps, None)))
             moved = moved or name
@@ -287,15 +287,18 @@ def _inference(
     return step | ({"per_channel": True} if clean(params.get("per_channel")) else {})
 
 
-def _first_case(dataset: Any, group: str) -> tuple[int, int]:
-    """What the first case holds in ``group``, read off its header: its channels and spatial rank; one channel of a
-    3D volume where no dataset of the run holds it (a group a nested model makes)."""
+def _first_case(dataset: Any, group: str) -> tuple[int, int, int]:
+    """What the first case holds in ``group``, read off its header: its channels, spatial rank and stacked members
+    (konfai's ``member_count``); one channel of a 3D volume where no dataset of the run holds it (a group a nested
+    model makes)."""
+    from konfai.data.transform.ensemble import member_count
+
     name = next(iter(dataset.case_names), None)
     holder = next((held for held in dataset.datasets.values() if held.is_dataset_exist(group, name)), None)
     if name is None or holder is None:
-        return 1, 3
-    shape, _ = holder.get_infos(group, name)
-    return int(shape[0]), len(shape) - 1
+        return 1, 3, 1
+    shape, attribute = holder.get_infos(group, name)
+    return int(shape[0]), len(shape) - 1, member_count(shape, attribute)
 
 
 def compile_evaluation(
