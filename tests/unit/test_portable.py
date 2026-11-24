@@ -737,14 +737,15 @@ def test_a_crop_finds_its_box_at_run_time_after_stages_that_move_nothing() -> No
     # reaches it, so after them the runtime crops the volume konfai finds the box in.
     chain = [
         {"Statistics": {}},
+        {"TensorCast": {"dtype": "float32"}},  # a value of the store is one of float32, and keeps its box
         {"Save": {"dataset": "./Work:nii.gz"}},
         {"Crop": {"inverse": True}},
         {"Clip": {"min_value": 0.0, "max_value": 400.0}},
         _WRITE,
     ]
     ops, _ = steps(chain, "CT")
-    assert [op["op"] for op in ops] == ["save", "crop", "clip"]
-    assert ops[1] == {"op": "crop"}
+    assert [op["op"] for op in ops] == ["cast", "save", "crop", "clip"]
+    assert ops[2] == {"op": "crop"}
 
 
 @pytest.mark.parametrize(
@@ -752,6 +753,7 @@ def test_a_crop_finds_its_box_at_run_time_after_stages_that_move_nothing() -> No
     [
         {"Clip": {"min_value": 0.0, "max_value": 400.0}},
         {"TensorCast": {"dtype": "int16"}},
+        {"TensorCast": {"dtype": "float32", "round": True}},  # 0.4 rounds to 0, out of a nonzero box
         {"Mask": {"path": "MASK"}},
         {"Flip": {"dims": "0"}},
         {"Resample": {"spacing": [1.5, 1.5, 1.5], "interpolation": "linear"}},
