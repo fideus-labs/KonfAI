@@ -67,8 +67,10 @@ import gc
 import math
 import os
 import tempfile
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable
 from functools import reduce
+from pathlib import Path
 from typing import Annotated, Literal, cast
 from unittest import mock
 
@@ -135,6 +137,10 @@ class _StepPerElement:
 
     def __init__(self, optimizer, steps: list) -> None:
         self._optimizer, self._steps = optimizer, steps
+
+    @property
+    def param_groups(self) -> list:
+        return self._optimizer.param_groups
 
     def zero_grad(self, *args, **kwargs) -> None:
         self._optimizer.zero_grad(*args, **kwargs)
@@ -559,12 +565,16 @@ class ImpactFeatureLoss(torch.nn.Module):
                 start += channels
         return values
 
-    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
-        mask: torch.Tensor | None = None
+    def _values(
+        self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
+    ) -> tuple[list[float], list[torch.Tensor]]:
+        """Each kept layer's weight and its distance between the two images, at the current level, over the voxels
+        ``region`` holds (``[1, 1, *spatial]``, all when None)."""
+        mask = region
         if self._masked:
             # A voxel counts where the fixed mask and the warped moving mask both hold it, as in FireANTs' own
             # masked metrics.
-            mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype)
+            mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * (1.0 if region is None else region)
             moved, fixed = moved[:, :-1], fixed[:, :-1]
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         # One draw per evaluation, the same channels in every patch and in the checkpoints' second pass.
@@ -611,11 +621,38 @@ class ImpactFeatureLoss(torch.nn.Module):
             values = halve_on_oom(
                 lambda: self._static_distances(level, moved, fixed, mask, seed), self.narrow, moved.is_cuda
             )
+        return weights, values
+
+    def latch(self, pieces: "Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]") -> None:
+        """Latch the level's normalisation on pieces of the pair instead of on the first evaluation: a registration
+        by boxes hands each box read with its halo (a moved and a fixed tensor) and ones on the box's own voxels.
+        Each layer's start is its mean over the voxels the boxes own, weighed by the voxels each counts (those both
+        masks keep, when masked): the level's mean, however its boxes cut it."""
+        if not self._normalize:
+            return
+        totals: list[float] = []
+        voxels = 0.0
+        with torch.no_grad():
+            for moved, fixed, region in pieces:
+                if self._masked:
+                    region = region * (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(region.dtype)
+                size = float(region.sum())
+                if size == 0:  # a box the masks miss counts no voxel
+                    continue
+                values = [float(value) * size for value in self._values(moved, fixed, region)[1]]
+                totals = [total + value for total, value in zip(totals or [0.0] * len(values), values, strict=True)]
+                voxels += size
+        self._latch([total / max(voxels, 1.0) for total in totals])
+
+    def _latch(self, starts: list[float]) -> None:
+        self._factors = [1.0 / start if start > 0 and np.isfinite(start) else 1.0 for start in starts]
+
+    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+        weights, values = self._values(moved, fixed)
         if self._normalize:
             if self._factors is None:
                 # Latched once a level, at the transform the scale starts from; a layer already at 0 keeps 1.
-                starts = [float(value.detach()) for value in values]
-                self._factors = [1.0 / start if start > 0 and np.isfinite(start) else 1.0 for start in starts]
+                self._latch([float(value.detach()) for value in values])
             values = [value * factor for value, factor in zip(values, self._factors, strict=True)]
         return reduce(torch.add, [weight * value for weight, value in zip(weights, values, strict=True)])
 
@@ -723,6 +760,8 @@ class FireANTsEngine:
         if cc_kernel % 2 == 0:
             # FireANTs' own cross-correlation refuses an even window, which has no centre voxel.
             raise ValueError(f"cc_kernel must be odd, got {cc_kernel}: an even window has no centre voxel.")
+        if deformable_method not in ("syn", "greedy", "none"):
+            raise ValueError(f"Unknown deformable_method '{deformable_method}' (expected 'syn', 'greedy' or 'none').")
         if linear_method == "none" and deformable_method == "none":
             # It would optimise nothing and return an identity no downstream check tells from a result.
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
@@ -1094,12 +1133,8 @@ class FireANTsEngine:
         else:
             if self._deformable_method == "syn":
                 from fireants.registration.syn import SyNRegistration as Deformable
-            elif self._deformable_method == "greedy":
-                from fireants.registration.greedy import GreedyRegistration as Deformable
             else:
-                raise ValueError(
-                    f"Unknown deformable_method '{self._deformable_method}' (expected 'syn', 'greedy' or 'none')."
-                )
+                from fireants.registration.greedy import GreedyRegistration as Deformable
             # The linear stage's images go before this stage builds its own: FireANTs keeps its tensors in
             # reference cycles, which only the cyclic collector frees.
             if self._linear_method != "none":
@@ -1199,6 +1234,223 @@ class FireANTsEngine:
             torch.cuda.synchronize()
         dvf_np, _ = image_to_data(field)
         return dvf_np
+
+    def check_sampled(self, fixed_shape, moving_shape) -> None:
+        """Refuse what ``register_sampled`` cannot register, from the pair's voxel shapes ((z, y, x)) alone, before
+        anything is read."""
+        _require_fireants()
+        from fireants.utils.globals import MIN_IMG_SIZE
+
+        if 1 in (*fixed_shape, *moving_shape):
+            raise NotImplementedError(
+                "an image with an axis of one voxel has no extent along it for FireANTs' normalized coordinates:"
+                " by boxes the pair is registered as volumes."
+            )
+        if self._deformable_method == "none":
+            return
+        if self._deformable_metric == "impact" and self._update_interval > 0:
+            raise NotImplementedError(
+                "feature_map_update_interval restarts FireANTs' deformable stage on the moving image resampled whole"
+                " at every refresh: by boxes the Static features are extracted once."
+            )
+        if self._deformable_metric == "mi":
+            raise NotImplementedError(
+                "mutual information is one histogram over the whole image, which the deformable stage's boxes do not"
+                " pool: by boxes it registers with cc, mse or impact."
+            )
+        if self._deformable_metric == "impact" and any(
+            spec.voxel_size is not None for specs in self._impact_levels for spec in specs
+        ):
+            raise NotImplementedError(
+                "a model's voxel_size is read against the whole image, where the deformable stage reads its boxes or"
+                " its blocks: by boxes the models see the image at its own resolution."
+            )
+        if min(fixed_shape) < MIN_IMG_SIZE:
+            raise NotImplementedError(
+                f"FireANTs resamples an axis under {MIN_IMG_SIZE} voxels to that many at every scale, where the"
+                f" deformable stage by boxes reads the fixed image's own grid: this one has an axis of"
+                f" {min(fixed_shape)}."
+            )
+
+    def register_sampled(
+        self,
+        fixed: Path,
+        moving: Path,
+        fixed_mask: Path | None,
+        moving_mask: Path | None,
+        device_index: int,
+        scratch: Path,
+        field: Path,
+        box: int,
+        samples: int | None = None,
+        epochs: int | None = None,
+    ) -> dict:
+        """Register the uncompressed MetaImage ``moving`` onto ``fixed`` (float32, their masks binary, on their
+        image's grid) without ever holding an image or a warp whole: the images are memory mapped and read by boxes,
+        the pyramid levels and the warps live in files of ``scratch``.
+
+        ``samples`` is how many voxels an iteration draws, in random boxes drawn anew at every iteration, as elastix
+        draws its points: an iteration's memory and time follow them and not the image. Unset, the rigid and affine
+        stages draw about two million, and the deformable stage takes what the device holds: every box of a level at
+        every iteration, on boxes as large as its memory, which is FireANTs' own iteration. The rigid and affine
+        stages run the preset's iterations on their draws, their step falling as elastix's gain does, which takes
+        them to the whole pair's optimum as the iterations grow. The deformable stage steps
+        the boxes it draws, each box as often on average as the preset gives a scale iterations (``epochs`` for
+        every scale, when given). A level the samples hold whole is registered as FireANTs registers it. The
+        displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what the
+        run measured."""
+        from ..native import field_map, mapped_centre, mapped_window, mmap_image, read_information, write_field
+        from ..ooc import ArraySource, HeaderImages, OnesSource, RescaledSource, StackedSource
+        from .fireants_sampled import (
+            _TOGETHER,
+            sampled_deformable_class,
+            sampled_linear_alignment,
+            static_feature_sources,
+        )
+
+        self.check_sampled(mmap_image(fixed).array.shape, mmap_image(moving).array.shape)
+        torch.manual_seed(self._seed)
+        device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
+        mapped = {"fixed": mmap_image(fixed), "moving": mmap_image(moving)}
+        masks = {
+            side: mmap_image(path) if path is not None else None
+            for side, path in (("fixed", fixed_mask), ("moving", moving_mask))
+        }
+        masked = any(mask is not None for mask in masks.values())
+        readers = {"fixed": read_information(fixed), "moving": read_information(moving)}
+
+        def mask_source(side: str):
+            """A side's mask, read by boxes: all ones where it has none (masked mode wants one beside both images)."""
+            if masks[side] is None:
+                return OnesSource(mapped[side].array.shape, device)
+            return ArraySource(masks[side].array[None], device)
+
+        def sources(metric: str, with_masks: bool) -> list:
+            """The fixed and moving images of a stage scoring ``metric``, read by boxes: rescaled for MI (see
+            ``_unit_range``, the percentiles taken by passes over the twin), with the mask as a last channel of both in
+            masked mode (all ones where a side has none)."""
+            pair = []
+            for side in ("fixed", "moving"):
+                source = ArraySource(mapped[side].array[None], device)
+                if metric == "mi":
+                    source = RescaledSource(source, *mapped_window(mapped[side]), _UNIT_TOP)
+                pair.append(StackedSource([source, mask_source(side)]) if with_masks else source)
+            return pair
+
+        scratch.mkdir(parents=True, exist_ok=True)
+        started, measured = time.perf_counter(), {}
+        affine_matrix: torch.Tensor | None = None
+        if self._linear_method != "none":
+            init_translation: str | torch.Tensor = "cof"
+            if self._moments_init == "none":
+                init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
+            elif self._moments_init == "com":
+                centres = [mapped_centre(mapped[side], masks[side], "com") for side in ("moving", "fixed")]
+                init_translation = torch.tensor(np.subtract(*centres), device=device, dtype=torch.float32).reshape(1, 3)
+            pair = sources(self._affine_metric, masked)
+            affine_matrix = sampled_linear_alignment(
+                readers["fixed"],
+                readers["moving"],
+                *pair,
+                scales=self._scales,
+                iterations=self._affine_iterations,
+                loss_type=f"masked_{self._affine_metric}" if masked else self._affine_metric,
+                optimizer_lr=self._affine_lr,
+                translation_lr=self._translation_lr,
+                cc_kernel_size=self._cc_kernel,
+                init_translation=init_translation,
+                device=device,
+                # Drawn, small boxes in many places: a global metric is estimated on them, and boxes side by side tell
+                # it less than boxes apart. Not told how many to draw, _TOGETHER voxels an iteration, as elastix draws
+                # its points: a level they hold whole is FireANTs' own iteration.
+                box=max(box // 3, 8),
+                boxes=max(1, (samples or _TOGETHER) // max(box // 3, 8) ** 3),
+                together=samples or _TOGETHER,
+                seed=self._seed,
+                affine=self._linear_method != "rigid",
+                scratch=scratch,
+            )
+            measured["linear_seconds"] = time.perf_counter() - started
+            measured["bytes_read"] = sum(source.bytes_read for source in pair)
+
+        if self._deformable_method == "none":
+            write_field(field, mapped["fixed"], self._affine_to_sitk(affine_matrix))
+            return measured
+        deformable_masked = masked and self._deformable_masked
+        custom_loss, loss_halo = None, None
+        if self._deformable_metric == "impact":
+            custom_loss = self._impact_loss()
+            custom_loss._masked = deformable_masked
+            custom_loss.reset()
+            extent = [
+                size * step
+                for size, step in zip(readers["fixed"].GetSize(), readers["fixed"].GetSpacing(), strict=True)
+            ]
+            for core in custom_loss.cores:
+                core.extent = extent
+            loss_type = "custom"
+            if self._mode == "Static":
+                # The loss compares the volumes' channels: twice the radius of a local correlation's window.
+                loss_halo = 2 * ((self._lncc_kernel - 1) // 2)
+            else:
+                # A network's feature at a voxel reads its receptive field around it, and so does the feature's
+                # gradient: twice its radius, at most half a box (which a model that cannot size its field gets too).
+                # ponytail: in the model's own voxels; a voxel_size coarser than the image's reads wider.
+                widest = 1
+                for core in custom_loss.cores:
+                    try:
+                        widest = max(widest, core.model.receptive_field)
+                    except MeasureError:
+                        widest = box
+                loss_halo = min(widest - 1, box // 2)
+        else:
+            loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
+        deformable_started = time.perf_counter()
+        pair = sources(self._deformable_metric, deformable_masked)
+        if custom_loss is not None and self._mode == "Static":
+            # Static: the feature volumes extracted once, by blocks, into files; the stage then registers them, with
+            # the mask channel beside them so that masked still means what it says.
+            features = static_feature_sources(custom_loss, *sources("impact", False), scratch, block=max(box, 64))
+            custom_loss.release()
+            pair = [
+                StackedSource([volume, mask_source(side)]) if deformable_masked else volume
+                for volume, side in zip(features, ("fixed", "moving"), strict=True)
+            ]
+        registration = sampled_deformable_class()(
+            self._scales,
+            [int(epochs)] * len(self._scales) if epochs else self._deformable_iterations,
+            *(HeaderImages(readers[side], pair[0].channels, device) for side in ("fixed", "moving")),
+            *pair,
+            scratch=scratch,
+            symmetric=self._deformable_method == "syn",
+            loss_type=loss_type,
+            custom_loss=custom_loss,
+            cc_kernel_size=self._cc_kernel,
+            loss_halo=loss_halo,
+            smooth_warp_sigma=self._smooth_warp_sigma,
+            smooth_grad_sigma=self._smooth_grad_sigma,
+            optimizer_lr=self._deformable_lr,
+            init_affine=affine_matrix,
+            box=box,
+            samples=samples,
+            seed=self._seed,
+            # The points of a sampled Jacobian loss read a patch of the receptive field around them, which a box at
+            # the image's edge, short and with no halo past it, would not hold.
+            least=max(getattr(custom_loss, "_patch", None) or [1]),
+        )
+        try:
+            registration.optimize()
+            measured["deformable_seconds"] = time.perf_counter() - deformable_started
+            output = field_map(field, mapped["fixed"])
+            registration.write_field(output)
+            output.flush()
+        finally:
+            registration.close()
+        measured["bytes_read"] = measured.get("bytes_read", 0) + sum(source.bytes_read for source in pair)
+        measured["loss"] = [registration.losses[0], registration.losses[-1]] if registration.losses else []
+        measured["warps_resident"] = registration.resident
+        measured["boxes_per_scale"] = registration.boxes_per_scale
+        return measured
 
 
 class RegistrationNet(network.Network):

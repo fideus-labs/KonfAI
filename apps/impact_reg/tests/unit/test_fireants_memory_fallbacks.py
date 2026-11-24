@@ -133,11 +133,11 @@ def test_a_static_extraction_that_does_not_fit_tiles_both_images_alike(
     tiles: list[tuple[tuple[int, ...], int]] = []
     volume = ImpactFeatureModel._volume
 
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap):
+    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap, statistics=None, norms=None):
         tiles.append((tuple(image.shape[2:]), patch))
         if patch == 0:
             raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
-        return volume(self, image, normalization, patch, overlap)
+        return volume(self, image, normalization, patch, overlap, statistics, norms)
 
     monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
     loss = _static_loss(tmp_path)

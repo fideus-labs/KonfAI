@@ -76,6 +76,7 @@ def test_each_model_configuration_carries_its_voxel_size_and_feature_normalizati
             built[-1].append(value)
 
     monkeypatch.setattr(convexadam, "itk", SimpleNamespace(ImpactModelConfiguration=_Configuration))
+    monkeypatch.setattr(convexadam, "_itk_impact_predates_its_stages", lambda: False)
     model = str(tmp_path / "model.pt")
     models = {
         "0": convexadam.ModelSpec(ref=model),
@@ -113,6 +114,27 @@ def test_a_configuration_loads_with_or_without_the_setting_that_does_nothing(
     net = apply_config("Predictor.Model.RegistrationNet")(convexadam.RegistrationNet)()
 
     assert [model.model_path for model in net["Registration"]._engine._feature_models["fine"]] == [str(model.resolve())]
+
+
+def test_a_configuration_of_the_former_affine_pre_alignment_is_refused_by_name(tmp_path: Path, monkeypatch) -> None:
+    # A preset that still asks for the affine would otherwise register without it, the key only warned about: the
+    # build refuses it, naming what replaces it, and leaves the file as it was.
+    model = tmp_path / "model.pt"
+    model.write_bytes(b"jit")
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        f"Predictor:\n  Model:\n    RegistrationNet:\n      linear: true\n      models:\n        '0':\n          ref: {model}\n",
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    from konfai.utils.config import apply_config, strict_config
+    from konfai.utils.errors import ConfigError
+
+    with pytest.raises(ConfigError, match="moments_init"), strict_config("Predictor", refuse=False):
+        apply_config("Predictor.Model.RegistrationNet")(convexadam.RegistrationNet)()
+    assert config.read_bytes() == before
 
 
 def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field_through_the_graph() -> None:
@@ -188,9 +210,6 @@ def test_each_mask_reaches_both_stages_and_no_mask_sets_nothing(tmp_path: Path, 
         assert stage.calls["SetFixedMask"] == (fixed_mask,) and stage.calls["SetMovingMask"] == (moving_mask,)
     for stage in _stages(tmp_path, monkeypatch):
         assert "SetFixedMask" not in stage.calls and "SetMovingMask" not in stage.calls
-    # deformable_masked off: the authors' whole-image run, the masks left to the affine stage.
-    for stage in _stages(tmp_path, monkeypatch, masks=(fixed_mask, moving_mask), deformable_masked=False):
-        assert "SetFixedMask" not in stage.calls and "SetMovingMask" not in stage.calls
 
 
 def test_a_weight_per_kept_layer_reaches_each(tmp_path: Path, monkeypatch) -> None:
@@ -243,117 +262,6 @@ def test_each_stage_takes_its_level_s_models(tmp_path: Path, monkeypatch) -> Non
         _net(tmp_path, levels={"0": levels["0"]})
 
 
-@pytest.mark.slow  # the first itk registration loads ITK's modules, ~10 s
-def test_the_linear_stage_recovers_a_shift_whatever_the_intensity_range(tmp_path: Path) -> None:
-    # The rigid was seeded from intensity moments, which divide by the total intensity: negative for a CT in HU,
-    # zero for a z-scored image. A z-scored moving was seeded ~1e9 mm away and the linear stage stopped on "All
-    # samples map outside moving image buffer".
-    shift = np.array([7.0, -5.0, 9.0])
-    fixed = _ct_phantom()
-    moving = _ct_phantom(shift)
-    array = sitk.GetArrayViewFromImage(moving)
-    moving = sitk.Cast((moving - float(array.mean())) / float(array.std()), sitk.sitkFloat32)
-    engine = _net(tmp_path, stages=[], linear=True, linear_iterations=50)["Registration"]._engine
-
-    field = engine.register(fixed, moving, -1)
-
-    body = field[:, 10:22, 12:28, 14:34].reshape(3, -1)
-    assert np.abs(body - shift[:, None]).max() < 1.0
-
-
-def test_the_linear_stage_holds_against_a_few_hot_voxels(tmp_path: Path) -> None:
-    # Light-sheet tissue lies in a few tens of grey values beside lone voxels in the tens of thousands: on the raw
-    # ExaSPIM brains Otsu's foreground of the fixed image was 9 hot voxels, 9 mm from the brain's centre, and the mutual
-    # information binned every tissue voxel into one of 32 bins, so the affine seeded and stayed off target.
-    shift = np.array([7.0, -5.0, 9.0])
-    fixed, moving = ((_ct_phantom(s) + 1000.0) / 36.0 for s in (np.zeros(3), shift))  # air 0, tissue ~30, bone 50
-    fixed[2, 3, 4] = 20000.0
-    fixed[3, 3, 4] = 18000.0
-    engine = _net(tmp_path, stages=[], linear=True, linear_iterations=50)["Registration"]._engine
-
-    field = engine.register(fixed, moving, -1)
-
-    body = field[:, 10:22, 12:28, 14:34].reshape(3, -1)
-    assert np.abs(body - shift[:, None]).max() < 1.0
-
-
-def test_a_sampled_linear_stage_still_recovers_a_shift(tmp_path: Path) -> None:
-    # Reading every voxel at every iteration took 83 s of an abdominal CT pair's 106 s registration; a tenth of them,
-    # drawn with the engine's seed, lands the same affine to a fraction of a voxel.
-    shift = np.array([7.0, -5.0, 9.0])
-    engine = _net(tmp_path, stages=[], linear=True, linear_iterations=50, linear_sampling=0.1)["Registration"]._engine
-
-    field = engine.register(_ct_phantom(), _ct_phantom(shift), -1)
-
-    body = field[:, 10:22, 12:28, 14:34].reshape(3, -1)
-    assert np.abs(body - shift[:, None]).max() < 1.0
-    for share in (0.0, 1.5):
-        with pytest.raises(ValueError, match="linear_sampling"):
-            _net(tmp_path, linear_sampling=share)
-
-
-def test_the_linear_stage_is_not_seeded_off_target_by_a_scan_that_reaches_further(tmp_path: Path) -> None:
-    # The Learn2Reg abdomen CT covers 50 mm more of the body than its MR: the foreground centres lay that far apart
-    # where the anatomy did not, and the affine seeded there went off target on the coarse copy (Dice 0.42 -> 0).
-    shift = np.array([3.0, -2.0, 4.0])
-    moving = _ct_phantom(shift)
-    array = sitk.GetArrayFromImage(moving)
-    array[..., :12] = 40.0  # tissue along a whole side of the moving scan alone
-    longer = sitk.GetImageFromArray(array)
-    longer.CopyInformation(moving)
-    engine = _net(tmp_path, stages=[], linear=True, linear_iterations=50)["Registration"]._engine
-
-    field = engine.register(_ct_phantom(), longer, -1)
-
-    body = field[:, 10:22, 12:28, 14:34].reshape(3, -1)
-    assert np.abs(body - shift[:, None]).max() < 1.0
-
-
-def test_the_linear_stage_draws_the_same_samples_every_run(tmp_path: Path) -> None:
-    # Its scales estimator samples the image through ITK's global Mersenne Twister, which ITK seeds from the clock in
-    # every process: the same pair got another affine each run. Whatever the generator was left at, a run draws
-    # the same numbers and leaves it in the same state.
-    import itk
-
-    fixed, moving = _ct_phantom(), _ct_phantom((7.0, -5.0, 9.0))
-    engine = _net(tmp_path, stages=[], linear=True, linear_iterations=5)["Registration"]._engine
-    after = []
-    for clock in (1917622863, 1983980151):  # two processes' seeds
-        itk.MersenneTwisterRandomVariateGenerator.GetInstance().SetSeed(clock)
-        engine.register(fixed, moving, -1)
-        after.append(itk.MersenneTwisterRandomVariateGenerator.GetInstance().GetVariate())
-
-    assert after[0] == after[1]
-
-
-@pytest.mark.slow  # the linear stage loads ITK's modules
-def test_each_mask_restricts_the_linear_stage_and_its_seed(tmp_path: Path) -> None:
-    # They reached the coarse and fine stages alone: a CT's table or head rest still pulled the affine and its seed.
-    import itk
-
-    fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
-    engine = _net(tmp_path, stages=[], linear_iterations=10)["Registration"]._engine
-    array = np.zeros(fixed.GetSize()[::-1], dtype=np.uint8)
-    array[..., :24] = 1
-    half = sitk.GetImageFromArray(array)
-    half.CopyInformation(fixed)  # the phantoms share one grid
-    centre = convexadam._foreground_centre(fixed, None)
-    fixed_itk, moving_itk, half_itk = (
-        convexadam._sitk_to_itk(fixed),
-        convexadam._sitk_to_itk(moving),
-        convexadam._sitk_to_itk(half, np.uint8),
-    )
-
-    def affine(fixed_mask, moving_mask) -> np.ndarray:
-        found = engine._linear_align(fixed_itk, moving_itk, fixed_mask, moving_mask, centre, centre)
-        return np.append(itk.array_from_matrix(found.GetMatrix()), found.GetTranslation())
-
-    free = affine(None, None)
-    assert np.allclose(affine(None, None), free)  # the threads' sums vary in their last bits, not more
-    assert not np.allclose(affine(half_itk, None), free) and not np.allclose(affine(None, half_itk), free)
-    assert not np.allclose(convexadam._foreground_centre(fixed, half), centre)
-
-
 def test_a_mask_takes_its_image_s_grid_where_it_lies_on_it_and_is_resampled_onto_it_elsewhere() -> None:
     # It took the image's header whatever its grid: one of another size raised, one elsewhere was moved onto the image.
     image = sitk.Image([10, 10, 10], sitk.sitkFloat32)
@@ -401,7 +309,7 @@ def test_a_mask_restricts_both_stages_and_a_whole_image_one_changes_nothing(tmp_
         pytest.skip("itk-impact is not installed")
     fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
     models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
-    settings = {"grid_spacing": 2, "displacement_half_width": 2, "iterations": 10, "linear": False}
+    settings = {"grid_spacing": 2, "displacement_half_width": 2, "iterations": 10}
     engine = _net(tmp_path, models=models, **settings)["Registration"]._engine
     whole = sitk.Cast(fixed * 0 + 1, sitk.sitkUInt8)
     array = np.zeros(fixed.GetSize()[::-1], dtype=np.uint8)
@@ -426,19 +334,16 @@ def test_a_mask_restricts_both_stages_and_a_whole_image_one_changes_nothing(tmp_
     assert made[0].GetBalanceLosses() and len(made[0].GetLayerSpreads()) == 1 and made[0].GetLayerSpreads()[0] > 0
 
 
-@pytest.mark.slow  # the linear stage loads ITK's modules
-@pytest.mark.parametrize("linear", [False, True])
-def test_each_mask_reaches_the_filters_on_the_grid_of_the_image_handed_with_it(
-    tmp_path: Path, monkeypatch, linear: bool
-) -> None:
-    # The engine hands the filters the pair with its voxel axes in LPS order, and the moving image resampled onto the
-    # fixed grid after the linear stage: a mask left on the grid it came on would restrict other voxels than its
-    # image's. Each must reach them on its image's grid, over the same anatomy, binarised.
+@pytest.mark.slow  # the engine loads ITK's modules
+def test_each_mask_reaches_the_filters_on_the_grid_of_the_image_handed_with_it(tmp_path: Path, monkeypatch) -> None:
+    # The engine hands the filters the pair with its voxel axes in LPS order: a mask left on the grid it came on would
+    # restrict other voxels than its image's. Each must reach them on its image's grid, over the same anatomy,
+    # binarised.
     import itk
 
     fixed = sitk.PermuteAxes(_ct_phantom() + 1000.0, [1, 0, 2])  # axes out of LPS order
     moving = sitk.Flip(_ct_phantom((8.0, -6.0, 10.0)) + 1000.0, [True, False, True])[2:, 1:, :]  # another grid
-    engine = _net(tmp_path, linear=linear, linear_iterations=5)["Registration"]._engine
+    engine = _net(tmp_path)["Registration"]._engine
     handed = {}
 
     def run_stages(fixed_itk, moving_itk, fixed_mask, moving_mask, device):
@@ -446,24 +351,17 @@ def test_each_mask_reaches_the_filters_on_the_grid_of_the_image_handed_with_it(
         return engine._zero_field(fixed_itk)
 
     monkeypatch.setattr(engine, "_run_stages", run_stages)
-    linear_masks: list = []
-    linear_align = engine._linear_align
-    monkeypatch.setattr(engine, "_linear_align", lambda *args: linear_masks.extend(args[2:4]) or linear_align(*args))
     engine.register(fixed, moving, -1, _body(fixed), _body(moving))
 
     assert list(handed["fixed"][0].GetLargestPossibleRegion().GetSize()) == [48, 40, 32]  # back in LPS order
-    if linear:  # the linear stage is masked too, the moving mask still on the moving grid
-        assert linear_masks[0] is handed["fixed"][1] and linear_masks[1] is not None
-    for side, (image, mask) in handed.items():
+    for image, mask in handed.values():
         for query in ("GetOrigin", "GetSpacing"):
             assert np.allclose(getattr(mask, query)(), getattr(image, query)())
         assert np.allclose(itk.array_from_matrix(mask.GetDirection()), itk.array_from_matrix(image.GetDirection()))
         body, voxels = itk.array_view_from_image(mask), itk.array_view_from_image(image)
         assert body.shape == voxels.shape and body.dtype == np.uint8 and np.unique(body).tolist() == [0, 1]
-        # The same voxels as the image's body: exactly where nothing was resampled, all but the edge where the linear
-        # stage resampled the moving image (linearly) and its mask (by nearest neighbour).
-        agreement = np.mean(body.astype(bool) == (voxels > 500))
-        assert agreement > (0.95 if linear and side == "moving" else 0.9999)
+        # The same voxels as the image's body: nothing was resampled.
+        assert np.mean(body.astype(bool) == (voxels > 500)) > 0.9999
 
 
 @pytest.mark.slow  # the engine loads ITK's modules
@@ -473,7 +371,7 @@ def test_a_fixed_mask_alone_gives_the_moving_side_a_whole_image_mask(tmp_path: P
     import itk
 
     fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
-    engine = _net(tmp_path, linear=False)["Registration"]._engine
+    engine = _net(tmp_path)["Registration"]._engine
     handed: list = []
 
     def run_stages(fixed_itk, moving_itk, fixed_mask, moving_mask, device):
@@ -516,11 +414,12 @@ def test_a_negative_layer_weight_fails_at_build(tmp_path: Path) -> None:
         ({"models": {}}, "at least one feature model"),
         ({"stages": ["fine", "coarse"]}, "not a ConvexAdam chain"),
         ({"stages": ["coarse", "affine"]}, "not a ConvexAdam chain"),
-        ({"stages": [], "linear": False}, "nothing to register"),
+        ({"stages": []}, "nothing to register"),
         ({"grid_spacing": 0}, "grid_spacing must be at least 1"),
         ({"grid_shrink": 0}, "grid_shrink must be at least 1"),
         ({"lncc_kernel": 4}, "lncc_kernel must be odd"),
         ({"mode": "Online"}, "mode must be 'Static' or 'Jacobian'"),
+        ({"moments_init": "centre"}, "moments_init must be 'cof', 'com' or 'none'"),
     ],
 )
 def test_a_configuration_convexadam_cannot_run_fails_at_build(tmp_path: Path, overrides: dict, message: str) -> None:
@@ -532,12 +431,9 @@ def test_a_configuration_convexadam_cannot_run_fails_at_build(tmp_path: Path, ov
 
 
 @pytest.mark.slow  # itk-impact runs the whole chain on the CPU, ITK's modules load first
-@pytest.mark.parametrize("linear", [False, True])
-def test_the_field_is_the_physical_fixed_to_moving_map_on_an_oblique_anisotropic_grid(
-    tmp_path: Path, linear: bool
-) -> None:
+def test_the_field_is_the_physical_fixed_to_moving_map_on_an_oblique_anisotropic_grid(tmp_path: Path) -> None:
     # What the orchestrator and every downstream reader assume: channel-first on the fixed grid, x,y,z components in
-    # millimetres, moved(p) = moving(p + d(p)), with the affine applied after the deformable field. Checked against
+    # millimetres, moved(p) = moving(p + d(p)). Checked against
     # a known rigid motion on a grid whose direction, spacing and axis order all differ from the identity.
     import itk
 
@@ -573,8 +469,6 @@ def test_the_field_is_the_physical_fixed_to_moving_map_on_an_oblique_anisotropic
         regularization_weight=1.25,
         grid_shrink=2,
         stages=["coarse", "fine"],
-        linear=linear,
-        linear_iterations=50,
     )
 
     def tensor_and_geometry(image: sitk.Image) -> tuple[torch.Tensor, Attribute]:
@@ -582,7 +476,8 @@ def test_the_field_is_the_physical_fixed_to_moving_map_on_an_oblique_anisotropic
         return torch.from_numpy(array)[None], geometry
 
     (f, fg), (m, mg) = tensor_and_geometry(fixed), tensor_and_geometry(moving)
-    field = net["Registration"](f, m, torch.ones_like(f), torch.ones_like(m), [[fg], [mg], [fg], [mg]])[0].numpy()
+    headers = [[fg], [mg], [fg], [mg]]
+    field = net["Registration"](f, m, torch.ones_like(f), torch.ones_like(m), attributes=headers)[0].numpy()
 
     assert field.shape == (3, 36, 44, 40) and field.dtype == np.float32
     errors = []
@@ -592,3 +487,102 @@ def test_the_field_is_the_physical_fixed_to_moving_map_on_an_oblique_anisotropic
         truth = np.array(motion.TransformPoint(p.tolist())) - p
         errors.append(np.linalg.norm(field[:, index[2], index[1], index[0]] - truth))
     assert np.mean(errors) < 0.6 and np.max(errors) < 2.0  # mm, over a motion of 3.6 mm on average
+
+
+@pytest.mark.slow  # itk-impact runs the coarse stage on the CPU, ITK's modules load first
+def test_a_pair_beyond_the_coarse_search_starts_from_the_translation_between_its_centres(tmp_path: Path) -> None:
+    # The coarse search spans displacement_half_width x grid_spacing voxels each way (10 mm here): past it, the pair
+    # only registers from a starting translation, which the field carries.
+    import itk
+
+    if not hasattr(itk, "ImpactCoarseRegistration"):
+        pytest.skip("itk-impact is not installed")
+    fixed = _ct_phantom() + 1000.0
+    shift = np.array([18.0, -15.0, 21.0])
+    moving = sitk.Image(fixed)
+    moving.SetOrigin([float(v) for v in np.add(fixed.GetOrigin(), shift)])  # moving(p + shift) = fixed(p)
+    models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
+    settings = {"grid_spacing": 2, "displacement_half_width": 2, "stages": ["coarse"]}
+
+    def error(moments_init: str) -> float:
+        engine = _net(tmp_path, models=models, moments_init=moments_init, **settings)["Registration"]._engine
+        field = engine.register(fixed, moving, -1)
+        return float(np.abs(field[:, 6:-6, 6:-6, 6:-6] - shift[:, None, None, None]).mean())
+
+    assert error("com") < 0.5 and error("cof") < 0.5  # mm
+    assert error("none") > 5.0
+
+
+@pytest.mark.slow  # itk-impact runs both stages by regions on the CPU
+def test_the_region_route_starts_from_the_translation_between_the_centres_too(tmp_path: Path) -> None:
+    # By regions the moving twin streams from its file: its origin moves on the way, and the translation goes into
+    # the dense field and the control grid written to files. A shifted pair is then the pair placed, plus the shift.
+    import itk
+    from impact_reg_konfai import impact_reg as reg
+    from impact_reg_konfai.native import write_twin
+    from konfai.utils.dataset import Dataset
+
+    if not hasattr(itk, "ImpactFineRegistration") or not hasattr(
+        convexadam._fine_registration_type().New(), "SetRegionSize"
+    ):
+        pytest.skip("itk-impact 0.2 is not installed")
+    fixed = _ct_phantom() + 1000.0
+    models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
+
+    def fields(shift: np.ndarray, moments_init: str) -> tuple[np.ndarray, np.ndarray]:
+        case = tmp_path / moments_init
+        case.mkdir()
+        moving = sitk.Image(fixed)
+        moving.SetOrigin([float(v) for v in np.add(fixed.GetOrigin(), shift)])
+        twins = []
+        for name, image in (("Fixed", fixed), ("Moving", moving)):
+            sitk.WriteImage(image, str(case / f"{name}.mha"))
+            root, _, backend = reg._stage_group(case / "stage", name, {"P000": case / f"{name}.mha"}).rpartition(":")
+            twins.append(write_twin(Dataset(root, backend), name, "P000", case / f"{name}.h5", dtype="float32"))
+        engine = _net(tmp_path, models=models, grid_spacing=2, displacement_half_width=2, moments_init=moments_init)
+        for stage_models in engine["Registration"]._engine._feature_models.values():
+            for model in stage_models:
+                model.fov = [1]  # voxel by voxel: no halo around a box
+        result = engine["Registration"]._engine.refine_by_regions(*twins, None, None, -1, 16, 3, case / "DVF.mha")
+        return tuple(sitk.GetArrayFromImage(sitk.ReadImage(str(path))) for path in (result.field, result.control_grid))
+
+    shift = np.array([18.0, -15.0, 21.0])
+    placed, placed_grid = fields(np.zeros(3), "none")
+    shifted, shifted_grid = fields(shift, "com")
+
+    assert np.allclose(shifted, placed + shift, atol=1e-3) and np.allclose(shifted_grid, placed_grid + shift, atol=1e-3)
+
+
+@pytest.mark.slow  # itk-impact runs the coarse stage by regions on the CPU
+def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path) -> None:
+    # A preset with the coarse stage alone (ConvexAdam#coarse, #impact_mrct) runs by regions too: its field,
+    # interpolated from its grid for each region the writer asks, is the whole run's.
+    import itk
+    from impact_reg_konfai import impact_reg as reg
+    from impact_reg_konfai.native import write_twin
+    from konfai.utils.dataset import Dataset
+
+    if not hasattr(itk, "ImpactCoarseRegistration") or not hasattr(
+        convexadam._coarse_registration_type().New(), "SetRegionSize"
+    ):
+        pytest.skip("itk-impact 0.2 is not installed")
+    fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
+    models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
+    engine = _net(tmp_path, models=models, grid_spacing=2, displacement_half_width=2, stages=["coarse"])
+    engine = engine["Registration"]._engine
+    for stage_models in engine._feature_models.values():
+        for model in stage_models:
+            model.fov = [1]  # voxel by voxel: no halo around a box
+    twins = []
+    for name, image in (("Fixed", fixed), ("Moving", moving)):
+        sitk.WriteImage(image, str(tmp_path / f"{name}.mha"))
+        root, _, backend = reg._stage_group(tmp_path / "stage", name, {"P000": tmp_path / f"{name}.mha"}).rpartition(
+            ":"
+        )
+        twins.append(write_twin(Dataset(root, backend), name, "P000", tmp_path / f"{name}.h5", dtype="float32"))
+
+    result = engine.refine_by_regions(*twins, None, None, -1, 16, 3, tmp_path / "DVF.mha")
+
+    by_regions = np.moveaxis(sitk.GetArrayFromImage(sitk.ReadImage(str(result.field))), -1, 0)
+    assert result.iterations == 0 and result.control_grid.exists()
+    assert np.allclose(by_regions, engine.register(fixed, moving, -1), atol=1e-3)

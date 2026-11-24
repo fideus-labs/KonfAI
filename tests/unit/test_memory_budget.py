@@ -192,8 +192,9 @@ def test_a_slurm_grant_bounds_the_budget_when_no_cgroup_enforces_it(
     monkeypatch.setenv("SLURM_MEM_PER_NODE", "32000")  # MB
     monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
     _fake_host_available(monkeypatch, 512 * 2**30)
+    monkeypatch.setattr(budget, "held_bytes", lambda: 2**30)  # the grant is a total: what is held comes off
 
-    assert budget.available_memory_bytes() == (32000 * 2**20, "SLURM memory grant")
+    assert budget.available_memory_bytes() == (32000 * 2**20 - 2**30, "SLURM memory grant")
 
 
 def test_a_slurm_grant_of_zero_means_the_whole_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -213,6 +214,7 @@ def test_a_slurm_per_cpu_grant_is_multiplied_by_the_task_cpus(monkeypatch: pytes
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
     monkeypatch.setenv("SLURM_CPUS_ON_NODE", "64")  # the task's cpus win over the node's
     _fake_host_available(monkeypatch, 512 * 2**30)
+    monkeypatch.setattr(budget, "held_bytes", lambda: 0)
 
     assert budget.available_memory_bytes() == (4000 * 8 * 2**20, "SLURM memory grant")
 
@@ -805,7 +807,7 @@ def test_a_machine_budget_pays_for_the_process_and_a_declared_one_does_not(
 
     Getting this backwards kills a small machine (647 MiB is 22% of what a 4 GiB one offers) or
     zeroes every budget a test declares in kilobytes."""
-    monkeypatch.setattr(budget, "resident_bytes", lambda: 600 << 20)
+    monkeypatch.setattr(budget, "held_bytes", lambda: 600 << 20)
 
     measured = budget.MemoryBudget(4 << 30, "auto: 4 GiB", shared_across_ranks=True)
     assert measured.work_bytes(1) == (4 << 30) - (600 << 20)
@@ -814,12 +816,29 @@ def test_a_machine_budget_pays_for_the_process_and_a_declared_one_does_not(
     assert declared.work_bytes(1) == 4 << 30
 
 
+def test_a_machine_budget_is_charged_what_its_process_took_since_the_measure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The measure is of what was free: the bytes the process held then are already off it (under a
+    cgroup, a second charge left a 4 GiB machine with no budget once a workflow had run in the process)."""
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (4 << 30, "cgroup limit"))
+    monkeypatch.setattr(budget, "held_bytes", lambda: 3 << 30)
+    measured = budget.resolve_memory_budget("auto")
+    whole = (4 << 30) * budget.AUTO_MEMORY_SAFETY_FRACTION
+    assert measured.work_bytes(1) == whole
+    monkeypatch.setattr(budget, "held_bytes", lambda: (3 << 30) + (200 << 20))
+    assert measured.work_bytes(1) == whole - (200 << 20)
+    # A rank spawned after the measure holds none of what was counted then.
+    monkeypatch.setattr(budget.os, "getpid", lambda: -1)
+    assert measured.work_bytes(1) == max(0.0, whole - (3 << 30) - (200 << 20))
+
+
 def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Never negative: the refusals speak for a budget already gone, rather than arithmetic
     handing the sizing a figure below zero to divide by."""
-    monkeypatch.setattr(budget, "resident_bytes", lambda: 8 << 30)
+    monkeypatch.setattr(budget, "held_bytes", lambda: 8 << 30)
     assert budget.MemoryBudget(1 << 30, "auto", shared_across_ranks=True).work_bytes(1) == 0.0
 
 

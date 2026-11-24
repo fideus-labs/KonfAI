@@ -159,34 +159,33 @@ def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sit
 
 
 def center_of_mass_translation(
-    fixed: sitk.Image, moving: sitk.Image, fixed_mask: sitk.Image | None = None, moving_mask: sitk.Image | None = None
+    fixed: sitk.Image,
+    moving: sitk.Image,
+    fixed_mask: sitk.Image | None = None,
+    moving_mask: sitk.Image | None = None,
+    kind: str = "com",
 ) -> list[float]:
     """The translation from ``fixed``'s centre of mass to ``moving``'s: where a linear stage starts for a preset that
-    declares ``moments_init: com``.
+    declares ``moments_init: com`` (with ``kind='cof'``, from the centre of one frame to the other's).
 
     Each centre is taken in its image's own physical space, inside its mask if it has one, on intensities winsorised
-    to their 0.5-99.5 percentiles and rescaled to [0, 1]. Raw, a background outweighs a sparse subject (the 36 um
-    between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue, and
-    a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
-    ambiguous principal axes.
+    to their 0.5-99.5 percentiles and counted from the lower one. Raw, a background outweighs a sparse subject (the
+    36 um between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue,
+    and a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
+    ambiguous principal axes. It is ``native.mapped_centre``, the one the out-of-core route takes on the twins, so that
+    both start from the same translation to the bit.
     """
+    from ..native import Mapped, geometry_of, mapped_centre
 
     def centre(image: sitk.Image, mask: sitk.Image | None) -> np.ndarray:
-        rescaled = sitk.RescaleIntensity(winsorized(sitk.Cast(image, sitk.sitkFloat32), 0.5, 99.5), 0.0, 1.0)
-        if mask is None:
-            region = sitk.Image(image.GetSize(), sitk.sitkUInt8) + 1
-            region.CopyInformation(image)
-        else:
+        image = sitk.Cast(image, sitk.sitkFloat32)
+        region = None
+        if mask is not None:
             # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
             identity = sitk.Transform(image.GetDimension(), sitk.sitkIdentity)
-            region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
-        stats = sitk.LabelIntensityStatisticsImageFilter()
-        stats.SetComputePerimeter(False)
-        stats.Execute(region, rescaled)
-        if stats.HasLabel(1) and stats.GetSum(1) > 0:
-            return np.asarray(stats.GetCenterOfGravity(1))
-        # A constant subject (all 0 once rescaled) has no centre of mass: its grid's centre, as centring frames.
-        return np.asarray(image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()]))
+            mask = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
+            region = Mapped(sitk.GetArrayViewFromImage(mask), geometry_of(mask))
+        return mapped_centre(Mapped(sitk.GetArrayViewFromImage(image), geometry_of(image)), region, kind)
 
     return (centre(moving, moving_mask) - centre(fixed, fixed_mask)).tolist()
 
@@ -198,3 +197,25 @@ def is_partial_mask(mask: sitk.Image | None) -> bool:
         return False
     array = sitk.GetArrayViewFromImage(mask)
     return bool((array != 0).any()) and bool((array == 0).any())
+
+
+def engine_of(config: dict, network_class: type, level_class: type):
+    """The engine a prediction config describes, built as the config binder builds ``network_class`` (a backend's
+    ``RegistrationNet``, its levels ``level_class``): for the out-of-core run, which drives the engine itself rather
+    than through a KonfAI prediction."""
+    from konfai_apps.app_repository import LocalAppRepository
+
+    from .impact_loss import ModelSpec
+
+    def specs(models: dict | None) -> dict:
+        return {name: ModelSpec(**spec) for name, spec in (models or {}).items()}
+
+    block = dict(LocalAppRepository._model_param_block(config)[1])
+    for key in ("optimizer", "schedulers", "outputs_criterions"):
+        block.pop(key, None)
+    block["models"] = specs(block.get("models"))
+    block["levels"] = {
+        name: level_class(**{**level, "models": specs(level.get("models"))})
+        for name, level in (block.get("levels") or {}).items()
+    }
+    return network_class(**block).get_submodule("Registration")._engine

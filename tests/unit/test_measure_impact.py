@@ -16,6 +16,7 @@
 
 """The IMPACT feature models: a ref fetched at its pinned revision, shaped by the registry, probed once."""
 
+import itertools
 import json
 import os
 from pathlib import Path
@@ -163,6 +164,20 @@ def test_the_lncc_a_few_channels_a_pass_is_the_lncc() -> None:
     chunked = distance("LNCC", moved, fixed, None, 3, 3)
     torch.testing.assert_close(chunked, whole)
     torch.testing.assert_close(torch.autograd.grad(chunked, moved)[0], torch.autograd.grad(whole, moved)[0])
+
+
+def test_the_lncc_reads_the_whole_window_around_a_voxel() -> None:
+    """Against the window's means taken in one pooling of the three axes, borders included."""
+    moved, fixed = _features()
+    kernel = 3
+
+    def mean(tensor: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.avg_pool3d(tensor, kernel, stride=1, padding=kernel // 2, count_include_pad=False)
+
+    covariance = mean(moved * fixed) - mean(moved) * mean(fixed)
+    variances = [(mean(t * t) - mean(t) ** 2).clamp_min(impact._LNCC_VARIANCE_FLOOR) for t in (moved, fixed)]
+    expected = 1.0 - (covariance**2 / (variances[0] * variances[1])).mean()
+    torch.testing.assert_close(distance("LNCC", moved, fixed, None, kernel, 0), expected, rtol=1e-4, atol=1e-6)
 
 
 class _TwoLayers(torch.nn.Module):
@@ -313,6 +328,71 @@ def test_a_tiled_volume_leaves_no_seam() -> None:
     assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
 
 
+class _InstanceNormed(torch.nn.Module):
+    """A convolution, then an instance normalisation by the statistics it is handed (``norms``) or else by its
+    input's own, with the ``norm_input``/``norm_count`` protocol of the published TS and MIND models."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def norm_count(self, nb_layers: int) -> int:
+        return 1
+
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        return self.conv(tile)
+
+    def forward(self, tile, nb_layers, stats, direction=None, norms=None) -> list[torch.Tensor]:
+        x = self.conv(tile)
+        if not norms:
+            return [torch.nn.functional.instance_norm(x)]
+        mean, var = norms[0]
+        return [(x - mean.view(1, -1, 1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1, 1) + 1e-5)]
+
+
+def test_blocks_normalised_by_the_gathered_statistics_give_the_whole_images_features() -> None:
+    # An instance normalisation of a block reads that block's statistics; with the whole image's, gathered by a pass
+    # over the blocks, each block's own voxels get the whole image's features.
+    model, image = _stub_model(_InstanceNormed(), [1.0]), torch.rand(1, 1, 20, 16, 12) * torch.linspace(1, 3, 12)
+    statistics = impact._statistics(image)[0]
+    (whole,), _ = model.volume(image, statistics=statistics)
+    norms = model.norms(lambda: impact._blocks(image, 8, 2), statistics)
+    errors = {}
+    for given in (None, norms):
+        tiled = torch.zeros_like(whole)
+        for start in itertools.product(*(range(0, n, 8) for n in image.shape[2:])):
+            low = [max(0, a - 2) for a in start]
+            own = [slice(a, min(a + 8, n)) for a, n in zip(start, image.shape[2:], strict=True)]
+            box = image[
+                (..., *(slice(lo, min(o.stop + 2, n)) for lo, o, n in zip(low, own, image.shape[2:], strict=True)))
+            ]
+            (layer,), _ = model.volume(box, statistics=statistics, norms=given)
+            tiled[(..., *own)] = layer[
+                (..., *(slice(o.start - lo, o.stop - lo) for o, lo in zip(own, low, strict=True)))
+            ]
+        errors[given is None] = float((tiled - whole).abs().max())
+    assert len(norms) == 1 and errors[False] < 1e-5 < 1e-2 < errors[True]
+
+
+class _NormedOnSixteen(_InstanceNormed):
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        if any(size % 16 for size in tile.shape[2:]):
+            raise RuntimeError(f"sizes of tensors must match: {tuple(tile.shape[2:])}")
+        return self.conv(tile)
+
+
+def test_the_normalisations_are_gathered_on_blocks_padded_to_the_models_multiple() -> None:
+    # A network whose input must be a multiple of 16 is handed its blocks as a tile is: padded up to it, the padding
+    # left out of the statistics, which are then the whole image's.
+    model, image = _stub_model(_NormedOnSixteen(), [1.0]), torch.rand(1, 1, 20, 32, 40)
+    model.multiple = 16
+    (mean, var), *_ = model.norms(lambda: impact._blocks(image, 16, 16), impact._statistics(image)[0])
+    features = model.model.conv(image).double()
+    assert torch.allclose(mean.double(), features.mean((0, 2, 3, 4)), atol=1e-6)
+    assert torch.allclose(var.double(), features.var((0, 2, 3, 4), unbiased=False), atol=1e-6)
+
+
 class _NeedsSixteen(torch.nn.Module):
     def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
         if any(size % 16 for size in tile.shape[2:]):
@@ -369,11 +449,11 @@ def test_a_volume_that_does_not_fit_is_extracted_again_in_smaller_tiles(monkeypa
     model, passes = _stub_model(_Constant(), [1.0]), []
     whole = ImpactFeatureModel._volume
 
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap):
+    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap, statistics=None, norms=None):
         passes.append(patch)
         if patch == 0:
             raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
-        return whole(self, image, normalization, patch, overlap)
+        return whole(self, image, normalization, patch, overlap, statistics, norms)
 
     monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
     assert model.volume(torch.rand(1, 1, 20, 40, 100))[1] == 64 and passes == [0, 64]

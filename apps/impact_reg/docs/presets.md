@@ -12,17 +12,18 @@ lists them; `show NAME` prints what one runs, needs and tunes, with every parame
 | `Elastix#rigid_bspline` | elastix | rigid, B-spline (16 mm grid) | mutual information | yes | coarse copy, then B-spline on native tiles |
 | `Elastix#impact_static` | elastix-IMPACT | rigid (MI), B-spline (20 mm) | IMPACT: MIND (L1) and TotalSegmentator MR `TS/M730` (soft Dice), last decoder layer at the two coarse levels, segmentation head at the two fine ones; features extracted once (Static); plus MI | yes | coarse copy only |
 | `Elastix#impact_jacobian` | elastix-IMPACT | rigid (MI), B-spline (10 mm) | IMPACT: early `TS/M730` layers (`'01'`, L1), differentiated through the network (Jacobian) | yes | coarse copy only |
-| `ConvexAdam#coarse` | itk-impact | affine (MI), coupled-convex coarse search | IMPACT on MIND | yes | coarse copy only |
-| `ConvexAdam#composite` | itk-impact | affine (MI), coarse search, Adam refinement (80 steps) | IMPACT on MIND (L2) | yes | coarse copy, then the refinement on native tiles |
-| `ConvexAdam#impact_cbct` | itk-impact | affine (MI), coarse search, Adam refinement | IMPACT on TotalSegmentator MR `TS/M730` layer 2 (`'01'`, L2) | yes | coarse copy, then the refinement on native tiles |
-| `ConvexAdam#impact_mrct` | itk-impact | affine (MI), coarse search, Adam refinement (regularisation 5) | IMPACT on `TS/M730` layer 7 (`'0000001'`, soft Dice) and MIND (L2) | yes | coarse copy only |
+| `ConvexAdam#coarse` | itk-impact | coupled-convex coarse search | IMPACT on MIND | yes | coarse copy only |
+| `ConvexAdam#composite` | itk-impact | coarse search, Adam refinement (80 steps) | IMPACT on MIND (L2) | yes | coarse copy, then the refinement on native tiles |
+| `ConvexAdam#impact_cbct` | itk-impact | coarse search, Adam refinement | IMPACT on TotalSegmentator MR `TS/M730` layer 2 (`'01'`, L2) | yes | coarse copy, then the refinement on native tiles |
+| `ConvexAdam#impact_mrct` | itk-impact | coarse search alone (regularisation 2.5) | IMPACT on the segmentation head of `TS/M730` (`'00000001'`, L2) and MIND (L2) | yes | coarse copy only |
 | `FireANTs#syn` | FireANTs | rigid, affine (MI), SyN | local correlation | yes | coarse copy, then SyN on native tiles |
-| `FireANTs#impact` | FireANTs | rigid, affine (MI), SyN | IMPACT: early layers of TotalSegmentator CT `TS/M291` (`'01'`, L1) | yes | coarse copy, then SyN on native tiles |
+| `FireANTs#impact` | FireANTs | rigid, affine (MI), SyN | IMPACT: early layers of TotalSegmentator CT `TS/M291` (`'01'`, local correlation of l2-normalised features) | yes | coarse copy, then SyN on native tiles |
 | `FireANTs#anatomix` | FireANTs | rigid, affine (MI), SyN (step 0.5, warp smoothed at 1 voxel) | IMPACT on anatomix and MIND, extracted once and reduced to their main components | yes | coarse copy, then SyN on native tiles |
 | `FireANTs#impact_mrct` | FireANTs | rigid, affine (MI), SyN (step 0.5, warp smoothed at 1 voxel) | IMPACT on `TS/M730` layer 7 (`'0000001'`) and MIND, extracted once and reduced to their main components | yes | coarse copy, then SyN on native tiles |
 
-Every deformable preset starts with its own rigid or affine stage, so a pair that starts centimetres apart needs no
-separate rigid run. Masks restrict the similarity to a region (`--fixed-mask`, `--moving-mask`), in every engine. The
+Every elastix and FireANTs deformable preset starts with its own rigid or affine stage, so a pair that starts
+centimetres apart needs no separate rigid run; the ConvexAdam presets have none, their coarse search covering a few
+centimetres (`moments_init` starts them from the translation between the centres). Masks restrict the similarity to a region (`--fixed-mask`, `--moving-mask`), in every engine. The
 last column is how `register` handles a pair larger than what the preset registers whole in the memory free: see
 [Large images](large-images.md).
 
@@ -30,7 +31,7 @@ last column is how `register` handles a pair larger than what the preset registe
 
 | Pair | First choice | Also good | Avoid |
 |---|---|---|---|
-| any pair that starts far apart | the deformable preset for the pair: each aligns rigidly first | `Elastix#rigid` alone when the anatomy is rigid (head, a bone) | |
+| any pair that starts far apart | the elastix or FireANTs preset for the pair: each aligns rigidly first | `Elastix#rigid` alone when the anatomy is rigid (head, a bone) | |
 | MR/CT | `Elastix#impact_static` with a body mask on the CT | `FireANTs#impact_mrct`; `ConvexAdam#impact_mrct` on the abdomen | `FireANTs#syn`, whose local correlation compares grey values that do not correspond across modalities, and `FireANTs#impact`, whose early CT layers do not carry over: on head and neck MR/CT both ended below the pair as it came (Dice 0.62 and 0.50 against 0.64) |
 | CT/CBCT | `FireANTs#syn` | `FireANTs#impact`: at most 0.01 more Dice, 2.5 to 6.5 times slower, and 22 GB of GPU memory; `ConvexAdam#impact_cbct` in half a minute | `ConvexAdam#coarse` alone: on two of the three sets it ends at or below the pair as it came |
 | CT/CT | `ConvexAdam#composite`: within 0.01 Dice and 0.1 mm of the best on the lungs, in 40 s and 6 GB | `FireANTs#anatomix`, the best on the lungs, five times slower; `Elastix#impact_static` between two patients | `Elastix#rigid` alone on breathing lungs (landmark error 15.3 mm, 12.8 as they came) |

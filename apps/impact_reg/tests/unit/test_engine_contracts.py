@@ -17,6 +17,7 @@
 """Build-time contracts of the registration engines: promises the parameter annotations make must hold
 at construction, not surface minutes later as a cryptic subprocess or autograd failure."""
 
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -80,6 +81,7 @@ def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = 
         _max_iterations=0,
         _iterations=None,
     )
+    engine._run = partial(ElastixEngine._run, engine)
     fixed = fixed if fixed is not None else sitk.Image([6, 5, 4], sitk.sitkFloat32)
     return ElastixEngine.register(engine, fixed, sitk.Image(fixed), 0)
 
@@ -112,6 +114,8 @@ def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impac
         _stage_parameter_maps=lambda work, device_index, native_voxel_size, voxels=None: [],
         _iterations=None,
     )
+    engine._run = partial(ElastixEngine._run, engine)
+    engine._check_models = partial(ElastixEngine._check_models, engine)
     tissue = np.zeros((30, 30, 30), np.uint16)
     tissue[5:25, 5:25, 5:25] = 30
     tissue[15, 15, 15] = 21668

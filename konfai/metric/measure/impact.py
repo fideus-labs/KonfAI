@@ -23,7 +23,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -35,6 +35,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from konfai.data.patching import Accumulator, Cosinus, ModelPatch, blend_axes, blend_overlap
+from konfai.data.patching.sweep import _sweep_targets
 from konfai.metric.measure.adversarial import Gram
 from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
@@ -145,7 +146,7 @@ MODELS_REPO = "VBoussot/impact-torchscript-models"
 
 #: The models and their registry are read at this revision of ``MODELS_REPO``, so a re-export on the Hub cannot change
 #: a result silently. A ref names another revision with ``repo@revision:path``.
-MODELS_REVISION = "47ffad660e67cebbac8d74aecf0fa181c5dac042"
+MODELS_REVISION = "6d9a85f4d076038cb8e1b666e7819b42ddb06c1d"
 
 
 def _is_local_ref(ref: str) -> bool:
@@ -210,7 +211,17 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor | None) -> torch.Tenso
 def _lncc_piece(moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, kernel: int) -> torch.Tensor:
     """1 - the squared local correlation of each channel over a window of ``kernel`` voxels a side, averaged."""
     pool = F.avg_pool3d if moved.dim() == 5 else F.avg_pool2d
-    mean = lambda t: pool(t, kernel, stride=1, padding=kernel // 2, count_include_pad=False)  # noqa: E731
+    axes = moved.dim() - 2
+
+    def mean(t: torch.Tensor) -> torch.Tensor:
+        # The window's mean one axis at a time: the same value (a window cut by the border is cut along each axis),
+        # for 3 x kernel readings a voxel in place of kernel ** 3.
+        for axis in range(axes):
+            size, padding = [1] * axes, [0] * axes
+            size[axis], padding[axis] = kernel, kernel // 2
+            t = pool(t, size, stride=1, padding=padding, count_include_pad=False)
+        return t
+
     moved_mean, fixed_mean = mean(moved), mean(fixed)
     covariance = mean(moved * fixed) - moved_mean * fixed_mean
     moved_var = (mean(moved * moved) - moved_mean * moved_mean).clamp_min(_LNCC_VARIANCE_FLOOR)
@@ -733,6 +744,29 @@ def _centre_features(
     return tuple(features)
 
 
+def _blocks(image: torch.Tensor, block: int, halo: int) -> Iterator[tuple[torch.Tensor, tuple[slice, ...]]]:
+    """``image``'s blocks of ``block`` voxels a side, each with ``halo`` around it inside the image, and the slices of
+    its own voxels in it: the partition ``ImpactFeatureModel.norms`` sums over."""
+    shape = list(image.shape[2:])
+    for target in _sweep_targets(shape, [block] * len(shape)):
+        low = [max(0, axis.start - halo) for axis in target]
+        high = [min(n, axis.stop + halo) for axis, n in zip(target, shape, strict=True)]
+        own = tuple(slice(axis.start - lo, axis.stop - lo) for axis, lo in zip(target, low, strict=True))
+        yield image[(slice(None), slice(None), *(slice(lo, hi) for lo, hi in zip(low, high, strict=True)))], own
+
+
+def own_cells(own: Sequence[slice], box: Sequence[int], layer: Sequence[int]) -> tuple[slice, ...]:
+    """The cells of a layer ``[B, C, *layer]`` a network computed on a block ``box`` voxels a side that cover the
+    block's own voxels ``own``: the layer's stride a power of two along each axis, a cell counted in the block that
+    holds its first voxel, so that blocks starting on a multiple of the stride count every cell of the image once."""
+    strides = [2 ** round(math.log2(b / n)) for b, n in zip(box, layer, strict=True)]
+    return (
+        slice(None),
+        slice(None),
+        *(slice(-(-o.start // k), -(-o.stop // k)) for o, k in zip(own, strides, strict=True)),
+    )
+
+
 def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
     """The grid one extraction runs on, cut as the predictor cuts a network's input: ``patch`` 0, or an axis no longer
     than it, is one tile spanning that axis (a cube wider than the axis would pad it up to the tile); the tiles share
@@ -886,6 +920,12 @@ class ImpactFeatureModel:
             raise MeasureError(f"'{self.model_path}' weighs its layer {deepest + 1}, past the {len(self.fov)} it has.")
         return int(self.fov[deepest])
 
+    def _halo(self) -> int:
+        """The voxels a block needs around it for its own to read as in the whole image: half the receptive field,
+        rounded up to the input multiple."""
+        step = max(self.multiple, 1)
+        return -(-(self.receptive_field // 2) // step) * step
+
     def _half(self, device: torch.device) -> bool:
         # float16 has no 3-D pooling on the CPU.
         return self.half and device.type == "cuda"
@@ -904,10 +944,11 @@ class ImpactFeatureModel:
         network = network.half() if self._half(device) else network.float()
         return _SliceSweep(network) if self.dim == 2 else network
 
-    def inputs(self, tensor: torch.Tensor, attribute: Attribute) -> list[torch.Tensor]:
-        """The ``[tensor, nb_layer, stats(, direction)]`` inputs the extractor takes, for ONE sample: the flat
+    def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
+        """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat
         ``[ImageMin, ImageMax, ImageMean, ImageStd]`` itk-impact passes, which a model reads only when
-        ``stats.numel() == 4`` and otherwise replaces with statistics of the tensor it is handed."""
+        ``stats.numel() == 4`` and otherwise replaces with statistics of the tensor it is handed; and ``norms``, the
+        statistics of its normalisations over the whole image (``norms``), for a tensor that is a region of it."""
         if tensor.shape[1] != self.in_channels:
             tensor = tensor.repeat(1, self.in_channels, *([1] * (tensor.dim() - 2)))
         if self.denormalize:
@@ -915,8 +956,44 @@ class ImpactFeatureModel:
         if self._half(tensor.device):
             tensor = tensor.half()
         stats = [float(attribute[key]) for key in ("ImageMin", "ImageMax", "ImageMean", "ImageStd")]
-        direction = [] if self.direction is None else [self.direction]
-        return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats), *direction]
+        rest: list = [] if self.direction is None else [self.direction]
+        if norms:  # after the direction, an empty one when the images are fed as given
+            rest = [*(rest or [torch.tensor([])]), list(norms)]
+        return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats), *rest]
+
+    @torch.no_grad()
+    def norms(
+        self, boxes: Callable[[], Iterable[tuple[torch.Tensor, tuple[slice, ...]]]], statistics: Attribute
+    ) -> list[torch.Tensor]:
+        """The statistics over the whole image of the normalisations the network applies by its input's own (TS's
+        instance normalisation, MIND's bound on its variance), up to its deepest weighted layer: what makes a region
+        of the image read as it does in the whole image, handed to ``inputs`` and ``volume``. One pass over the image
+        a normalisation: ``boxes()`` yields each block of it read with the receptive field around it and the slices
+        of the block's own voxels in it, the blocks covering the image once. Empty for a network without them."""
+        gathered: list[torch.Tensor] = []
+        first = next(iter(boxes()), None)
+        network = None if first is None else self.network(first[0].device)
+        norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
+        norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
+        if norm_count is None:
+            return gathered
+        for _ in range(int(norm_count(len(self.weights)))):
+            total: torch.Tensor | None = None
+            count = 0
+            for box, own in boxes():
+                # Padded as ``_volume`` pads a tile, up to the input multiple after the block's own voxels.
+                (box,) = next(iter(_feature_grid(tuple(box.shape[2:]), 0, 0.0, self.multiple).disassemble(box)))
+                tensor, _, stats, *direction = self.inputs(box, statistics)
+                layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
+                part = layer[own_cells(own, box.shape[2:], layer.shape[2:])].double()
+                axes = (0, *range(2, part.dim()))
+                sums = torch.stack([part.sum(axes), (part**2).sum(axes)])
+                total, count = (sums if total is None else total + sums), count + part[0, 0].numel()
+            if total is None:
+                return []
+            mean = total[0] / count
+            gathered.append(torch.stack([mean, (total[1] / count - mean**2).clamp_min(0.0)]).float())
+        return gathered
 
     @property
     def kept(self) -> list[int]:
@@ -924,16 +1001,27 @@ class ImpactFeatureModel:
         return [index for index, weight in enumerate(self.weights) if weight]
 
     @torch.no_grad()
-    def _volume(self, image: torch.Tensor, normalization: str, patch: int, overlap: float) -> list[torch.Tensor]:
-        """``volume`` in tiles of ``patch``: the intensity statistics are the whole image's, so every tile is normalised
-        alike. Each layer is blended on its own grid, a segmentation network's deeper ones coarser, and normalised
+    def _volume(
+        self,
+        image: torch.Tensor,
+        normalization: str,
+        patch: int,
+        overlap: float,
+        statistics: Attribute | None = None,
+        norms: Sequence[torch.Tensor] | None = None,
+    ) -> list[torch.Tensor]:
+        """``volume`` in tiles of ``patch``: the intensity statistics are the whole image's, and so are the network's
+        normalisations (``norms``, gathered over the image when not given), so every tile is normalised as the whole
+        image. Each layer is blended on its own grid, a segmentation network's deeper ones coarser, and normalised
         there, as itk-impact's ImageToFeaturesMap does."""
         network = self.network(image.device)
-        statistics = _statistics(image)[0]
+        statistics = statistics if statistics is not None else _statistics(image)[0]
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
+        if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
+            norms = self.norms(lambda: _blocks(image, patch, self._halo()), statistics)
         accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
-            outputs = network(*self.inputs(tile, statistics))
+            outputs = network(*self.inputs(tile, statistics, norms or ()))
             for rank, kept in enumerate(self.kept):
                 layer = outputs[kept].float()
                 if index == 0:
@@ -945,12 +1033,20 @@ class ImpactFeatureModel:
         return [normalized_features(accumulator.assemble(), normalization) for accumulator in accumulators]
 
     def volume(
-        self, image: torch.Tensor, normalization: str = "none", patch: int = 0, overlap: float = 0.25
+        self,
+        image: torch.Tensor,
+        normalization: str = "none",
+        patch: int = 0,
+        overlap: float = 0.25,
+        statistics: Attribute | None = None,
+        norms: Sequence[torch.Tensor] | None = None,
     ) -> tuple[list[torch.Tensor], int]:
         """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
         layer's own grid (``onto_image_grid`` brings it onto the image's), and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
         width blended by a cosine window. A pass that does not fit the card runs again in tiles of
-        ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time."""
+        ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time.
+        ``statistics``: the ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` the network normalises its input by,
+        when ``image`` is a block of a larger image (``image``'s own otherwise); ``norms``, its normalisations' (``norms``)."""
         tile = patch
 
         def narrow() -> bool:
@@ -965,7 +1061,12 @@ class ImpactFeatureModel:
                 tile //= 2
             return True
 
-        return halve_on_oom(lambda: self._volume(image, normalization, tile, overlap), narrow, image.is_cuda), tile
+        return (
+            halve_on_oom(
+                lambda: self._volume(image, normalization, tile, overlap, statistics, norms), narrow, image.is_cuda
+            ),
+            tile,
+        )
 
     def sampled(
         self,

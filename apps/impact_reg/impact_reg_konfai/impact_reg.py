@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -58,6 +59,7 @@ from konfai.utils.dataset import (
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import field_reach
+from konfai.utils.runtime import apply_cpu_thread_budget
 from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
@@ -494,6 +496,11 @@ def _units(paths: list[Path]) -> list[Path]:
 _Header = tuple[list[int], list[float], list[float], list[float]]
 
 
+def _some_cases(groups: dict[str, list[Path]], indices: list[int]) -> dict[str, list[Path]]:
+    """The units of the cases ``indices``, in every group."""
+    return {group: [units[index] for index in indices] for group, units in groups.items()}
+
+
 def _cases(groups: dict[str, list[Path]]) -> list[list[Path]]:
     """``eval``'s groups, keyed by their option, each as long as the case count (:func:`_broadcast`); each modality
     comes as a pair (a fixed side without its moving one scores nothing)."""
@@ -676,7 +683,7 @@ def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None
 def _same_grid(first: _Header, second: _Header) -> bool:
     """Whether two images lie on one voxel grid: the same extent, spacing, origin and direction."""
     return first[0][-3:] == second[0][-3:] and all(
-        np.allclose(one, other, atol=1e-4) for one, other in zip(first[1:], second[1:], strict=True)
+        np.allclose(one, other, rtol=0.0, atol=1e-4) for one, other in zip(first[1:], second[1:], strict=True)
     )
 
 
@@ -939,6 +946,87 @@ def _run_transform(
             torch.cuda.empty_cache()
 
 
+#: The engines whose presets run by the sampled strategy, as the module a preset's classpath names.
+_SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
+#: The compact transforms the sampled routes keep beside the dense field, ``<preset>_<name>`` in a case's output.
+_COMPACT_NAMES = ("Transform.h5", "ControlGrid.mha")
+
+
+@dataclass
+class _SampledRun:
+    """What one preset's sampled run is given (``_register_sampled``)."""
+
+    preset: str
+    config: dict
+    inputs: dict[str, list[Path]]
+    headers: "list[dict[str, _Header]]"
+    work: Path
+    gpu: list[int]
+    cpu: int | None
+    quiet: bool
+    region_size: int
+    samples: int | None
+    epochs: int | None
+    output_group: str
+    cases: list[str]
+
+    @property
+    def device_index(self) -> int:
+        """The GPU the engine runs on, -1 for the CPU."""
+        return self.gpu[0] if self.gpu else -1
+
+
+def _partial_masks(twins: dict[str, dict[str, Path]], case: str) -> tuple[list[Path | None], int]:
+    """The fixed and moving mask twins of ``case`` that restrict their image (some voxels in, some out): None for a
+    side that has no mask, or one that restricts nothing; and the voxels the fixed one keeps (0 when it is None). An
+    empty fixed mask is refused."""
+    from .native import nonzero, open_twin
+
+    masks: list[Path | None] = []
+    kept = 0
+    for group in ("FixedMask", "MovingMask"):
+        path = twins.get(group, {}).get(case)
+        mapped = open_twin(path) if path is not None else None
+        inside = nonzero(mapped) if mapped is not None else 0
+        if group == "FixedMask" and mapped is not None and inside == 0:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{case}: the fixed mask holds no voxel, which leaves nothing to register.",
+                "Pass the mask of the region to register, or none.",
+            )
+        masks.append(path if mapped is not None and 0 < inside < math.prod(mapped.array.shape) else None)
+        if group == "FixedMask" and masks[0] is not None:
+            kept = inside
+    return masks, kept
+
+
+def _require_lps(run: _SampledRun) -> None:
+    """Refuse, before any twin is written, a pair whose voxel axes are not those of LPS for a run on features by the
+    sampled strategy: the features are computed along the voxel axes, and the pair is taken as it is (a run on the
+    whole pair reorients it)."""
+    for index, case in enumerate(run.cases):
+        for group in ("Fixed", "Moving"):
+            if not np.allclose(np.reshape(run.headers[index][group][3], (3, 3)), np.eye(3), atol=1e-6):
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"{run.preset} {case}: the {group.lower()} image's voxel axes are not LPS's (its direction is not"
+                    " the identity), and the features are computed along them; --out-of-core sampled takes the pair"
+                    " as it is.",
+                    "Write the image with an identity direction first (SimpleITK's DICOMOrient to 'LPS' permutes and"
+                    " flips its axes; an oblique image needs resampling), or register it without --out-of-core"
+                    " sampled.",
+                )
+
+
+def _config_output_group(config: dict) -> str:
+    """The output group a preset's config names (``Predictor.outputs_dataset.*.OutputDataset.group``)."""
+    for sink in config["Predictor"].get("outputs_dataset", {}).values():
+        block = sink.get("OutputDataset", sink) if isinstance(sink, dict) else {}
+        if "group" in block:
+            return str(block["group"])
+    raise KonfAIError("ImpactReg", "The preset's config names no output group.", "Give its OutputDataset a group.")
+
+
 class ImpactRegKonfAIApp:
     """Run IMPACT-Reg preset apps, ensemble their displacement fields, evaluate, and estimate uncertainty."""
 
@@ -1106,6 +1194,10 @@ class ImpactRegKonfAIApp:
         max_voxels: int | None = None,
         output_format: list[str] | None = None,
         seed: int | None = None,
+        out_of_core: str = "auto",
+        region_size: int = 64,
+        samples: int | None = None,
+        epochs: int | None = None,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -1126,6 +1218,14 @@ class ImpactRegKonfAIApp:
         tile``); the two fields are composed on the native fixed grid (see ``_register_tiled``). The sizes are what
         the device holds when the run starts at the peak costs the preset declares (``_plan``); ``max_voxels``
         overrides the size registered whole, the tiles following in proportion.
+
+        ``out_of_core`` "sampled" is the second strategy: a pair over the budget registers at native resolution in
+        one pass, never resampled and never held whole, its engine scoring a random subset of it at every iteration
+        (``_register_sampled``). ``samples`` is how many an iteration draws, anew at each one, which its memory and
+        its time follow: elastix that many points, its images mapped from files; ConvexAdam and FireANTs that many
+        voxels, in random boxes of ``region_size`` voxels at most, a box of their deformable stages stepping
+        ``epochs`` times on average (the stage's iterations when unset). A pair the device holds whole runs as it
+        does.
 
         ``fields_only`` writes the transforms and stops there. The moved image is derived FROM the
         transform, at the cost of a full-size resample and a full-size rewrite: worth it for a
@@ -1150,6 +1250,8 @@ class ImpactRegKonfAIApp:
             inputs["MovingMask"] = _units(list(moving_masks))
         _check_inputs(inputs, output)
         _check_presets(presets)
+        if out_of_core not in ("auto", "sampled"):
+            raise KonfAIError("ImpactReg", f"--out-of-core {out_of_core} is not a mode.", "Use auto or sampled.")
         overrides = _preset_overrides(presets, config_overrides, quiet)
         self._run_args = ["--seed", str(seed)] if seed is not None else []
         self._moved_format = None
@@ -1166,10 +1268,26 @@ class ImpactRegKonfAIApp:
                 self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
             if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
                 self._run_args += ["--output-format", spec]
+        for refused, what, drop in (
+            (self._remote is not None, "runs the preset's engine in this process, not on a server.", "--host"),
+            (tta, "registers the pair once, with no test-time augmentation.", "--tta"),
+            (
+                self._run_args,
+                "draws with its own seed and writes its field as a MetaImage: --seed and --output-format reach no"
+                " part of it but the moved image (Moved=FORMAT).",
+                "them",
+            ),
+        ):
+            if out_of_core == "sampled" and refused:
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"--out-of-core sampled {what}",
+                    f"Drop {drop}, or register without --out-of-core sampled.",
+                )
         # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
         # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
         self._dense = len(presets) > 1 or bool(tta)
-        self._applied, self._plans, self._ran = {}, {}, {}
+        self._applied, self._plans, self._ran, self._compact = {}, {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
         try:
@@ -1199,7 +1317,42 @@ class ImpactRegKonfAIApp:
                 tiling = manifest.get("tiling") or {}
                 budget, tile_budget = _plan(manifest, gpu, max_voxels, self._remote)
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
-                largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
+                voxels = [max(math.prod(header[0][-3:]) for header in case.values()) for case in headers]
+                # The cases the strategy registers sampled: those over the budget, each keeping its case ID; the
+                # others register whole, as they would alone.
+                rest = list(range(len(headers)))
+                over = (
+                    [index for index in rest if budget and voxels[index] > budget] if out_of_core == "sampled" else []
+                )
+                if over:
+                    if flat:
+                        raise KonfAIError(
+                            "ImpactReg",
+                            f"{preset}: --out-of-core sampled registers volumes, and this pair is 2-D.",
+                            "Register it without --out-of-core sampled.",
+                        )
+                    fields_by_preset[preset] = sampled = self._register_sampled(
+                        preset,
+                        manifest,
+                        _some_cases(inputs, over),
+                        [headers[index] for index in over],
+                        [f"P{index:03d}" for index in over],
+                        work,
+                        gpu,
+                        cpu,
+                        quiet,
+                        overrides[preset],
+                        region_size,
+                        samples,
+                        epochs,
+                    )
+                    rest = [index for index in rest if index not in over]
+                    if not rest:
+                        continue
+                if out_of_core == "sampled" and not quiet:
+                    fits = "the pair fits" if not over else f"{', '.join(f'P{index:03d}' for index in rest)} fit"
+                    print(f"[ImpactReg] {preset}: {fits} the device; registered whole.", flush=True)
+                largest_voxels = max(voxels[index] for index in rest)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
@@ -1208,6 +1361,8 @@ class ImpactRegKonfAIApp:
                 if onto_fixed:
                     on_grid = on_grid or self._onto_fixed_grid(lifted, headers, work, gpu, cpu, quiet)
                 pair = on_grid if onto_fixed else (lifted, headers)
+                if over:  # the cases that fit, as a cohort of their own: neither tiled nor flipped (no --tta here)
+                    pair = (_some_cases(pair[0], rest), [pair[1][index] for index in rest])
                 if tiled:
                     fields_by_preset[preset] = self._register_tiled(
                         preset,
@@ -1237,6 +1392,18 @@ class ImpactRegKonfAIApp:
                     max_voxels=budget,
                     uncertainty=uncertainty and bool(tta) and not flat,
                 )
+                if over:
+                    (sampled_group, sampled_fields), (group, whole_fields) = sampled, fields_by_preset[preset]
+                    if group != sampled_group:
+                        raise RuntimeError(
+                            f"preset '{preset}' named its output '{sampled_group}' sampled and '{group}' whole; the"
+                            " cases of one preset must share one group."
+                        )
+                    ids = {f"P{position:03d}": f"P{index:03d}" for position, index in enumerate(rest)}
+                    fields_by_preset[preset] = (
+                        group,
+                        {**sampled_fields, **{ids[c]: f for c, f in whole_fields.items()}},
+                    )
             groups = {group for group, _ in fields_by_preset.values()}
             if len(groups) != 1:
                 raise RuntimeError(
@@ -1269,6 +1436,11 @@ class ImpactRegKonfAIApp:
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
+                # A compact transform stands beside the field it was found with: an earlier run's goes before the field
+                # is replaced, this run's once it stands, so that no failure leaves a field beside another's transform.
+                for name in _COMPACT_NAMES:
+                    for stale in case_out.glob(f"*_{name}"):
+                        stale.unlink()
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
@@ -1285,6 +1457,9 @@ class ImpactRegKonfAIApp:
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                 # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
                 _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
+                for preset in presets:
+                    for compact in self._compact.get(preset, {}).get(case, ()):
+                        _publish_output(compact, case_out / f"{_workspace(preset)}_{compact.name}", move=True)
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1336,6 +1511,7 @@ class ImpactRegKonfAIApp:
             "plans": self._plans,
             "ran": self._ran,
             "tta": tta,
+            "out_of_core": out_of_core,
             "device": f"cuda:{','.join(map(str, gpu))}" if gpu else f"cpu ({cpu or 1} worker(s))",
             "versions": {package: _version(package) for package in ("impact-reg-konfai", "konfai", "konfai-apps")},
             "runtime_s": round(time.monotonic() - started, 1),
@@ -1487,6 +1663,421 @@ class ImpactRegKonfAIApp:
             composed[case] = out / case / f"{group}{_form(tile_fields[case])}"
         shutil.rmtree(read, ignore_errors=True)
         return composed
+
+    def _register_sampled(
+        self,
+        preset: str,
+        manifest: dict,
+        inputs: dict[str, list[Path]],
+        headers: "list[dict[str, _Header]]",
+        cases: list[str],
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        config_overrides: dict[str, list[str]],
+        region_size: int,
+        samples: int | None,
+        epochs: int | None,
+    ) -> tuple[str, dict[str, Path]]:
+        """One preset on pairs too large for the device by the second out-of-core strategy (``--out-of-core
+        sampled``): the preset whole (its global config) on the native pair of each of ``cases`` (their IDs in the
+        cohort; ``inputs`` and ``headers`` are theirs), never resampled and never held whole, each engine evaluating
+        its loss on a random subset of the pair at every iteration, as its own algorithm allows. ``config_overrides``
+        holds the ``--set`` share of each pass.
+
+        The native pair is first written as twins, from one read of each input by bands (``_native_twins``). Then:
+
+        - ConvexAdam (``_sampled_convexadam``): its coarse stage by regions, its fine stage on random boxes of the
+          control grid.
+        - elastix (``_sampled_elastix``): elastix as it is, which draws its samples at every iteration, with every
+          image of the run mapped from files and paged by the kernel.
+        - FireANTs (``_sampled_fireants``): its rigid, affine and deformable stages on random boxes of the pair, the
+          warps on the device, in host memory or in files.
+
+        Each leaves the dense field on the native fixed grid, written by regions, and a compact transform beside it.
+        """
+        import importlib
+
+        from konfai_apps.app_repository import apply_overrides
+
+        from .models.intensity import world_transform
+        from .native import to_millimetres
+
+        tiling = manifest.get("tiling") or {}
+        config = _preset_config(preset, tiling.get("global") or "Prediction.yml")
+        classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
+        module = classpath.partition(":")[0].rsplit(".", 1)[-1]
+        if module not in _SAMPLED_ENGINES:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{preset} cannot run --out-of-core sampled: its engine ({classpath or 'unnamed'}) has no"
+                " stage that runs on a subset of the pair.",
+                "Register it without --out-of-core sampled: the pair resampled to fit, then its deformable stage on"
+                " native tiles where the preset declares a tile pass.",
+            )
+        try:  # the engine runs here, with its own requirements
+            network = importlib.import_module(f".models.{module}", __package__).RegistrationNet
+        except ModuleNotFoundError as error:
+            raise KonfAIError(
+                "ImpactReg",
+                f"--out-of-core sampled runs the preset's engine in this process, which needs {error.name}.",
+                "pip install the preset's requirements.txt.",
+            ) from error
+        apply_overrides(config, config_overrides["global"], lambda: network)
+        # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
+        # in the same order, and the transform is the run in memory's.
+        apply_cpu_thread_budget(1)
+        run = _SampledRun(
+            preset,
+            config,
+            inputs,
+            headers,
+            work,
+            gpu,
+            cpu,
+            quiet,
+            region_size,
+            samples,
+            epochs,
+            _config_output_group(config),
+            cases,
+        )
+        fields = getattr(self, f"_sampled_{module}")(run)
+        shutil.rmtree(work / _workspace(f"{preset}_native"), ignore_errors=True)
+        # The engines measured the pair in the fixed image's finest voxel: the fields and the compact transforms
+        # come back in millimetres.
+        for index, case in enumerate(run.cases):
+            voxel = min(headers[index]["Fixed"][1])
+            to_millimetres(fields[case], voxel)
+            for compact in self._compact.get(preset, {}).get(case, ()):
+                if compact.suffix == ".h5":
+                    sitk.WriteTransform(world_transform(sitk.ReadTransform(str(compact)), voxel), str(compact))
+                else:
+                    to_millimetres(compact, voxel)
+        return run.output_group, fields
+
+    def _native_twins(self, run: "_SampledRun", *, chunked: bool, clipped: bool) -> dict[str, dict[str, Path]]:
+        """The native pair as twins under ``<work>/<preset>_native``, from one read of each input by bands
+        (``native.write_twin``): an uncompressed MetaImage per image and mask, which an engine memory-maps, or
+        with ``chunked`` an HDF5 image in ITK's layout with chunks, which ITK's readers stream by boxes. Their geometry
+        is measured in the fixed image's finest voxel, as ``EngineRegistration`` measures a pair registered whole.
+        ``clipped`` winsorises the MetaImage twins (KonfAI's quantiles, by bounded passes). A mask goes onto
+        its image's grid first (KonfAI TRANSFORM, streamed), and is written binary."""
+        from konfai.data.transform import Resample, TensorCast, Write
+
+        from .native import write_twin
+
+        native_root = run.work / _workspace(f"{run.preset}_native")
+        twins: dict[str, dict[str, Path]] = {group: {} for group in run.inputs}
+        for index, case in enumerate(run.cases):
+            for group in run.inputs:
+                source = run.inputs[group][index]
+                mask = group.endswith("Mask")
+                image_group = group.removesuffix("Mask")
+                if mask and not _same_grid(run.headers[index][group], run.headers[index][image_group]):
+                    roots = [
+                        _stage_group(native_root / "stage" / case, group, {case: source}),
+                        _stage_group(native_root / "stage" / case, image_group, {case: run.inputs[image_group][index]}),
+                    ]
+                    chain = [
+                        Resample(reference="{case}", reference_group=image_group, interpolation="nearest"),
+                        TensorCast(dtype="float32"),
+                        Write(dataset=f"{native_root / 'on_grid'}:mha"),
+                    ]
+                    _run_transform(
+                        f"impact_reg_native_{group}_{case}",
+                        roots,
+                        {group: {group: chain}},
+                        run.work,
+                        run.gpu,
+                        run.cpu,
+                        run.quiet,
+                    )
+                    source = native_root / "on_grid" / case / f"{group}.mha"
+                root, _, backend = _stage_group(native_root / "stage" / case, group, {case: source}).rpartition(":")
+                dataset = Dataset(root, backend)
+                clip = None
+                if clipped and not mask:
+                    # KonfAI's own quantile: the value numpy gives on the whole image, read by bounded passes.
+                    clip = tuple(float(dataset.read_data_quantile(group, case, q)) for q in (0.0001, 0.9999))
+                    clip = clip if clip[1] > clip[0] else None  # as intensity.winsorized leaves such an image
+                (native_root / group / case).mkdir(parents=True, exist_ok=True)
+                twins[group][case] = write_twin(
+                    dataset,
+                    group,
+                    case,
+                    native_root / group / case / f"{group}{'.h5' if chunked else '.mha'}",
+                    dtype="uint8" if mask else "float32",
+                    clip=clip,
+                    voxel=min(run.headers[index]["Fixed"][1]),
+                )
+        return twins
+
+    def _sampled_convexadam(self, run: "_SampledRun") -> dict[str, Path]:
+        """The ConvexAdam preset by regions (itk-impact's ``RegionSize``). The coarse stage, when the preset has one:
+        one pass over the boxes pools the native features to its coarse grid, its cost volume is built by boxes of
+        that grid, never whole, and its field starts the fine stage. The fine stage: one pass over the boxes of
+        ``region_size`` voxels, read with their halo, pools the native features to the control grid; where the
+        pooled maps fit the device the iterations run on them whole (ConvexAdam's own Static mode), and where
+        they do not they live in files of the workspace and every iteration steps every cell, by bricks the
+        device holds: the same iterations. The dense field on the fixed grid is written by regions; the field on
+        the control grid is kept beside it."""
+        from .models.convexadam import LevelSpec, RegistrationNet, refuse_linear_keys, region_geometry
+        from .models.intensity import engine_of
+
+        refuse_linear_keys(LocalAppRepository._model_param_block(run.config)[1] or {})
+        engine = engine_of(run.config, RegistrationNet, LevelSpec)
+        _require_lps(run)  # ConvexAdam reads features (MIND, IMPACT's models), which a run on the whole pair reorients
+        engine.check_gradients()
+        # The stages read the images as they are, as ConvexAdam does.
+        native = self._native_twins(run, chunked=True, clipped=False)
+        # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
+        visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
+        # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.
+        samples, region_size = run.samples, run.region_size
+        if samples is not None:
+            region_size = min(region_size, max(8, round(samples ** (1 / 3))))
+        fields_root = run.work / _workspace(f"{run.preset}_fields")
+        fields: dict[str, Path] = {}
+        compact: dict[str, list[Path]] = {}
+        for index, case in enumerate(run.cases):
+            size = [int(extent) for extent in run.headers[index]["Fixed"][0][-3:]][::-1]
+            grid_shrink = engine._grid_shrink
+            geometry = region_geometry(size, grid_shrink, region_size)
+            # The masks are read (an empty fixed one refused) where a stage reads them.
+            masks = _partial_masks(native, case)[0] if engine._deformable_masked else [None, None]
+            if not run.quiet and "fine" not in engine._stages:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: coarse stage by regions (itk-impact ImpactCoarseRegistration)"
+                    f" on {' x '.join(map(str, size))} native voxels, its field written by regions.",
+                    flush=True,
+                )
+            elif not run.quiet:
+                cells = math.prod(geometry["cells"])
+                schedule = (
+                    f"one pass over the boxes pools the features to the control grid, then {visits} iterations on"
+                    " them, on the device where they fit and from files of the workspace otherwise"
+                )
+                if samples is not None:
+                    schedule = (
+                        "one pass over the boxes pools the features to the control grid, on the device where they fit"
+                        " and in files of the workspace otherwise;"
+                        f" an iteration then steps the boxes it draws, {samples:,} voxels of them, each box"
+                        f" {visits} times on average"
+                    )
+                start = (
+                    "from the coarse stage's field, computed by regions too"
+                    if "coarse" in engine._stages
+                    else "from the identity"
+                )
+                if engine._moments_init != "none":
+                    centres = "of mass" if engine._moments_init == "com" else "of the frames"
+                    start += f", the moving image first translated by the centres {centres}"
+                print(
+                    f"[ImpactReg] {run.preset} {case}: fine stage by random boxes (itk-impact ImpactFineRegistration) on"
+                    f" {' x '.join(map(str, size))} native voxels, {start}: control grid every"
+                    f" {grid_shrink} voxels ({cells:,} cells, about"
+                    f" {cells * 3 * 4 * 5 / 2**20:,.0f} MiB on the device), boxes of {region_size} voxels"
+                    f" ({geometry['regions']} boxes) read with their halo from HDF5 chunks; {schedule}.",
+                    flush=True,
+                )
+            fields[case] = fields_root / case / f"{run.output_group}.mha"
+            fields[case].parent.mkdir(parents=True, exist_ok=True)
+            result = engine.refine_by_regions(
+                native["Fixed"][case],
+                native["Moving"][case],
+                *masks,
+                run.device_index,
+                region_size,
+                visits,
+                fields[case],
+                samples=samples,
+            )
+            compact[case] = [result.control_grid]
+            self._ran[f"{run.preset}_regions_{case}"] = {
+                "resident_features": result.resident,
+                "iterations": result.iterations,
+                "regions": result.regions,
+                "bytes_read": result.bytes_read,
+                "streamed": {"fixed": result.streamed[0], "moving": result.streamed[1]},
+                "seconds": round(result.seconds, 1),
+                "device_peak_bytes": result.device_peak_bytes,
+                "loss": [result.metric_values[0], result.metric_values[-1]] if result.metric_values else [],
+            }
+            if result.coarse is not None:
+                self._ran[f"{run.preset}_regions_{case}"]["coarse"] = {
+                    "seconds": round(result.coarse[0], 1),
+                    "bytes_read": result.coarse[1],
+                }
+            if not run.quiet:
+                streamed = "by regions" if all(result.streamed) else "whole (the readers could not stream)"
+                route = "pooled maps resident" if result.resident else "box by box"
+                if result.coarse is not None:
+                    print(
+                        f"[ImpactReg] {run.preset} {case}: coarse stage by regions in {_duration(result.coarse[0])},"
+                        f" {result.coarse[1] / 2**30:.2f} GiB read.",
+                        flush=True,
+                    )
+                if "fine" in engine._stages:
+                    loss = (
+                        f", loss {result.metric_values[0]:.4f} -> {result.metric_values[-1]:.4f}"
+                        if result.metric_values
+                        else ""
+                    )
+                    print(
+                        f"[ImpactReg] {run.preset} {case}: {route}, {result.iterations:,} iterations in"
+                        f" {_duration(result.seconds)},"
+                        f" {result.bytes_read / 2**30:.2f} GiB read {streamed}, device peak"
+                        f" {(result.device_peak_bytes or 0) / 2**20:,.0f} MiB{loss}.",
+                        flush=True,
+                    )
+        self._compact[run.preset] = compact
+        return fields
+
+    def _sampled_elastix(self, run: "_SampledRun") -> dict[str, Path]:
+        """The elastix preset on the native pair. elastix draws the samples of its metric at every iteration: what
+        kept a large pair out of its reach is that it holds every image whole (the pair, each pyramid level, the
+        coefficients of each interpolator). It runs here as it is, with those images mapped from files of the
+        workspace and paged by the system (its ``-out-of-core``): the transform is the one of a run in memory. The dense
+        field is its transform sampled on the fixed grid band by band; the transform itself is kept beside it."""
+        from .models.elastix import ElastixLevelSpec, RegistrationNet
+        from .models.elastix_engine import with_shift
+        from .models.intensity import engine_of
+        from .native import mapped_centre, mmap_image, shift_origin, write_field
+
+        # The engine looks its parameter maps up beside the config a KonfAI prediction stages; here they are the
+        # preset's own files.
+        block = LocalAppRepository._model_param_block(run.config)[1]
+        block["parameter_maps"] = [
+            str(app_file(IMPACT_REG_KONFAI_REPO, split_preset(run.preset)[0], Path(name).name))
+            for name in block["parameter_maps"]
+        ]
+        if run.samples is not None:  # the points every map draws, whatever the image holds
+            block["spatial_samples"], block["voxel_sampling"] = int(run.samples), 1.0
+        engine = engine_of(run.config, RegistrationNet, ElastixLevelSpec)
+        if not engine.supports_mapped_images():
+            raise KonfAIError(
+                "ImpactReg",
+                f"{run.preset} cannot run --out-of-core sampled with this elastix ({engine._elastix_bin}): it has no"
+                " -out-of-core option, which keeps the images of a registration in files.",
+                "Point KONFAI_ELASTIX_DIR at an elastix-IMPACT build that has it.",
+            )
+        impact = bool(engine._feature_models)
+        if impact:
+            _require_lps(run)
+        # Grey values alone are winsorised, as the engine does; IMPACT's models read the intensities they know.
+        raw = self._native_twins(run, chunked=False, clipped=not impact)
+        fields_root = run.work / _workspace(f"{run.preset}_fields")
+        fields: dict[str, Path] = {}
+        compact: dict[str, list[Path]] = {}
+        for index, case in enumerate(run.cases):
+            fixed = mmap_image(raw["Fixed"][case])
+            masks, inside = _partial_masks(raw, case)
+            shift = None
+            if engine._moments_init == "com":
+                # The moving twin goes there by its origin, as the engine moves a pair registered whole, its centre
+                # taken by a pass over the twin; the shift is added back to the transform.
+                mapped = [None if path is None else mmap_image(path) for path in masks]
+                shift = mapped_centre(mmap_image(raw["Moving"][case]), mapped[1], "com") - mapped_centre(
+                    fixed, mapped[0], "com"
+                )
+                for path in (raw["Moving"][case], masks[1]):
+                    if path is not None:
+                        shift_origin(path, shift)
+            # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
+            voxels = inside or fixed.array.size
+            out = fields_root / case
+            out.mkdir(parents=True, exist_ok=True)
+            if not run.quiet:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: elastix on {' x '.join(map(str, fixed.array.shape[::-1]))}"
+                    " native voxels, its images kept in files and paged by the system (-out-of-core).",
+                    flush=True,
+                )
+            start = time.perf_counter()
+            transform = engine.register_mapped(
+                raw["Fixed"][case],
+                raw["Moving"][case],
+                masks[0],
+                masks[1],
+                run.device_index,
+                out / "elastix",
+                tuple(v / min(run.headers[index]["Fixed"][1]) for v in run.headers[index]["Fixed"][1]),
+                voxels,
+            )
+            transform = with_shift(transform, None if shift is None else shift.tolist())
+            seconds = time.perf_counter() - start
+            compact[case] = [out / "Transform.h5"]
+            sitk.WriteTransform(transform, str(compact[case][0]))
+            fields[case] = write_field(out / f"{run.output_group}.mha", fixed, transform)
+            shutil.rmtree(out / "elastix", ignore_errors=True)
+            self._ran[f"{run.preset}_mapped_{case}"] = {"seconds": round(seconds, 1), "sampled_voxels": voxels}
+            if not run.quiet:
+                print(f"[ImpactReg] {run.preset} {case}: registered in {_duration(seconds)}.", flush=True)
+        self._compact[run.preset] = compact
+        return fields
+
+    def _sampled_fireants(self, run: "_SampledRun") -> dict[str, Path]:
+        """The FireANTs preset on boxes of the native pair (``FireANTsEngine.register_sampled``): its rigid
+        and affine stages start a scale on random boxes and end it on every box of the level, by packets of
+        ``samples`` voxels; its deformable stage (greedy or SyN) takes FireANTs' iteration on the whole grid box by
+        box, every box once an epoch, a box holding no more than ``samples``, the pyramid levels in files of the workspace, the warps on the GPU when they fit, in files
+        otherwise. The deformable stage is FireANTs' on the whole image, the linear ones with every box in one
+        iteration. The displacement field is written by blocks."""
+        from .models.fireants import RegistrationNet
+        from .models.impact_loss import LevelSpec
+        from .models.intensity import engine_of
+
+        engine = engine_of(run.config, RegistrationNet, LevelSpec)
+        if engine._deformable_metric == "impact" and engine._deformable_method != "none":
+            _require_lps(run)
+        for index in range(len(run.cases)):
+            engine.check_sampled(*(run.headers[index][group][0][-3:] for group in ("Fixed", "Moving")))
+        raw = self._native_twins(run, chunked=False, clipped=False)
+        fields: dict[str, Path] = {}
+        for index, case in enumerate(run.cases):
+            masks = _partial_masks(raw, case)[0]
+            out = run.work / _workspace(f"{run.preset}_fields") / case
+            out.mkdir(parents=True, exist_ok=True)
+            fields[case] = out / f"{run.output_group}.mha"
+            if not run.quiet:
+                shape = run.headers[index]["Fixed"][0][-3:]
+                drawn = (
+                    f"{run.samples:,} voxels at once" if run.samples is not None else "what the device holds at once"
+                )
+                print(
+                    f"[ImpactReg] {run.preset} {case}: FireANTs on boxes of {' x '.join(map(str, shape[::-1]))} native"
+                    f" voxels: {drawn}, the warps on the device when they fit, else in host memory or in files.",
+                    flush=True,
+                )
+            start = time.perf_counter()
+            measured = engine.register_sampled(
+                raw["Fixed"][case],
+                raw["Moving"][case],
+                masks[0],
+                masks[1],
+                run.device_index,
+                out / "warps",
+                fields[case],
+                run.region_size,
+                run.samples,
+                run.epochs,
+            )
+            shutil.rmtree(out / "warps", ignore_errors=True)
+            seconds = time.perf_counter() - start
+            self._ran[f"{run.preset}_boxes_{case}"] = {
+                "seconds": round(seconds, 1),
+                **{key: round(value, 1) if isinstance(value, float) else value for key, value in measured.items()},
+            }
+            if not run.quiet:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: registered in {_duration(seconds)},"
+                    f" {measured.get('bytes_read', 0) / 2**30:.2f} GiB read"
+                    f"{', boxes a scale ' + str(measured['boxes_per_scale']) if 'boxes_per_scale' in measured else ''}.",
+                    flush=True,
+                )
+        return fields
 
     def _register_tiled(
         self,

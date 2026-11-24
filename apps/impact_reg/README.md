@@ -62,17 +62,18 @@ impact-reg-konfai list
 | `Elastix#rigid_bspline` | any | elastix | Rigid, then B-spline deformable refinement |
 | `Elastix#impact_static` | MRI / CT | elastix + IMPACT | Rigid, then a B-spline driven by TotalSegmentator (decoder, then segmentation head) and MIND, features extracted once |
 | `Elastix#impact_jacobian` | CT / CBCT | elastix + IMPACT | Rigid, then a B-spline driven by early TotalSegmentator layers, differentiated through the network |
-| `ConvexAdam#coarse` | any | itk-impact | Linear pre-alignment, then the global coarse coupled-convex initialisation on MIND features |
+| `ConvexAdam#coarse` | any | itk-impact | The global coarse coupled-convex initialisation on MIND features |
 | `ConvexAdam#composite` | any | itk-impact | The same coarse pass followed by the Adam instance-optimisation refinement |
 | `ConvexAdam#impact_cbct` | CT / CBCT | itk-impact | The same pipeline on the second layer of TotalSegmentator MR |
-| `ConvexAdam#impact_mrct` | MRI / CT | itk-impact | The same pipeline on the last decoder layer of TotalSegmentator MR and MIND |
+| `ConvexAdam#impact_mrct` | MRI / CT | itk-impact | The coarse initialisation alone, on the segmentation head of TotalSegmentator MR and MIND |
 | `FireANTs#syn` | any | FireANTs | Rigid, affine, then SyN diffeomorphic registration on the GPU |
 | `FireANTs#impact` | CT / CBCT | FireANTs + IMPACT | Rigid, affine, then SyN driven by IMPACT on early TotalSegmentator layers |
 | `FireANTs#anatomix` | any | FireANTs + IMPACT | anatomix and MIND features extracted once and registered as feature volumes |
 | `FireANTs#impact_mrct` | MRI / CT | FireANTs + IMPACT | Rigid, affine, then SyN on the last decoder layer of TotalSegmentator MR and MIND, extracted once |
 
-Every deformable preset aligns the pair rigidly or affinely first, so a pair that starts centimetres apart needs no
-separate rigid run. `impact-reg-konfai show NAME` says what a preset runs, needs and tunes, and
+Every elastix and FireANTs deformable preset aligns the pair rigidly or affinely first, so a pair that starts
+centimetres apart needs no separate rigid run; the ConvexAdam presets have no such stage, their coarse search covering
+a few centimetres, and `moments_init` starts them from the translation between the centres. `impact-reg-konfai show NAME` says what a preset runs, needs and tunes, and
 [the presets page](docs/presets.md) which one suits which pair, with the benchmark behind that advice.
 
 > **Give the CT a body mask** (`--fixed-mask`) whenever it shows what the other image does not: a table, a head rest,
@@ -248,6 +249,13 @@ voxels. A pair that fits is registered in one piece, at native resolution. A lar
 [ImpactReg] FireANTs#syn: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
 on the whole pair resampled to fit, then its deformable stage on native tiles of at most 17,705,407 voxels.
 ```
+
+`--out-of-core sampled` is the second strategy: the preset in one pass on the native pair, never resampled and never
+held whole, its engine scoring a random subset of the pair at every iteration. ConvexAdam: the coarse stage's cost
+built by boxes of its grid, the fine stage's loss on random boxes, the control grid alone on the GPU. FireANTs: its
+rigid, affine and deformable stages on random boxes, the warps on the GPU when they fit, else in host memory while
+the memory budget holds them, in files beyond. elastix: its own samples, with its images mapped from files and paged
+by the kernel.
 
 Everything around the presets is streamed, outputs included (`.mha`, `.nii`, `.nii.gz`, `.nrrd`, OME-Zarr). Pin
 `--max-voxels` for reproducible runs. SlicerImpactReg is not streamed: it loads the moved image and, for uncertainty,

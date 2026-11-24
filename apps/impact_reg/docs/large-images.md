@@ -47,6 +47,81 @@ If a pass still runs out of GPU memory, because another process took some of it,
 again. There is no such second chance on the CPU: Linux kills a process that runs out of RAM, which is why a CPU run
 is sized from the RAM before it starts.
 
+## Sampled, at native resolution
+
+`--out-of-core sampled` is the second strategy: a pair over the budget registers at native resolution in one pass,
+never resampled, never held whole. The image never changes; what the engine looks at does: a random subset of the
+pair at every iteration, as each engine's own algorithm allows. The inputs are first read once, by bands, and
+written as uncompressed twins the engines map or read by boxes, measured in the fixed image's finest voxel as a run on
+the whole pair is (a preset's lengths are voxels); the fields and transforms come back in millimetres. A mask lying
+on another grid than its image goes onto it first, streamed. The strategy registers 3-D pairs, once, with its own
+seed, and writes its field as a MetaImage: `--tta`, `--seed` and `--output-format` (but `Moved=FORMAT`) are refused.
+
+### ConvexAdam
+
+1. **Twins.** Each input is read once, by bands, and written as an HDF5 image in ITK's layout with 32-voxel chunks
+   (`impact_reg_konfai.native`): the stages read boxes with their halo from it, which touch the few chunks under
+   them wherever they land. A mask lying on another grid than its image goes onto it first, streamed.
+2. **Coarse stage by regions.** When the preset has one (itk-impact's `ImpactCoarseRegistration`), one pass over
+   the boxes pools the native MIND features to its coarse grid, which stays on the device; its cost volume is then
+   built by boxes of that grid, never whole, and the coupled-convex iterations run on the pooled maps. Its field
+   starts the fine stage.
+3. **Fine stage by regions.** One pass reads the pair by boxes of `--region-size` voxels through streaming readers
+   and pools the native MIND features to the control grid of the preset's fine stage (itk-impact's
+   `ImpactFineRegistration`): the pair is read once. Where the pooled maps fit the device's budget, the preset's
+   `iterations` run on them whole, ConvexAdam's own Static mode. Where they do not, the maps, the control grid
+   and the optimizer's state live in files of `--tmp-dir` and every iteration steps every cell, by bricks the
+   device holds: the same iterations, at any size. With `--samples`, the maps stay on the device where they fit
+   its budget too, and an iteration draws boxes at random, that many voxels of them, anew at each one, and steps their
+   cells alone, as elastix steps on the points it draws: what it holds and what it costs are its boxes',
+   whatever the image. A box steps as often on average as the preset has `iterations` (`--epochs`). Give
+   `--tmp-dir` a directory on a disk for a pair larger than memory.
+   The dense field is written by regions; the field on the control grid is written beside it,
+   `<preset>_ControlGrid.mha`. A preset with the coarse stage alone (`ConvexAdam#coarse`, `#impact_mrct`) writes
+   that stage's field, interpolated from its grid region by region.
+
+### elastix
+
+elastix draws the samples of its metric at every iteration: it is a sampled registration already. What keeps a
+large pair out of its reach is that it holds every image whole, with a copy for each pyramid level and each
+interpolator. With `-out-of-core`, elastix maps the pixels of the pair from the files themselves and the system pages
+them in as the samples of an iteration read them. It keeps no copy of a full-size image: the finest pyramid level is
+the image, and an interpolation of order 1 reads it directly. The preset runs as it is. At order 1 the transform is
+the one of a run in memory, bit for bit, given the same images; at a higher order the interpolation coefficients
+are kept in single precision. It needs an elastix-IMPACT build that has `-out-of-core` (`KONFAI_ELASTIX_DIR`). The
+dense field is the transform sampled on the fixed grid band by band; the transform itself is written beside it as
+`<preset>_Transform.h5`.
+
+### FireANTs
+
+FireANTs holds both images, the warp and its Adam moments on the device and steps every voxel at every iteration.
+Here the same iteration runs on boxes, as large as the device holds; with `--samples`, an iteration draws that many
+voxels in random boxes, anew at each one, as elastix draws its points. The pyramid levels are files of the
+workspace; the warps and their Adam moments stay on the GPU when they fit three quarters of its
+free memory, else in host memory while the memory budget holds them, and in files beyond, where every step
+writes them back to the disk.
+
+1. **Rigid and affine.** An iteration scores small boxes spread over the level, about two million voxels, or
+   `--samples` of them: a noisy estimate of the whole level's gradient. A level they hold whole gets FireANTs' own
+   iteration. The step falls as elastix's gain does, `a / (A + k + 1)^0.602` with `A = 50`, and a scale
+   ends on the mean of the transforms of its second half: the transform goes to the whole level's optimum as the
+   iterations grow. A scale runs the preset's iterations.
+2. **Greedy or SyN.** An iteration steps its boxes: their smoothed gradients folded into Adam's moments (a box's
+   gradient is the whole grid's over its voxels), then their steps, normalised by the largest direction the
+   boxes last had, composed and smoothed. Without `--samples` its boxes are all of them, which is FireANTs'
+   iteration on the whole pair; with it, the ones it draws, each box stepping as often on average as the preset
+   gives its scale iterations (`--epochs` for every scale).
+3. **IMPACT.** Jacobian mode runs the networks on each box. Static mode first extracts the feature volumes block
+   by block into files (the PCA and the means over every block), then registers them.
+4. **Field.** Written block by block; for SyN the forward warp is read through the inverse of the reverse one,
+   computed on each block.
+
+A level the samples hold whole is registered as FireANTs registers it: each stage is then FireANTs' on the whole
+image. `feature_map_update_interval` is not
+available by boxes. A preset on features (every ConvexAdam preset, an IMPACT preset of elastix or FireANTs) takes
+the pair with an identity direction, its voxel axes those of LPS, since the features are computed along them: reorient
+it first, or register it without `--out-of-core sampled`, which reorients it.
+
 ## Options
 
 | Option | Effect |
@@ -54,6 +129,10 @@ is sized from the RAM before it starts.
 | `--max-voxels N` | register whole a pair of at most `N` voxels, whatever the device holds; the tiles are sized in proportion |
 | `--tmp-dir DIR` | where the intermediates go (default: a hidden directory beside `--output`) |
 | `--fields-only` | write the transform only, skip the moved image |
+| `--out-of-core sampled` | register a pair over the budget at native resolution in one pass, the engine scoring a random subset at every iteration |
+| `--region-size N` | side of a box of the sampled mode, in voxels (default 64; ConvexAdam, FireANTs). Without `--samples`, FireANTs' deformable stage takes larger ones when the GPU has room: the result does not depend on them |
+| `--samples N` | samples an iteration draws, anew at each one: its memory and its time follow them, not the image. A sample is a centre, read with what the loss or the model reads around it (its field of view). elastix draws that many points; ConvexAdam and FireANTs that many voxels, in random boxes whose centres share what they read. Default: what the device holds (ConvexAdam and FireANTs then step every box at every iteration, as on the whole pair), the preset's count for elastix |
+| `--epochs E` | steps a box takes on average in the deformable stages (default: the stage's own iterations; ConvexAdam, FireANTs) |
 
 The plan follows the memory free when the run starts, so a busy GPU can change it, and with it the result, slightly.
 For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset started with (`plans`) and, per rank, the final plan it ran on after

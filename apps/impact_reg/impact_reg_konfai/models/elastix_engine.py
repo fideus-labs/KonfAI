@@ -432,9 +432,7 @@ class ElastixEngine:
                 "The elastix IMPACT presets are 3-D: register a 2-D image with ConvexAdam or Elastix#rigid(_bspline)."
             )
         if self._feature_models:
-            for model in self._feature_models.values() if self._unchecked else ():
-                model.check(gradient=True)
-            self._unchecked = False
+            self._check_models()
             # IMPACT's features are computed along each image's voxel axes: both images go in with their voxel axes
             # in LPS order, the transform comes back physical. A residual oblique rotation is sampled physically by
             # elastix-IMPACT, which is built on ITKIMPACT.
@@ -458,93 +456,19 @@ class ElastixEngine:
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
             sitk.WriteImage(fixed, str(fixed_path))
             sitk.WriteImage(moving, str(moving_path))
-
-            args = [str(self._elastix_bin), "-f", str(fixed_path), "-m", str(moving_path)]
-            for flag, mask, name in (
-                ("-fMask", fixed_mask, "FixedMask.mha"),
-                ("-mMask", moving_mask, "MovingMask.mha"),
-            ):
-                if is_partial_mask(mask):
-                    mask_path = work / name
+            masks: list[Path | None] = []
+            for mask, name in ((fixed_mask, "FixedMask.mha"), (moving_mask, "MovingMask.mha")):
+                masks.append(work / name if is_partial_mask(mask) else None)
+                if masks[-1] is not None:
                     # Binarised: a cast would truncate a soft mask and wrap labels.
-                    sitk.WriteImage(sitk.Cast(mask != 0, sitk.sitkUInt8), str(mask_path))
-                    args += [flag, str(mask_path)]
-            args += ["-out", str(work)]
-            # A model without a voxel_size sees the fixed image's grid, as elastix gets it.
+                    sitk.WriteImage(sitk.Cast(mask != 0, sitk.sitkUInt8), str(masks[-1]))
             # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
             voxels = math.prod(fixed.GetSize())
-            if is_partial_mask(fixed_mask):
+            if masks[0] is not None:
                 voxels = int(np.count_nonzero(sitk.GetArrayViewFromImage(fixed_mask)))
-            staged = self._stage_parameter_maps(work, device_index, fixed.GetSpacing(), voxels)
-            for pmap in staged:
-                args += ["-p", str(pmap)]
-
-            env = loader_env(self._elastix_root)
-            # The ITK thread share konfai gave this rank, so N ranks do not oversubscribe the node. Through the
-            # environment, which every copy of ITK in the process reads: the published elastix links ITK statically
-            # into the IMPACT plugin too, and its -threads crashes that plugin.
-            env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
-            proc = subprocess.Popen(  # nosec B603
-                args,
-                cwd=str(work),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
+            transform = self._run(
+                work, fixed_path, moving_path, masks[0], masks[1], device_index, fixed.GetSpacing(), voxels, moving
             )
-            # Drive a tqdm bar over elastix's iteration lines so SlicerKonfAI (which parses the "N% done"
-            # progress line) shows real progress. The description mirrors KonfAI's bars: resolution level + the
-            # metric value.
-            captured: list[str] = []
-            told: set[str] = set()
-            iteration_line = re.compile(r"^\d+\s")
-            budget = self._iterations or None
-            progress = tqdm.tqdm(total=budget, desc="Registration", ncols=0, leave=True)
-            assert proc.stdout is not None
-            resolution = 0
-            for line in proc.stdout:
-                captured.append(line)
-                stripped = line.strip()
-                if stripped.startswith("Resolution:"):
-                    try:
-                        resolution = int(stripped.split(":", 1)[1])
-                    except ValueError:
-                        pass
-                elif stripped.startswith("IMPACT:") and stripped not in told:
-                    # IMPACT says when it ran out of device memory and went on with smaller patches: the run
-                    # is slower for it, and nothing else tells why.
-                    told.add(stripped)
-                    progress.write(stripped)
-                elif iteration_line.match(line):
-                    progress.update(1)
-                    columns = line.split()  # column 2 is the metric (header "1:ItNr 2:Metric ...")
-                    if len(columns) > 1:
-                        try:
-                            progress.set_description(
-                                f"Registration : res {resolution} | metric {float(columns[1]):.4f}"
-                            )
-                        except ValueError:
-                            pass
-            progress.close()
-            returncode = proc.wait()
-            if returncode != 0:
-                # elastix follows a CUDA out-of-memory with its C++ backtrace: the line leads the message, where
-                # out_of_memory_as_torch looks for it, so konfai re-plans the patch.
-                oom = [line for line in captured if device_out_of_memory(line)][:1]
-                raise RuntimeError(
-                    f"elastix failed (code {returncode}){_kept_log(work)}:\n{''.join(oom + captured[-40:])}"
-                    f"{_cuda_hint(captured, self._elastix_root)}{_mask_hint(captured)}"
-                    f"{_extent_hint(captured, staged, moving)}"
-                )
-
-            transforms = sorted(
-                work.glob("TransformParameters.*-Composite.itk.txt"),
-                key=lambda p: int(p.name.split(".")[1].split("-")[0]),
-            )
-            if not transforms:
-                raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
-            transform = sitk.ReadTransform(str(transforms[-1]))
             if self._transform_type != "field":
                 # The maps' own transform (the one affine linear maps compose to; rigid then B-spline as such,
                 # kilobytes where its field weighs megabytes), the start added back: a moving point is T(x) + shift.
@@ -557,13 +481,142 @@ class ElastixEngine:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    def _check_models(self) -> None:
+        """Probe the IMPACT models once for a gradient through every weighted layer, which Jacobian mode needs."""
+        for model in self._feature_models.values() if self._unchecked else ():
+            model.check(gradient=True)
+        self._unchecked = False
+
+    def supports_mapped_images(self) -> bool:
+        """Whether this elastix keeps its images in files (``-out-of-core``), which a registration of images larger
+        than the memory runs with."""
+        listed = subprocess.run(  # nosec B603
+            [str(self._elastix_bin), "--help"], capture_output=True, text=True, env=loader_env(self._elastix_root)
+        )
+        return "-out-of-core" in listed.stdout
+
+    def register_mapped(
+        self,
+        fixed: Path,
+        moving: Path,
+        fixed_mask: Path | None,
+        moving_mask: Path | None,
+        device_index: int,
+        work: Path,
+        spacing: tuple[float, ...],
+        voxels: int,
+    ) -> sitk.Transform:
+        """Register the image files ``moving`` onto ``fixed`` (uncompressed, in elastix's internal pixel type, their
+        masks binary), every image of the run kept in files of ``work`` (``-out-of-core``) and paged by the system: the
+        pair, its pyramid levels and the interpolators' coefficients stay out of the memory, and the samples of an
+        iteration bring in the pages they read. Returns the transform, physical, fixed to moving. ``voxels`` counts
+        the voxels the sampler draws from; the images go in as they are (their voxel axes in LPS order for an IMPACT
+        map, which the caller checks)."""
+        self._check_models()
+        shutil.rmtree(work, ignore_errors=True)  # the transform is read back by its file name
+        work.mkdir(parents=True)
+        return self._run(
+            work, fixed, moving, fixed_mask, moving_mask, device_index, spacing, voxels, None, ("-out-of-core",)
+        )
+
+    def _run(
+        self,
+        work: Path,
+        fixed: Path,
+        moving: Path,
+        fixed_mask: Path | None,
+        moving_mask: Path | None,
+        device_index: int,
+        spacing: tuple[float, ...],
+        voxels: int,
+        moving_image: sitk.Image | None,
+        extra: tuple[str, ...] = (),
+    ) -> sitk.Transform:
+        """elastix on the image files, its output in ``work``: the composite transform of its last parameter map."""
+        args = [str(self._elastix_bin), "-f", str(fixed), "-m", str(moving)]
+        for flag, mask in (("-fMask", fixed_mask), ("-mMask", moving_mask)):
+            if mask is not None:
+                args += [flag, str(mask)]
+        args += ["-out", str(work), *extra]
+        # A model without a voxel_size sees the fixed image's grid, as elastix gets it.
+        staged = self._stage_parameter_maps(work, device_index, spacing, voxels)
+        for pmap in staged:
+            args += ["-p", str(pmap)]
+
+        env = loader_env(self._elastix_root)
+        # The ITK thread share konfai gave this rank, so N ranks do not oversubscribe the node. Through the
+        # environment, which every copy of ITK in the process reads: the published elastix links ITK statically
+        # into the IMPACT plugin too, and its -threads crashes that plugin.
+        env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
+        proc = subprocess.Popen(  # nosec B603
+            args,
+            cwd=str(work),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        # Drive a tqdm bar over elastix's iteration lines so SlicerKonfAI (which parses the "N% done"
+        # progress line) shows real progress. The description mirrors KonfAI's bars: resolution level + the
+        # metric value.
+        captured: list[str] = []
+        told: set[str] = set()
+        iteration_line = re.compile(r"^\d+\s")
+        budget = self._iterations or None
+        progress = tqdm.tqdm(total=budget, desc="Registration", ncols=0, leave=True)
+        assert proc.stdout is not None
+        resolution = 0
+        for line in proc.stdout:
+            captured.append(line)
+            stripped = line.strip()
+            if stripped.startswith("Resolution:"):
+                try:
+                    resolution = int(stripped.split(":", 1)[1])
+                except ValueError:
+                    pass
+            elif stripped.startswith("IMPACT:") and stripped not in told:
+                # IMPACT says when it ran out of device memory and went on with smaller patches: the run
+                # is slower for it, and nothing else tells why.
+                told.add(stripped)
+                progress.write(stripped)
+            elif iteration_line.match(line):
+                progress.update(1)
+                columns = line.split()  # column 2 is the metric (header "1:ItNr 2:Metric ...")
+                if len(columns) > 1:
+                    try:
+                        progress.set_description(f"Registration : res {resolution} | metric {float(columns[1]):.4f}")
+                    except ValueError:
+                        pass
+        progress.close()
+        returncode = proc.wait()
+        if returncode != 0:
+            # elastix follows a CUDA out-of-memory with its C++ backtrace: the line leads the message, where
+            # out_of_memory_as_torch looks for it, so konfai re-plans the patch.
+            oom = [line for line in captured if device_out_of_memory(line)][:1]
+            extent = _extent_hint(captured, staged, moving_image) if moving_image is not None else ""
+            raise RuntimeError(
+                f"elastix failed (code {returncode}){_kept_log(work)}:\n{''.join(oom + captured[-40:])}"
+                f"{_cuda_hint(captured, self._elastix_root)}{_mask_hint(captured)}{extent}"
+            )
+
+        transforms = sorted(
+            work.glob("TransformParameters.*-Composite.itk.txt"),
+            key=lambda p: int(p.name.split(".")[1].split("-")[0]),
+        )
+        if not transforms:
+            raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
+        return sitk.ReadTransform(str(transforms[-1]))
+
 
 def with_shift(transform: sitk.Transform, shift: list[float] | None) -> sitk.Transform:
     """``transform`` with the start the moving image was moved by added back: a moving point is ``T(x) + shift``
     (a composite applies its last transform first)."""
     if shift is None:
         return transform
-    return sitk.CompositeTransform([sitk.TranslationTransform(len(shift), list(shift)), transform])
+    shifted = sitk.CompositeTransform([sitk.TranslationTransform(len(shift), list(shift)), transform])
+    shifted.FlattenTransform()  # ITK writes no composite nested in another
+    return shifted
 
 
 class ElastixRegistration(EngineRegistration):

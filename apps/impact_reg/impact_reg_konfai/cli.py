@@ -204,6 +204,44 @@ convention): resampling the moving image through it gives Moved.""",
         "and a preset that declares a tile pass then refines it on native tiles sized in proportion.",
     )
     reg.add_argument(
+        "--out-of-core",
+        "--out_of_core",
+        dest="out_of_core",
+        choices=("auto", "sampled"),
+        default="auto",
+        help="How a pair larger than the device registers. auto (default): resampled to fit, then its deformable "
+        "stage on native tiles where the preset declares a tile pass. sampled: the preset in one pass on the native "
+        "pair, never resampled and never held whole in host memory: the images are read from files, by boxes, and "
+        "the device takes what it holds of the work. With --samples, every iteration draws that many samples anew "
+        "and steps on them, as elastix does on its points.",
+    )
+    reg.add_argument(
+        "--region-size",
+        "--region_size",
+        dest="region_size",
+        type=at_least(8),
+        default=64,
+        help="Side of a box of the sampled mode, in voxels (default 64).",
+    )
+    reg.add_argument(
+        "--samples",
+        dest="samples",
+        type=at_least(1),
+        default=None,
+        help="Samples an iteration of the sampled mode draws, anew at each one: an iteration's memory and time follow "
+        "them, not the image, so that a smaller number registers a larger pair on a smaller machine. A sample is a "
+        "centre: what is read is each centre with what the loss or the model reads around it (its field of view). "
+        "elastix draws that many points; ConvexAdam and FireANTs that many voxels, in random boxes, whose centres "
+        "share what they read. Default: what the device holds (ConvexAdam and FireANTs then step every box at every "
+        "iteration, as on the whole pair), what its preset says for elastix.",
+    )
+    reg.add_argument(
+        "--epochs",
+        type=at_least(1),
+        default=None,
+        help="Visits of every box in the sampled mode (default: the stage's iterations).",
+    )
+    reg.add_argument(
         "--fields-only",
         "--fields_only",
         dest="fields_only",
@@ -450,6 +488,10 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             max_voxels=args.max_voxels,
             output_format=args.output_format,
             seed=args.seed,
+            out_of_core=args.out_of_core,
+            region_size=args.region_size,
+            samples=args.samples,
+            epochs=args.epochs,
         )
 
     elif args.command == "eval":
