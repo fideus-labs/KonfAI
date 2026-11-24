@@ -72,6 +72,7 @@ def _scan_block_on_the_store_grid(
     element_bytes: int = _STATISTICS_ELEMENT_BYTES,
     companions: Sequence[tuple[Sequence[int] | None, int]] = (),
     piece: int = 1,
+    halo: int = 0,
 ) -> tuple[int, int]:
     """The rows one scan block reads, and what reading it holds.
 
@@ -84,6 +85,7 @@ def _scan_block_on_the_store_grid(
     A block raised to the grain stays a whole number of ``piece`` (their common multiple), so the fold sees the same
     pieces; where that multiple is taller than the grain and than the block the scan reads anyway, the block keeps
     its own height, a whole number of pieces too, and the grain is decoded again where a block straddles it.
+    A block read with ``halo`` rows more on both sides holds them too, on a ``plane`` its caller pads.
     """
     grain = max(1, int(granularity[0])) if granularity else 0
     block = math.lcm(grain, piece) if grain else 0
@@ -94,16 +96,19 @@ def _scan_block_on_the_store_grid(
     def decoded(step: int, grain: Sequence[int] | None) -> int:
         """Rows a store of ``grain`` materialises to serve one step, at the worst place the walk puts it."""
         if not grain:
-            return step
+            return step + 2 * halo
         return max(
-            chunk_hull_voxels([slice(start, min(extent, start + step))], [max(1, int(grain[0]))], [extent])
+            chunk_hull_voxels(
+                [slice(max(0, start - halo), min(extent, start + step + halo))], [max(1, int(grain[0]))], [extent]
+            )
             for start in range(0, extent, step)
         )
 
     def held_for(step: int) -> int:
         """Blocks in flight, plus what the read in flight decodes above the step it serves."""
+        read = step + 2 * halo
         return sum(
-            int((step * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step, grain) - step)) * plane * nbytes)
+            int((read * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step, grain) - read)) * plane * nbytes)
             for grain, nbytes in sources
         )
 
@@ -121,18 +126,40 @@ def _scan_block_on_the_store_grid(
     return rows, held
 
 
-def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], piece: int = 1) -> int:
+def _block_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], halo: int = 0) -> int:
+    """The rows one block of a scan of an entry of ``shape`` reads along its first spatial axis: a whole number of
+    update pieces, so the fold sees the same pieces whatever the read grain. Sized and refused by :func:`_scan_rows`
+    for ``entries``, the entries read by bounded regions; on the budget alone without them, probing a store read
+    whole for its element size decoding it once more. ``halo`` rows on both sides of a block, and around its plane,
+    are read and held with it. An entry shorter than a piece is one block, one piece."""
+    if len(shape) < 2:
+        return 1
+    piece = min(int(shape[1]), _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS))
+    if entries:
+        return _scan_rows(entries, name, shape, piece, halo)
+    rows = _statistics_chunk_length(_padded(shape, halo), 1, _statistics_block_elements()) - 2 * halo
+    return max(piece, rows // piece * piece)
+
+
+def _padded(shape: list[int], halo: int) -> list[int]:
+    """``shape`` with ``halo`` voxels more on both sides of every spatial axis but the first, which a block cuts."""
+    return [*shape[:2], *(int(extent) + 2 * halo for extent in shape[2:])]
+
+
+def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], piece: int = 1, halo: int = 0) -> int:
     """The rows one step of a whole-volume scan reads along the first spatial axis, for ``entries``
     read at the same steps (a volume and its mask; ``Dataset``s, duck typed): a whole number of
     ``piece``, sized against the budget this rank published and put on the first entry's grain
-    where that fits. A budget the shortest step still exceeds is refused."""
+    where that fits, ``halo`` rows more read on both sides of a step and its plane padded by it. A
+    budget the shortest step still exceeds is refused."""
     budget = per_rank_budget_bytes()
     # Only a declared budget pays the probe.
     element_bytes = [
         _STATISTICS_ELEMENT_BYTES if budget is None else dataset._scanned_element_bytes(group, name, shape)
         for dataset, group in entries
     ]
-    rows = _statistics_chunk_length(shape, 1, _statistics_block_elements(sum(element_bytes)))
+    padded = _padded(shape, halo)
+    rows = _statistics_chunk_length(padded, 1, _statistics_block_elements(sum(element_bytes))) - 2 * halo
     grains = []
     for dataset, group in entries:
         granularity = dataset.read_granularity(group, name)
@@ -140,12 +167,13 @@ def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], 
     rows, held = _scan_block_on_the_store_grid(
         max(piece, rows // piece * piece),
         int(shape[1]),
-        _statistics_plane_elements(shape, 1),
+        _statistics_plane_elements(padded, 1),
         grains[0],
         budget,
         element_bytes[0],
         list(zip(grains[1:], element_bytes[1:], strict=True)),
         piece,
+        halo,
     )
     if budget is not None and held > budget:
         raise DatasetManagerError(
@@ -530,13 +558,7 @@ def _walk_slabs(entries: Sequence[tuple[Any, str]], name: str, shape: list[int])
         return lambda slices: resident[slices]
 
     readers = [slab_reader(dataset, group) for dataset, group in entries]
-    # A whole number of update pieces, as Dataset.iter_data_blocks steps.
-    piece = _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS) if len(shape) >= 2 else 1
-    if by_region:
-        rows = _scan_rows(by_region, name, shape, piece)
-    else:
-        rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
-        rows = max(piece, rows // piece * piece)
+    rows = _block_rows(by_region, name, shape)
     extent = int(shape[1]) if len(shape) >= 2 else 1
     for start in range(0, extent, rows):
         slices: tuple[slice, ...] = (

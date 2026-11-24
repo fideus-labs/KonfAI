@@ -204,6 +204,27 @@ def test_a_float16_blend_is_written_at_the_manifest_version_that_carries_it(tmp_
     assert manifest["konfai_edge_manifest"] == version
 
 
+class _Head(torch.nn.Module):
+    """``forward`` as the one head of a routed graph."""
+
+    def named_forward(self, x):
+        yield "head", self.forward(x)
+
+
+class _Conv(_Head):
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 2, 3, padding=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class _Fixed(_Conv):  # reads an axis as a number, which fixes it
+    def forward(self, x):
+        return self.conv(x)[..., : int(x.shape[-2]) // 2, :]
+
+
 def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_refused(tmp_path):
     # One window per case: the manifest's patch is zeros and the graph runs at any shape; a forward that reads
     # its input's shape as a number answers for the example alone, which the export finds and refuses.
@@ -214,43 +235,280 @@ def test_a_model_exported_whole_keeps_its_axes_free_and_one_that_fixes_them_is_r
     from konfai.export import export_to_onnx
     from konfai.utils.errors import PredictorError
 
-    class Free(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.conv = torch.nn.Conv3d(1, 2, 3, padding=1)
-
-        def named_forward(self, x):
-            yield "head", self.conv(x)
-
-    class Fixed(Free):  # reads the middle axis as a number
-        def named_forward(self, x):
-            yield "head", self.conv(x)[..., : int(x.shape[-2]) // 2, :]
-
-    class Floored(
-        Free
-    ):  # pads up to a floor in a branch on the size: the export keeps the example's branch (SynthSeg v1)
-        def named_forward(self, x):
+    class Floored(_Conv):  # pads up to a floor in a branch on the size: the export keeps the example's (SynthSeg v1)
+        def forward(self, x):
             width = x.shape[-1]
             if width < 32:
                 x = torch.nn.functional.pad(x, (0, 32 - width))
-            yield "head", self.conv(x)
+            return self.conv(x)
 
-    class Decided(Free):  # a hard decision between two networks, as SynthSeg takes one
-        def named_forward(self, x):
-            yield "head", self.conv(self.conv(x)[:, :1].tanh() * (self.conv(x).argmax(1, keepdim=True) == 1))
+    class Decided(_Conv):  # a hard decision between two networks, as SynthSeg takes one
+        def forward(self, x):
+            return self.conv(self.conv(x)[:, :1].tanh() * (self.conv(x).argmax(1, keepdim=True) == 1))
 
     example = torch.randn(1, 1, 8, 10, 12)
-    path, manifest = export_to_onnx(Free().eval(), tmp_path / "free", example, "head", dynamic=True)
+    path, manifest = export_to_onnx(_Conv().eval(), tmp_path / "free", example, "head", dynamic=True)
     assert manifest["patch"]["size"] == [0, 0, 0]
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     assert session.run(None, {"input": np.zeros((1, 1, 5, 7, 9), np.float32)})[0].shape == (1, 2, 5, 7, 9)
     with pytest.raises(PredictorError, match="answers for the example's shape alone"):
-        export_to_onnx(Fixed().eval(), tmp_path / "fixed", example, "head", dynamic=True)
-    # Right on the example's shape a little larger (28 < 32 along the last axis), wrong on it twice as long.
-    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_to_onnx(_Fixed().eval(), tmp_path / "fixed", example, "head", dynamic=True)
+    # Traced on 12 voxels along x, under its floor of 32, which torch takes past.
+    with pytest.raises(PredictorError, match=r"at most 31 voxels.*answers for the example's shape alone"):
         export_to_onnx(Floored().eval(), tmp_path / "floored", example, "head", dynamic=True)
     # Checked on a smooth input, against the gap at the example's own shape: a hard decision is not a fixed shape.
     export_to_onnx(Decided().eval(), tmp_path / "decided", example, "head", dynamic=True)
+
+
+def test_a_graph_refused_leaves_the_one_it_would_replace(tmp_path):
+    # A graph that fails its check is never written over the bundle's: the manifest beside it still names a graph
+    # that passed.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the check of the free axes runs the graph
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    example = torch.randn(1, 1, 8, 10, 12)
+    path, _ = export_to_onnx(_Conv().eval(), tmp_path, example, "head", dynamic=True)
+    kept = path.read_bytes()
+    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_to_onnx(_Fixed().eval(), tmp_path, example, "head", dynamic=True)
+    assert path.read_bytes() == kept and sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json", "model.onnx"]
+
+
+def test_two_exports_to_one_destination_stage_their_graphs_apart(tmp_path, monkeypatch):
+    # A second export to the bundle while the first checks its graph stages its own: neither takes the other's.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai import export
+
+    check, nested = export._check_free_axes, []
+
+    def checked(*args):
+        if not nested:
+            nested.append(True)
+            export.export_to_onnx(_Conv().eval(), tmp_path, torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+        return check(*args)
+
+    monkeypatch.setattr(export, "_check_free_axes", checked)
+    export.export_to_onnx(_Conv().eval(), tmp_path, torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["manifest.json", "model.onnx"]
+
+
+@pytest.mark.parametrize(("eager", "exported"), [(float("nan"), 2.0), (float("-inf"), float("inf"))])
+def test_a_nonfinite_value_the_graph_moves_is_refused_and_one_it_keeps_is_not(tmp_path, eager, exported):
+    # A NaN torch writes where the graph writes a number, or an infinity of the other sign, is a gap a maximum over
+    # the voxels would read as NaN, and pass; both writing the same NaN at the same voxel is no gap.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the check of the free axes runs the graph
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Moved(_Head):  # the smooth input is 1 at its first voxel only
+        def forward(self, x):
+            value = exported if torch.compiler.is_compiling() else eager
+            return torch.where(x > 0.999, value, x * 2)
+
+    class Kept(_Head):
+        def forward(self, x):
+            return torch.where(x > 0.999, eager, x * 2)
+
+    example = torch.randn(1, 1, 8, 10, 12)
+    with pytest.raises(PredictorError, match="nonfinite"):
+        export_to_onnx(Moved().eval(), tmp_path / "moved", example, "head", dynamic=True)
+    export_to_onnx(Kept().eval(), tmp_path / "kept", example, "head", dynamic=True)
+
+
+def test_a_branch_on_a_free_size_the_example_never_takes_is_refused(tmp_path):
+    # Traced on 12 voxels along x, the graph keeps the branch of 8 or more and would answer it for 7: the trace's
+    # own guard says where it holds, and torch taking a size past it is refused, whatever the probes above it say.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the check of the free axes runs the graph
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Below(_Conv):
+        def forward(self, x):
+            return self.conv(x) if x.shape[-1] >= 8 else self.conv(x) + 1
+
+    with pytest.raises(PredictorError, match=r"8 voxels or more.*answers for the example's shape alone"):
+        export_to_onnx(Below().eval(), tmp_path, torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+
+
+def test_a_branch_on_sizes_the_trace_ties_is_refused_where_torch_takes_them_untied(tmp_path):
+    # Traced on a square, the graph keeps the square's branch and ties the two axes to one size: torch takes a
+    # rectangle, where the graph would answer with that branch. A tie torch needs itself (two inputs added) holds.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Square(_Conv):
+        def forward(self, x):
+            return self.conv(x) if x.shape[-1] == x.shape[-2] else self.conv(x) + 1
+
+    with pytest.raises(PredictorError, match=r"tied.*answers for the example's shape alone"):
+        export_to_onnx(Square().eval(), tmp_path, torch.randn(1, 1, 8, 12, 12), "head", dynamic=True)
+
+
+def test_a_branch_on_a_tie_is_refused_on_whichever_tied_axis_torch_takes_moved_alone(tmp_path):
+    # Traced on two widths equal, the graph adds z unsliced: torch refuses x alone wider (x + z), and takes z alone
+    # wider, which it slices to x's width where the graph does not.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Sliced(torch.nn.Module):
+        def named_forward(self, x, z):
+            yield "head", x + (z if z.shape[-1] == x.shape[-1] else z[..., : x.shape[-1]])
+
+    examples = (torch.randn(1, 1, 8, 8), torch.randn(1, 1, 8, 8))
+    with pytest.raises(PredictorError, match=r"tied.*answers for the example's shape alone"):
+        export_to_onnx(Sliced().eval(), tmp_path, examples, "head", input_group=["A", "B"], dynamic=True)
+
+
+def test_an_example_of_axes_of_one_voxel_is_no_other_shape_to_check_on(tmp_path):
+    # A shorter axis of one voxel is that one voxel: the example's own shape checks nothing of another.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class One(_Head):
+        def forward(self, x):
+            return x.reshape(1, 1, 1, 1) * 2
+
+    with pytest.raises(PredictorError, match="torch takes none"):
+        export_to_onnx(One().eval(), tmp_path, torch.randn(1, 1, 1, 1), "head", dynamic=True)
+
+
+@pytest.mark.parametrize("example", [(1, 1, 8, 12, 12), (1, 1, 8, 16, 8)], ids=["square", "oblong"])
+def test_a_branch_on_the_order_of_two_sizes_is_checked_on_shapes_that_reverse_it(tmp_path, example):
+    # Traced taller than wide, or as tall, the graph keeps that branch: it is checked on a case wider than tall, which
+    # torch answers otherwise.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Tall(_Conv):
+        def forward(self, x):
+            return self.conv(x) if x.shape[-2] >= x.shape[-1] else self.conv(x) + 1
+
+    with pytest.raises(PredictorError, match="answers for the example's shape alone"):
+        export_to_onnx(Tall().eval(), tmp_path, torch.randn(*example), "head", dynamic=True)
+
+
+def test_the_shapes_a_model_of_many_inputs_is_checked_on_grow_with_the_rank_alone(tmp_path):
+    # Each axis of an input is moved by its own multiple of the step, the same for every input: four inputs of three
+    # axes are checked on inputs at most four times as long on an axis, not on one 13 times as long.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+
+    seen: list[int] = []
+
+    class Means(torch.nn.Module):
+        def named_forward(self, *inputs):
+            if not torch.compiler.is_compiling():  # the checks' own calls, not the trace's
+                seen.extend(x.numel() for x in inputs)
+            yield "head", inputs[0] + sum(x.mean() for x in inputs[1:])
+
+    examples = tuple(torch.randn(1, 1, 8, 8, 8) for _ in range(4))
+    export_to_onnx(Means().eval(), tmp_path, examples, "head", input_group=["A", "B", "C", "D"], dynamic=True)
+    assert max(seen) <= 4**3 * 8**3, max(seen)
+
+
+def test_a_model_taking_blocks_of_32_voxels_is_checked_on_shapes_it_takes(tmp_path):
+    # Probes keep the powers of two of the example's extents up to 32: a model of 32-voxel blocks takes them, and the
+    # graph is checked there. A model torch takes at the example's shape alone has no other shape to be checked on.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Blocks(_Head):  # each 32 x 32 block less its mean
+        def forward(self, x):
+            n, c, h, w = x.shape
+            blocks = x.reshape(n, c, h // 32, 32, w // 32, 32)
+            return (blocks - blocks.mean(dim=(3, 5), keepdim=True)).reshape(n, c, h, w)
+
+    class Exact(_Head):
+        def forward(self, x):
+            return x.reshape(1, 1, 64, 64) * 2
+
+    path, _ = export_to_onnx(Blocks().eval(), tmp_path / "blocks", torch.randn(1, 1, 64, 64), "head", dynamic=True)
+    case = torch.randn(1, 1, 96, 160)
+    got = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"]).run(None, {"input": case.numpy()})[0]
+    np.testing.assert_allclose(got, Blocks()(case).numpy(), atol=1e-6)
+    with pytest.raises(PredictorError, match="torch takes none"):
+        export_to_onnx(Exact().eval(), tmp_path / "exact", torch.randn(1, 1, 64, 64), "head", dynamic=True)
+
+
+def test_a_model_reading_two_groups_at_sizes_it_ties_is_checked_at_sizes_that_keep_the_tie(tmp_path, monkeypatch):
+    # The trace keeps the first group twice the second (2*s, s): the shapes it is checked on move s, and keep the tie.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai import export
+    from konfai.export import export_to_onnx
+
+    traced, held = export._traced_sizes, []
+    monkeypatch.setattr(export, "_traced_sizes", lambda *args: held.append(traced(*args)) or held[-1])
+
+    class Tied(torch.nn.Module):
+        def named_forward(self, x, y):
+            yield "head", x + torch.nn.functional.interpolate(y, scale_factor=2)
+
+    examples = (torch.randn(1, 1, 64, 64), torch.randn(1, 1, 32, 32))
+    export_to_onnx(Tied().eval(), tmp_path, examples, "head", input_group=["A", "B"], dynamic=True)
+    [(sizes, values)] = held
+    assert [str(size) for size in sizes[1][2:]] == [str(symbol) for symbol in values] and set(values.values()) == {32}
+
+
+def test_every_size_the_trace_holds_is_one_the_checks_move() -> None:
+    # A free axis an exporter fixed (an int, or a symbol of one value as torch 2.5 holds it, where 2.12 keeps a symbol
+    # its guards hold at one value) gets a symbol of its own, so the shapes checked move it and the graph is seen to
+    # refuse them. A size held as an expression of a symbol no input holds alone (2*s + 1) moves with that symbol,
+    # valued as the trace holds it.
+    from types import SimpleNamespace
+
+    import sympy
+    from konfai.export import _traced_sizes
+    from torch._dynamo.source import ConstantSource
+    from torch.fx.experimental.sym_node import SymNode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    env = ShapeEnv()
+    symbol = env.create_symintnode(env.create_symbol(32, ConstantSource("s")), hint=32)
+    fixed = torch.SymInt(SymNode(sympy.Integer(10), env, int, 10))
+    shape = (1, 1, 10, fixed, 2 * symbol + 1)
+    node = SimpleNamespace(op="placeholder", name="x", meta={"val": SimpleNamespace(shape=shape)})
+    traced = SimpleNamespace(graph_signature=SimpleNamespace(user_inputs=["x"]), graph=SimpleNamespace(nodes=[node]))
+    sizes, values = _traced_sizes(traced, [[1, 1, 10, 10, 65]], 2)
+    assert sizes[0][:2] == [1, 1] and values == {sizes[0][2]: 10, sizes[0][3]: 10, symbol.node.expr: 32}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
+def test_a_model_on_a_device_is_checked_on_that_device(tmp_path):
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the check of the free axes runs the graph
+    from konfai.export import export_to_onnx
+
+    example = torch.randn(1, 1, 8, 10, 12, device="cuda")
+    export_to_onnx(_Conv().cuda().eval(), tmp_path, example, "head", dynamic=True)
 
 
 def test_a_case_statistic_is_traced_past_its_halo_and_checked_on_every_spatial_axis(tmp_path):

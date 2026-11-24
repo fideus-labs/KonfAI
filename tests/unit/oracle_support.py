@@ -38,6 +38,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data import augmentation as augmentation_module
+from konfai.data import spline
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
@@ -140,6 +141,39 @@ def assert_same_as_scipy(got: np.ndarray, want: np.ndarray) -> None:
         np.testing.assert_array_equal(got, want)
         return
     np.testing.assert_allclose(got, want, rtol=0, atol=16 * np.finfo(want.dtype).eps * float(np.abs(want).max()))
+
+
+def zoom(array: np.ndarray, shape: tuple[int, ...], order: int, corners: bool = False) -> np.ndarray:
+    """``scipy.ndimage.zoom(array, ..., order=order, mode='nearest', grid_mode=not corners)`` onto ``shape``, in
+    float64: :func:`konfai.data.spline.zoom_window` on the whole volume."""
+    whole = tuple(slice(0, int(extent)) for extent in shape)
+    return spline.zoom_window(array, [0] * array.ndim, list(array.shape), shape, whole, order, corners)
+
+
+def resize(array: np.ndarray, shape: tuple[int, ...], order: int) -> np.ndarray:
+    """``skimage.transform.resize(array, shape, order, mode='edge', anti_aliasing=False)`` on a float64 array: the
+    extents aligned, then clipped to the input's range."""
+    out = zoom(array, shape, order)
+    if order > 0:
+        np.clip(out, *spline.value_range(array), out=out)
+    return out
+
+
+def resample_faces(data: np.ndarray, shape: tuple[int, ...], order: int, axis: int | None) -> np.ndarray:
+    """The faces grid's resampling of an image ``(C, *spatial)``, in float64: each channel through
+    :func:`konfai.data.spline.resample_region` on the whole region, clipped to its range; with ``axis``, every slice
+    across it resized alone, then that axis picked by nearest neighbour."""
+    whole = tuple(slice(0, int(extent)) for extent in shape)
+    channels = data.astype(np.float64)
+    origin, extents = [0] * (data.ndim - 1), list(data.shape[1:])
+    return np.stack(
+        [
+            spline.resample_region(
+                channel, origin, extents, shape, whole, order, axis=axis, bounds=spline.value_range(channel)
+            )
+            for channel in channels
+        ]
+    )
 
 
 @dataclass(frozen=True)

@@ -490,6 +490,48 @@ def test_a_crop_to_a_shape_is_mri_synthsegs_crop_then_pad_from_the_header_alone(
         again.transform_shape("CT", "case", [4, 5, 9], Attribute())
 
 
+@pytest.mark.parametrize("fill", [0.0, None])
+def test_a_region_far_past_the_volume_pads_only_what_it_covers(monkeypatch, fill) -> None:
+    # A crop to a shape far larger than the volume, its inverse and a pad: a region past the volume reads its nearest
+    # rows, and the pad holds that region, not the gap between it and them (1.7 GiB for one plane of Crop(shape=[4096,
+    # 512, 512]) over a 512^3 volume).
+    pad, held = F.pad, []
+
+    def measured(*args, **kwargs):
+        out = pad(*args, **kwargs)
+        held.append(out.numel())
+        return out
+
+    def streamed(read, run, stage, target, attribute):
+        held.clear()
+        source = read("case", target, [4, 5, 6], attribute)
+        region = run("case", volume[(slice(None), *source)], RegionContext(tuple(source), target, (4, 5, 6)), attribute)
+        assert max(held) <= 2 * region.numel(), stage
+        return region
+
+    volume = torch.arange(1 * 4 * 5 * 6, dtype=torch.float32).reshape(1, 4, 5, 6) + 1
+    crop = Crop(shape=[400, 0, 0], fill=fill)
+    attribute, back = Attribute(), Attribute()
+    crop.transform_shape("CT", "case", [4, 5, 6], attribute)
+    back["box"] = np.array([[100, 100], [0, 0], [0, 0]])  # a crop that dropped 100 rows on each side
+    padding = Padding([0, 0, 0, 0, 0, 3], mode="replicate" if fill is None else "constant")
+    whole = crop("case", volume.clone(), Attribute(attribute))
+    restored = crop.inverse("case", volume.clone(), Attribute(back))
+    padded = padding("case", volume.clone(), Attribute())
+    monkeypatch.setattr(F, "pad", measured)
+    for rows in (slice(0, 1), slice(196, 200), slice(399, 400)):  # before the volume, across its start, after it
+        target = (rows, slice(0, 5), slice(0, 6))
+        region = streamed(crop.stream_region_source, crop.stream_region, "crop", target, attribute)
+        assert torch.equal(region, whole[(slice(None), *target)])
+    for rows in (slice(0, 1), slice(99, 101), slice(203, 204)):
+        target = (rows, slice(0, 5), slice(0, 6))
+        region = streamed(crop.stream_region_target, crop.stream_region_inverse, "inverse", target, back)
+        assert torch.equal(region, restored[(slice(None), *target)])
+    target = (slice(5, 7), slice(0, 5), slice(0, 6))  # past the volume's last row, which the block holds with others
+    region = streamed(padding.stream_region_source, padding.stream_region, "padding", target, Attribute())
+    assert torch.equal(region, padded[(slice(None), *target)])
+
+
 def test_crop_inverse_pads_back_a_case_without_geometry() -> None:
     attribute = Attribute()
     attribute["box"] = np.array([[1, 2], [0, 1], [3, 0]])

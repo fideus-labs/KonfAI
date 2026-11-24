@@ -561,6 +561,22 @@ def test_a_percentile_bound_streams_on_the_number_the_whole_volume_gives(tmp_pat
     assert ("Percentile:0.5" in case.landed_attributes(0)) is save
 
 
+def test_a_store_percentile_is_read_on_the_channels_its_stage_declares(tmp_path):
+    # Two stages of one case reading the median of another channel each get their own channel's, as the moments are
+    # read: the first answer does not serve the second, and no stage's channels read the volume's.
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, np.stack([np.zeros((6, 6, 6)), np.full((6, 6, 6), 100.0)]), geometry())
+    case = manager(dataset, [])
+
+    def median(channels: list[int] | None) -> float:
+        locality = PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Percentile:50.0"}), stat_channels=channels
+        )
+        return float(dict(case._store_seed(dataset, "CT", CASE_NAME, Attribute(), locality))["Percentile:50.0"])
+
+    assert [median([0]), median([1]), median(None)] == [0.0, 100.0, 50.0]
+
+
 def test_a_case_statistic_is_folded_by_slabs_of_the_store_to_the_whole_volume_s_value(tmp_path, monkeypatch):
     # A statistic of the app's own, read with a halo: bounded slabs of the stored volume, each read with its neighbour
     # rows, fold to the value the whole volume gives, and every region is that one float32.

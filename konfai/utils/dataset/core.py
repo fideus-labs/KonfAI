@@ -36,7 +36,6 @@ except ImportError:
 from typing import TYPE_CHECKING
 
 from konfai.utils import uri
-from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
     AFFINE_ATTRIBUTE,
@@ -55,13 +54,7 @@ from konfai.utils.dataset.itk_transform_file import ItkTransformFile
 from konfai.utils.dataset.ome_zarr_file import OmeZarrFile
 from konfai.utils.dataset.sitk_file import SitkFile
 from konfai.utils.dataset.staging import _recover_orphaned_backup, is_staging_entry
-from konfai.utils.dataset.statistics import (
-    _lerp_like_numpy,
-    _order_statistics,
-    _scan_rows,
-    _statistics_chunk_length,
-    data_statistics,
-)
+from konfai.utils.dataset.statistics import _block_rows, _lerp_like_numpy, _order_statistics, data_statistics
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
     STORE_FORMS,
@@ -641,14 +634,8 @@ class Dataset:
 
         if len(shape) < 2:
             return lambda: iter([read((slice(None),))])
-        # A whole number of update pieces: the fold sees the same pieces in the same order whatever
-        # the read grain, so the budget never changes what the running mean and std answer.
-        piece = _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
-        if bounded:
-            rows = _scan_rows([(self, groups)], name, shape, piece)
-        else:  # sized on the budget alone: probing the store's element size would decode it once more
-            rows = _statistics_chunk_length(shape, 1, statistics._statistics_block_elements())
-            rows = max(piece, rows // piece * piece)
+        # The budget never changes what the running mean and std answer: the fold sees the same pieces.
+        rows = _block_rows([(self, groups)] if bounded else [], name, shape, halo)
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
@@ -667,10 +654,13 @@ class Dataset:
         probe = (slice(0, 1),) * len(shape)
         return max(1, int(self.read_data_slice(groups, name, probe)[0].dtype.itemsize))
 
-    def read_data_quantile(self, groups: str, name: str, q: float) -> Any:
+    def read_data_quantile(self, groups: str, name: str, q: float, channels: list[int] | None = None) -> Any:
         """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without
-        holding the volume: bounded passes over :meth:`iter_data_blocks`."""
-        low, high, weight = _order_statistics(self.iter_data_blocks(groups, name), float(q))
+        holding the volume: bounded passes over :meth:`iter_data_blocks`, of the ``channels`` given
+        (every one without)."""
+        blocks = self.iter_data_blocks(groups, name)
+        selected = blocks if channels is None else lambda: (block[channels] for block in blocks())
+        low, high, weight = _order_statistics(selected, float(q))
         if not np.issubdtype(np.asarray(low).dtype, np.inexact):
             # numpy.quantile promotes an integer input to float64 before it interpolates.
             low, high = np.float64(low), np.float64(high)

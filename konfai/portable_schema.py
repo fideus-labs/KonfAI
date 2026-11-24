@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from konfai.data.transform.resample import GRID_RULES
+from konfai.data.transform.resample import GRID_RULES, INTERPOLATIONS
 from konfai.export import FLOAT16_BLEND_VERSION, MANIFEST_VERSION
 from konfai.portable import PREDICTION_PROGRAM_VERSION, TRANSFORM_PROGRAM_VERSION
 from konfai.portable_evaluation import EVALUATION_PROGRAM_VERSION
@@ -46,7 +46,7 @@ _FILL: dict[str, Any] = {"oneOf": [_NUMBER, {"const": "edge"}]}
 _PAD: dict[str, Any] = {"oneOf": [_NUMBER, {"enum": ["edge", "min"]}]}
 #: A clip bound: a number, or "min", "max" or "percentile:<q>", resolved against the volume in hand.
 _BOUND: dict[str, Any] = {"type": ["number", "string"]}
-_INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear", "cubic", "bspline", "nearest_even"]}
+_INTERPOLATION: dict[str, Any] = {"enum": list(INTERPOLATIONS)}
 _ALIGN: dict[str, Any] = {"enum": ["extent", "origin"]}
 _AXES: dict[str, Any] = {"type": "array", "items": {"type": "integer", "minimum": 0}}
 #: The name a post chain undoes the step by; written on the ops konfai's predictor can undo.

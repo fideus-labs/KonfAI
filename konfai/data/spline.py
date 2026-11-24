@@ -142,13 +142,6 @@ def _zoom_coordinates(n_in: int, n_out: int, corners: bool, shift: float) -> np.
     return cc + shift
 
 
-def zoom(array: np.ndarray, shape: tuple[int, ...], order: int, corners: bool = False) -> np.ndarray:
-    """``scipy.ndimage.zoom(array, ..., order=order, mode='nearest', grid_mode=not corners)`` onto ``shape``, in
-    float64. Order 3 runs scipy's prefilter, orders 0 and 1 read the voxels as they are."""
-    whole = tuple(slice(0, int(extent)) for extent in shape)
-    return zoom_window(array, [0] * array.ndim, list(array.shape), shape, whole, order, corners)
-
-
 def zoom_window(
     window: np.ndarray,
     starts: list[int],
@@ -158,7 +151,8 @@ def zoom_window(
     order: int,
     corners: bool = False,
 ) -> np.ndarray:
-    """``region`` of :func:`zoom` of the ``extents``-long volume, read off ``window``, its part from ``starts`` on
+    """``region`` of ``scipy.ndimage.zoom(volume, ..., order=order, mode='nearest', grid_mode=not corners)`` of the
+    ``extents``-long volume, in float64, read off ``window``, its part from ``starts`` on
     (:func:`window_of`). At order 3 the window is prefiltered as scipy prefilters the volume: padded by 12 of its edge
     voxels where it meets the volume's edges (``spline_filter(np.pad(volume, 12, 'edge'), 3, mode='nearest')``)."""
     if order not in (0, 1, 3):
@@ -191,7 +185,7 @@ def window_of(
     axis: int | None = None,
 ) -> list[slice]:
     """The part of a volume of ``extents`` that ``region`` of its resampling onto ``shape`` reads: the taps of the
-    zoom and, at order 3, ``HALO`` voxels past them; with ``axis`` resampled apart (:func:`resample_faces`), the
+    zoom and, at order 3, ``HALO`` voxels past them; with ``axis`` resampled apart (:func:`resample_region`), the
     slices picked along it, each whole."""
     window = []
     for dim, (n, m, part) in enumerate(zip(extents, shape, region, strict=True)):
@@ -226,15 +220,6 @@ def zoom_region(
     return xyz.transpose(flip)
 
 
-def resize(array: np.ndarray, shape: tuple[int, ...], order: int) -> np.ndarray:
-    """``skimage.transform.resize(array, shape, order, mode='edge', anti_aliasing=False)`` on a float64 array:
-    the extents aligned, then clipped to the input's range."""
-    out = zoom(array, shape, order)
-    if order > 0:
-        np.clip(out, *value_range(array), out=out)
-    return out
-
-
 def value_range(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The range scikit-image clips a resize to: the input's least and greatest values, NaN left out."""
     low, high = (np.nanmin, np.nanmax) if np.isnan(np.min(array)) else (np.min, np.max)
@@ -251,25 +236,6 @@ def separate_axis(current_zyx: list[float], new_zyx: list[float]) -> int | None:
     return None
 
 
-def resample_faces(data: np.ndarray, shape: tuple[int, ...], order: int, axis: int | None) -> np.ndarray:
-    """The faces grid's resampling of an image: ``data`` is ``(C, *spatial)``, each channel resized by
-    scikit-image's ``resize`` at ``order``, the result float64 (the caller casts it to ``data.dtype``). With
-    ``axis``, every slice across it is resized alone, then that axis is picked by nearest neighbour."""
-    if tuple(data.shape[1:]) == tuple(shape):
-        return data
-    data = data.astype(np.float64, copy=False)
-    whole = tuple(slice(0, int(extent)) for extent in shape)
-    extents = list(data.shape[1:])
-    return np.stack(
-        [
-            resample_region(
-                channel, [0] * channel.ndim, extents, shape, whole, order, axis=axis, bounds=value_range(channel)
-            )
-            for channel in data
-        ]
-    )
-
-
 def resample_region(
     window: np.ndarray,
     starts: list[int],
@@ -281,7 +247,7 @@ def resample_region(
     axis: int | None = None,
     bounds: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """``region`` of one channel resampled onto ``shape``, read off ``window`` (:func:`window_of`): :func:`zoom`,
+    """``region`` of one channel resampled onto ``shape``, read off ``window`` (:func:`window_of`): :func:`zoom_window`,
     clipped to ``bounds`` (the whole channel's range, where scikit-image's ``resize`` clips). With ``axis`` (the
     faces grid), each slice the region picks across it is resized whole in plane, clipped to its own range."""
     if axis is None:

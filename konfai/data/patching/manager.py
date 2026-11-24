@@ -85,7 +85,7 @@ from konfai.data.transform import (
 from konfai.data.transform.base import MEASURING_STATISTICS
 from konfai.data.transform.resample import _host_array
 from konfai.utils.dataset import Attribute, Dataset, decompressed
-from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_extrema, needs_moments
+from konfai.utils.dataset.statistics import data_statistics, needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
 from konfai.utils.utils import env_flag
@@ -696,17 +696,13 @@ class DatasetManager:
                 # windows of the stages before; one the budget cannot hold is refused by name.
                 granularity = self._entry_granularity(dataset, group, entry)
                 tile = self._sizer(landing, channels, plans, prefix, granularity).sweep_tile(0)
-                state = None
-                for target in _sweep_targets(landing, tile):
-                    spans = self._region_spans(source, target)
-                    tensor, read = self._read_streamed_region(source, spans)
-                    tensor, _, _ = self._apply_streamed_region(source, spans, tensor, read, Attribute(attribute), None)
-                    values = _host_array(tensor)
-                    # The channels the stage declares, as the store's statistics are read for it.
-                    state = _update_running_extrema(
-                        state, values if locality.stat_channels is None else values[locality.stat_channels]
-                    )
-                stats, held = _finalize_running_statistics(state), Attribute()
+                regions = (
+                    _host_array(self._replay_streamed_region(source, target, Attribute(attribute), None)[0])
+                    for target in _sweep_targets(landing, tile)
+                )
+                # The channels the stage declares, as the store's statistics are read for it.
+                keys = [_STREAM_STATS[key] for key in locality.stat_keys]
+                stats, held = data_statistics(regions, locality.stat_channels, keys), Attribute()
                 for key in sorted(locality.stat_keys):
                     held[key] = np.asarray(stats[_STREAM_STATS[key]], dtype=np.float64)
                 self._measured_statistics[(a, id(stage))] = {key: held[key] for key in sorted(locality.stat_keys)}
@@ -732,15 +728,17 @@ class DatasetManager:
         if not missing:
             return ()
         seed = Attribute()
-        # A percentile, numpy's to the value, or the stage's own statistic, by bounded passes over the stored volume.
+        # A percentile, numpy's to the value, or the stage's own statistic, by bounded passes over the stored volume:
+        # of the channels the stage declares, as the moments below.
+        channels = tuple(loc.stat_channels) if loc.stat_channels is not None else None
         for key in [key for key in missing if key.startswith(("Percentile:", "Statistic:"))]:
-            memo = (source_dataset, source_group, source_entry, key)
+            memo = (source_dataset, source_group, source_entry, key, channels)
             if memo not in self._disk_statistics:
                 if key.startswith("Statistic:"):
                     value = cast(Callable, loc.measure)(source_dataset, source_group, source_entry)
                 else:
                     quantile = float(key.partition(":")[2]) / 100
-                    value = source_dataset.read_data_quantile(source_group, source_entry, quantile)
+                    value = source_dataset.read_data_quantile(source_group, source_entry, quantile, loc.stat_channels)
                 self._disk_statistics[memo] = {key: value}
             seed[key] = float(self._disk_statistics[memo][key])
         moments = [key for key in missing if key not in seed]

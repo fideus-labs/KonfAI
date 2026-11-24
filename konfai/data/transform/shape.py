@@ -167,11 +167,18 @@ def _pad_region(
 ) -> torch.Tensor:
     """The region ``context.target`` of a padded volume, from the block ``tensor`` its input holds at
     ``context.source``: input index ``i`` lands at ``i + before`` on each axis, and ``mode`` fills what the
-    block does not reach."""
+    block does not reach. Along an axis the region lies wholly past the block on, a fill that the distance to the
+    block does not change (``constant``, ``replicate``) is padded from the block's nearest plane set against the
+    region, never across the gap between them."""
     pads: list[tuple[int, int]] = []
     crops: list[slice] = []
-    for target, source, shift in zip(context.target, context.source, before, strict=True):
+    for axis, (target, source, shift) in enumerate(zip(context.target, context.source, before, strict=True), 1):
         start, stop = source.start + shift, source.stop + shift  # where the block sits in the output
+        if mode in ("constant", "replicate") and (target.stop <= start or target.start >= stop):
+            ahead = target.stop <= start
+            tensor = tensor.narrow(axis, 0 if ahead else tensor.shape[axis] - 1, 1)
+            start = target.stop if ahead else target.start - 1
+            stop = start + 1
         low, high = max(0, start - target.start), max(0, target.stop - stop)
         pads.append((low, high))
         crops.append(slice(target.start - (start - low), target.stop - (start - low)))
@@ -833,8 +840,13 @@ class Flip(TransformInverse):
 
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
-
-        self.dims = [int(d) + 1 for d in str(dims).split("|")]
+        try:
+            self.dims = [int(d) + 1 for d in str(dims).split("|")]
+        except ValueError:
+            raise TransformError(
+                f"'Flip' cannot read dims={dims!r}.",
+                "dims names the spatial axes to mirror as a '|'-separated string: dims: \"0|2\" (not a list).",
+            ) from None
 
     def _remap(self, rank: int) -> AxisRemap:
         # The identity permutation, mirrored on the flipped axes.

@@ -30,7 +30,7 @@ from konfai.data.transform import Canonical, LocalityKind, Resample
 from konfai.data.transform.resample import _RuleGrid
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
-from oracle_support import assert_same_as_scipy, geometry
+from oracle_support import assert_same_as_scipy, geometry, resample_faces, resize, zoom
 
 _RNG = np.random.default_rng(7)
 _VOLUME = (_RNG.normal(size=(13, 17, 11)) * 100).astype(np.float64)
@@ -46,21 +46,20 @@ def _ndi():
 def test_zoom_is_scipys_to_the_bit(order: int, corners: bool, shape: tuple[int, ...]) -> None:
     ndi = _ndi()
     want = ndi.zoom(_VOLUME, np.divide(shape, _VOLUME.shape), order=order, mode="nearest", grid_mode=not corners)
-    assert_same_as_scipy(spline.zoom(_VOLUME, shape, order, corners), want)
+    assert_same_as_scipy(zoom(_VOLUME, shape, order, corners), want)
 
 
 @pytest.mark.parametrize("shape", [(20, 9, 11), (7, 30, 5)])
 def test_resize_is_skimages_to_the_bit(shape: tuple[int, ...]) -> None:
-    resize = pytest.importorskip("skimage.transform").resize
-    want = resize(_VOLUME, shape, 3, mode="edge", anti_aliasing=False)
-    assert_same_as_scipy(spline.resize(_VOLUME, shape, 3), want)
+    want = pytest.importorskip("skimage.transform").resize(_VOLUME, shape, 3, mode="edge", anti_aliasing=False)
+    assert_same_as_scipy(resize(_VOLUME, shape, 3), want)
 
 
 @pytest.mark.parametrize(("shape", "order"), [((30, 50, 20), 3), ((30, 50, 20), 1)])
 def test_resample_faces_resizes_each_channel_as_scikit_image(shape: tuple[int, ...], order: int) -> None:
     data = (_RNG.normal(size=(2, 12, 40, 33)) * 300).astype(np.float32)
-    want = np.stack([spline.resize(channel.astype(np.float64), shape, order) for channel in data])
-    np.testing.assert_array_equal(spline.resample_faces(data, shape, order, None), want)
+    want = np.stack([resize(channel.astype(np.float64), shape, order) for channel in data])
+    np.testing.assert_array_equal(resample_faces(data, shape, order, None), want)
 
 
 @pytest.mark.parametrize(("shape", "axis"), [((40, 60, 66), 0), ((12, 70, 20), 2)])
@@ -68,13 +67,13 @@ def test_resample_faces_resizes_slices_alone_then_picks_the_axis_apart_by_neares
     shape: tuple[int, ...], axis: int
 ) -> None:
     data = (_RNG.normal(size=(1, 12, 40, 33)) * 300).astype(np.float32)
-    out = spline.resample_faces(data, shape, 3, axis)
+    out = resample_faces(data, shape, 3, axis)
     source = np.moveaxis(data[0].astype(np.float64), axis, 0)
     plane = tuple(extent for a, extent in enumerate(shape) if a != axis)
     for k, picked in enumerate(np.moveaxis(out[0], axis, 0)):
         # the output slice k reads the input slice nearest its centre, n / m (k + 1/2) - 1/2, rounded half up
         j = min(int(np.floor(source.shape[0] / shape[axis] * (k + 0.5) - 0.5 + 0.5)), source.shape[0] - 1)
-        np.testing.assert_array_equal(picked, spline.resize(source[max(j, 0)], plane, 3))
+        np.testing.assert_array_equal(picked, resize(source[max(j, 0)], plane, 3))
 
 
 @pytest.mark.parametrize(
@@ -113,7 +112,7 @@ def test_a_resample_on_the_faces_grid_counts_its_voxels_and_comes_back(
     case, interpolation: str, back: str | None
 ) -> None:
     """``grid: faces`` counts ``round(s / s' * n)`` voxels per axis, resamples them through
-    ``spline.resample_faces`` (the coarse axis apart where it is over the threshold), and its inverse brings the
+    the faces grid's ``resample_region`` (the coarse axis apart where it is over the threshold), and its inverse brings the
     case back onto its own grid."""
     spacing, shape = case
     plans = [1.0, 1.0, 3.0]
@@ -126,7 +125,7 @@ def test_a_resample_on_the_faces_grid_counts_its_voxels_and_comes_back(
     assert tuple(out.shape[1:]) == counted
     axis = spline.separate_axis(list(spacing[::-1]), list(plans[::-1]))
     if interpolation == "bspline" or axis is not None:
-        np.testing.assert_array_equal(out.numpy(), spline.resample_faces(data, counted, order, axis).astype(np.float32))
+        np.testing.assert_array_equal(out.numpy(), resample_faces(data, counted, order, axis).astype(np.float32))
     restored = stage.inverse("case", out.clone(), attribute)
     assert tuple(restored.shape[1:]) == shape
 

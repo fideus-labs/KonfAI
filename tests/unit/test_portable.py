@@ -286,7 +286,7 @@ def test_a_write_naming_no_dataset_is_refused() -> None:
         ({"spacing": [1.5, 1.5, 1.5], "transforms": {"T": False}}, "transforms"),
         ({"spacing": [1.5, 1.5, 1.5], "align": "center"}, "center"),
         ({}, "neither"),
-        ({"spacing": [1.5, 1.5, 1.5], "shape": [64, 64, 64]}, "both"),
+        ({"spacing": [1.5, 1.5, 1.5], "shape": [64, 64, 64]}, "spacing and shape"),
         ({"spacing": [1.5, 1.5, 1.5], "interpolation": "lanczos"}, "lanczos"),
     ],
 )
@@ -2122,6 +2122,52 @@ def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
     assert value.shape == () and value == ScaledRoughness(0.9).finish(torch.from_numpy(total)).item()
 
 
+def test_an_output_chain_folds_an_apps_own_class_through_a_plain_fold_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fold_out that says nothing of the dtype it reads folds a class of the app's own as konfai hands a fold its
+    # input, in float32.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # a class folds where its graph exports and checks
+    from konfai.portable import compile_pipeline
+
+    (tmp_path / "PlainFold.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Twice(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    folded: list[int] = []
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
+        folded.append(len(folds))
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": "float32"}
+
+    steps, _, _ = compile_pipeline({"PlainFold:Twice": {}}, fold_out=fold_out, extension=True)
+    assert folded == [1] and [step["op"] for step in steps] == ["onnx"]
+
+
+def test_a_case_statistic_of_a_group_of_several_channels_is_refused_before_its_graphs_are_traced() -> None:
+    # Its partial graph is traced on one channel, a stored scalar volume, and would refuse a block of two at run time.
+    from konfai.portable import _probe_after, compile_pipeline
+
+    traced: list[dict[str, Any]] = []
+
+    def statistic(params: dict[str, Any]) -> dict[str, Any]:
+        traced.append(params)
+        return {"op": "case_statistic", "halo": 1, "partial": "p.onnx", "finish": "f.onnx"}
+
+    chain = {"CaseStatistic": {"statistic": "oracle_support:Roughness"}}
+    with pytest.raises(ConfigError, match="2 channels"):
+        compile_pipeline(chain, case_statistic=statistic, probe=_probe_after(3, lambda: 2))
+    assert not traced
+    steps, _, _ = compile_pipeline(chain, case_statistic=statistic, probe=_probe_after(3, lambda: 1))
+    assert [step["op"] for step in steps] == ["case_statistic"]
+
+
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Only a parameter-free model compiles without checkpoints: another would export its random weights.
     from konfai.portable import compile_prediction
@@ -2775,15 +2821,125 @@ def test_a_normalize_over_some_channels_is_refused_by_name() -> None:
     assert steps == [{"op": "normalize", "min_value": -1.0, "max_value": 1.0}]
 
 
+#: What each op compiles from at the least: the arguments its konfai class cannot do without.
+_LEAST = {
+    "TensorCast": {"dtype": "float32"},
+    "Resample": {"spacing": [1.0, 1.0, 1.0]},
+    "Padding": {"padding": [1, 1, 1, 1, 1, 1]},
+    "Flip": {"dims": "0"},
+    "Permute": {"dims": "1|0|2"},
+    "SelectLabel": {"labels": ["(1,2)"]},
+    "ThresholdLabels": {"labels": [1]},
+    "OneHot": {"num_classes": 2},
+    "HistogramMatching": {"reference_group": "REF"},
+    "Percentage": {"baseline": 1.0},
+    "Mask": {"path": "BODY"},
+    "Brightness": {"b_std": 0.1},
+}
+
+
+@pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
+def test_every_op_refuses_a_key_its_konfai_class_does_not_take(stage: str) -> None:
+    # konfai builds a stage from the keys its config gives and refuses one its class does not take: the compiler
+    # refuses it too, whatever its op reads, rather than compile a program that runs without it.
+    least = _LEAST.get(stage, {})
+    assert _CHAIN_OPS[stage](dict(least))["op"]
+    with pytest.raises(TransformError, match="no_such_key"):
+        _CHAIN_OPS[stage]({**least, "no_such_key": 1})
+
+
+def test_a_chain_draw_s_prob_is_refused_as_konfai_s_build_refuses_it(tmp_path: Path) -> None:
+    # konfai binds a draw of a chain by its constructor keys alone (a test-time draw's prob is read apart, through
+    # Prob): its build refuses a prob nothing reads, and the op refuses it too, the program never drawing without it.
+    from konfai.portable import compile_transform
+
+    config = _reducing_config(tmp_path, "Expand: {nb: 2, seed: 3}\nBrightness: {b_std: 5.0, prob: 0.5}\n")
+    with pytest.raises(ConfigError, match=r"Brightness\.prob"):
+        compile_transform(config, tmp_path / "Transforms")
+    with pytest.raises(TransformError, match="prob"):
+        _CHAIN_OPS["Brightness"]({"b_std": 5.0, "prob": 0.5})
+
+
+def test_a_chain_konfai_refuses_to_build_compiles_to_no_program() -> None:
+    # SynthSeg-KonfAI at 728e5cb: a Crop that crops only, then one that pads only, and a Resample on a grid konfai has
+    # no rule for. konfai's run refuses each as it builds it, and so does the compile, in both chains it compiles.
+    from konfai.data.transform import Crop, Resample
+    from konfai.portable import compile_pipeline
+
+    crop = {"shape": [0, 0, 0], "only": "crop", "fill": 0.0, "inverse": True}
+    resample = {"spacing": [1.0, 1.0, 1.0], "grid": "first_face", "interpolation": "linear"}
+    with pytest.raises(TypeError, match="only"):
+        Crop(**crop)
+    with pytest.raises(TransformError, match="first_face"):
+        Resample(**resample)
+    chains = [
+        {"Crop": crop, "Clip": {"min_value": "percentile:0.5", "max_value": "percentile:99.5"}, "Crop#2": crop},
+        {"Resample": resample},
+    ]
+    for chain in chains:
+        with pytest.raises(TransformError, match=r"only|first_face"):
+            compile_pipeline(chain, fold=True, invertible=True)
+        with pytest.raises(TransformError, match=r"only|first_face"):
+            steps({**chain, "Write": {"dataset": "./Out:mha"}}, "CT")
+
+
+@pytest.mark.parametrize(
+    ("chain", "refused"),
+    [
+        # Crop.transform_shape: a Crop behind another of the chain would read the first one's box.
+        (
+            {
+                "Crop": {"shape": [4, 4, 4]},
+                "Clip": {"min_value": 0.0, "max_value": 1.0},
+                "Crop#2": {"shape": [6, 6, 6]},
+            },
+            "earlier 'Crop'",
+        ),
+        # Crop.transform_shape: a source group no dataset holds, the case's to say (a needed app's output, staged
+        # beside it at run time): no rule of the chain's.
+        ({"Crop": {"source": "BODY"}}, None),
+    ],
+    ids=["a-second-crop", "a-crop-source-staged-at-run-time"],
+)
+def test_a_group_chain_konfai_plans_to_no_case_compiles_to_no_program(chain: dict, refused: str | None) -> None:
+    # konfai binds a group's chain stage by stage, each with the stages before it, and plans it before a case runs:
+    # each rule of that planning, refused at compile with konfai's own message where konfai refuses every case.
+    from konfai.portable import transform_manifest
+
+    config = {"Predictor": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": chain}}}}}}}
+    compiles = [
+        lambda: transform_manifest(config, "Predictor"),
+        lambda: steps({**chain, "Write": {"dataset": "./Out:mha"}}, "CT"),
+    ]
+    for compile_it in compiles:
+        if refused is None:
+            compile_it()
+            continue
+        with pytest.raises(TransformError, match=refused):
+            compile_it()
+
+
 def test_a_keep_largest_component_carries_its_labels_and_connectivity_and_refuses_another() -> None:
     from konfai.portable import compile_pipeline
 
-    with pytest.raises(KonfAIError, match="connectivity 18"):
+    with pytest.raises(KonfAIError, match="connectivity=18"):
         compile_pipeline({"KeepLargestComponent": {"connectivity": 18}}, fold=False)
     steps, _folds, _inverted = compile_pipeline(
         {"KeepLargestComponent": {"per_label": True, "connectivity": 26}}, fold=False
     )
     assert steps == [{"op": "keep_largest_component", "per_label": True, "connectivity": 26}]
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+def test_a_per_axis_gradient_hands_on_a_channel_per_spatial_axis_of_the_case(rank: int) -> None:
+    # The channels the compiler counts after the step are konfai's own Gradient's, in 2-D as in 3-D.
+    import torch
+    from konfai.data.transform import Gradient
+    from konfai.portable import _channels_after
+    from konfai.utils.dataset import Attribute
+
+    handed = Gradient(per_dim=True)("case", torch.rand(2, *[5] * rank), Attribute())
+    assert _channels_after({"op": "gradient", "per_dim": True}, 2, rank) == handed.shape[0]
 
 
 def test_an_in_plane_quarter_turn_turns_about_the_slice_axis_alone() -> None:
