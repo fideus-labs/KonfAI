@@ -236,8 +236,9 @@ class Last(Fold):
         (b"\0asm, and no module", "is no WebAssembly module"),
         (DOUBLE.replace("(i32.const 2))", "(i32.const 1))", 1), "interface 1"),
         (DOUBLE.replace("(module", '(module (import "konfai" "missing" (func))', 1), "does not start"),
+        (DOUBLE.replace("(result i32) (i32.const 2))", "(result f32) (f32.const 2.5))", 1), "interface none"),
     ],
-    ids=["no module", "another interface", "an import nothing gives"],
+    ids=["no module", "another interface", "an import nothing gives", "an interface no integer names"],
 )
 def test_the_module_is_checked_when_the_configs_name_no_class_of_the_app(tmp_path: Path, module, refused) -> None:
     wasmtime = pytest.importorskip("wasmtime")

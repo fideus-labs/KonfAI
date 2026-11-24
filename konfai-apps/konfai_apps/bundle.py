@@ -317,8 +317,7 @@ def assemble_bundle(
             # A link into the bundle, by its absolute path or out of it and back, reads the update's file there, as the
             # bundle published will.
             for link in [path for path in update.rglob("*") if path.is_symlink()]:
-                placed = bundle.absolute() / link.relative_to(update)
-                target = Path(os.path.normpath(placed.parent / os.readlink(link)))
+                target = Path(os.path.realpath(bundle / link.relative_to(update)))
                 for spelled in {bundle.absolute(), bundle.resolve()}:
                     if target.is_relative_to(spelled):
                         link.unlink()
@@ -670,7 +669,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             # The app's modules are the update's: the process's import path, read from where it runs, but for the
             # bundle; bytecode neither written into the update nor read from it, but under a folder of its own.
             path = [os.path.abspath(entry) for entry in sys.path if entry]
-            path = [entry for entry in path if os.path.realpath(entry) != os.path.realpath(out)]
+            path = [entry for entry in path if not Path(os.path.realpath(entry)).is_relative_to(os.path.realpath(out))]
             env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode")}
             env["PYTHONPATH"] = os.pathsep.join([str(update.resolve()), *path])
             code = "import json, sys; from konfai_apps.bundle import _finish_update; _finish_update(json.loads(sys.argv[1]))"

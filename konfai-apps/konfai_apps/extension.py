@@ -62,7 +62,11 @@ class _Opened:
             self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
         except (wasmtime.Trap, wasmtime.WasmtimeError) as trap:  # its start traps, or it imports what nothing gives
             raise AppMetadataError(f"The extension {extension.name} does not start: {trap}") from trap
-        built = self.call("ext_abi") if self.exports.get("ext_abi") is not None else None
+        # The interface is an `() -> i32` it answers: no other function's value read as one.
+        abi = self.exports.get("ext_abi")
+        signature = abi.type(self.store) if isinstance(abi, wasmtime.Func) else None
+        named = signature is not None and not signature.params and signature.results == [wasmtime.ValType.i32()]
+        built = self.call("ext_abi") if named else None
         if built != _ABI:
             raise AppMetadataError(
                 f"The extension {extension.name} is built against interface {built or 'none'} of konfai-edge-ext,"

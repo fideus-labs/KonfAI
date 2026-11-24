@@ -1426,6 +1426,15 @@ def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path, spelled):
 
     with pytest.raises(AppMetadataError, match="'Alias:Scale' does not transform a volume"):
         _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    # A link reaching out of the bundle through another link reads what it read.
+    (tmp_path / "out" / "shared" / "sub").mkdir(parents=True)
+    (tmp_path / "out" / "shared" / "icon.png").write_bytes(b"shared")
+    (bundle / "icon.png").write_bytes(b"the bundle's")
+    (bundle / "pivot").symlink_to("../shared/sub")
+    (bundle / "Alias.png").symlink_to("pivot/../icon.png")
+    (root / "Model.py").write_text(OWN)
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / "Alias.png").read_bytes() == b"shared"
 
 
 def test_a_copy_an_earlier_update_left_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
@@ -1554,6 +1563,26 @@ def test_an_update_is_checked_without_a_module_the_process_imported_from_the_bun
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
         _cli(root, extension=str(root / "own.wasm"))
     assert sys.path[0] == str(bundle)
+
+
+def test_an_update_is_checked_without_a_folder_of_the_bundle_on_the_import_path(tmp_path, monkeypatch):
+    # The process imports from a folder inside the bundle, which the update drops: the check does not read it.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "lib").mkdir()
+    (root / "lib" / "libscales.py").write_text(OWN)
+    (root / "Model.py").write_text("from libscales import Scale\n")
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"), support_file=["lib=lib"], support_root=str(root))
+    monkeypatch.syspath_prepend(str(bundle / "lib"))
+    for module in ("Model", "libscales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
 
 
 def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):
