@@ -212,12 +212,12 @@ def _group_steps(
     extension: bool = False,
     held: tuple[int, int] = (1, 3),
 ) -> list[dict[str, Any]]:
-    """A ``groups_dest`` chain as the steps the runtime runs on the case it reads, which ``held`` holds (its channels
-    and spatial rank): a class of the app's own is probed on what the steps before it make of it. the chain ops, a ``statistics``
+    """A ``groups_dest`` chain as the steps the runtime runs on the case it reads: the chain ops, a ``statistics``
     where konfai's ``Statistics`` records the volume's on the case, a model step for a ``KonfAIInference``, the
     nested app's model exported once however many groups run it, and a ``save`` where a ``Save`` writes what
     reaches it (konfai reads that entry back on a later run in place of the stages before it; the runtime runs
-    them again)."""
+    them again). A class of the app's own is probed on what the steps before it make of ``held``, the case's
+    channels and spatial rank."""
     steps: list[dict[str, Any]] = []
     moved = None  # the first stage that may move the grid or the values a Crop finds its box in
     for name, params in chain_items(chain):
