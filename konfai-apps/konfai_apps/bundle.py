@@ -320,8 +320,8 @@ def assemble_bundle(
 
 
 def _under(module: Any, folder: Path) -> bool:
-    """Whether ``module`` was imported from a file below ``folder``."""
-    return Path(getattr(module, "__file__", None) or "/").is_relative_to(folder)
+    """Whether ``module`` was imported from a file below ``folder``, however either is spelled."""
+    return Path(getattr(module, "__file__", None) or "/").resolve().is_relative_to(folder.resolve())
 
 
 def _carried(bundle: Path, source: str, target: str) -> None:
