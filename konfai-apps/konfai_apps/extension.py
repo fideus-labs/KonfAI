@@ -60,7 +60,7 @@ class _Opened:
         self.name = name
         try:
             self.exports: Any = linker.instantiate(self.store, module).exports(self.store)
-        except wasmtime.Trap as trap:
+        except (wasmtime.Trap, wasmtime.WasmtimeError) as trap:  # its start traps, or it imports what nothing gives
             raise AppMetadataError(f"The extension {extension.name} does not start: {trap}") from trap
         built = self.call("ext_abi") if self.exports.get("ext_abi") is not None else None
         if built != _ABI:

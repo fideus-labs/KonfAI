@@ -1344,6 +1344,61 @@ def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path):
     assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
 
 
+def test_an_update_whose_export_stops_short_is_refused(tmp_path):
+    # The model's module ends the interpreter cleanly before the export: no graph, so no update.
+    root, config, exporting = _exporting(tmp_path)
+    (root / "Exits.py").write_text("import sys\n\nsys.exit(0)\n")
+    config["Predictor"]["Model"]["classpath"] = "Exits:TinySegNet"
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    exporting["support_file"].append("Exits.py=Exits.py")
+
+    with pytest.raises(AppMetadataError, match="did not finish"):
+        _cli(root, **exporting)
+    assert not (tmp_path / "out" / "Seg").exists()
+
+
+def test_an_update_is_checked_with_a_module_found_on_a_relative_import_path(tmp_path, monkeypatch):
+    # The process finds a module through a path relative to where it runs: so does the check, which runs elsewhere.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (tmp_path / "deps").mkdir()
+    (tmp_path / "deps" / "relscales.py").write_text(OWN)
+    (root / "Model.py").write_text("from relscales import Scale\n")
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend("deps")
+    for module in ("Model", "relscales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+
+    assert (_cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm")) / "own.wasm").is_file()
+
+
+def test_bytecode_the_bundle_holds_is_none_the_check_reads(tmp_path):
+    # An unchecked bytecode of the old Model.py beside it in the bundle: the check reads the new source, which
+    # scales by 3, and refuses.
+    import py_compile
+
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    cache = bundle / "__pycache__" / f"Model.{sys.implementation.cache_tag}.pyc"
+    py_compile.compile(
+        str(bundle / "Model.py"), cfile=str(cache), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH
+    )
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+
+
 def test_an_extension_named_as_a_file_the_export_writes_is_refused(tmp_path):
     # The export would write its manifest over the extension, in any case: refused before anything is written.
     root = _support_workspace(tmp_path)
@@ -1354,9 +1409,10 @@ def test_an_extension_named_as_a_file_the_export_writes_is_refused(tmp_path):
     assert not (tmp_path / "out" / "Seg").exists()
 
 
-def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path):
-    # Alias.py links to the bundle's Model.py by its absolute path: the check reads the Model.py the update brings,
-    # which scales by 3, as the published bundle will.
+@pytest.mark.parametrize("spelled", ["absolute", "relative"])
+def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path, spelled):
+    # Alias.py links to the bundle's Model.py, by its absolute path or out of the bundle and back: the check reads
+    # the Model.py the update brings, which scales by 3, as the published bundle will.
     from test_extension import DOUBLE, OWN
 
     wasmtime = pytest.importorskip("wasmtime")
@@ -1365,7 +1421,7 @@ def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path):
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Alias:Scale: {}\n")
     bundle = _cli(root, model_py=str(root / "Model.py"))
-    (bundle / "Alias.py").symlink_to((bundle / "Model.py").resolve())
+    (bundle / "Alias.py").symlink_to((bundle / "Model.py").resolve() if spelled == "absolute" else "../Seg/Model.py")
     (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
 
     with pytest.raises(AppMetadataError, match="'Alias:Scale' does not transform a volume"):

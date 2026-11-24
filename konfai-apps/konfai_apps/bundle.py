@@ -314,11 +314,13 @@ def assemble_bundle(
         # every file the export reads beside the staged ones, none of those the update drops.
         if bundle.exists():
             shutil.copytree(bundle, update, symlinks=True, copy_function=lambda src, dst: _carried(bundle, src, dst))
-            # A link into the bundle by its absolute path reads the update's file there, as the bundle published will.
+            # A link into the bundle, by its absolute path or out of it and back, reads the update's file there, as the
+            # bundle published will.
             for link in [path for path in update.rglob("*") if path.is_symlink()]:
-                target = Path(os.readlink(link))
+                placed = bundle.absolute() / link.relative_to(update)
+                target = Path(os.path.normpath(placed.parent / os.readlink(link)))
                 for spelled in {bundle.absolute(), bundle.resolve()}:
-                    if target.is_absolute() and target.is_relative_to(spelled):
+                    if target.is_relative_to(spelled):
                         link.unlink()
                         link.symlink_to(os.path.relpath(update / target.relative_to(spelled), link.parent))
                         break
@@ -665,9 +667,11 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             told = Path(scratch) / "report.json"
             spec["report"] = str(told)
-            # The app's modules are the update's: the process's import path, but for the bundle, and no bytecode.
-            path = [entry for entry in sys.path if entry and os.path.realpath(entry) != os.path.realpath(out)]
-            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+            # The app's modules are the update's: the process's import path, read from where it runs, but for the
+            # bundle; bytecode neither written into the update nor read from it, but under a folder of its own.
+            path = [os.path.abspath(entry) for entry in sys.path if entry]
+            path = [entry for entry in path if os.path.realpath(entry) != os.path.realpath(out)]
+            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode")}
             env["PYTHONPATH"] = os.pathsep.join([str(update.resolve()), *path])
             code = "import json, sys; from konfai_apps.bundle import _finish_update; _finish_update(json.loads(sys.argv[1]))"
             done = subprocess.run([sys.executable, "-c", code, json.dumps(spec)], cwd=update, env=env, check=False)  # nosec B603
@@ -675,6 +679,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
                 report.update(json.loads(told.read_text()))
         if done.returncode:
             raise AppMetadataError(*report.get("refused", ["The update's export or check failed, as told above."]))
+        # Each stage asked for told what it did: one that ends the interpreter early is no export, no check.
+        if (spec["onnx"] and "artifact" not in report) or (spec["extension"] and "checked" not in report):
+            raise AppMetadataError("The update's export or check did not finish: the bundle is as it was.")
 
     bundle = assemble_bundle(
         name=args["name"],
