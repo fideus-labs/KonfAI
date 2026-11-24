@@ -2343,6 +2343,7 @@ packages:
   - onnxruntime ; extra == 'dev'
   - onnxscript>=0.5 ; extra == 'dev'
   - onnx-ir>=0.1.8 ; extra == 'dev'
+  - torch>=2.7 ; extra == 'dev'
   - jsonschema ; extra == 'dev'
   - nvidia-ml-py ; extra == 'dev'
   - tensorboard ; extra == 'dev'

@@ -107,6 +107,7 @@ dev = [
   "onnxruntime",
   "onnxscript>=0.5",
   "onnx-ir>=0.1.8",
+  "torch>=2.7",
   "jsonschema",
   "nvidia-ml-py",
   "tensorboard",
