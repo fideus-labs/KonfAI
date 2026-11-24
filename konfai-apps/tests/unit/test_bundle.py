@@ -1251,7 +1251,7 @@ def test_a_bundle_whose_previous_copy_stays_is_still_updated(tmp_path, monkeypat
     remove = bundle_module.shutil.rmtree
 
     def kept(path, *args, **kwargs):
-        if ".previous-" not in str(path):
+        if not str(path).endswith(".Seg.previous"):
             return remove(path, *args, **kwargs)
         if not kwargs.get("ignore_errors"):
             raise OSError("kept")
@@ -1261,7 +1261,7 @@ def test_a_bundle_whose_previous_copy_stays_is_still_updated(tmp_path, monkeypat
     assert (bundle / "Prediction.yml").read_text().endswith("# second\n")
     # The next update removes it first.
     monkeypatch.setattr(bundle_module.shutil, "rmtree", remove)
-    assert list(bundle.parent.glob(".Seg.previous-*"))
+    assert (bundle.parent / ".Seg.previous").is_dir()
     _cli(root, extension=str(root / "own.wasm"))
     assert not list(bundle.parent.glob(".Seg.*"))
 
@@ -1288,18 +1288,37 @@ def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path, mo
 
 
 def test_a_bundle_left_only_as_its_previous_copy_is_put_back_first(tmp_path):
-    # Both renames refused, the bundle stayed only as its copy beside it: the next packaging puts it back, user
-    # files and all, before it clears its scratch folders.
-    import os
-
+    # Both renames refused, the bundle stayed only as its copy beside it: the next packaging, in this process or
+    # another, puts it back, user files and all, before it clears its scratch folders.
     root = _support_workspace(tmp_path)
     bundle = _cli(root)
     (bundle / "notes.txt").write_text("mine\n")
-    bundle.rename(bundle.with_name(f".Seg.previous-{os.getpid()}"))
+    bundle.rename(bundle.with_name(".Seg.previous"))
 
     _cli(root)
     assert (bundle / "notes.txt").read_text() == "mine\n"
     assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_an_export_whose_model_needs_what_is_missing_fails_the_update(tmp_path, monkeypatch):
+    # The extension's check alone stands down without wasmtime: an export that fails on a missing module fails.
+    import konfai.export as exporter
+    import konfai.metric.measure  # noqa: F401  # the check imports it, which builds networks: before they are stubbed
+
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(b"\0asm")
+    config = {"Predictor": {"Model": {"classpath": "Probe"}, "outputs_dataset": {"Head": {"OutputDataset": {}}}}}
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    _stub_export(monkeypatch)
+
+    def missing(*args, **kwargs):
+        raise ModuleNotFoundError("No module named 'wasmtime'", name="wasmtime")
+
+    monkeypatch.setattr(exporter, "export_to_onnx", missing)
+    onnx = {"onnx": True, "patch_size": [4, 4], "in_channels": 1, "output_module": "Head"}
+    with pytest.raises(ModuleNotFoundError):
+        _cli(root, extension=str(root / "own.wasm"), **onnx)
+    assert not (tmp_path / "out" / "Seg").exists()
 
 
 def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):

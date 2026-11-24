@@ -283,7 +283,7 @@ def assemble_bundle(
     bundle = Path(out_dir) / name
     staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
     update = bundle.with_name(f".{name}.update-{os.getpid()}")
-    previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
+    previous = bundle.with_name(f".{name}.previous")  # no process's own: the next one finds it
     if previous.exists() and not bundle.exists():
         previous.rename(bundle)  # an earlier update left the bundle only there
     for scratch in (staging, update, previous):
@@ -630,13 +630,17 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
             others = [config for config in configs if config not in compiled]
             extension = staged / Path(args["extension"]).name
-            checked = check_extension(extension, compiled, runs) + check_extension(extension, others)
+            try:
+                checked = check_extension(extension, compiled, runs) + check_extension(extension, others)
+            except ModuleNotFoundError as error:
+                if error.name != "wasmtime":
+                    raise
+                print(
+                    "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
+                )
+                return
             names = ", ".join(dict.fromkeys(checked)) or "no class of the app"
             print(f"[KonfAI-Apps] Extension checked against: {names}")
-        except ModuleNotFoundError as error:
-            if error.name != "wasmtime":
-                raise
-            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
         finally:
             sys.path[:] = path
             sys.dont_write_bytecode = writes
