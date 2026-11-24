@@ -195,6 +195,29 @@ def test_a_class_of_the_app_s_in_an_evaluation_chain_is_probed_in_the_dtype_it_i
     assert steps[-1]["op"] == "extension"
 
 
+def test_a_class_of_the_app_s_run_again_to_count_its_channels_is_run_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Probing the last class runs the ones before it again: the bitwise one past an Argmax takes int64 labels there too.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "EvaluatedBits.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Whole(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    chain = {"Argmax": {}, "EvaluatedBits:Odd": {}, "EvaluatedBits:Whole": {}}
+    steps = _group_steps("Seg", chain, tmp_path, {}, None, True, (2, 2))
+    assert [step["op"] for step in steps] == ["argmax", "extension", "extension"]
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")

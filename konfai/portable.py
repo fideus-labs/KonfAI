@@ -784,13 +784,20 @@ def _probed(stage: Any, volume: Any, attribute: Any) -> Any:
     return stage("probe", volume, attribute)
 
 
-def _probe_after(rank: int, start: Callable[[], int], before: Callable[[], list[dict[str, Any]]] = list) -> Probe:
-    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists."""
+def _probe_after(
+    rank: int,
+    start: Callable[[], int],
+    before: Callable[[], list[dict[str, Any]]] = list,
+    dtype: str | None = "float32",
+) -> Probe:
+    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, past what ``before`` lists, a class
+    of the app's own among them run again in the dtype its place hands it of ``dtype`` (``None``: the stored one)."""
 
     def probe(steps: list[dict[str, Any]]) -> tuple[int, ...]:
-        held = start()
+        held, handed = start(), dtype
         for step in [*before(), *steps]:
-            held = _channels_after(step, held, rank)
+            held = _channels_after(step, held, rank, handed)
+            handed = _result_dtype(step, handed)
         return (held, *_probe_extents(rank))
 
     return probe
@@ -3014,11 +3021,12 @@ def export_checkpoints(
     return models, written, per_copy
 
 
-def _channels_after(step: dict[str, Any], held: int, rank: int) -> int:
+def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | None = None) -> int:
     """The channels a step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis one each per spatial axis of the
     ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
-    channel where it runs on each."""
+    channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (float32 where
+    only the run knows it)."""
     if "manifest" in step:
         made = int(step["manifest"]["output"]["channels"])
         for post in step["manifest"].get("postprocessing", []):
@@ -3034,7 +3042,7 @@ def _channels_after(step: dict[str, Any], held: int, rank: int) -> int:
         import torch
 
         extents = _probe_extents(rank) if "halo" in step or "whole" in step else (1,) * rank
-        volume = torch.zeros((held, *extents))
+        volume = torch.zeros((held, *extents), dtype=getattr(torch, dtype or "float32"))
         stage = _own_stage(step["class"], step["params"], rank)
         return int(_probed(stage, volume, _probe_attribute(rank)).shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
