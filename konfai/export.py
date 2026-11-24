@@ -429,7 +429,19 @@ def _check_free_axes(
                 )
     inputs = smooth(shapes)
     want = reference(inputs)
-    own = (gap(inputs, want)[0] if want is not None else None) or 0.0
+    own, answer = gap(inputs, want) if want is not None else (0.0, "")
+    # Off torch at the example's own shape by more than its rounding is no tolerance for the others.
+    if want is not None and (
+        own is None or own > 1e-4 * max(1.0, float(np.abs(want[np.isfinite(want)]).max(initial=0.0)))
+    ):
+        answer = answer or f"lands {own:.3g} from torch"
+        raise PredictorError(
+            f"The model exported with free spatial axes {answer} at the example's own shape {shapes[0]}: the graph is"
+            " not the forward.",
+            "Make the forward the exporter traces the one torch runs (a branch on torch.compiler.is_compiling, an op"
+            " the exporter translates otherwise).",
+        )
+    own = own or 0.0
     checked = False
     # Each size moved by a multiple its first axis's place in its input sets, so that no input grows with the others.
     spread = len(shapes[0]) - free_from

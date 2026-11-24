@@ -396,6 +396,28 @@ def test_a_nonfinite_value_the_graph_moves_is_refused_and_one_it_keeps_is_not(tm
     export_to_onnx(Kept().eval(), tmp_path / "kept", example, "head", dynamic=True)
 
 
+def test_a_graph_off_torch_at_the_example_s_own_shape_is_refused_before_it_sets_the_tolerance(tmp_path):
+    # Off by one everywhere, the graph is off by one at the example's shape too: that gap is no tolerance for the
+    # other shapes, which it would pass at ten times its size. A right graph's rounding there grows with its values.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")
+    from konfai.export import export_to_onnx
+    from konfai.utils.errors import PredictorError
+
+    class Off(_Conv):
+        def forward(self, x):
+            return self.conv(x) + 1 if torch.compiler.is_compiling() else self.conv(x)
+
+    class Large(_Conv):  # right, in thousands: its rounding is a thousand times a unit's
+        def forward(self, x):
+            return self.conv(x) * 3000.0
+
+    with pytest.raises(PredictorError, match="at the example's own shape"):
+        export_to_onnx(Off().eval(), tmp_path / "off", torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+    export_to_onnx(Large().eval(), tmp_path / "large", torch.randn(1, 1, 8, 10, 12), "head", dynamic=True)
+
+
 def test_a_branch_on_a_free_size_the_example_never_takes_is_refused(tmp_path):
     # Traced on 12 voxels along x, the graph keeps the branch of 8 or more and would answer it for 7: the trace's
     # own guard says where it holds, and torch taking a size past it is refused, whatever the probes above it say.
