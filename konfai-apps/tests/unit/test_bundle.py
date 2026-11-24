@@ -1238,6 +1238,55 @@ def test_a_bundle_whose_update_fails_to_take_its_place_is_put_back(tmp_path, mon
     assert not list(bundle.parent.glob(".Seg.*"))
 
 
+def test_a_bundle_whose_previous_copy_stays_is_still_updated(tmp_path, monkeypatch):
+    # The update has taken the bundle's place: a copy of the old one that cannot be removed fails nothing, and the
+    # next update removes it.
+    import konfai_apps.bundle as bundle_module
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"))
+    (root / "Prediction.yml").write_text("Predictor: {}\n# second\n")
+    remove = bundle_module.shutil.rmtree
+
+    def kept(path, *args, **kwargs):
+        if ".previous-" not in str(path):
+            return remove(path, *args, **kwargs)
+        if not kwargs.get("ignore_errors"):
+            raise OSError("kept")
+
+    monkeypatch.setattr(bundle_module.shutil, "rmtree", kept)
+    _cli(root, extension=str(root / "own.wasm"))
+    assert (bundle / "Prediction.yml").read_text().endswith("# second\n")
+    # The next update removes it first.
+    monkeypatch.setattr(bundle_module.shutil, "rmtree", remove)
+    assert list(bundle.parent.glob(".Seg.previous-*"))
+    _cli(root, extension=str(root / "own.wasm"))
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path, monkeypatch):
+    # A manifest the bundle holds as a link elsewhere: the export would write the new one there, so it is refused.
+    wasmtime = pytest.importorskip("wasmtime")
+    import konfai.metric.measure  # noqa: F401  # the check imports it, which builds networks: before they are stubbed
+
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    config = {"Predictor": {"Model": {"classpath": "Probe"}, "outputs_dataset": {"Head": {"OutputDataset": {}}}}}
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    _stub_export(monkeypatch)
+    onnx = {"onnx": True, "patch_size": [4, 4], "in_channels": 1, "output_module": "Head"}
+    bundle = _cli(root, extension=str(root / "own.wasm"), **onnx)
+    (tmp_path / "elsewhere.json").write_text("not the bundle's")
+    (bundle / "manifest.json").unlink()
+    (bundle / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
+
+    with pytest.raises(AppMetadataError, match="manifest.json"):
+        _cli(root, extension=str(root / "own.wasm"), **onnx)
+    assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
+
+
 def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
     # The Model.py a first packaging carried stays in the bundle when the next one names none: the classes the next
     # config names from it are the app's, and the staged update reads them there.
@@ -1285,6 +1334,30 @@ def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monke
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
         _cli(root, extension=str(root / "own.wasm"), **folder)
     assert (bundle / "scales.py").read_text() == OWN
+
+
+def test_an_update_is_checked_without_a_module_the_process_imported_from_the_bundle(tmp_path, monkeypatch):
+    # The process imported the bundle's support module, which the update drops: the check does not take it from there.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("from dropped import Scale\n")
+    (root / "dropped.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    support = {"support_file": ["dropped.py=dropped.py"], "support_root": str(root)}
+    bundle = _cli(root, model_py=str(root / "Model.py"), **support)
+    for module in ("Model", "dropped"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+    sys.path.insert(0, str(bundle))
+    try:
+        import dropped  # noqa: F401
+    finally:
+        sys.path.remove(str(bundle))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
 
 
 def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):

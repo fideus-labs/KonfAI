@@ -283,7 +283,8 @@ def assemble_bundle(
     bundle = Path(out_dir) / name
     staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
     update = bundle.with_name(f".{name}.update-{os.getpid()}")
-    for scratch in (staging, update):
+    previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
+    for scratch in (staging, update, previous):
         if scratch.exists():
             shutil.rmtree(scratch)
     staging.mkdir(parents=True)
@@ -307,14 +308,14 @@ def assemble_bundle(
         _replace_bundle(staging, update, metadata["models"])
         finish(update)
         if bundle.exists():
-            previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
             bundle.rename(previous)
             try:
                 update.rename(bundle)
             except OSError:
                 previous.rename(bundle)  # the update refused its place: the bundle takes its own back
                 raise
-            shutil.rmtree(previous)
+            # The update has its place: a copy of the old bundle left behind fails nothing, the next one removes it.
+            shutil.rmtree(previous, ignore_errors=True)
         else:
             update.rename(bundle)
     finally:
@@ -579,13 +580,26 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
 
         # The app's classes as konfai imports them, from this update alone: a module of one of its names imported
         # before is set aside and comes back after, the update's own go with it, and no bytecode is written into it.
-        own = {path.stem for path in staged.glob("*.py")} | {path.name for path in staged.iterdir() if path.is_dir()}
+        # The bundle's own names too: a module the update drops may have been imported from the bundle.
+        own = {
+            path.stem if path.suffix == ".py" else path.name
+            for folder in (staged, out)
+            if folder.is_dir()
+            for path in folder.iterdir()
+            if path.suffix == ".py" or path.is_dir()
+        }
         displaced = {name: sys.modules.pop(name) for name in list(sys.modules) if name.partition(".")[0] in own}
         sys.path.insert(0, str(staged))
         writes, sys.dont_write_bytecode = sys.dont_write_bytecode, True
         try:
             runs = None
             if args.get("onnx"):
+                # The export writes its graphs and manifest beside the configs: never through a link there.
+                if linked := sorted(path.name for path in staged.iterdir() if path.is_symlink()):
+                    raise AppMetadataError(
+                        f"The bundle holds {', '.join(linked)} beside its configs as links, which the export would"
+                        " write through: replace them by the files they point to."
+                    )
                 artifact = export_portable_into_bundle(
                     staged,
                     checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
