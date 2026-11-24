@@ -155,8 +155,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             self._kept = self._kept_key is not None and _KEPT_MODEL.get("key") == self._kept_key
             if self._kept:
                 # Built again on no device and dropped: its config is bound and resolved as a build binds it.
-                # ponytail: a model whose constructor reads a tensor's values cannot be built on meta; keep it off.
-                with torch.device("meta"):
+                try:
+                    with torch.device("meta"):
+                        model.get_model(train=False)
+                except (NotImplementedError, RuntimeError):  # a constructor that reads a tensor's values
                     model.get_model(train=False)
             self.model = _KEPT_MODEL["model"] if self._kept else model.get_model(train=False)
         self._model_loader = model

@@ -182,6 +182,9 @@ Predictor:
       PROMPT: {groups_dest: {PROMPT: {transforms: None, is_input: true}}}
       PREVIOUS: {groups_dest: {PREVIOUS: {transforms: None, is_input: true}}}
     Patch: {patch_size: [0, 0, 0]}
+  outputs_dataset:
+    Segmentation:  # the one output of a PromptedNet
+      OutputDataset: {dataset_filename: Dataset:mha, group: PRED, same_as_group: IMAGE:IMAGE}
 ```
 
 A correction is one more point in the file and one more prediction, run with `--overwrite` (`overwrite=True`): a

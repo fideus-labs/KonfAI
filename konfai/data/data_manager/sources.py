@@ -1289,6 +1289,11 @@ class DataPrediction(Data):
         self.measures_batch = batch_size == 0
 
     def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
+        # Cases whose channels differ (sets of points of different sizes) never stack, whatever the batch size.
+        if any(
+            len({manager.base_shape[0] for manager in managers}) > 1 for managers in (self._managers or {}).values()
+        ):
+            return {"sampler": sampler, "batch_size": 1}
         # Off a GPU nothing measures, nor where two patches may not stack: one patch per batch, as
         # batch_size: 1 has it.
         if not self.measures_batch or not cuda_visible_devices() or not self.patches_stack():

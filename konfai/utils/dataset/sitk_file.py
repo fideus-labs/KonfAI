@@ -634,8 +634,8 @@ class SitkFile(AbstractFile):
                     stream.write_slice(tuple(slice(0, extent) for extent in data.shape), data)
         elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
             data = np.round(data, 4)
-            labels = json.loads(attributes["Labels"]) if "Labels" in attributes else []
-            write_landmarks(data, Path(f"{self.filename}{name}.fcsv"), labels if len(labels) == len(data) else None)
+            labels = json.loads(attributes["Labels"]) if "Labels" in attributes else None
+            write_landmarks(data, Path(f"{self.filename}{name}.fcsv"), labels)  # a label per point, or refused
         elif "path" in attributes:
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
