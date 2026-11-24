@@ -3102,6 +3102,90 @@ _LEAST = {
 }
 
 
+#: The parameters each stage of the chain vocabulary is run with beyond its least ones, where they change the dtype.
+_DTYPE_VARIANTS = {
+    "Gradient": [{}, {"per_dim": True}],
+    "Standardize": [{}, {"nonzero": True, "inverse": False}],
+    "TensorCast": [{"dtype": "int16"}, {"dtype": "float32"}],
+}
+_DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "float32", "float64")
+
+
+@pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
+def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_path: Path) -> None:
+    # konfai's stage run on a volume of each dtype it takes: what the compiler says it leaves (_result_dtype, which
+    # settles the default interpolation and the dtype a fold is traced in after it) is what it returns.
+    import numpy as np
+    import torch
+    from konfai.data.augmentation.color import Brightness
+    from konfai.portable import _probe_attribute, _probed, _result_dtype, _stage_class
+    from konfai.utils.dataset import Attribute, Dataset
+
+    companions = Dataset(str(tmp_path / "Companions"), "mha")
+    for group in ("REF", "BODY"):
+        companions.write(group, "probe", np.ones((1, 6, 7, 8), np.float32), Attribute(_probe_attribute(3)))
+    for params in _DTYPE_VARIANTS.get(stage, [_LEAST.get(stage, {})]):
+        step, ran = _CHAIN_OPS[stage](dict(params)), []
+        for dtype in _DTYPES:
+            volume = (torch.arange(6 * 7 * 8).reshape(1, 6, 7, 8) % 2).to(getattr(torch, dtype))
+            try:
+                if stage == "Brightness":  # a draw: run as konfai draws a copy of the case
+                    draw = Brightness(**params)
+                    draw.load(1.0)
+                    draw.state_init(0, [list(volume.shape[1:])], [Attribute()])
+                    returned = draw("probe", 0, [volume], [Attribute()])[0]
+                else:
+                    built = _stage_class(stage)(**params)
+                    built.set_datasets([companions])
+                    returned = _probed(built, volume, _probe_attribute(3))
+            except (RuntimeError, TypeError, ValueError, KonfAIError):  # a dtype the stage does not take
+                continue
+            ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
+        assert ran, f"{stage} {params} takes none of {_DTYPES}"
+        assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
+
+
+@pytest.mark.parametrize(
+    ("op", "fold"),
+    [
+        ("mean", "reduction:Mean"),
+        ("median", "reduction:Median"),
+        ("median_lower", "reduction:Median"),
+        ("std", "reduction:Std"),
+        ("variance", "ensemble:Variance"),
+        ("standard_deviation", "ensemble:StandardDeviation"),
+        ("segmentation_disagreement", "ensemble:SegmentationDisagreement"),
+    ],
+)
+def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op: str, fold: str) -> None:
+    # Three copies of each dtype, folded by konfai's reduction, or a stack of three members by its ensemble stage.
+    import torch
+    from konfai.data import reduction
+    from konfai.data.transform import ensemble
+    from konfai.portable import _result_dtype
+    from konfai.utils.dataset import Attribute
+
+    module, name = fold.split(":")
+    cls = getattr({"reduction": reduction, "ensemble": ensemble}[module], name)
+    for dtype in _DTYPES:
+        values = (torch.arange(3 * 6 * 7).reshape(3, 1, 6, 7) % 3).to(getattr(torch, dtype))
+        if module == "reduction":
+            returned = cls()([copy[None] for copy in values])
+        else:
+            returned = cls()("probe", values[:, 0], Attribute())
+        assert _result_dtype({"op": op}, dtype) == str(returned.dtype).removeprefix("torch."), (op, dtype)
+
+
+def test_a_resample_past_a_gradient_of_labels_is_linear_as_konfai_s() -> None:
+    # A gradient of uint8 labels is float32 in konfai, which a Resample stating nothing reads linearly, where uint8
+    # labels it reads by nearest.
+    manifest, _, _ = transform_manifest(
+        _prediction({"TensorCast": {"dtype": "uint8"}, "Gradient": {}, "Resample": {"spacing": [2.0, 2.0, 2.0]}}, {}),
+        "Predictor",
+    )
+    assert [step.get("interpolation") for step in manifest["preprocessing"] if step["op"] == "resample"] == ["linear"]
+
+
 @pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
 def test_every_op_refuses_a_key_its_konfai_class_does_not_take(stage: str) -> None:
     # konfai builds a stage from the keys its config gives and refuses one its class does not take: the compiler

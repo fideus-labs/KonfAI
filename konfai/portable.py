@@ -613,10 +613,16 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
         return "int64"
     if op == "threshold_labels":
         return "uint8"
-    if op in ("one_hot", "brightness", "norm", "case_statistic", *_MEMBER_FOLD_OPS):
+    if op in ("one_hot", "brightness", "norm", "magnitude", "case_statistic", "std", *_MEMBER_FOLD_OPS):
         return "float32"
-    if op in ("standardize", "normalize", "unnormalize", "softmax") and dtype not in (None, "float64"):
-        return "float32"
+    if op == "standardize":
+        return "float32" if step.get("nonzero") or dtype not in (None, "float64") else dtype
+    if op == "histogram_match":
+        return "float32" if dtype == "float16" else dtype
+    # On an integer volume float32, a floating one kept.
+    over_integers = ("percentage", "mean", "median", "median_lower", "normalize", "unnormalize", "softmax")
+    if (op in over_integers or (op == "gradient" and not step.get("per_dim"))) and dtype is not None:
+        return dtype if dtype.startswith("float") else "float32"
     return dtype
 
 
