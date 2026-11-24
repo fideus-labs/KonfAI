@@ -624,33 +624,38 @@ class Dataset:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
         quantile scan iterate. A store that cannot serve bounded region reads (GIPL) is read whole
-        once and kept for every pass: the declared whole-volume route, which the plan names LOAD and
-        refuses when the volume does not fit the budget. With ``halo``, each block carries ``halo``
-        voxels more on both sides of every spatial axis: its neighbours where the volume has them, its
-        edge replicated past the volume's border."""
+        once, as each region read of it decodes it whole, and kept for every pass, which take it by
+        the same blocks: a fold holds the volume as stored and one block of its own. With ``halo``,
+        each block carries ``halo`` voxels more on both sides of every spatial axis: its neighbours
+        where the volume has them, its edge replicated past the volume's border."""
         shape, _ = self.get_infos(groups, name)
-        if len(shape) < 2 or not self.bounded_region_reads(groups, name):
-            resident: list[np.ndarray] = []
+        bounded = len(shape) >= 2 and self.bounded_region_reads(groups, name)
+        resident: list[np.ndarray] = []
 
-            def whole() -> Iterator[np.ndarray]:
-                if not resident:
-                    resident.append(self.read_data(groups, name)[0])
-                widths = [(0, 0)] + [(halo, halo)] * (len(shape) - 1)
-                yield np.pad(resident[0], widths, mode="edge") if halo else resident[0]
+        def read(slices: tuple[slice, ...]) -> np.ndarray:
+            if bounded:
+                return self.read_data_slice(groups, name, slices)[0]
+            if not resident:
+                resident.append(self.read_data(groups, name)[0])
+            return resident[0][slices]
 
-            return whole
+        if len(shape) < 2:
+            return lambda: iter([read((slice(None),))])
         # A whole number of update pieces: the fold sees the same pieces in the same order whatever
         # the read grain, so the budget never changes what the running mean and std answer.
-        rows = _scan_rows(
-            [(self, groups)], name, shape, _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
-        )
+        piece = _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
+        if bounded:
+            rows = _scan_rows([(self, groups)], name, shape, piece)
+        else:  # sized on the budget alone: probing the store's element size would decode it once more
+            rows = _statistics_chunk_length(shape, 1, statistics._statistics_block_elements())
+            rows = max(piece, rows // piece * piece)
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
                 stop = min(int(shape[1]), start + rows)
                 low, high = max(0, start - halo), min(int(shape[1]), stop + halo)
                 slices = (slice(None), slice(low, high), *(slice(None) for _ in shape[2:]))
-                block = self.read_data_slice(groups, name, slices)[0]
+                block = read(slices)
                 widths = [(0, 0), (halo - start + low, halo - high + stop)] + [(halo, halo)] * (len(shape) - 2)
                 yield np.pad(block, widths, mode="edge") if halo else block
 

@@ -33,7 +33,18 @@ import torch
 from konfai.data.augmentation import ContrastAroundMean, Gamma
 from konfai.data.augmentation.base import DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import CaseStatistic, Clip, Normalize, Resample, Standardize, Statistics, Transform
+from konfai.data.transform import (
+    CaseStatistic,
+    Clip,
+    Normalize,
+    Permute,
+    Resample,
+    Standardize,
+    Statistics,
+    TensorCast,
+    Transform,
+    stat_seed_valid,
+)
 from konfai.data.transform.base import LocalityKind, PatchLocality
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.ome_zarr import write_ome_zarr
@@ -577,3 +588,68 @@ def test_a_case_statistic_is_folded_by_slabs_of_the_store_to_the_whole_volume_s_
     whole = stage(CASE_NAME, torch.from_numpy(volume), Attribute())
     assert whole.dtype == torch.float32 and whole.shape == (1, 40, 32, 32)
     assert torch.equal(region, whole[:, 3:9])
+
+
+def test_a_case_statistic_of_a_store_read_whole_folds_it_by_slabs(tmp_path, monkeypatch):
+    # A store that serves no region alone (GIPL) is read whole once, as every region read of it decodes it whole; the
+    # fold still takes that volume by slabs, never all of it at once in float64 with the class's working copies.
+    import konfai.utils.dataset.statistics as statistics
+    from oracle_support import Roughness
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 8 * 32 * 32)
+    monkeypatch.setattr(statistics, "_STATISTICS_CHUNK_ELEMENTS", 8 * 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    assert not dataset.bounded_region_reads("CT", CASE_NAME)
+    rows: list[int] = []
+    whole: list[tuple] = []
+    partial, read = Roughness.partial, Dataset.read_data
+    monkeypatch.setattr(Roughness, "partial", lambda self, block: rows.append(block.shape[1]) or partial(self, block))
+    monkeypatch.setattr(Dataset, "read_data", lambda self, *entry: whole.append(entry) or read(self, *entry))
+    stage = CaseStatistic("oracle_support:Roughness")
+    case = manager(dataset, [stage])
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    assert len(whole) == 1  # read whole once: a region read of it would decode it whole for each block
+    region = case.read_region((slice(3, 9), slice(0, 32), slice(0, 32)), 0, False)
+
+    assert len(rows) > 3 and max(rows) < 40
+    assert torch.equal(region, stage(CASE_NAME, torch.from_numpy(volume), Attribute())[:, 3:9])
+
+
+class AlongX:
+    """A ``CaseStatistic`` class that tells the axes apart: the RMS of the difference of each voxel's two neighbours
+    along x."""
+
+    halo = 1
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        step = block[:, 1:-1, 1:-1, 2:] - block[:, 1:-1, 1:-1, :-2]
+        return torch.stack([(step**2).sum(), torch.ones_like(step).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(total[0] / total[1])
+
+
+def test_a_statistic_of_the_voxels_arrangement_is_measured_behind_a_reorientation(tmp_path):
+    # A reorientation keeps the values a moment or a percentile reads, not the arrangement a class may read: behind a
+    # Permute the stored volume's y is the stage's x, so the stored volume's number is not the stage's, and the regions
+    # take the one the whole route measures.
+    volume = np.random.default_rng(0).normal(size=(1, 12, 16, 20)).astype(np.float32).cumsum(axis=3)
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    chain = [Permute("0|2|1"), CaseStatistic("test_stream_after_a_measured_statistic:AlongX")]
+    case = manager(dataset, chain)
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region(tuple(slice(0, extent) for extent in case.spatial_shape), 0, False)
+
+    case.load(chain, [], load_augmentations=False)
+    assert torch.equal(region, case.data[0])
+    # The rule itself: what a reorientation keeps, and what a cast that keeps every value keeps.
+    turned, cast = (stage.patch_locality(Attribute()) for stage in (Permute("0|2|1"), TensorCast("float32")))
+    assert stat_seed_valid([turned], {"Percentile:50"}) and stat_seed_valid([cast], {chain[1].key})
+    assert not stat_seed_valid([turned], {chain[1].key})

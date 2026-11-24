@@ -81,10 +81,11 @@ class LocalityKind(Enum):
 
     @property
     def preserves_statistics(self) -> bool:
-        """Whether this kind leaves every whole-volume statistic of its input untouched.
+        """Whether this kind leaves the whole-volume statistics of its values untouched.
 
         Only a reorientation does: a flip or a permute is a bijection on the voxels. This decides
-        whether the stored volume's statistics are still a later transform's own input's.
+        whether the stored volume's statistics are still a later transform's own input's
+        (:func:`stat_seed_valid`, which keeps a ``Statistic:`` one out).
         """
         return self is LocalityKind.ORIENTATION
 
@@ -171,13 +172,19 @@ class PatchLocality:
         return self.kind.preserves_statistics
 
 
-def stat_seed_valid(upstream: Iterable[PatchLocality]) -> bool:
-    """Whether a ``GLOBAL_STAT`` stage's seed still describes its own input.
+def stat_seed_valid(upstream: Iterable[PatchLocality], stat_keys: Iterable[str]) -> bool:
+    """Whether the seed of a stage reading ``stat_keys`` still describes its own input.
 
     The seed is measured before the chain runs, so it holds only while every stage between the
-    measurement and the statistic leaves the values untouched.
+    measurement and the statistic leaves the values untouched. A reorientation moves them, which
+    keeps a statistic of the values alone (the extrema, the moments, a percentile) but not a
+    ``Statistic:`` one, which a class measures on their arrangement.
     """
-    return all(locality.statistics_preserving for locality in upstream)
+    arranged = any(key.startswith("Statistic:") for key in stat_keys)
+    return all(
+        locality.statistics_preserving and not (arranged and locality.kind is LocalityKind.ORIENTATION)
+        for locality in upstream
+    )
 
 
 class Transform(NeedDevice, ABC):

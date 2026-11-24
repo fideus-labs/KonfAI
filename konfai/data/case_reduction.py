@@ -254,7 +254,7 @@ def check_post_stages(post: list[Transform], output: str) -> None:
                 f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
                 f" second chain that reads '{output}' back.",
             )
-        if kind is LocalityKind.GLOBAL_STAT and not stat_seed_valid(localities):
+        if kind is LocalityKind.GLOBAL_STAT and not stat_seed_valid(localities, locality.stat_keys):
             raise ReductionError(
                 f"stage {index} '{name}' follows the Reduce into '{output}' and needs whole-volume"
                 " statistics, but an earlier stage after the Reduce changes the values: the"

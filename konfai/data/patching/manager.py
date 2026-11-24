@@ -831,7 +831,7 @@ class DatasetManager:
                 # every patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
                 identity = (a, _stage_identity(stage))
                 measured = self._measured_statistics.get(identity)
-                store_seeds = stat_seed_valid(localities[:-1])
+                store_seeds = stat_seed_valid(localities[:-1], loc.stat_keys)
                 if not store_seeds:
                     # The stored volume's statistic describes the wrong tensor, but a whole-volume
                     # pass over this case may already have measured the right one on this stage's own
