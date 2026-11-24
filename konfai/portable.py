@@ -848,9 +848,11 @@ def _probe_after(
     again in its own."""
 
     def probe(steps: list[dict[str, Any]], dtype: str | None) -> tuple[int, ...]:
-        held = start()
+        held, stacked = start(), members
         for step, handed in [*before(), *_handed(steps, dtype)]:
-            held = _channels_after(step, held, rank, handed, members)
+            held = _channels_after(step, held, rank, handed, stacked)
+            # A fold of the members leaves no stack: a later one counts each channel a member.
+            stacked = None if step.get("op") in _MEMBER_FOLD_OPS else stacked
         return (held, *_probe_extents(rank))
 
     return probe
@@ -915,8 +917,9 @@ def _extension_step(
 
         regridded = moves(returned, attribute, _probe_attribute(rank))
         if on_grid and not regridded:
-            # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one.
-            again, elsewhere = _probed_in(stage, probe, handed, placed=True)
+            # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one,
+            # another case, whose facts the class has yet to settle.
+            again, elsewhere = _probed_in(_own_stage(classpath, kwargs, rank), probe, handed, placed=True)
             regridded = moves(again, elsewhere, _probe_attribute(rank, placed=True))
         if on_grid and regridded:
             raise ConfigError(

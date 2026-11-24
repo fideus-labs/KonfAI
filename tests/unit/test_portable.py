@@ -1342,15 +1342,18 @@ def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
         write()
 
 
-@pytest.mark.parametrize("planted", ["a link at the program", "a link at the manifest", "a missing extension"])
-def test_a_prediction_compile_refuses_its_destinations_before_it_writes_a_graph(
+@pytest.mark.parametrize(
+    "planted",
+    ["a link at the program", "a link at the manifest", "a missing extension", "a link at a statistic's finish graph"],
+)
+def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
 ) -> None:
-    # The program, the extension it carries and the manifest an export writes beside the graph: each is refused
-    # before a graph is written over the one a previous compile left.
+    # The program, the extension it carries, the manifest an export writes beside the graph and a statistic's second
+    # graph: each is refused before a graph is written over the one a previous compile left.
     pytest.importorskip("onnxscript")
     import torch
-    from konfai.export import export_to_onnx
+    from konfai.export import export_case_statistic, export_to_onnx
     from konfai.portable import compile_prediction
 
     config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
@@ -1364,13 +1367,27 @@ def test_a_prediction_compile_refuses_its_destinations_before_it_writes_a_graph(
     extension = None
     if planted == "a link at the program":
         (out / "prediction.json").symlink_to(tmp_path / "elsewhere.json")
-    elif planted == "a link at the manifest":
-        (out / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
+    elif planted in ("a link at the manifest", "a link at a statistic's finish graph"):
+        (out / ("manifest.json" if planted == "a link at the manifest" else "finish.onnx")).symlink_to(
+            tmp_path / "elsewhere.json"
+        )
     else:
         extension = tmp_path / "missing.wasm"
+
+    class Mean:  # a CaseStatistic's two halves: a block's sum and count, then their quotient
+        halo = 0
+
+        def partial(self, block):
+            return torch.stack([block.sum(), torch.ones_like(block).sum()])
+
+        def finish(self, total):
+            return total[0] / total[1]
+
     with pytest.raises(ConfigError, match=r"is a link|is no file"):
         if planted == "a link at the manifest":
             export_to_onnx(TinySegNet(), out, torch.randn(1, 1, 16, 16))
+        elif planted == "a link at a statistic's finish graph":
+            export_case_statistic(Mean(), out / "model.onnx", out / "finish.onnx", rank=3)
         else:
             compile_prediction(
                 config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", out / "prediction.json", extension=extension
@@ -1438,6 +1455,28 @@ def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
         assert transform_manifest(config, "Predictor", extension=True)[0]["reads"][0]["preprocessing"][0]["op"] == (
             "extension"
         )
+
+
+def test_a_class_of_the_app_s_is_probed_on_each_grid_as_a_case_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class remembering a case's first spacing (konfai's case_facts) brings any grid to a unit spacing: the placed
+    # grid is probed as another case, whose facts are its own, and the move is seen.
+    (tmp_path / "CaseGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Unit(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        self.datasets[0].case_facts.setdefault(name, cache_attribute.get_np_array('Spacing'))\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        spacing = cache_attribute.get_np_array('Spacing') / self.datasets[0].case_facts[name]\n"
+        "        cache_attribute['Spacing'] = spacing\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"CaseGrid:Unit": {}}), "Predictor", extension=True)
 
 
 def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(

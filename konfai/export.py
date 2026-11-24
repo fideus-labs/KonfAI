@@ -538,6 +538,8 @@ def export_case_statistic(statistic: Any, partial_path: Path, finish_path: Path,
     block = torch.rand(1, *([8 + 2 * int(statistic.halo)] * rank), dtype=torch.float64)
     partial = _Function(statistic.partial).eval()
     partial_path.parent.mkdir(parents=True, exist_ok=True)
+    for path in (partial_path, finish_path):  # refused before either graph is written over the pair beside it
+        owned_destination(path)
     _write_onnx(partial, (block,), partial_path, ["block"], ["partial"], opset, dynamic=True, free_from=1)
     with torch.no_grad():
         total = partial(block)

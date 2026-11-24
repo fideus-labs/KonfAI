@@ -225,14 +225,21 @@ def test_a_class_of_the_app_s_run_again_to_count_its_channels_is_run_in_the_dtyp
         ("Variance", {}, 1, 6),
         ("SegmentationDisagreement", {}, 3, 1),
         ("Variance", {"OneHot": {"num_classes": 3}}, None, 1),
+        ("StandardDeviation, Variance", {}, 3, 1),
     ],
-    ids=["three-members-of-two", "one-member-of-six", "a-disagreement", "one-member-a-channel-of-a-one-hot"],
+    ids=[
+        "three-members-of-two",
+        "one-member-of-six",
+        "a-disagreement",
+        "one-member-a-channel-of-a-one-hot",
+        "a-spread-of-a-spread",
+    ],
 )
 def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_fold_leaves(
     tmp_path: Path, monkeypatch, fold: str, before: dict, members: int | None, channels: int
 ) -> None:
     # A stack of members cast to int16: a spread leaves one member's, a disagreement one channel, each in float32.
-    # Where no header counts them, each channel the fold is handed is a member.
+    # Where no header counts them, each channel the fold is handed is a member, as past a fold of them.
     from konfai.portable_evaluation import _group_steps
 
     (tmp_path / "AfterMembers.py").write_text(
@@ -248,7 +255,8 @@ def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_f
         "        return tensor\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    chain = {**before, "TensorCast": {"dtype": "int16"}, fold: {}, "AfterMembers:Count": {"channels": channels}}
+    folds = {name: {} for name in fold.split(", ")}
+    chain = {**before, "TensorCast": {"dtype": "int16"}, **folds, "AfterMembers:Count": {"channels": channels}}
     stored = 1 if members is None else 2 * members if members > 1 else 6
     steps = _group_steps("Spread", chain, tmp_path, {}, None, True, (stored, 3, members))
     assert steps[-1]["op"] == "extension"
