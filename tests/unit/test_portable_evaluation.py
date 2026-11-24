@@ -162,6 +162,39 @@ def test_a_class_of_the_app_s_past_a_nested_model_is_probed_on_what_the_model_ha
     assert steps[-1]["op"] == "extension"
 
 
+@pytest.mark.parametrize(
+    "before",
+    [{"TensorCast": {"dtype": "int16"}}, {"KonfAIInference": {"repo_id": "a", "model_name": "b"}}],
+    ids=["past-a-cast", "past-a-nested-model's-argmax"],
+)
+def test_a_class_of_the_app_s_in_an_evaluation_chain_is_probed_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch, before: dict
+) -> None:
+    # Past a cast to int16, or a nested app whose chain ends on an argmax, konfai hands the class integer labels,
+    # which a bitwise test takes and a float32 volume does not.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "EvaluatedLabels.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = {"model": "Seg.onnx", "output": {"channels": 3}, "postprocessing": [{"op": "argmax"}]}
+    steps = _group_steps(
+        "Seg",
+        {**before, "EvaluatedLabels:Odd": {}},
+        tmp_path,
+        {},
+        lambda group, _params, _out: {"id": group, "manifest": manifest},
+        True,
+        (1, 2),
+    )
+    assert steps[-1]["op"] == "extension"
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")

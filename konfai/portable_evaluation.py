@@ -38,6 +38,7 @@ from konfai.portable import (
     _budget_bytes,
     _built,
     _destination,
+    _dtype_after,
     _extension_step,
     _file_stem,
     _literal_group,
@@ -238,7 +239,9 @@ def _group_steps(
                 )
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif extension and ":" in stage and not records_only(name):
-            steps.append(_extension_step(name, params, _probe_after(held[1], lambda: held[0])(steps)))
+            probe = _probe_after(held[1], lambda: held[0])(steps)
+            # The dtype the steps before it set, float32 where only the run knows it (the stored one).
+            steps.append(_extension_step(name, params, probe, handed=_dtype_after(steps, None)))
             moved = moved or name
         elif not records_only(name):
             refuse_a_stage_konfai_does_not_carry(name, EvaluatorError)
