@@ -142,9 +142,20 @@ def _block_rows(
     piece = min(int(shape[1]), _statistics_chunk_length(shape, 1, _STATISTICS_UPDATE_ELEMENTS))
     if entries:
         return _scan_rows(entries, name, shape, piece, halo, fold_bytes)
-    rows = _statistics_chunk_length(_padded(shape, halo), 1, _statistics_block_elements(fold_bytes=fold_bytes))
-    rows -= 2 * halo
-    return max(piece, rows // piece * piece)
+    padded = _padded(shape, halo)
+    rows = _statistics_chunk_length(padded, 1, _statistics_block_elements(fold_bytes=fold_bytes)) - 2 * halo
+    rows = max(piece, rows // piece * piece)
+    # A fold's block over the budget is refused as a scan by regions refuses it; ordinary scans keep their rule.
+    held = (rows + 2 * halo) * _statistics_plane_elements(padded, 1)
+    held *= _STATISTICS_BLOCKS_IN_FLIGHT * _STATISTICS_ELEMENT_BYTES + fold_bytes
+    budget = per_rank_budget_bytes()
+    if fold_bytes and budget is not None and held > budget:
+        raise DatasetManagerError(
+            f"'{name}': the shortest block a whole-volume scan can read holds {format_bytes(held)} with its fold,"
+            f" over the per-rank memory budget ({format_bytes(budget)}).",
+            "Raise 'memory_budget'.",
+        )
+    return rows
 
 
 def _padded(shape: list[int], halo: int) -> list[int]:

@@ -663,6 +663,29 @@ def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_pa
     assert sizes and max(sizes) * (3 * 4 + 4 * 8) <= budget, f"blocks of {max(sizes)} elements"
 
 
+@pytest.mark.parametrize("extension", ["mha", "gipl"])
+def test_a_case_statistic_whose_shortest_block_and_fold_exceed_the_budget_is_refused(tmp_path, monkeypatch, extension):
+    # One row read with its halo holds 3 x 34 x 34 voxels: 152,592 B with the fold, over 100,000 B, whether the store
+    # is read by regions or whole.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", extension)
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.float32), geometry())
+    set_per_rank_budget(100_000)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
+        # The moments of a store read whole keep their rule: one row of 12,288 B over 10,000 B is read.
+        set_per_rank_budget(10_000)
+        if extension == "gipl":
+            assert dataset.read_data_statistics("CT", CASE_NAME)["mean"] == 0.0
+    finally:
+        set_per_rank_budget(None)
+
+
 class AlongX:
     """A ``CaseStatistic`` class that tells the axes apart: the RMS of the difference of each voxel's two neighbours
     along x."""
