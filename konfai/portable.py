@@ -711,14 +711,17 @@ def own_class(classpath: str) -> bool:
     return bool(module) and module.replace(":", ".").split(".")[0] not in ("konfai", "konfai_apps")
 
 
-def _own_dtype(classpath: str, returned: Callable[[Any], Any], probe: tuple[int, ...] = (1, 1, 1, 1)) -> dict[str, str]:
+def _own_dtype(
+    classpath: str, returned: Callable[[Any], Any], probe: tuple[int, ...] = (1, 1, 1, 1), handed: str | None = None
+) -> dict[str, str]:
     """The ``dtype`` the step of an app's own class states: the one the class returns whatever it reads, nothing
     for a class that returns the dtype it reads, which is all a step of the runtime writes. ``returned`` is the
-    class on a volume of the shape ``probe``, one voxel unless the class reads past it."""
+    class on a volume of the shape ``probe``, one voxel unless the class reads past it, in the dtype its chain hands
+    it where that is known (``handed``), in a few where only the run knows it."""
     import torch
 
     got = {}
-    for dtype in ("uint8", "int16", "float32"):
+    for dtype in (handed,) if handed else ("uint8", "int16", "float32"):
         try:
             got[dtype] = str(returned(torch.zeros(probe, dtype=getattr(torch, dtype))).dtype).split(".")[-1]
         except Exception:  # nosec B112 - a dtype the class refuses is none its chain hands it
@@ -901,7 +904,7 @@ def _extension_step(
                 ),
             )
     voxels = probe if reads else (probe[0], *[1] * (len(probe) - 1))
-    dtype = _own_dtype(classpath, lambda volume: _probed(stage, volume, _probe_attribute(rank)), voxels)
+    dtype = _own_dtype(classpath, lambda volume: _probed(stage, volume, _probe_attribute(rank)), voxels, handed)
     step = _admitted({"op": "extension", "class": classpath, "params": kwargs, **reads, **dtype})
     if read := stage.datasets[0].read:
         if not groups or "whole" not in reads:
@@ -1947,6 +1950,7 @@ def _group_chain(
         probe=_probe_after(rank, lambda: channels),
         planned=rank,
         on_grid=True,
+        dtype=None,
     )
     if (moved := next((step for step in steps if step["op"] in REGRIDS), None)) is not None:
         raise ConfigError(
@@ -1998,6 +2002,7 @@ def transform_manifest(
         extension=extension,
         probe=_probe_after(rank, lambda: first),
         planned=rank,
+        dtype=None,
     )
     folds += _patch_folds(config, root)
     post, per_copy = _post_chain(
@@ -3491,17 +3496,18 @@ def compile_prediction(
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:
     """Name the app's ``extension`` of KonfAI Edge in ``program``, copied beside it where ``output`` is written: a
-    file that is there, under a name neither ``output`` nor a file ``program`` names takes (a graph it exports)."""
+    file that is there, under a name neither ``output`` nor a file ``program`` names takes (a graph it exports, the
+    only files a program names)."""
 
-    def names(node: Any) -> Iterator[str]:
-        if isinstance(node, str):
+    def graphs(node: Any) -> Iterator[str]:
+        if isinstance(node, str) and node.endswith(".onnx"):
             yield node
         for value in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
-            yield from names(value)
+            yield from graphs(value)
 
     if not extension.is_file():
         raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
-    if extension.name == output.name or extension.name in names(program):
+    if extension.name == output.name or extension.name in graphs(program):
         raise ConfigError(
             f"The extension '{extension.name}' takes the name of a file the program writes beside it.",
             "Name the extension apart from the program and the graphs it names.",

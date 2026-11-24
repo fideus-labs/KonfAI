@@ -1239,7 +1239,8 @@ def test_a_model_reading_two_groups_names_the_second_and_the_chain_that_prepares
 
 def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(tmp_path: Path) -> None:
     # A program names its extension beside it: a file that is there, never one of the files it names otherwise
-    # (an exported graph copied over), nor the program itself. One already beside it is reused under its own name.
+    # (an exported graph copied over), nor the program itself. One already beside it is reused under its own name;
+    # a string of the program that names no file is none of them.
     from konfai.portable import carry_extension
 
     out = tmp_path / "out" / "prediction.json"
@@ -1258,6 +1259,11 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     named = dict(program)
     carry_extension(beside, named, out)
     assert named["extension"] == "own.wasm"
+    # A name the program holds as no file (a label's) is no collision.
+    (tmp_path / "roi.wasm").write_bytes(b"\0asm")
+    labelled = {**program, "outputs": [{"labels": {"1": "roi.wasm"}}]}
+    carry_extension(tmp_path / "roi.wasm", labelled, out)
+    assert labelled["extension"] == "roi.wasm" and (out.parent / "roi.wasm").read_bytes() == b"\0asm"
 
 
 @pytest.mark.parametrize(
@@ -2010,9 +2016,11 @@ def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
     # The identity and two drawn copies, then the app's own fold of the three.
     models = [step["manifest"] for step in steps if "manifest" in step]
     assert len(models) == 3
+    # The stored dtype only the run knows, Scale returns float32 of it; the classes after it are handed float32,
+    # which they return.
     scale = {"op": "extension", "class": "Own:Scale", "params": own["Own:Scale"], "dtype": "float32"}
-    smooth = {"op": "extension", "class": "Own:Smooth", "params": {}, "halo": 1, "dtype": "float32"}
-    centered = {"op": "extension", "class": "Own:Centered", "params": {}, "whole": True, "dtype": "float32"}
+    smooth = {"op": "extension", "class": "Own:Smooth", "params": {}, "halo": 1}
+    centered = {"op": "extension", "class": "Own:Centered", "params": {}, "whole": True}
     assert models[0]["preprocessing"] == [scale, smooth, centered]
     # A copy's draw closes its preprocessing with a seed of its own, and is undone first.
     draws = [manifest["preprocessing"][-1] for manifest in models[1:]]
@@ -2082,7 +2090,6 @@ def test_a_final_chain_reading_groups_of_the_case_closes_the_program(
         "class": "OwnGroup:ScaleOnto",
         "params": {"reference_group": "MR"},
         "whole": True,
-        "dtype": "float32",
         "groups": ["MR"],
         "in": [model["out"], "input"],
         "out": "t0",
@@ -2292,6 +2299,45 @@ def test_a_class_of_the_app_s_past_a_case_statistic_is_probed_in_float32(
         chain, extension=True, case_statistic=lambda _params: statistic, probe=_probe_after(3, lambda: 1)
     )
     assert [step["op"] for step in steps] == ["cast", "case_statistic", "extension"]
+
+
+def test_a_class_of_the_app_s_handed_a_known_dtype_states_what_it_returns_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past an Argmax the class is handed int64 labels, the only dtype it takes, and returns uint8: its step says so.
+    # In the input chain, where only the run knows the stored dtype, a class returning what it reads states none.
+    (tmp_path / "KnownLabels.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Bytes(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int64:\n"
+        "            raise TypeError(f'labels, not {tensor.dtype}')\n"
+        "        return tensor.to(torch.uint8)\n\n"
+        "class Same(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float()\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _prediction(
+        {"KnownLabels:Same": {}}, {"after_reduction_transforms": {"Argmax": {}, "KnownLabels:Bytes": {}}}
+    )
+    manifest, _folds, _per_copy = transform_manifest(config, "Predictor", extension=True)
+    (step,) = [step for step in manifest["postprocessing"] if step.get("class") == "KnownLabels:Bytes"]
+    assert step["dtype"] == "uint8"
+    (same,) = [step for step in manifest["preprocessing"] if step.get("class") == "KnownLabels:Same"]
+    assert "dtype" not in same
+    # A second input's chain starts from its stored dtype too: a class returning float32 of any says so.
+    manifest, _folds, _per_copy = transform_manifest(
+        _two_groups({"KnownLabels:Floats": {}}), "Predictor", extension=True
+    )
+    assert manifest["reads"][0]["preprocessing"][0]["dtype"] == "float32"
 
 
 @pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
