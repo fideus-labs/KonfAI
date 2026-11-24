@@ -721,7 +721,7 @@ def _own_dtype(
     import torch
 
     got = {}
-    for dtype in (handed,) if handed else ("uint8", "int16", "float32"):
+    for dtype in (handed,) if handed else _STORED_DTYPES:
         try:
             got[dtype] = str(returned(torch.zeros(probe, dtype=getattr(torch, dtype))).dtype).split(".")[-1]
         except Exception:  # nosec B112 - a dtype the class refuses is none its chain hands it
@@ -815,6 +815,26 @@ def _probed(stage: Any, volume: Any, attribute: Any) -> Any:
     return stage("probe", volume, attribute)
 
 
+#: The dtypes a case may be stored in: where only the run knows the one a class is handed, it is probed in each.
+_STORED_DTYPES = ("uint8", "int16", "float32")
+
+
+def _probed_in(stage: Any, probe: tuple[int, ...], handed: str | None, placed: bool = False) -> tuple[Any, Any]:
+    """An app's own ``stage`` on zeros of ``probe`` in the dtype ``handed``, or, where only the run knows it, the first
+    stored dtype it takes, and the geometry it was run on (:func:`_probe_attribute`)."""
+    import torch
+
+    *others, last = (handed,) if handed else _STORED_DTYPES
+    for dtype in others:
+        attribute = _probe_attribute(len(probe) - 1, placed)
+        try:
+            return _probed(stage, torch.zeros(probe, dtype=getattr(torch, dtype)), attribute), attribute
+        except Exception:  # nosec B112 - a dtype the class refuses is none its chain hands it
+            continue
+    attribute = _probe_attribute(len(probe) - 1, placed)
+    return _probed(stage, torch.zeros(probe, dtype=getattr(torch, last)), attribute), attribute
+
+
 def _probe_after(
     rank: int,
     start: Callable[[], int],
@@ -856,10 +876,9 @@ def _extension_step(
     ``HALO`` one a block with the ``halo`` it declares, whose grid and channels it keeps; any other (``WHOLE_VOLUME``,
     ``REGRID``, ...) the case (``whole``), which may leave another grid and be undone, or other channels and not be.
     The class is run on ``probe``, the channels and rank its place in the chain hands it, in the dtype ``handed`` (the
-    stored one, float32 where only the run knows it). With ``groups`` (the final
-    chain), a whole class may read groups of the case beside its volume, which the step names."""
+    stored one, the first it takes where only the run knows it). With ``groups`` (the final chain), a whole class may
+    read groups of the case beside its volume, which the step names."""
     import numpy as np
-    import torch
 
     from konfai.data.transform import LocalityKind, TransformInverse
 
@@ -878,9 +897,8 @@ def _extension_step(
         # Any other locality (a grid it moves, a statistic, the whole volume) is served the whole volume.
         reads = {"whole": True}
     if reads:
-        attribute = _probe_attribute(rank)
         try:
-            returned = _probed(stage, torch.zeros(probe, dtype=getattr(torch, handed or "float32")), attribute)
+            returned, attribute = _probed_in(stage, probe, handed)
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -898,8 +916,7 @@ def _extension_step(
         regridded = moves(returned, attribute, _probe_attribute(rank))
         if on_grid and not regridded:
             # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one.
-            elsewhere = _probe_attribute(rank, placed=True)
-            again = _probed(stage, torch.zeros(probe, dtype=getattr(torch, handed or "float32")), elsewhere)
+            again, elsewhere = _probed_in(stage, probe, handed, placed=True)
             regridded = moves(again, elsewhere, _probe_attribute(rank, placed=True))
         if on_grid and regridded:
             raise ConfigError(
@@ -3090,9 +3107,9 @@ def _channels_after(
     """The channels a step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis one each per spatial axis of the
     ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
-    channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (float32 where
-    only the run knows it), a spread of a stack of ``members`` one member's (each channel one where ``None``), a
-    disagreement of them one."""
+    channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (the first stored
+    dtype it takes where only the run knows it), a spread of a stack of ``members`` one member's (each channel one
+    where ``None``), a disagreement of them one."""
     if "manifest" in step:
         made, blended = _blended(step["manifest"])
         for post, handed in _handed(step["manifest"].get("postprocessing", []), blended, _restored(step["manifest"])):
@@ -3107,12 +3124,9 @@ def _channels_after(
     if step["op"] == "keep_largest_component" and "mask" in step:
         return held - 1
     if step["op"] == "extension":
-        import torch
-
         extents = _probe_extents(rank) if "halo" in step or "whole" in step else (1,) * rank
-        volume = torch.zeros((held, *extents), dtype=getattr(torch, dtype or "float32"))
         stage = _own_stage(step["class"], step["params"], rank)
-        return int(_probed(stage, volume, _probe_attribute(rank)).shape[0])
+        return int(_probed_in(stage, (held, *extents), dtype)[0].shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 
@@ -3434,11 +3448,8 @@ def compile_prediction(
     from konfai.predictor.workflow import Predictor, build_predict
 
     root = "Predictor"
-    output = Path(output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output, extension = compile_destinations(output, extension)
     checkpoints = [Path(model).resolve() for model in models or []]
-    extension = None if extension is None else Path(extension).resolve()
-    refuse_an_extension_the_graphs_overwrite(extension, output)
 
     with (
         _sources_staged_at_run_time(),
@@ -3513,20 +3524,32 @@ def compile_prediction(
     return prediction
 
 
-def refuse_an_extension_the_graphs_overwrite(extension: Path | None, output: Path) -> None:
-    """Refuse, before a graph is written, an extension beside ``output`` named as a graph: the export would write the
-    graph over it (a file system may tell no case apart)."""
-    if extension is not None and extension.parent == output.parent and extension.name.lower().endswith(".onnx"):
+def compile_destinations(output: str | Path, extension: str | Path | None) -> tuple[Path, Path | None]:
+    """The program a compile writes and the extension it carries, absolute, refused before a graph is written: the
+    program onto nothing or a file of its own (its folder resolved, a link at it refused, not followed), the
+    extension a file named apart from the graphs the export writes beside the program (a file system may tell no
+    case apart)."""
+    from konfai.utils.utils import owned_destination
+
+    output = owned_destination(Path(output).absolute().parent.resolve() / Path(output).name)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if extension is None:
+        return output, None
+    extension = Path(extension).resolve()
+    if not extension.is_file():
+        raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
+    if extension.parent == output.parent and extension.name.lower().endswith(".onnx"):
         raise ConfigError(
             f"The extension '{extension.name}' sits beside the program, named as a graph the export writes there.",
             "Name the extension apart from the graphs, or keep it in another folder.",
         )
+    return output, extension
 
 
 def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> None:
-    """Name the app's ``extension`` of KonfAI Edge in ``program``, copied beside it where ``output`` is written: a
-    file that is there, under a name neither ``output`` nor a file ``program`` names takes (a graph it exports, the
-    only files a program names)."""
+    """Name the app's ``extension`` of KonfAI Edge in ``program``, copied beside it where ``output`` is written: the
+    file :func:`compile_destinations` admits, under a name neither ``output`` nor a file ``program`` names takes (a
+    graph it exports, the only files a program names)."""
 
     def graphs(node: Any) -> Iterator[str]:
         """The graph files ``node`` names: a ``model``, a ``partial`` or a ``finish`` file, the ``models`` a program
@@ -3539,8 +3562,6 @@ def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> N
         for value in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
             yield from graphs(value)
 
-    if not extension.is_file():
-        raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
     if extension.name.lower() == output.name.lower() or extension.name.lower() in graphs(program):
         raise ConfigError(
             f"The extension '{extension.name}' takes the name of a file the program writes beside it.",

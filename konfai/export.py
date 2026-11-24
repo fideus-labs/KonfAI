@@ -642,6 +642,8 @@ def export_to_onnx(
             voxel = post(voxel)
         output_shape = (output_shape[0], int(voxel.shape[1]), *output_shape[2:])
     out_dir.mkdir(parents=True, exist_ok=True)
+    if write_manifest:  # refused before the graph is written over the one beside it
+        owned_destination(out_dir / "manifest.json")
 
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre, fold_post=fold_post).eval()
     names = [input_name] + [f"{input_name}_{at}" for at in range(1, len(examples))]

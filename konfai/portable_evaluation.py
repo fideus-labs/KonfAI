@@ -50,13 +50,13 @@ from konfai.portable import (
     carry_extension,
     chain_items,
     clean,
+    compile_destinations,
     is_save,
     moves_the_volume,
     own_class,
     records_only,
     refuse_a_late_crop,
     refuse_a_stage_konfai_does_not_carry,
-    refuse_an_extension_the_graphs_overwrite,
     source_of,
     warn_unportable_keys,
 )
@@ -241,7 +241,7 @@ def _group_steps(
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
         elif extension and ":" in stage and not records_only(name):
             probe = _probe_after(held[1], lambda: held[0], members=held[2])(steps, None)
-            # The dtype the steps before it set, float32 where only the run knows it (the stored one).
+            # The dtype the steps before it set, or the stored one, which only the run knows.
             steps.append(_extension_step(name, params, probe, handed=_dtype_after(steps, None)))
             moved = moved or name
         elif not records_only(name):
@@ -318,10 +318,7 @@ def compile_evaluation(
     from konfai.evaluator import Evaluator, build_evaluate
     from konfai.network.network.measure import criterion_keys
 
-    output = Path(output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    extension = None if extension is None else Path(extension).resolve()
-    refuse_an_extension_the_graphs_overwrite(extension, output)
+    output, extension = compile_destinations(output, extension)
     root = "Evaluator"
     with _built(
         evaluation_file, lambda file: build_evaluate(evaluations_file=file, evaluations_dir=Path(evaluations_dir))

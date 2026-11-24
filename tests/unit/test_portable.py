@@ -1239,17 +1239,17 @@ def test_a_model_reading_two_groups_names_the_second_and_the_chain_that_prepares
 
 
 def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(tmp_path: Path) -> None:
-    # A program names its extension beside it: a file that is there, never one of the files it names otherwise
-    # (an exported graph copied over), nor the program itself. One already beside it is reused under its own name;
-    # a string of the program that names no file is none of them.
-    from konfai.portable import carry_extension
+    # A program names its extension beside it: a file that is there (refused before the compile writes anything),
+    # never one of the files it names otherwise (an exported graph copied over), nor the program itself. One already
+    # beside it is reused under its own name; a string of the program that names no file is none of them.
+    from konfai.portable import carry_extension, compile_destinations
 
     out = tmp_path / "out" / "prediction.json"
     out.parent.mkdir()
     (out.parent / "model.onnx").write_bytes(b"graph")
     program = {"models": {"model": "model.onnx"}}
-    with pytest.raises(ConfigError, match=r"missing\.wasm"):
-        carry_extension(out.parent / "missing.wasm", dict(program), out)
+    with pytest.raises(ConfigError, match=r"missing\.wasm' is no file"):
+        compile_destinations(out, out.parent / "missing.wasm")
     for name in ("model.onnx", "prediction.json"):
         (tmp_path / name).write_bytes(b"\0asm")
         with pytest.raises(ConfigError, match=re.escape(name)):
@@ -1340,6 +1340,69 @@ def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
         )
     with pytest.raises(ConfigError, match=rf"{re.escape(name)}' is a directory"):
         write()
+
+
+@pytest.mark.parametrize("planted", ["a link at the program", "a link at the manifest", "a missing extension"])
+def test_a_prediction_compile_refuses_its_destinations_before_it_writes_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+) -> None:
+    # The program, the extension it carries and the manifest an export writes beside the graph: each is refused
+    # before a graph is written over the one a previous compile left.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.export import export_to_onnx
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "model.onnx").write_bytes(b"the previous graph")
+    (tmp_path / "elsewhere.json").write_text("not the program's")
+    extension = None
+    if planted == "a link at the program":
+        (out / "prediction.json").symlink_to(tmp_path / "elsewhere.json")
+    elif planted == "a link at the manifest":
+        (out / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
+    else:
+        extension = tmp_path / "missing.wasm"
+    with pytest.raises(ConfigError, match=r"is a link|is no file"):
+        if planted == "a link at the manifest":
+            export_to_onnx(TinySegNet(), out, torch.randn(1, 1, 16, 16))
+        else:
+            compile_prediction(
+                config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", out / "prediction.json", extension=extension
+            )
+    assert (out / "model.onnx").read_bytes() == b"the previous graph"
+    assert (tmp_path / "elsewhere.json").read_text() == "not the program's"
+
+
+def test_a_class_of_the_app_s_run_again_takes_a_dtype_it_takes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stored dtype only the run knows, a class taking int16 alone is run again, to count its channels, in a
+    # dtype it takes.
+    (tmp_path / "StoredInt.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Pairs(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int16:\n"
+        "            raise TypeError(f'int16, not {tensor.dtype}')\n"
+        "        return tensor.repeat(2, *[1] * (tensor.dim() - 1))\n\n"
+        "class Two(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest, _folds, _per_copy = transform_manifest(
+        _two_groups({"StoredInt:Pairs": {}, "StoredInt:Two": {}}), "Predictor", extension=True
+    )
+    assert [step["class"] for step in manifest["reads"][0]["preprocessing"]] == ["StoredInt:Pairs", "StoredInt:Two"]
 
 
 @pytest.mark.parametrize(
