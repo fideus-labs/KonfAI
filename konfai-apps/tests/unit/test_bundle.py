@@ -225,6 +225,8 @@ def test_derive_requirements_keeps_only_extra(tmp_path):
     )
     # stdlib (os), konfai-provided (torch/numpy), and konfai itself are excluded.
     assert derive_requirements([model_py]) == ["scikit-image", "segmentation-models-pytorch"]
+    # A module of the bundle's own is none, by the name it is imported under.
+    assert derive_requirements([model_py], local={"skimage"}) == ["segmentation-models-pytorch"]
 
 
 def test_derive_onnx_params_from_config():
@@ -1401,11 +1403,7 @@ def test_bytecode_the_bundle_holds_is_none_the_check_reads(tmp_path):
 
 @pytest.mark.parametrize(
     "planted",
-    [
-        "a directory at the manifest",
-        "a link at the drafted requirements",
-        "a link at the requirements a support file's Model.py drafts",
-    ],
+    ["a directory at the manifest", "a link at the requirements the bundle holds"],
 )
 def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_own(tmp_path, planted):
     # What the update writes, beside the configs or once published, it writes whole: into no directory, through no
@@ -1419,17 +1417,11 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
         with pytest.raises(AppMetadataError, match=r"manifest\.json' is a directory"):
             _cli(root, **exporting)
     else:
-        # The draft is written in the update, whichever way the Model.py it reads comes.
+        # The requirements the bundle holds are its author's: no draft is written over them, nor through them.
         (root / "Model.py").write_text("import einops\n")
         (bundle / "requirements.txt").symlink_to(tmp_path / "elsewhere.txt")
-        given = (
-            {"model_py": str(root / "Model.py")}
-            if planted == "a link at the drafted requirements"
-            else {"support_file": ["./Model.py=Model.py"], "support_root": str(root)}
-        )
-        with pytest.raises(ConfigError, match=r"requirements\.txt' is a link"):
-            _cli(root, **given)
-        assert not (bundle / "Model.py").exists()  # refused before the bundle takes the update
+        _cli(root, model_py=str(root / "Model.py"))
+        assert (bundle / "Model.py").is_file() and (bundle / "requirements.txt").is_symlink()
     assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
 
 
@@ -1531,10 +1523,20 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
     assert (bundle / "own.wasm").exists()
 
 
-@pytest.mark.parametrize("made", ["a support file's requirements", "a module the update drops", "a bundle left aside"])
+@pytest.mark.parametrize(
+    "made",
+    [
+        "a support file's requirements",
+        "requirements the bundle holds",
+        "a support file's Model.py",
+        "a module the update drops",
+        "a bundle left aside",
+    ],
+)
 def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_path, made):
-    # The draft reads the bundle the update makes: no draft over the requirements a support file brings, an import
-    # of a module the update drops is a requirement, and a bundle an earlier update left aside is the one updated.
+    # The draft reads the bundle the update makes, where it holds no requirements (a support file's, or the author's
+    # it kept): the Model.py a support file brings is read, an import of a module the update drops is a requirement,
+    # and a bundle an earlier update left aside is the one updated.
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text("import einops\n")
     (root / "einops.py").write_text("")
@@ -1543,6 +1545,15 @@ def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_p
         support = {"support_file": ["requirements.txt=listed.txt"], "support_root": str(root)}
         bundle = _cli(root, model_py=str(root / "Model.py"), **support)
         assert (bundle / "requirements.txt").read_text() == "numpy-stl\n"
+        return
+    if made == "requirements the bundle holds":
+        bundle = _cli(root, model_py=str(root / "Model.py"), requirements=str(root / "listed.txt"))
+        _cli(root)
+        assert (bundle / "requirements.txt").read_text() == "numpy-stl\n"
+        return
+    if made == "a support file's Model.py":
+        bundle = _cli(root, support_file=["./Model.py=Model.py"], support_root=str(root))
+        assert (bundle / "requirements.txt").read_text() == "einops\n"
         return
     if made == "a module the update drops":
         bundle = _cli(
@@ -1582,13 +1593,14 @@ def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path
     ("name", "refusal"),
     [
         ("Manifest.json", "Manifest.json takes the name of a file"),
+        ("model.onnx", "model.onnx takes the name of a file"),
         ("Requirements.txt", "Requirements.txt takes the name of a file"),
         ("APP.JSON", "'app.json' and 'APP.JSON' are one file"),
     ],
 )
 def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_path, name, refusal):
     # The export would write its manifest over the extension, the draft its requirements, the command its app.json,
-    # in any case: refused before anything is written.
+    # in any case: refused before anything is written, a graph's name with or without an export.
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text("import einops\n")
     (root / name).write_bytes(b"\0asm")

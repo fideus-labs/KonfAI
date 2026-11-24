@@ -30,7 +30,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -53,11 +53,12 @@ _IMPORT_TO_PYPI = {
 _PROVIDED_MODULES = {"torch", "torchvision", "numpy", "scipy", "yaml", "konfai", "konfai_apps"}
 
 
-def derive_requirements(py_files: list[str | Path]) -> list[str]:
+def derive_requirements(py_files: list[str | Path], local: Collection[str] = ()) -> list[str]:
     """Best-effort: the *extra* PyPI requirements imported by custom ``.py`` files.
 
-    Returns third-party packages beyond the standard library and what konfai provides
-    (``segmentation_models_pytorch`` kept, ``torch``/``numpy`` dropped). A draft to review.
+    Returns third-party packages beyond the standard library, what konfai provides
+    (``segmentation_models_pytorch`` kept, ``torch``/``numpy`` dropped) and the ``local`` modules, by the name they are
+    imported under. A draft to review.
     """
     import ast
 
@@ -73,7 +74,7 @@ def derive_requirements(py_files: list[str | Path]) -> list[str]:
                 continue
             for module in modules:
                 top = module.split(".")[0]
-                if top in stdlib or top in _PROVIDED_MODULES or top.startswith("konfai"):
+                if top in stdlib or top in _PROVIDED_MODULES or top.startswith("konfai") or top in local:
                     continue
                 found.add(_IMPORT_TO_PYPI.get(top, top.replace("_", "-")))
     return sorted(found)
@@ -687,32 +688,31 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     out = Path(args["out"]) / args["name"]
     report: dict[str, Any] = {}
     named = Path(args["extension"]).name if args.get("extension") else None
-    if named is not None and (named.lower() == "requirements.txt" or (args.get("onnx") and _exported(named))):
+    if named is not None and (named.lower() == "requirements.txt" or _exported(named)):
         raise AppMetadataError(
             f"The extension {named} takes the name of a file the bundle command writes.",
             "Name the extension apart from the requirements, the manifest, the program and the graphs.",
         )
-    # Without a requirements.txt, passed or a support file, one is drafted on the bundle the update makes from the
-    # imports of its Model.py (passed, a support file, or kept), less its own modules. Packaging deliberately does not
+    # The bundle the update makes, where it holds a Model.py and no requirements.txt (passed, a support file, or the
+    # author's it keeps), gets one drafted from its imports, less its own modules. Packaging deliberately does not
     # execute code to discover dependencies: the draft is reviewed.
     planned = {name.lower() for name in resolve_support_files(support, args.get("support_root"))}
     left = out.with_name(f".{out.name}.previous")  # the bundle an earlier update left aside, which it takes back
+    held = [folder for folder in (out, left) if folder.is_dir()][:1]
     drafting = not args.get("requirements") and "requirements.txt" not in planned
     drafting = drafting and bool(
-        args.get("model_py") or "model.py" in planned or (out / "Model.py").is_file() or (left / "Model.py").is_file()
+        args.get("model_py") or "model.py" in planned or any((folder / "Model.py").is_file() for folder in held)
     )
     drafted: list[str] = []
 
     def draft(update: Path) -> None:
-        if (update / "Model.py").is_file():
+        if (update / "Model.py").is_file() and not os.path.lexists(update / "requirements.txt"):
             local = {path.stem for path in update.glob("*.py")} | {
                 path.name for path in update.iterdir() if path.is_dir()
             }
-            drafted[:] = [
-                name for name in derive_requirements([update / "Model.py"]) if name.replace("-", "_") not in local
-            ]
+            drafted[:] = derive_requirements([update / "Model.py"], local)
         if drafted:
-            owned_destination(update / "requirements.txt").write_text("\n".join(drafted) + "\n")
+            (update / "requirements.txt").write_text("\n".join(drafted) + "\n")
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their

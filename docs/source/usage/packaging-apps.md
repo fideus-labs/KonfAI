@@ -67,9 +67,9 @@ the run's `.pt`. An app still reads the `.pt` weights of an older bundle, and ta
 is no custom Python file to include. For your own model, add `--model-py Model.py`.
 Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files. A helper
 file cannot end in `.pt` or `.safetensors`: an app reserves those for its models.
-Without `--requirements` or a support file of that name, the command drafts a
-`requirements.txt` from the imports of the bundle's `Model.py`: check it before
-distributing the app.
+Where the bundle holds no `requirements.txt` (passed with `--requirements`, a
+support file, or one it keeps), the command drafts one from the imports of its
+`Model.py`: check it before distributing the app.
 
 ## Check the packaged result
 
