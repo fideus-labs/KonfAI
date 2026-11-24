@@ -369,7 +369,6 @@ def _finish_update(spec: dict[str, Any]) -> None:
     interpreter of its own whose working folder is the update: the app's modules are the update's, none another
     process imported. Writes to ``spec["report"]`` the artifact exported, the classes checked (``None``: not checked,
     wasmtime missing) or the refusal."""
-    import yaml
     from konfai.utils.errors import KonfAIError
 
     from .extension import check_extension, classes_run
@@ -397,17 +396,13 @@ def _finish_update(spec: dict[str, Any]) -> None:
             # Every config KonfAI Edge runs that the bundle holds once updated, passed or kept, runs with the
             # extension: the compiled program's classes of the Prediction.yml, every class of the others. A config
             # is told by its root: a Predictor's or an Evaluator's (Evaluation.yml, Uncertainty.yml) is run, a
-            # Trainer's (Config.yml) never. The bytes checked are the ones the bundle takes.
+            # Trainer's (Config.yml) never, nor a file that reads as no YAML. The bytes checked are the ones the
+            # bundle takes.
             compiled = [update / "Prediction.yml"] if runs is not None else []
-            held = {
-                config: yaml.safe_load(config.read_text(encoding="utf-8")) for config in sorted(update.glob("*.yml"))
-            }
             others = [
                 config
-                for config, loaded in held.items()
-                if config not in compiled
-                and isinstance(loaded, dict)
-                and ("Predictor" in loaded or "Evaluator" in loaded)
+                for config in sorted([*update.glob("*.yml"), *update.glob("*.yaml")])
+                if config not in compiled and _run_by_konfai_edge(config)
             ]
             extension = update / spec["extension"]
             try:
@@ -421,6 +416,17 @@ def _finish_update(spec: dict[str, Any]) -> None:
         raise SystemExit(1) from error
     finally:
         Path(spec["report"]).write_text(json.dumps(report))
+
+
+def _run_by_konfai_edge(config: Path) -> bool:
+    """Whether ``config`` is one KonfAI Edge runs: a Predictor's or an Evaluator's, told by its root."""
+    import yaml
+
+    try:
+        loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return False
+    return isinstance(loaded, dict) and ("Predictor" in loaded or "Evaluator" in loaded)
 
 
 def _carried(bundle: Path, source: str, target: str) -> None:
@@ -676,9 +682,18 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             f"The extension {named} takes the name of a file the bundle command writes.",
             "Name the extension apart from the requirements, the manifest, the program and the graphs.",
         )
-    # The requirements drafted below are written once the bundle takes the update: their file is refused before.
-    if not args.get("requirements") and (args.get("model_py") or (out / "Model.py").exists()):
-        owned_destination(out / "requirements.txt")
+    # Without a requirements.txt, one is drafted from the imports of the Model.py the bundle will hold (passed, a
+    # support file, or kept), less the bundle's own modules, and staged with its other files. Packaging deliberately
+    # does not execute code to discover dependencies: the draft is reviewed.
+    requirements = args.get("requirements") or None
+    drafted: list[str] = []
+    model = args.get("model_py") or (
+        Path(args.get("support_root") or ".") / support["Model.py"] if "Model.py" in support else out / "Model.py"
+    )
+    if requirements is None and Path(model).is_file():
+        kept = [path.name for path in out.iterdir()] if out.is_dir() else []
+        local = {Path(name).parts[0].removesuffix(".py") for name in [*support, "Model.py", *kept]}
+        drafted = [name for name in derive_requirements([model]) if name.replace("-", "_") not in local]
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their
@@ -708,20 +723,24 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         if (spec["onnx"] and "artifact" not in report) or (spec["extension"] and "checked" not in report):
             raise AppMetadataError("The update's export or check did not finish: the bundle is as it was.")
 
-    bundle = assemble_bundle(
-        name=args["name"],
-        out_dir=args["out"],
-        app_json=args["app_json"],
-        configs=args["config"],
-        checkpoints=args["checkpoint"],
-        model_py=args.get("model_py"),
-        requirements=args.get("requirements"),
-        support_files=support,
-        support_root=args.get("support_root"),
-        # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
-        extension=args.get("extension"),
-        finish=export_and_check if args.get("onnx") or args.get("extension") else None,
-    )
+    with tempfile.TemporaryDirectory() as scratch:
+        if drafted:
+            requirements = Path(scratch) / "requirements.txt"
+            requirements.write_text("\n".join(drafted) + "\n")
+        bundle = assemble_bundle(
+            name=args["name"],
+            out_dir=args["out"],
+            app_json=args["app_json"],
+            configs=args["config"],
+            checkpoints=args["checkpoint"],
+            model_py=args.get("model_py"),
+            requirements=requirements,
+            support_files=support,
+            support_root=args.get("support_root"),
+            # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
+            extension=args.get("extension"),
+            finish=export_and_check if args.get("onnx") or args.get("extension") else None,
+        )
     print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
     if "artifact" in report:
         print(f"[KonfAI-Apps] Portable model exported: {bundle / report['artifact']}")
@@ -732,16 +751,5 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             if report["checked"] is not None
             else "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
         )
-
-    # If no requirements.txt was provided, draft one from the custom Model.py imports.
-    if not args.get("requirements") and (bundle / "Model.py").exists():
-        drafted = derive_requirements([bundle / "Model.py"])
-        # A declared local package is not a PyPI dependency. Requirements remain a reviewed draft;
-        # packaging deliberately does not execute code to discover dependencies.
-        local_modules = {path.stem for path in bundle.glob("*.py")} | {
-            path.name for path in bundle.iterdir() if path.is_dir()
-        }
-        drafted = [name for name in drafted if name.replace("-", "_") not in local_modules]
-        if drafted:
-            owned_destination(bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
-            print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
+    if drafted:
+        print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
