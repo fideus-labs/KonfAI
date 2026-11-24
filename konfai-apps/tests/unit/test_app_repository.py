@@ -335,6 +335,28 @@ def test_a_whole_hf_app_includes_the_files_its_cache_lacks(
     assert ("MR/model.safetensors" in fetched) is whole
 
 
+def test_an_hf_app_names_its_files_relative_to_its_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """As in a directory app, a file name is relative to the app folder: one that starts like the app's name, or
+    a subfolder named like the app, is still read under it."""
+    snapshot = _hub_cache(monkeypatch, tmp_path, ["coarse/app.json"])
+    names = ["coarse.safetensors", "coarse/w.safetensors"]
+    _fake_hub(monkeypatch, ["coarse/app.json", *(f"coarse/{name}" for name in names)])
+    fetched: list[str] = []
+
+    def download(repo_id: str, filename: str, force_update: bool) -> Path:
+        fetched.append(filename)
+        return snapshot / filename
+
+    monkeypatch.setattr(app_repository_module.LocalAppRepositoryFromHF, "download", staticmethod(download))
+    repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "coarse", False)
+    fetched.clear()
+
+    repo._download(names[0])
+    repo.download_files(names)
+
+    assert fetched == ["coarse/coarse.safetensors", "coarse/coarse.safetensors", "coarse/coarse/w.safetensors"]
+
+
 def test_local_hf_download_syncs_non_model_files_for_current_revision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

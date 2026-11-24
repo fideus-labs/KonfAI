@@ -2064,9 +2064,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
             return LocalAppRepositoryFromHF.download(repo_id, filename, True)
 
     def _download(self, filename: str) -> Path:
-        if not filename.startswith(f"{self._app_name}/"):
-            filename = self._app_name + "/" + filename
-        return LocalAppRepositoryFromHF.download(self._repo_id, filename, self._force_update)
+        return LocalAppRepositoryFromHF.download(self._repo_id, f"{self._app_name}/{filename}", self._force_update)
 
     def get_app_filenames(self) -> list[str]:
         """Return the app files as paths relative to the app folder, downloaded or not."""
@@ -2083,12 +2081,10 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         force_update:
             Refresh the files from the Hub instead of reusing cached copies.
         """
-        paths: list[Path] = []
-        for filename in filenames or self.get_app_filenames():
-            if not filename.startswith(f"{self._app_name}/"):
-                filename = f"{self._app_name}/{filename}"
-            paths.append(LocalAppRepositoryFromHF.download(self._repo_id, filename, force_update))
-        return paths
+        return [
+            LocalAppRepositoryFromHF.download(self._repo_id, f"{self._app_name}/{filename}", force_update)
+            for filename in filenames or self.get_app_filenames()
+        ]
 
     def get_name(self) -> str:
         return f"{self._repo_id}:{self._app_name}"
