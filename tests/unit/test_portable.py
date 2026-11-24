@@ -1516,6 +1516,24 @@ def test_a_class_of_the_app_s_is_probed_in_each_stored_dtype_it_takes(
         transform_manifest(_two_groups({"DtypeGrid:Trim": {}}), "Predictor", extension=True)
 
 
+def test_a_class_of_the_app_s_taking_blocks_of_voxels_is_probed_on_a_volume_it_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class folding blocks of 2 x 2 x 2 voxels takes even extents alone: the probe's are, and other along each axis.
+    (tmp_path / "Blocks.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Even(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if any(extent % 2 for extent in tensor.shape[1:]):\n"
+        "            raise ValueError(f'even extents, not {list(tensor.shape[1:])}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = transform_manifest(_two_groups({"Blocks:Even": {}}), "Predictor", extension=True)[0]
+    assert manifest["reads"][0]["preprocessing"][0]["op"] == "extension"
+
+
 def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3435,6 +3453,11 @@ _DTYPE_VARIANTS = {
     "TensorCast": [{"dtype": "int16"}, {"dtype": "float32"}],
 }
 _DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "float32", "float64")
+#: The dtypes konfai's stage refuses, each a row the portable runtime is tested against: any other failure fails.
+_REFUSED = {
+    "Clip": ("uint8", "int8"),  # bounds past the dtype's range
+    "HistogramMatching": ("uint8", "int8", "int16", "int32", "int64", "float64"),  # float16 and float32 alone
+}
 
 
 def _tabled(step: dict[str, Any], dtype: str, returned: str | None) -> None:
@@ -3459,7 +3482,7 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
     for group in ("REF", "BODY"):
         companions.write(group, "probe", np.ones((1, 6, 7, 8), np.float32), Attribute(_probe_attribute(3)))
     for params in _DTYPE_VARIANTS.get(stage, [_LEAST.get(stage, {})]):
-        step, ran = _CHAIN_OPS[stage](dict(params)), []
+        step, ran, refused = _CHAIN_OPS[stage](dict(params)), [], []
         for dtype in _DTYPES:
             volume = (torch.arange(6 * 7 * 8).reshape(1, 6, 7, 8) % 2).to(getattr(torch, dtype))
             try:
@@ -3474,10 +3497,12 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
                     returned = _probed(built, volume, _probe_attribute(3))
             except (RuntimeError, TypeError, ValueError, KonfAIError):  # a dtype the stage does not take
                 _tabled(step, dtype, None)
+                refused.append(dtype)
                 continue
             ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
             _tabled(step, dtype, ran[-1][2])
         assert ran, f"{stage} {params} takes none of {_DTYPES}"
+        assert tuple(refused) == _REFUSED.get(stage, ()), (stage, params, refused)  # no other failure
         assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
 
 

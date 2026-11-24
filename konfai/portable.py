@@ -779,14 +779,15 @@ def _own_stage(classpath: str, params: dict[str, Any], rank: int, placed: bool =
     return stage
 
 
-#: The extent of the volume a class that reads past the voxel is probed on along its first axis, one more along each
-#: next: wider than a neighbourhood, and other along each axis, so a class that swaps two is seen to.
+#: The extent of the volume a class that reads past the voxel is probed on along its first axis, twice it along the
+#: next, and so on: wider than a neighbourhood, a multiple of 8 along each axis (a class folding blocks of voxels
+#: takes it), and other along each axis, so a class that swaps two is seen to.
 _PROBE_EXTENT = 8
 
 
 def _probe_extents(rank: int) -> tuple[int, ...]:
     """The extents of the volume of ``rank`` axes a class is probed on."""
-    return tuple(_PROBE_EXTENT + axis for axis in range(rank))
+    return tuple(_PROBE_EXTENT * (axis + 1) for axis in range(rank))
 
 
 #: What a class is probed on where its chain is not known: one channel of a 3D volume.
