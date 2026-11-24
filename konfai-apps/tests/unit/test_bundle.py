@@ -1215,6 +1215,29 @@ def test_a_bundle_takes_an_update_only_once_its_export_and_its_extension_are_che
     assert not list(bundle.parent.glob(".Seg.*"))
 
 
+def test_a_bundle_whose_update_fails_to_take_its_place_is_put_back(tmp_path, monkeypatch):
+    # The update checked, the bundle moved aside, and the update refused its place: the bundle is back where it was.
+    from pathlib import Path
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"))
+    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+    rename = Path.rename
+
+    def refused(self, target):
+        if self.name.startswith(".Seg.update-") and Path(target) == bundle:
+            raise OSError("refused")
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refused)
+    with pytest.raises(OSError, match="refused"):
+        _cli(root, extension=str(root / "own.wasm"))
+    assert {path.name: path.read_bytes() for path in bundle.iterdir()} == before
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
 def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
     # The Model.py a first packaging carried stays in the bundle when the next one names none: the classes the next
     # config names from it are the app's, and the staged update reads them there.

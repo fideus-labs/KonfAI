@@ -309,7 +309,11 @@ def assemble_bundle(
         if bundle.exists():
             previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
             bundle.rename(previous)
-            update.rename(bundle)
+            try:
+                update.rename(bundle)
+            except OSError:
+                previous.rename(bundle)  # the update refused its place: the bundle takes its own back
+                raise
             shutil.rmtree(previous)
         else:
             update.rename(bundle)
