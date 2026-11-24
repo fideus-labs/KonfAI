@@ -269,6 +269,10 @@ def assemble_bundle(
 
     if _support_relative(name, "bundle name").name != name:
         raise AppMetadataError("Bundle name must be a single directory name.")
+    if name.startswith("."):
+        raise AppMetadataError(
+            f"Bundle name {name!r} starts with '.', which names the command's own folders beside it."
+        )
     support = resolve_support_files(support_files, support_root)
     files: dict[str, Path | None] = {"app.json": None}
 
@@ -293,9 +297,10 @@ def assemble_bundle(
     _check_file_layout(files)
     metadata["support_files"] = sorted(support)
     bundle = Path(out_dir) / name
-    staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
-    update = bundle.with_name(f".{name}.update-{os.getpid()}")
-    previous = bundle.with_name(f".{name}.previous")  # no process's own: the next one finds it
+    bundle = bundle.resolve() if bundle.is_symlink() else bundle  # a bundle reached by a link: where it leads
+    staging = bundle.with_name(f".{bundle.name}.staging-{os.getpid()}")
+    update = bundle.with_name(f".{bundle.name}.update-{os.getpid()}")
+    previous = bundle.with_name(f".{bundle.name}.previous")  # no process's own: the next one finds it
     if previous.exists() and not bundle.exists():
         previous.rename(bundle)  # an earlier update left the bundle only there
     for scratch in (staging, update, previous):
@@ -328,7 +333,12 @@ def assemble_bundle(
             # A link into the bundle, by its absolute path or out of it and back, reads the update's file there, as the
             # bundle published will.
             for link in [path for path in update.rglob("*") if path.is_symlink()]:
-                target = Path(os.path.realpath(bundle / link.relative_to(update)))
+                # What the link names, its folders read as the system reads them, its last part not followed: a chain
+                # of links into the bundle is kept a chain.
+                named = Path(os.readlink(link))
+                held = bundle.absolute() / link.relative_to(update).parent
+                last = named.name not in ("", ".", "..")
+                target = Path(os.path.realpath(held / (named.parent if last else named))) / (named.name if last else "")
                 for spelled in {bundle.absolute(), bundle.resolve()}:
                     if target.is_relative_to(spelled):
                         link.unlink()
@@ -686,6 +696,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             raise AppMetadataError(f"Conflicting --support-file mappings for {destination!r}.")
         support[destination] = source
     out = Path(args["out"]) / args["name"]
+    out = out.resolve() if out.is_symlink() else out  # as assemble_bundle reads it
     report: dict[str, Any] = {}
     named = Path(args["extension"]).name if args.get("extension") else None
     if named is not None and (named.lower() == "requirements.txt" or _exported(named)):
@@ -708,7 +719,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     def draft(update: Path) -> None:
         if (update / "Model.py").is_file() and not os.path.lexists(update / "requirements.txt"):
             local = {path.stem for path in update.glob("*.py")} | {
-                path.name for path in update.iterdir() if path.is_dir()
+                path.name for path in update.iterdir() if path.is_dir() and any(path.rglob("*.py"))
             }
             drafted[:] = derive_requirements([update / "Model.py"], local)
         if drafted:

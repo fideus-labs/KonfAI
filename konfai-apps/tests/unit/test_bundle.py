@@ -19,6 +19,7 @@
 import codecs
 import json
 import locale
+import os
 import re
 import shutil
 import sys
@@ -1530,6 +1531,7 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
         "requirements the bundle holds",
         "a support file's Model.py",
         "a module the update drops",
+        "an empty folder of the module's name",
         "a bundle left aside",
     ],
 )
@@ -1560,12 +1562,54 @@ def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_p
             root, model_py=str(root / "Model.py"), support_file=["einops.py=einops.py"], support_root=str(root)
         )
         assert not (bundle / "requirements.txt").exists()  # einops is the bundle's own module
+    elif made == "an empty folder of the module's name":
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        (bundle / "einops").mkdir()  # no module: what is imported is the package
     else:
         bundle = _cli(root, model_py=str(root / "Model.py"))
         (bundle / "requirements.txt").unlink()
         bundle.rename(bundle.with_name(".Seg.previous"))
     _cli(root)
     assert (bundle / "requirements.txt").read_text() == "einops\n"
+
+
+def test_a_bundle_reached_by_a_link_is_updated_where_the_link_leads(tmp_path):
+    # The update takes the place of the folder the link names, which the link then names still, as a direct update
+    # writes there.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "requirements.txt").unlink()
+    (tmp_path / "kept").mkdir()
+    bundle.rename(tmp_path / "kept" / "SegV")
+    bundle.symlink_to(tmp_path / "kept" / "SegV")
+    (root / "Model.py").write_text("import einops\nimport scipy\n")
+
+    _cli(root, model_py=str(root / "Model.py"))
+    assert bundle.is_symlink() and (bundle / "Model.py").read_text() == "import einops\nimport scipy\n"
+    assert sorted(path.name for path in bundle.parent.iterdir()) == ["Seg"]
+
+
+def test_a_bundle_s_name_is_none_of_the_command_s_scratch_folders(tmp_path):
+    # `.Seg.previous` is the folder an update leaves the bundle in: no bundle takes such a name.
+    root = _support_workspace(tmp_path)
+    with pytest.raises(AppMetadataError, match=r"starts with '\.'"):
+        _cli(root, name=".Seg.previous")
+
+
+def test_a_link_the_update_re_points_keeps_the_link_it_names(tmp_path):
+    # Alias.py names Bridge.py by its absolute path, which names Model.py: re-pointed into the update, it names
+    # Bridge.py still, and the update keeps the bundle's chain of links.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "requirements.txt").unlink()
+    (bundle / "Bridge.py").symlink_to("Model.py")
+    (bundle / "Alias.py").symlink_to((bundle / "Bridge.py").absolute())
+
+    _cli(root)
+    assert os.readlink(bundle / "Alias.py") == "Bridge.py"
 
 
 def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path):
