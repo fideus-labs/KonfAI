@@ -1250,8 +1250,10 @@ def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monke
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     for module in ("Model", "scales"):
         monkeypatch.delitem(sys.modules, module, raising=False)
-    bundle = _cli(root, model_py=str(root / "Model.py"), support_file=["scales.py=scales.py"], support_root=str(root))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    # Checked once with it, which imports it.
+    support = {"support_file": ["scales.py=scales.py"], "support_root": str(root)}
+    bundle = _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"), **support)
 
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
         _cli(root, extension=str(root / "own.wasm"))
@@ -1260,7 +1262,7 @@ def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monke
 
 def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):
     # A Model imported before is not the first packaging's, and the first packaging's is not the second's, which
-    # scales by 3: each checks its own, and the second is refused.
+    # scales by 3: each checks its own, the second is refused, and the Model imported before is the process's again.
     from types import ModuleType
 
     from test_extension import DOUBLE, OWN
@@ -1269,7 +1271,8 @@ def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monk
     root = _support_workspace(tmp_path)
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
-    monkeypatch.setitem(sys.modules, "Model", ModuleType("Model"))
+    before = ModuleType("Model")
+    monkeypatch.setitem(sys.modules, "Model", before)
     for scale in (2.0, 3.0):
         (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", f"scale: float = {scale}"))
         if scale == 2.0:
@@ -1278,6 +1281,8 @@ def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monk
             continue
         with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume as the Python class does"):
             _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    # The process gets back the Model it held.
+    assert sys.modules["Model"] is before
 
 
 def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):

@@ -319,6 +319,11 @@ def assemble_bundle(
     return bundle
 
 
+def _under(module: Any, folder: Path) -> bool:
+    """Whether ``module`` was imported from a file below ``folder``."""
+    return Path(getattr(module, "__file__", None) or "/").is_relative_to(folder)
+
+
 def _carried(bundle: Path, source: str, target: str) -> None:
     """A file of ``bundle`` into the update an export finishes: a copy where the export may write it in place (a
     manifest, a program, a graph beside the configs), else a link (a checkpoint, a file below the top level, which it
@@ -568,12 +573,10 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         until both are done."""
         from .extension import check_extension, classes_run
 
-        # The app's classes as konfai imports them, from this update: none an earlier import of the same name left,
-        # and no bytecode written into the bundle.
+        # The app's classes as konfai imports them, from this update alone: a module of one of its names imported
+        # before is set aside and comes back after, the update's own go with it, and no bytecode is written into it.
         own = {path.stem for path in staged.glob("*.py")} | {path.name for path in staged.iterdir() if path.is_dir()}
-
-        for module in [name for name in sys.modules if name.partition(".")[0] in own]:
-            del sys.modules[module]
+        displaced = {name: sys.modules.pop(name) for name in list(sys.modules) if name.partition(".")[0] in own}
         sys.path.insert(0, str(staged))
         writes, sys.dont_write_bytecode = sys.dont_write_bytecode, True
         try:
@@ -610,6 +613,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         finally:
             sys.path.remove(str(staged))
             sys.dont_write_bytecode = writes
+            for name in [name for name, module in sys.modules.items() if _under(module, staged)]:
+                del sys.modules[name]
+            sys.modules.update(displaced)
 
     bundle = assemble_bundle(
         name=args["name"],
