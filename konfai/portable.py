@@ -798,9 +798,10 @@ def _probe_after(
     rank: int,
     start: Callable[[], int],
     before: Callable[[], list[tuple[dict[str, Any], str | None]]] = list,
-    members: int = 1,
+    members: int | None = 1,
 ) -> Probe:
-    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, a stack of ``members``, past what
+    """The ``Probe`` of a chain at ``rank`` that ``start`` gives the channels of, a stack of ``members`` (``None``: one
+    a channel of what a fold of them is handed), past what
     ``before`` lists, each step with the dtype konfai hands it (:func:`_handed`), then the chain's steps, the first
     handed the dtype the probe is asked with (``None``: the stored one): a class of the app's own among them is run
     again in its own."""
@@ -3051,12 +3052,15 @@ def export_checkpoints(
     return models, written, per_copy
 
 
-def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | None = None, members: int = 1) -> int:
+def _channels_after(
+    step: dict[str, Any], held: int, rank: int, dtype: str | None = None, members: int | None = 1
+) -> int:
     """The channels a step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis one each per spatial axis of the
     ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
     channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (float32 where
-    only the run knows it), a spread of a stack of ``members`` one member's, a disagreement of them one."""
+    only the run knows it), a spread of a stack of ``members`` one member's (each channel one where ``None``), a
+    disagreement of them one."""
     if "manifest" in step:
         made, blended = _blended(step["manifest"])
         for post, handed in _handed(step["manifest"].get("postprocessing", []), blended):
@@ -3065,7 +3069,7 @@ def _channels_after(step: dict[str, Any], held: int, rank: int, dtype: str | Non
     if step["op"] in ("argmax", "magnitude", "threshold_labels", "segmentation_disagreement"):
         return 1
     if step["op"] in ("variance", "standard_deviation"):
-        return held // members
+        return held // members if members else 1
     if step["op"] == "gradient" and step["per_dim"]:
         return held * rank
     if step["op"] == "keep_largest_component" and "mask" in step:

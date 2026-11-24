@@ -219,14 +219,20 @@ def test_a_class_of_the_app_s_run_again_to_count_its_channels_is_run_in_the_dtyp
 
 
 @pytest.mark.parametrize(
-    ("fold", "members", "channels"),
-    [("StandardDeviation", 3, 2), ("Variance", 1, 6), ("SegmentationDisagreement", 3, 1)],
+    ("fold", "before", "members", "channels"),
+    [
+        ("StandardDeviation", {}, 3, 2),
+        ("Variance", {}, 1, 6),
+        ("SegmentationDisagreement", {}, 3, 1),
+        ("Variance", {"OneHot": {"num_classes": 3}}, None, 1),
+    ],
+    ids=["three-members-of-two", "one-member-of-six", "a-disagreement", "one-member-a-channel-of-a-one-hot"],
 )
 def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_fold_leaves(
-    tmp_path: Path, monkeypatch, fold: str, members: int, channels: int
+    tmp_path: Path, monkeypatch, fold: str, before: dict, members: int | None, channels: int
 ) -> None:
-    # A stack of members of two channels cast to int16: a spread leaves one member's, a disagreement one channel,
-    # each in float32.
+    # A stack of members cast to int16: a spread leaves one member's, a disagreement one channel, each in float32.
+    # Where no header counts them, each channel the fold is handed is a member.
     from konfai.portable_evaluation import _group_steps
 
     (tmp_path / "AfterMembers.py").write_text(
@@ -242,16 +248,17 @@ def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_f
         "        return tensor\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    chain = {"TensorCast": {"dtype": "int16"}, fold: {}, "AfterMembers:Count": {"channels": channels}}
-    steps = _group_steps("Spread", chain, tmp_path, {}, None, True, (2 * members if members > 1 else 6, 3, members))
+    chain = {**before, "TensorCast": {"dtype": "int16"}, fold: {}, "AfterMembers:Count": {"channels": channels}}
+    stored = 1 if members is None else 2 * members if members > 1 else 6
+    steps = _group_steps("Spread", chain, tmp_path, {}, None, True, (stored, 3, members))
     assert steps[-1]["op"] == "extension"
 
 
-@pytest.mark.parametrize(("members", "count"), [(2, 2), (None, 4)])
+@pytest.mark.parametrize(("members", "count"), [(2, 2), (None, None)])
 def test_the_first_case_s_stacked_members_are_read_off_its_header(
     tmp_path: Path, image_attributes, members, count
 ) -> None:
-    # As konfai counts them: the header's count, else one member a channel.
+    # As konfai counts them: the header's count, else none, one member a channel of what the fold is handed.
     from types import SimpleNamespace
 
     import numpy as np
