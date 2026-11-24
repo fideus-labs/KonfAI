@@ -308,7 +308,7 @@ def _traced_sizes(
                 expr = sympy.Integer(extent)
             elif isinstance(size, torch.SymInt) and size.node.expr.free_symbols:
                 expr = size.node.expr
-                env = size.node.shape_env  # torch 2.5 calls backed_var_to_val var_to_val, later ones deprecate it
+                env: Any = size.node.shape_env  # torch 2.5 calls backed_var_to_val var_to_val, later ones deprecate it
                 traced_values = env.backed_var_to_val if hasattr(env, "backed_var_to_val") else env.var_to_val
                 values.update({symbol: int(traced_values[symbol]) for symbol in sorted(expr.free_symbols, key=str)})
             else:  # an int or a symbol of one value (torch 2.5): an axis the trace fixed
