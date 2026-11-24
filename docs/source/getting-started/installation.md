@@ -65,7 +65,7 @@ every extra but `monai`, `[dev]` adds the test, lint and docs tooling.
 | `monai` | `monai` | MONAI networks and losses named by classpath (`monai.networks.nets:UNet`) and MONAI Bundles, see {doc}`../usage/adopting-konfai` |
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
-| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` 0.5+, `onnx-ir` 0.1.8+, `torch` 2.7+ | ONNX export, see {doc}`../usage/python-api` |
 | `check` | `jsonschema` | `konfai <WORKFLOW> --check`, see {doc}`../reference/cli` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
 | `all` | everything above but `monai`, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |

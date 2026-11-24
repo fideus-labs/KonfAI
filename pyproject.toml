@@ -69,7 +69,10 @@ omezarr = ["zarr>=3", "ngff-zarr>=0.49", "dask"]
 # Reading a dataset root from S3: s3fs is the fsspec implementation, aiohttp the transport
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
-export = ["onnx", "onnxruntime", "onnxscript"]
+# The dynamo exporter: torch 2.7 is the first that exports the catalog's networks and keeps their axes
+# free (2.6 takes custom_translation_table, and fails both), onnx-ir 0.1.8 the first whose serde writes
+# an exported graph's boolean attributes, onnxscript 0.5 the first that exports a padding of free sizes.
+export = ["onnx", "onnxruntime", "onnxscript>=0.5", "onnx-ir>=0.1.8", "torch>=2.7"]
 # `konfai <WORKFLOW> --check`: a config against its JSON Schema (konfai.config_schema.config_errors).
 check = ["jsonschema"]
 # MONAI Bundles (konfai.bundle) and the MONAI networks the docs wrap (monai.networks.nets:UNet).
@@ -102,7 +105,8 @@ dev = [
   "scikit-image",
   "onnx",
   "onnxruntime",
-  "onnxscript",
+  "onnxscript>=0.5",
+  "onnx-ir>=0.1.8",
   "jsonschema",
   "nvidia-ml-py",
   "tensorboard",
