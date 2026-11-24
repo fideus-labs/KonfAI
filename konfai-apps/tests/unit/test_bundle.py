@@ -1258,6 +1258,28 @@ def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monke
     assert (bundle / "scales.py").read_text() == OWN
 
 
+def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):
+    # A Model imported before is not the first packaging's, and the first packaging's is not the second's, which
+    # scales by 3: each checks its own, and the second is refused.
+    from types import ModuleType
+
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    monkeypatch.setitem(sys.modules, "Model", ModuleType("Model"))
+    for scale in (2.0, 3.0):
+        (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", f"scale: float = {scale}"))
+        if scale == 2.0:
+            _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+            assert "Extension checked against: Model:Scale" in capsys.readouterr().out
+            continue
+        with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume as the Python class does"):
+            _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+
+
 def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):
     # Its name beside a support file of another source is refused before anything is written, a symlink in the
     # bundle under its name is not written through, and an extension of its own name lands.

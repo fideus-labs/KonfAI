@@ -230,7 +230,8 @@ def assemble_bundle(
     references are not recursively inferred. The manifest records the expanded managed files.
     ``extension``, the app's extension of KonfAI Edge, lands under its own name. ``finish`` runs on the bundle the
     export makes, a copy beside it that then takes its place: what it writes there goes in with it, and what it raises
-    leaves the bundle as it was. Returns the bundle directory.
+    leaves the bundle as it was. The copy links the checkpoints and the files below the top level, which ``finish``
+    reads or replaces whole, never writes in place. Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -567,8 +568,14 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         until both are done."""
         from .extension import check_extension, classes_run
 
-        # The app's classes as konfai imports them.
+        # The app's classes as konfai imports them, from this update: none an earlier import of the same name left,
+        # and no bytecode written into the bundle.
+        own = {path.stem for path in staged.glob("*.py")} | {path.name for path in staged.iterdir() if path.is_dir()}
+
+        for module in [name for name in sys.modules if name.partition(".")[0] in own]:
+            del sys.modules[module]
         sys.path.insert(0, str(staged))
+        writes, sys.dont_write_bytecode = sys.dont_write_bytecode, True
         try:
             runs = None
             if args.get("onnx"):
@@ -602,6 +609,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
         finally:
             sys.path.remove(str(staged))
+            sys.dont_write_bytecode = writes
 
     bundle = assemble_bundle(
         name=args["name"],
