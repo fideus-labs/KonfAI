@@ -1163,6 +1163,68 @@ def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_require
         )
 
 
+#: The least module KonfAI Edge opens: it starts and calls the interface KonfAI Edge calls.
+_MODULE = '(module (memory (export "memory") 1) (func (export "ext_abi") (result i32) (i32.const 2)))'
+
+
+def _cli(root, **more):
+    """``konfai-apps bundle`` of the support workspace's app into ``out/Seg``."""
+    from konfai_apps.bundle import run_bundle_cli
+
+    args = {
+        "name": "Seg",
+        "out": str(root.parent / "out"),
+        "app_json": str(root / "app.json"),
+        "config": [str(root / "Prediction.yml")],
+        "checkpoint": [str(root / "CV_0.safetensors")],
+    }
+    run_bundle_cli(args | more)
+    return root.parent / "out" / "Seg"
+
+
+def test_a_bundle_takes_an_update_only_once_its_export_and_its_extension_are_checked(tmp_path, monkeypatch):
+    # The update is assembled, exported and checked beside the bundle: an extension that does not load leaves the
+    # bundle the config and the program it ran before.
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"))
+    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+    config = {"Predictor": {"Model": {"classpath": "Probe"}, "outputs_dataset": {"Head": {"OutputDataset": {}}}}}
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    (root / "own.wasm").write_bytes(b"\0asm, and no module")
+    _stub_export(monkeypatch)
+
+    with pytest.raises(AppMetadataError, match="is no WebAssembly module"):
+        _cli(root, extension=str(root / "own.wasm"), onnx=True, patch_size=[4, 4], in_channels=1, output_module="Head")
+    assert {path.name: path.read_bytes() for path in bundle.iterdir()} == before
+    assert not list(bundle.parent.glob(".Seg.staging-*"))
+
+
+def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):
+    # Its name beside a support file of another source is refused before anything is written, a symlink in the
+    # bundle under its name is not written through, and an extension of its own name lands.
+    module = pytest.importorskip("wasmtime").wat2wasm(_MODULE)
+    root = _support_workspace(tmp_path)
+    (root / "engine.wasm").write_bytes(b"a support file")
+    (tmp_path / "built").mkdir()
+    (tmp_path / "built" / "engine.wasm").write_bytes(module)
+    support = {"support_file": ["engine.wasm=engine.wasm"], "support_root": str(root)}
+
+    with pytest.raises(AppMetadataError, match=r"Different bundle files would overwrite 'engine\.wasm'"):
+        _cli(root, extension=str(tmp_path / "built" / "engine.wasm"), **support)
+    assert not (tmp_path / "out").exists()
+    bundle = _cli(root)
+    (tmp_path / "elsewhere.wasm").write_bytes(b"not the bundle's")
+    (bundle / "engine.wasm").symlink_to(tmp_path / "elsewhere.wasm")
+    with pytest.raises(AppMetadataError, match="symlink"):
+        _cli(root, extension=str(tmp_path / "built" / "engine.wasm"))
+    assert (tmp_path / "elsewhere.wasm").read_bytes() == b"not the bundle's"
+    (bundle / "engine.wasm").unlink()
+    (tmp_path / "built" / "own.wasm").write_bytes(module)
+    assert (_cli(root, extension=str(tmp_path / "built" / "own.wasm"), **support) / "own.wasm").read_bytes() == module
+
+
 @pytest.mark.slow
 def test_the_published_mrseg_program_fixture_is_what_the_compiler_emits(tmp_path):
     """The runtime's `mrseg_program.json` fixture is the program this export writes for the published

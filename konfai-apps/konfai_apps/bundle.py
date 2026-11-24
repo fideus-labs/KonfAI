@@ -28,7 +28,7 @@ import json
 import os
 import shutil
 import sys
-import tempfile
+from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -210,6 +210,8 @@ def assemble_bundle(
     requirements: str | None = None,
     support_files: dict[str, str] | None = None,
     support_root: str | Path | None = None,
+    extension: str | Path | None = None,
+    finish: Callable[[Path], None] | None = None,
 ) -> Path:
     """Assemble ``<out_dir>/<name>/`` in the standard app-bundle layout.
 
@@ -225,7 +227,9 @@ def assemble_bundle(
     ``support_files`` explicitly maps bundle-relative destinations to files/directories below
     ``support_root`` (required with this option). Only these paths are copied; imports and asset
     references are not recursively inferred. The manifest records the expanded managed files.
-    Returns the bundle directory.
+    ``extension``, the app's extension of KonfAI Edge, lands under its own name. ``finish`` runs on the staged
+    export before it replaces the bundle: what it writes there goes in with it, and what it raises leaves the bundle
+    as it was. Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -270,6 +274,8 @@ def assemble_bundle(
         add("requirements.txt", requirements)
     for destination, planned in support.items():
         add(destination, planned)
+    if extension is not None:
+        add(Path(extension).name, extension)
     _check_file_layout(files)
     metadata["support_files"] = sorted(support)
     bundle = Path(out_dir) / name
@@ -287,6 +293,8 @@ def assemble_bundle(
                     _publish_weights(staged, target)
                 else:
                     shutil.copy(staged, target)
+        if finish is not None:
+            finish(staging)
         _replace_bundle(staging, bundle, metadata["models"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -520,6 +528,48 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         if destination in support and support[destination] != source:
             raise AppMetadataError(f"Conflicting --support-file mappings for {destination!r}.")
         support[destination] = source
+    out = Path(args["out"]) / args["name"]
+
+    def export_and_check(staged: Path) -> None:
+        """The portable program and the extension's check, on the staged update: the bundle takes neither until both
+        are done."""
+        from .extension import check_extension, classes_run
+
+        runs = None
+        if args.get("onnx"):
+            artifact = export_portable_into_bundle(
+                staged,
+                checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
+                patch_size=args.get("patch_size"),
+                in_channels=args.get("in_channels"),
+                output_module=args.get("output_module"),
+                extension=bool(args.get("extension")),
+            )
+            print(f"[KonfAI-Apps] Portable model exported: {out / artifact.relative_to(staged)}")
+            # The classes the program runs by the extension: a class folded into a graph is no longer its.
+            # A program, or the manifest beside the one model it would run.
+            written = artifact if artifact.suffix == ".json" else staged / "manifest.json"
+            runs = classes_run(json.loads(written.read_text())) if args.get("extension") else None
+        if not args.get("extension"):
+            return
+        # Checked against the classes it stands for, as konfai imports them: the bytes the bundle takes.
+        sys.path.insert(0, str(staged))
+        try:
+            configs = [staged / Path(config).name for config in args["config"]]
+            # The program is the prediction config's: the classes of the other configs are all checked.
+            compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
+            others = [config for config in configs if config not in compiled]
+            extension = staged / Path(args["extension"]).name
+            checked = check_extension(extension, compiled, runs) + check_extension(extension, others)
+            names = ", ".join(dict.fromkeys(checked)) or "no class of the app"
+            print(f"[KonfAI-Apps] Extension checked against: {names}")
+        except ModuleNotFoundError as error:
+            if error.name != "wasmtime":
+                raise
+            print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
+        finally:
+            sys.path.remove(str(staged))
+
     bundle = assemble_bundle(
         name=args["name"],
         out_dir=args["out"],
@@ -530,6 +580,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         requirements=args.get("requirements"),
         support_files=support,
         support_root=args.get("support_root"),
+        # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
+        extension=args.get("extension"),
+        finish=export_and_check,
     )
     print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
 
@@ -545,48 +598,3 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         if drafted:
             (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
             print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
-
-    runs = None
-    if args.get("onnx"):
-        artifact = export_portable_into_bundle(
-            bundle,
-            checkpoints=[Path(c).name for c in args["checkpoint"]] if args.get("checkpoint") else None,
-            patch_size=args.get("patch_size"),
-            in_channels=args.get("in_channels"),
-            output_module=args.get("output_module"),
-            extension=bool(args.get("extension")),
-        )
-        print(f"[KonfAI-Apps] Portable model exported: {artifact}")
-
-    if args.get("extension"):
-        from .extension import check_extension, classes_run
-
-        source = Path(args["extension"])
-        if args.get("onnx"):
-            # The classes the program runs by the extension: a class folded into a graph is no longer its.
-            # A program, or the manifest beside the one model it would run.
-            written = artifact if artifact.suffix == ".json" else bundle / "manifest.json"
-            runs = classes_run(json.loads(written.read_text()))
-        with tempfile.TemporaryDirectory() as scratch:
-            # A copy is checked and carried: the bytes the bundle gets are the ones checked, whatever the source does.
-            staged = Path(shutil.copy(source, scratch))
-            # Checked against the classes it stands for, as konfai imports them.
-            sys.path.insert(0, str(bundle))
-            try:
-                configs = [bundle / Path(config).name for config in args["config"]]
-                # The program is the prediction config's: the classes of the other configs are all checked.
-                compiled = [c for c in configs if c.name == "Prediction.yml"] if runs is not None else []
-                others = [config for config in configs if config not in compiled]
-                checked = check_extension(staged, compiled, runs) + check_extension(staged, others)
-                names = ", ".join(dict.fromkeys(checked)) or "no class of the app"
-                print(f"[KonfAI-Apps] Extension checked against: {names}")
-            except ModuleNotFoundError as error:
-                if error.name != "wasmtime":
-                    raise
-                print(
-                    "[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes."
-                )
-            finally:
-                sys.path.remove(str(bundle))
-            # The app's extension of KonfAI Edge rides in the bundle, once it holds what the classes do.
-            shutil.copy(staged, bundle / source.name)
