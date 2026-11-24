@@ -284,6 +284,8 @@ def assemble_bundle(
     staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
     update = bundle.with_name(f".{name}.update-{os.getpid()}")
     previous = bundle.with_name(f".{name}.previous-{os.getpid()}")
+    if previous.exists() and not bundle.exists():
+        previous.rename(bundle)  # an earlier update left the bundle only there
     for scratch in (staging, update, previous):
         if scratch.exists():
             shutil.rmtree(scratch)
@@ -327,6 +329,11 @@ def assemble_bundle(
 def _under(module: Any, folder: Path) -> bool:
     """Whether ``module`` was imported from a file below ``folder``, however either is spelled."""
     return Path(getattr(module, "__file__", None) or "/").resolve().is_relative_to(folder.resolve())
+
+
+def _same(entry: str, folder: Path) -> bool:
+    """Whether the import path ``entry`` (``""``: the working folder) is ``folder``."""
+    return Path(entry or ".").resolve() == folder.resolve()
 
 
 def _carried(bundle: Path, source: str, target: str) -> None:
@@ -589,7 +596,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             if path.suffix == ".py" or path.is_dir()
         }
         displaced = {name: sys.modules.pop(name) for name in list(sys.modules) if name.partition(".")[0] in own}
-        sys.path.insert(0, str(staged))
+        # Nor from the bundle on the import path (a PYTHONPATH, the folder the command runs in).
+        path = list(sys.path)
+        sys.path[:] = [str(staged), *(entry for entry in path if not out.is_dir() or not _same(entry, out))]
         writes, sys.dont_write_bytecode = sys.dont_write_bytecode, True
         try:
             runs = None
@@ -629,7 +638,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
                 raise
             print("[KonfAI-Apps] Extension not checked: install konfai-apps[extension] to compare it with the classes.")
         finally:
-            sys.path.remove(str(staged))
+            sys.path[:] = path
             sys.dont_write_bytecode = writes
             for name in [name for name, module in sys.modules.items() if _under(module, staged)]:
                 del sys.modules[name]

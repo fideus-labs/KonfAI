@@ -1287,6 +1287,21 @@ def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path, mo
     assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
 
 
+def test_a_bundle_left_only_as_its_previous_copy_is_put_back_first(tmp_path):
+    # Both renames refused, the bundle stayed only as its copy beside it: the next packaging puts it back, user
+    # files and all, before it clears its scratch folders.
+    import os
+
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (bundle / "notes.txt").write_text("mine\n")
+    bundle.rename(bundle.with_name(f".Seg.previous-{os.getpid()}"))
+
+    _cli(root)
+    assert (bundle / "notes.txt").read_text() == "mine\n"
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
 def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
     # The Model.py a first packaging carried stays in the bundle when the next one names none: the classes the next
     # config names from it are the app's, and the staged update reads them there.
@@ -1358,6 +1373,12 @@ def test_an_update_is_checked_without_a_module_the_process_imported_from_the_bun
 
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
         _cli(root, extension=str(root / "own.wasm"))
+    # Nor from the bundle on the path the process imports from, which it keeps.
+    monkeypatch.delitem(sys.modules, "dropped")
+    monkeypatch.syspath_prepend(str(bundle))
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
+    assert sys.path[0] == str(bundle)
 
 
 def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):
