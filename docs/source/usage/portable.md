@@ -47,7 +47,9 @@ overrides the budget the program carries.
 A prediction also needs the checkpoints to export; a model with no parameters
 needs none. The compiler writes their ONNX files beside the JSON program. Keep
 them together when moving the program. A model whose module reads the case's
-attributes (`accepts_attributes`) runs Python on the case and is refused.
+attributes (`accepts_attributes`) runs Python on the case and is refused. So is an
+output written by another `name_class` than `OutputDataset`: the runtime assembles
+the patches and writes them as `OutputDataset` does.
 
 ```python
 from konfai.portable import compile_prediction
