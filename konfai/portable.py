@@ -1436,7 +1436,9 @@ def compile_transform(
         "chains": chains,
     }
     if output is not None:
-        Path(output).write_text(json.dumps(program, indent=2))
+        from konfai.utils.utils import owned_destination
+
+        owned_destination(Path(output)).write_text(json.dumps(program, indent=2))
     return program
 
 
@@ -3505,7 +3507,9 @@ def compile_prediction(
 
     if extension is not None:
         carry_extension(extension, prediction, output)
-    output.write_text(json.dumps(prediction, indent=2))
+    from konfai.utils.utils import owned_destination
+
+    owned_destination(output).write_text(json.dumps(prediction, indent=2))
     return prediction
 
 
@@ -3542,13 +3546,10 @@ def carry_extension(extension: Path, program: dict[str, Any], output: Path) -> N
             f"The extension '{extension.name}' takes the name of a file the program writes beside it.",
             "Name the extension apart from the program and the graphs it names.",
         )
-    if (output.parent / extension.name).is_symlink():
-        raise ConfigError(
-            f"'{output.parent / extension.name}' is a link, which the extension would be copied through.",
-            "Remove the link, then compile again.",
-        )
     if extension.parent != output.parent:
-        shutil.copy(extension, output.parent / extension.name)
+        from konfai.utils.utils import owned_destination
+
+        shutil.copy(extension, owned_destination(output.parent / extension.name))
     program["extension"] = extension.name
 
 

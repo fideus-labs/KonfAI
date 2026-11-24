@@ -34,6 +34,20 @@ from konfai.utils import uri
 from konfai.utils.errors import ConfigError, DatasetManagerError
 
 
+def owned_destination(path: Path) -> Path:
+    """``path`` as a destination a compile or a bundle's update writes: nothing, or a regular file of its own. A
+    directory, a link, or a file shared with another path (a hard link) would be written into or through: refused
+    by name."""
+    held = "a link" if path.is_symlink() else "a directory" if path.is_dir() else None
+    if held is None and path.exists() and (not path.is_file() or path.stat().st_nlink > 1):
+        held = "shared with another path" if path.is_file() else "no regular file"
+    if held is not None:
+        raise ConfigError(
+            f"'{path}' is {held}, which the write would go into or through.", "Remove it, then run again."
+        )
+    return path
+
+
 def env_flag(name: str, default: bool) -> bool:
     """A ``KONFAI_*`` switch: ``0``/``false`` is off, anything else set is on, unset is ``default``."""
     value = os.environ.get(name)

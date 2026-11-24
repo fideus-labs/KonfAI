@@ -22,6 +22,7 @@ what has no portable form must be refused at compile time and never approximated
 
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable
 from importlib import import_module
@@ -1280,6 +1281,65 @@ def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(
     with pytest.raises(ConfigError, match="link"):
         carry_extension(tmp_path / "engine.wasm", dict(program), out)
     assert (out.parent / "model.onnx").read_bytes() == b"graph"
+
+
+@pytest.mark.parametrize(
+    "site", ["the extension", "a graph", "a transform program", "an evaluation program", "a prediction program"]
+)
+def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    # A directory where the compile writes is refused by name, as any destination it would write into or through
+    # (konfai.utils.utils.owned_destination).
+    from konfai.portable import carry_extension, compile_transform
+
+    out = tmp_path / "out"
+    out.mkdir()
+    if site == "the extension":
+        (out / "engine.wasm").mkdir()
+        (tmp_path / "engine.wasm").write_bytes(b"\0asm")
+        write, name = lambda: carry_extension(tmp_path / "engine.wasm", {}, out / "prediction.json"), "engine.wasm"
+    elif site == "a graph":
+        pytest.importorskip("onnxscript")
+        from konfai.export import export_folds
+
+        (out / "fold.onnx").mkdir()
+        write, name = lambda: export_folds([lambda tensor: tensor * 2], out / "fold.onnx", 1, 2, "float32"), "fold.onnx"
+    elif site == "a transform program":
+        config = _reducing_config(tmp_path, "Clip: {min_value: 0.0, max_value: 1.0}\n")
+        (out / "transform.json").mkdir()
+        write, name = (
+            lambda: compile_transform(config, tmp_path / "Transforms", out / "transform.json"),
+            "transform.json",
+        )
+    elif site == "a prediction program":
+        pytest.importorskip("onnxscript")
+        import torch
+        from konfai.portable import compile_prediction
+
+        config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+        from TinySeg import TinySegNet
+
+        torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+        (out / "prediction.json").mkdir()
+        write, name = (
+            lambda: compile_prediction(
+                config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", out / "prediction.json"
+            ),
+            "prediction.json",
+        )
+    else:
+        from konfai.portable_evaluation import compile_evaluation
+        from test_portable_evaluation import _evaluation
+
+        config = _evaluation(tmp_path, "            Dice: {labels: [1]}\n")
+        (out / "evaluation.json").mkdir()
+        write, name = (
+            lambda: compile_evaluation(config, tmp_path / "Evaluations", out / "evaluation.json"),
+            "evaluation.json",
+        )
+    with pytest.raises(ConfigError, match=rf"{re.escape(name)}' is a directory"):
+        write()
 
 
 @pytest.mark.parametrize(
@@ -3238,6 +3298,14 @@ _DTYPE_VARIANTS = {
 _DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "float32", "float64")
 
 
+def _tabled(step: dict[str, Any], dtype: str, returned: str | None) -> None:
+    """One row of the table of what each op of a program returns of each dtype (``None``: konfai's stage refuses it),
+    appended as a JSON line to the file ``KONFAI_DTYPE_TABLE`` names, which the portable runtime tests against."""
+    if table := os.environ.get("KONFAI_DTYPE_TABLE"):
+        with open(table, "a", encoding="utf-8") as rows:
+            rows.write(json.dumps({"step": step, "dtype": dtype, "returns": returned}) + "\n")
+
+
 @pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
 def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_path: Path) -> None:
     # konfai's stage run on a volume of each dtype it takes: what the compiler says it leaves (_result_dtype, which
@@ -3266,8 +3334,10 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
                     built.set_datasets([companions])
                     returned = _probed(built, volume, _probe_attribute(3))
             except (RuntimeError, TypeError, ValueError, KonfAIError):  # a dtype the stage does not take
+                _tabled(step, dtype, None)
                 continue
             ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
+            _tabled(step, dtype, ran[-1][2])
         assert ran, f"{stage} {params} takes none of {_DTYPES}"
         assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
 
@@ -3300,6 +3370,7 @@ def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op:
             returned = cls()([copy[None] for copy in values])
         else:
             returned = cls()("probe", values[:, 0], Attribute())
+        _tabled({"op": op}, dtype, str(returned.dtype).removeprefix("torch."))
         assert _result_dtype({"op": op}, dtype) == str(returned.dtype).removeprefix("torch."), (op, dtype)
 
 

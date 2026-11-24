@@ -401,7 +401,9 @@ def compile_evaluation(
         }
     if extension is not None:
         carry_extension(extension, program, output)
-    output.write_text(json.dumps(program, indent=2))
+    from konfai.utils.utils import owned_destination
+
+    owned_destination(output).write_text(json.dumps(program, indent=2))
     return program
 
 

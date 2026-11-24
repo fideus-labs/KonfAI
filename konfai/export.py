@@ -39,7 +39,7 @@ import numpy as np
 import torch
 
 from konfai.utils.errors import PredictorError
-from konfai.utils.utils import Placement
+from konfai.utils.utils import Placement, owned_destination
 
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
@@ -273,7 +273,7 @@ def _write_onnx(
             # A dynamo export always carries the program it traced, guards and all.
             traced = cast("torch.export.ExportedProgram", program.exported_program)
             _check_free_axes(module, examples, staged, input_names, free_from, traced)
-        staged.replace(onnx_path)
+        staged.replace(owned_destination(onnx_path))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -688,5 +688,5 @@ def export_to_onnx(
     if manifest.get("blend") == "GaussianFloat16" or ":" in manifest.get("blend", ""):
         manifest["konfai_edge_manifest"] = FLOAT16_BLEND_VERSION
     if write_manifest:
-        (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        owned_destination(out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return onnx_path, manifest
