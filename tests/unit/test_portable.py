@@ -1479,6 +1479,43 @@ def test_a_class_of_the_app_s_is_probed_on_each_grid_as_a_case_of_its_own(
         transform_manifest(_two_groups({"CaseGrid:Unit": {}}), "Predictor", extension=True)
 
 
+def test_a_class_of_the_app_s_reads_the_header_of_the_grid_it_is_probed_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class copying its group's stored spacing keeps the grid: the placed grid's header is the placed one.
+    (tmp_path / "HeaderGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Header(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        self.group = group_src\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        cache_attribute['Spacing'] = self.datasets[0].get_infos(self.group, name)[1].get_np_array('Spacing')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = transform_manifest(_two_groups({"HeaderGrid:Header": {}}), "Predictor", extension=True)[0]
+    assert manifest["reads"][0]["preprocessing"][0]["op"] == "extension"
+
+
+def test_a_class_of_the_app_s_is_probed_in_each_stored_dtype_it_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Where only the run knows the stored dtype, a class keeping the grid of an integer volume and trimming a float one
+    # is refused: each stored dtype it takes is a case it may be handed.
+    (tmp_path / "DtypeGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Trim(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[:, 1:] if tensor.is_floating_point() else tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="for the stored dtypes it takes"):
+        transform_manifest(_two_groups({"DtypeGrid:Trim": {}}), "Predictor", extension=True)
+
+
 def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

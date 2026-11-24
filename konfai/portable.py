@@ -744,16 +744,17 @@ def _own_dtype(
 
 class _GroupsRead:
     """The run's datasets as a probed class sees them: every group of the case it reads beside its volume
-    (``read_companion``), recorded in order, held as zeros of ``shape`` on the identity grid."""
+    (``read_companion``), recorded in order, held as zeros of ``shape`` on the grid it is probed on (``placed``:
+    :func:`_probe_attribute`)."""
 
-    def __init__(self, shape: tuple[int, ...]) -> None:
-        self.shape = shape
+    def __init__(self, shape: tuple[int, ...], placed: bool = False) -> None:
+        self.shape, self.placed = shape, placed
         self.read: list[str] = []
         #: What a class memoizes per case, as on a dataset (konfai's ``Dataset.case_facts``).
         self.case_facts: dict[Any, Any] = {}
 
     def get_infos(self, group: str, name: str) -> tuple[list[int], Any]:
-        return list(self.shape), _probe_attribute(len(self.shape) - 1)
+        return list(self.shape), _probe_attribute(len(self.shape) - 1, self.placed)
 
     def is_dataset_exist(self, group: str, name: str) -> bool:
         # The probe's own group is the volume the class is handed, as stored: no other group of the case.
@@ -767,14 +768,14 @@ class _GroupsRead:
         return np.zeros(self.shape, np.float32), None
 
 
-def _own_stage(classpath: str, params: dict[str, Any], rank: int) -> Any:
+def _own_stage(classpath: str, params: dict[str, Any], rank: int, placed: bool = False) -> Any:
     """The app's own transform a chain names, built as konfai binds it, the groups it reads at ``rank`` recorded
-    (:class:`_GroupsRead`)."""
+    (:class:`_GroupsRead`, on the grid ``placed`` names)."""
     from konfai.utils.utils import get_module
 
     module, name = get_module(classpath, "konfai.data.transform")
     stage = getattr(module, name)(**params)
-    stage.set_datasets([_GroupsRead((1, *_probe_extents(rank)))])
+    stage.set_datasets([_GroupsRead((1, *_probe_extents(rank)), placed)])
     return stage
 
 
@@ -819,20 +820,34 @@ def _probed(stage: Any, volume: Any, attribute: Any) -> Any:
 _STORED_DTYPES = ("uint8", "int16", "float32")
 
 
-def _probed_in(stage: Any, probe: tuple[int, ...], handed: str | None, placed: bool = False) -> tuple[Any, Any]:
-    """An app's own ``stage`` on zeros of ``probe`` in the dtype ``handed``, or, where only the run knows it, the first
-    stored dtype it takes, and the geometry it was run on (:func:`_probe_attribute`)."""
+def _probed_in(
+    classpath: str, params: dict[str, Any], probe: tuple[int, ...], handed: str | None, placed: bool = False
+) -> list[tuple[Any, Any]]:
+    """An app's own class on zeros of ``probe`` in the dtype ``handed``, or, where only the run knows it, in each
+    stored dtype it takes, each run a case of its own (a fresh instance, :func:`_own_stage`) with the geometry it was
+    run on (:func:`_probe_attribute`). Refused where the shape it returns is not one whatever it takes."""
     import torch
 
-    *others, last = (handed,) if handed else _STORED_DTYPES
-    for dtype in others:
+    ran: list[tuple[Any, Any]] = []
+    took: list[str] = []
+    failure: Exception | None = None
+    for dtype in (handed,) if handed else _STORED_DTYPES:
         attribute = _probe_attribute(len(probe) - 1, placed)
+        stage = _own_stage(classpath, params, len(probe) - 1, placed)
         try:
-            return _probed(stage, torch.zeros(probe, dtype=getattr(torch, dtype)), attribute), attribute
-        except Exception:  # nosec B112 - a dtype the class refuses is none its chain hands it
-            continue
-    attribute = _probe_attribute(len(probe) - 1, placed)
-    return _probed(stage, torch.zeros(probe, dtype=getattr(torch, last)), attribute), attribute
+            ran.append((_probed(stage, torch.zeros(probe, dtype=getattr(torch, dtype)), attribute), attribute))
+            took.append(dtype)
+        except Exception as error:  # nosec B112 - a dtype the class refuses is none its chain hands it
+            failure = error
+    if not ran and failure is not None:
+        raise failure
+    if len(shapes := {tuple(returned.shape) for returned, _ in ran}) > 1:
+        raise ConfigError(
+            f"transform '{classpath}' returns {sorted(list(shape) for shape in shapes)} for the stored dtypes it takes"
+            f" ({', '.join(took)}), and only the run knows which a case holds.",
+            _or_konfai("Return one shape whatever the dtype, or cast the volume before the class", _RUN),
+        )
+    return ran
 
 
 def _probe_after(
@@ -900,7 +915,9 @@ def _extension_step(
         reads = {"whole": True}
     if reads:
         try:
-            returned, attribute = _probed_in(stage, probe, handed)
+            ran = _probed_in(classpath, kwargs, probe, handed)
+        except ConfigError:
+            raise
         except Exception as error:
             raise ConfigError(
                 f"transform '{name}' takes no volume of {list(probe)} ({error}), so what it returns cannot be read.",
@@ -915,12 +932,12 @@ def _extension_step(
                 for key in ("Origin", "Spacing", "Direction")
             )
 
-        regridded = moves(returned, attribute, _probe_attribute(rank))
+        returned = ran[0][0]
+        regridded = any(moves(*run, _probe_attribute(rank)) for run in ran)
         if on_grid and not regridded:
-            # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one,
-            # another case, whose facts the class has yet to settle.
-            again, elsewhere = _probed_in(_own_stage(classpath, kwargs, rank), probe, handed, placed=True)
-            regridded = moves(again, elsewhere, _probe_attribute(rank, placed=True))
+            # A grid of unit spacing hides a move by what the spacing is: the group's grid is asked of another one.
+            placed = _probe_attribute(rank, placed=True)
+            regridded = any(moves(*run, placed) for run in _probed_in(classpath, kwargs, probe, handed, placed=True))
         if on_grid and regridded:
             raise ConfigError(
                 f"transform '{name}' returns {list(returned.shape)} for {list(probe)}, which moves its group off the"
@@ -3128,8 +3145,7 @@ def _channels_after(
         return held - 1
     if step["op"] == "extension":
         extents = _probe_extents(rank) if "halo" in step or "whole" in step else (1,) * rank
-        stage = _own_stage(step["class"], step["params"], rank)
-        return int(_probed_in(stage, (held, *extents), dtype)[0].shape[0])
+        return int(_probed_in(step["class"], step["params"], (held, *extents), dtype)[0][0].shape[0])
     return int(step.get("num_classes", step.get("channels", held)))
 
 
