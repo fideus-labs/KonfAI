@@ -13,22 +13,17 @@ from .base import (
     ToolResult,
     ToolSpec,
     Turn,
-    Usage,
-    b64,
+    content,
+    image_block,
     is_loopback,
+    package_version,
+    usage_of,
     without_image_data,
 )
 
 
-def _image_block(image: ImageContent) -> dict[str, Any]:
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": "image/png",
-            "data": b64(image.png),
-        },
-    }
+def _tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
+    return [{"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True} for t in tools]
 
 
 class AnthropicProvider:
@@ -71,49 +66,29 @@ class AnthropicProvider:
             )
 
     def sdk_version(self) -> str:
-        try:
-            import anthropic
-
-            return str(anthropic.__version__)
-        except ImportError:  # pragma: no cover
-            return "unknown"
+        return package_version("anthropic")
 
     def start(self, system: str, tools: list[ToolSpec]) -> None:
         self.system = system
-        self.tools = [
-            {"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True} for t in tools
-        ]
+        self.tools = _tools(tools)
         self.messages = []
 
     def user(self, text: str, images: list[ImageContent] | None = None) -> Turn:
-        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-        for image in images or []:
-            if image.label:
-                content.append({"type": "text", "text": image.label})
-            content.append(_image_block(image))
-        return self._call({"role": "user", "content": content})
+        return self._call({"role": "user", "content": content(text, images, image_block)})
 
     def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
         blocks = []
         for result in results:
-            content: list[dict[str, Any]] = [{"type": "text", "text": result.text}]
-            for image in result.images:
-                if image.label:
-                    content.append({"type": "text", "text": image.label})
-                content.append(_image_block(image))
             blocks.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": result.call_id,
-                    "content": content,
+                    "content": content(result.text, result.images, image_block),
                     **({"is_error": True} if result.is_error else {}),
                 }
             )
         if tools is not None:
-            self.tools = [
-                {"name": t.name, "description": t.description, "input_schema": t.parameters, "strict": True}
-                for t in tools
-            ]
+            self.tools = _tools(tools)
         return self._call({"role": "user", "content": blocks})
 
     def _call(self, pending: dict[str, Any]) -> Turn:
@@ -165,12 +140,7 @@ class AnthropicProvider:
             stop={"end_turn": "end_turn", "tool_use": "tool_use", "max_tokens": "max_tokens", "refusal": "refusal"}.get(
                 stop, "other"
             ),
-            usage=Usage(
-                input_tokens=int(usage.get("input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
-                cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-                cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-            ),
+            usage=usage_of(usage),
             model=str(data.get("model") or self.model),
         )
 

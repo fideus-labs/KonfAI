@@ -9,9 +9,10 @@ import pytest
 from konfai_scout import InspectionCase, ScoutConfig, inspect
 from konfai_scout.agent import parse_second_reading
 from konfai_scout.config import Budget
+from konfai_scout.planes import box_to_dict
+from konfai_scout.prompts import PROMPT_VERSION
 from konfai_scout.providers.base import ProviderError, Turn, Usage
 from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, call, turn
-from konfai_scout.report import compare, defects_of, match_defects
 from konfai_scout.synthetic import registration_case, segmentation_case, synthesis_case
 
 
@@ -31,16 +32,28 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
         assert len([v for v in report.views if v.kind == "slice"]) >= 3  # the central slices in the secondary modes
     else:
         assert "view" in tools
-    assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(report.tool_calls)
-    assert report.case["truth_available"] and report.versions["prompt"] == "1.2"
+    explored = [c for c in report.tool_calls if c.tool not in ("note", "conclude")]  # notes are outside the budget
+    assert report.usage.images_sent >= 3 and report.budget["spent"]["tool_calls"] == len(explored)
+    assert report.case["truth_available"] and report.versions["prompt"] == PROMPT_VERSION
     assert report.prompts["system"].startswith("You are KonfAI Scout")
     summary = report.summary()
     assert summary["verdict"] == report.conclusion.verdict and summary["observations"][0]["defect"]
     data = json.loads((tmp_path / mode / "report.json").read_text())
     assert (
-        data["schema_version"] == "1.0"
+        data["schema_version"] == "1.1"
         and data["case"]["inputs"]["image" if key == "segmentation" else next(iter(data["case"]["inputs"]))]["sha256"]
     )
+
+
+def test_the_model_is_blind_to_the_method_and_the_scores_unless_told(fixtures, tmp_path):
+    case, _ = fixtures["segmentation"]
+    prior = {"PRED:TRUTH:Dice:1": 0.912}
+    named = InspectionCase(case.task, "methodx_case07", case.inputs, case.labels, prior, notes="by MethodX")
+    for blind in (True, False):
+        provider = HeuristicProvider()
+        report = inspect(named, ScoutConfig(blind=blind, max_px=200), tmp_path / str(blind), provider=provider)
+        assert all((secret in provider.card) is not blind for secret in ("methodx_case07", "MethodX", "0.912"))
+        assert report.prior_evaluation == prior and report.config["blind"] is blind  # the report's reader sees all
 
 
 def test_without_truth_nothing_is_confirmed(fixtures, tmp_path):
@@ -48,7 +61,7 @@ def test_without_truth_nothing_is_confirmed(fixtures, tmp_path):
     report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path)
     assert not report.case["truth_available"]
     assert all(o.kind != "confirmed_error" for o in report.observations)
-    assert "No reference was given" in (tmp_path / "report.md").read_text()
+    assert "No reference given" in (tmp_path / "report.md").read_text()
 
 
 def test_the_budget_ends_an_endless_explorer(fixtures, tmp_path):
@@ -81,7 +94,7 @@ def test_the_budget_ends_an_endless_explorer(fixtures, tmp_path):
 
 
 def test_a_retryable_provider_error_is_retried_and_a_fatal_one_recorded(fixtures, tmp_path):
-    case, _ = fixtures["segmentation"]
+    case, _ = fixtures["segmentation_clean"]
     script = [turn(call("conclude", 1, verdict="acceptable", summary="fine", confidence=0.6))]
     provider = ScriptedProvider(list(script), raise_at={1: ProviderError("overloaded", retryable=True)})
     config = ScoutConfig(provider="mock", retry_wait_seconds=0.0, max_px=200)
@@ -111,7 +124,7 @@ def test_a_refusal_and_a_silent_model_are_recorded(fixtures, tmp_path):
 
 
 def test_tool_errors_do_not_end_the_inspection(fixtures, tmp_path):
-    case, _ = fixtures["registration_no_ref"]
+    case, _ = fixtures["registration_clean"]
     script = [
         turn(
             call(
@@ -131,11 +144,11 @@ def test_tool_errors_do_not_end_the_inspection(fixtures, tmp_path):
                 "note",
                 2,
                 kind="suspected_error",
-                defect="other",
+                defect="over_smoothing",  # a defect that may span the image, so the whole grid is a place
                 severity="minor",
                 confidence=0.5,
                 description="d",
-                box_mm=None,
+                box_mm=box_to_dict(case.grid.world_box()),
                 plane=None,
                 views=["v001"],
                 measurements=[],
@@ -209,14 +222,16 @@ def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
     config = ScoutConfig(provider="mock", max_px=200, second_reading=True)
     report = inspect(case, config, tmp_path / "blind", provider=HeuristicProvider(), reader=reader)
     errors = [o for o in report.observations if o.kind != "measured_property"]
-    assert report.error is None and errors and len(readers) == len(errors)
+    blind = [lead for lead in report.leads if "blind reading" in lead["reason"]]  # one session per disagreement too
+    assert report.error is None and errors and blind and len(readers) == len(errors) + len(blind)
+    assert all("could not tell" in lead["reason"] for lead in blind)  # this reader's answer names no contour
     for o in errors:
         assert o.second_reading["answer"] == "not_visible" and o.second_reading["text"].startswith("In v005")
         assert o.second_reading["views"] and all(
             any(v.id == i and v.sent for v in report.views) for i in o.second_reading["views"]
         )
     assert all(o.second_reading is None for o in report.observations if o.kind == "measured_property")
-    system, user = readers[0].messages[0], readers[0].messages[1]
+    system, user = readers[-1].messages[0], readers[-1].messages[1]  # the last session: a second reading
     assert system["role"] == "system" and "second reader" in system["content"] and "VISIBLE" in system["content"]
     assert user["images"] == 3 and user["content"].startswith("Claim: ") and "Views attached" in user["content"]
     assert "heuristic" not in user["content"] and "measure" not in user["content"].lower()
@@ -224,7 +239,6 @@ def test_the_second_reading_re_reads_each_error_blind(fixtures, tmp_path):
     assert (tmp_path / "blind" / "second_reading.json").exists()
     assert "Second reading (not_visible" in (tmp_path / "blind" / "report.md").read_text()
     assert report.summary()["observations"][0]["second_reading"] == "not_visible"
-    assert compare([report])["rows"][0]["not_visible"] == len(errors)
     assert report.usage.images_sent >= 3 + 3 * len(errors) and report.usage.requests > readers[0].calls
     # the default reader is a fresh session of the configured provider: the heuristic one cannot see, and says so
     report = inspect(case, config, tmp_path / "default", provider=HeuristicProvider())
@@ -238,15 +252,30 @@ def test_a_clean_case_is_a_negative_control(tmp_path):
     case, defects = segmentation_case(tmp_path / "clean", clean=True)
     assert defects == {} and json.loads((tmp_path / "clean" / "defects.json").read_text()) == {}
     report = inspect(case, ScoutConfig(provider="mock", max_px=200), tmp_path / "out")
-    assert report.error is None and report.observations
-    assert all(o.kind == "measured_property" for o in report.observations)
-    assert match_defects(report, defects) == {
-        "planted": 0,
-        "found": 0,
-        "found_names": [],
-        "false_positives": 0,
-        "false_positive_ids": [],
-    }
-    assert defects_of(report) == {}
+    assert (
+        report.error is None and report.leads == [] and report.observations == []
+    )  # nothing to point at, nothing invented
+    assert report.conclusion is not None and report.conclusion.verdict == "acceptable"
     assert registration_case(tmp_path / "reg", clean=True)[1] == {}
     assert synthesis_case(tmp_path / "syn", clean=True)[1] == {}
+
+
+def test_a_disagreement_with_the_reference_is_read_blind_before_the_model_looks(fixtures, tmp_path):
+    """The reader sees contours A and B and is not told which is the reference: its answer joins the lead, and its
+    views are not the model's look at the lead."""
+    case, _ = fixtures["segmentation"]
+
+    def reader():
+        return ScriptedProvider(
+            [Turn(text="A\nA follows the edge.", tool_calls=[], stop="end_turn", usage=Usage(3, 2))]
+        )
+
+    report = inspect(
+        case, ScoutConfig(provider="mock", max_px=200), tmp_path, provider=HeuristicProvider(), reader=reader
+    )
+    blind = [lead for lead in report.leads if lead["kind"] in ("result_only", "reference_only")]
+    assert blind and all("blind reading" in lead["reason"] for lead in blind)
+    judged = {lead["reason"].split("judged the ")[1].split("'s")[0] for lead in blind}
+    assert judged <= {"result", "reference"} and judged  # A is the result or the reference, by the lead's draw
+    contours = [v for v in report.views if v.mode == "contours"]
+    assert len(contours) == 3 * len(blind) and not any(v.sent for v in contours)  # three planes a disagreement

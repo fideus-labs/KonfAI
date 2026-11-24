@@ -1,0 +1,94 @@
+# How KonfAI Scout works
+
+The README shows how to run Scout. This page says what it does during an inspection, what the model can call, and how the budget, the providers and privacy work. `report.md` is the report's schema.
+
+## The inspection
+
+- **It explores.** Coverage first (a montage per plane), then targeted views: slices, zooms, checkerboards, difference
+  maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.
+- **It knows where to look first.** Before the model's first turn a deterministic survey lists leads, each a box and
+  why: a boundary the image does not support, a component unlike the main one, an enclosed cavity, a contour drawn
+  in steps or off its edge by a constant margin, a fold, a region where the warped image's edges stop following the
+  fixed one's, an error well above the case's typical one. A lead is not a finding; the model must look at each
+  before it concludes.
+- **It measures with KonfAI Eval, not with a scorer of its own.** A region is cropped and scored by `konfai.evaluate`
+  with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
+  and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
+  the agent and the report, nothing that KonfAI already does.
+- **It keeps its statements apart, and enforces it.** A *measured property*, a *suspected error* (seen, not proven)
+  and a *confirmed error* (a measured value past its criterion's threshold: Dice below 0.8, TRE above 3 mm, a
+  folded field...) are distinct, and without a truth nothing is confirmed from appearance. `note` refuses an error
+  that no cited view shows, a figure that no cited measurement holds, a confirmation resting on measurements taken
+  elsewhere. Scout measures every flagged box itself with KonfAI Eval, records it on the observation, and
+  downgrades a confirmation that no measured value supports. The verdict is *defective* exactly when a major or
+  critical error is noted at confidence 0.5 or more; "insufficient evidence" is a legitimate conclusion. An error
+  Scout would stand behind is marked *firm* (`firm` on the observation, "(firm)" in the report); the others are
+  doubts to check, and reading only the firm ones is the cautious way to use a report. On
+  request, a fresh session of the model re-reads every error blind, from crops of its box and the claim alone, and
+  its answer stands in the report next to the first reader's.
+- **It judges blind.** The model is told neither the case's name, nor its notes (the method, the dataset), nor its
+  prior scores: it judges the images and its own measurements (`--no-blind` hands them over, for a study).
+- **It leaves a record.** A versioned JSON report with versions, configuration, prompts, every tool call, every view,
+  every measurement, cost and duration, and a Markdown rendition that opens with the verdict and the findings at a
+  glance, then each observation with its images. Two modes, fixed views and active exploration, for a study of what
+  exploration buys.
+- **It works with Claude, GPT, or a local vision model** through an OpenAI-compatible server, and sends images to a
+  cloud API only when told to.
+
+## Inputs
+
+Roles: segmentation `image`, `prediction`, `truth`, `mask`; registration `fixed`, `moving`, `field` or `transform`,
+`fixed_labels`, `moving_labels`, `warped_labels`, `fixed_landmarks`, `moving_landmarks`, `fixed_mask`; synthesis
+`source`, `synthetic`, `target`, `mask`. A field is a displacement image in millimetres on the fixed grid (ITK's
+reading: the fixed point `x` matches `x + u(x)` in the moving image); a transform is an ITK transform file.
+
+## What the model can do
+
+| Tool | What it does |
+|---|---|
+| `view` | one slice: a plane, a position in mm or an index, a mode, a window, a zoom box, one label |
+| `montage` | equally spaced slices of a plane in one image |
+| `measure` | KonfAI Eval on a box: the case's groups cropped and scored with KonfAI's criteria, named as KonfAI names them or by a result key; SSIM is left out of a box thinner than its 7-voxel window |
+| `region_stats` | what a box holds, described role by role: labels, volumes, pieces, intensities (inside the case's mask when it has one), landmarks; no comparison (that is `measure`); a measurement of kind `scout`, citable |
+| `note` | one observation with its kind, defect, severity, confidence, box and the evidence it cites; refused when the evidence does not show what it claims (`docs/report.md`) |
+| `conclude` | the verdict |
+
+Modes: segmentation `image`, `prediction`, `truth`, `both`, `contours`, `disagreement`; registration `fixed`, `moving`, `warped`,
+`before`, `checkerboard`, `overlay`, `difference`, `field_magnitude`, `field_arrows`, `grid`, `jacobian`, `labels`,
+`landmarks`; synthesis `synthetic`, `target`, `source`, `source_checkerboard`, `difference`, `side_by_side`,
+`checkerboard`. A view's window is the image's own 1st to 99.9th percentile unless the model asks for `[low, high]` or
+a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
+
+## Budget, providers, privacy
+
+`--depth` sets how far an inspection looks in one word; any flag below overrides what it sets:
+
+| Depth | Tool calls | Effort | Second reading | For |
+|---|---|---|---|---|
+| `quick` | 10 | low | no | a cheap first pass over many cases |
+| `standard` (default) | 25 | high | no | one case |
+| `deep` | 40 | high | yes | a case that matters, or a doubt to settle |
+
+The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
+flagged box are the same at every depth.
+
+`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
+model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
+call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
+never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
+are counted inside the served tools, and `claude-code`'s cost message by message; `codex` reports its cost only once
+its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price is unknown).
+`--second-reading` adds, after the inspection, one short session per error observation for the blind re-read. It
+runs past the limits above: its cost is added to the report's, not bounded by `--max-usd`.
+Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is taken as local (Scout cannot tell whether that server forwards what it receives). The cost
+is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
+adds a model).
+
+The `claude-code` provider runs the Claude Agent SDK under your Claude Code login, no API key: the SDK drives the
+tool loop, Scout's tools are served to it as an in-process MCP server (images included) and no built-in tool is
+enabled. It is a cloud provider (`--allow-cloud-images`), and the CLI keeps the session, images included, under
+`~/.claude/projects`. The report records the same calls, views, measurements and budget as with the API providers.
+
+The `codex` provider does the same with the Codex CLI under your ChatGPT login: `codex exec` runs the loop, Scout's
+tools are served to it over a loopback MCP server, the case images are attached to the prompt; your own Codex
+configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the session under `~/.codex/sessions`.

@@ -139,12 +139,6 @@ class CodexProvider(ToolDriver):
         )
         return self._turn(prompt, paths)
 
-    def tool_results(self, results: list[ToolResult], tools: list[ToolSpec] | None = None) -> Turn:
-        raise ProviderError("the codex provider runs the tool loop itself: results reach it through `execute`")
-
-    def transcript(self) -> list[dict[str, Any]]:
-        return list(self.messages)
-
     # ------------------------------------------------------------------ the MCP server
 
     def _attach(self, image: ImageContent, n: int) -> Path:

@@ -12,7 +12,7 @@ import SimpleITK as sitk
 from konfai.data.geometry import Grid
 
 from .case import InspectionCase
-from .planes import box_to_dict
+from .planes import box_of
 
 
 def _direction(oblique: bool) -> tuple[float, ...]:
@@ -60,12 +60,6 @@ def _grid(shape: tuple[int, int, int], spacing: tuple[float, float, float], obli
     )
 
 
-def _box_of(mask: np.ndarray, grid: Grid) -> dict[str, list[float]]:
-    where = np.argwhere(mask)
-    window = tuple(slice(int(a), int(b) + 1) for a, b in zip(where.min(axis=0), where.max(axis=0), strict=True))
-    return box_to_dict(grid.world_box(window))
-
-
 def segmentation_case(
     folder: Path | str,
     shape: tuple[int, int, int] = (24, 48, 48),
@@ -111,9 +105,9 @@ def segmentation_case(
     defects: dict[str, object] = {}
     if not clean:
         defects = {
-            "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": _box_of(cube, grid)},
-            "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": _box_of(blob, grid)},
-            "hole": {"defect": "holes", "label": 1, "box_mm": _box_of(hole, grid)},
+            "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": box_of(cube, grid)},
+            "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": box_of(blob, grid)},
+            "hole": {"defect": "holes", "label": 1, "box_mm": box_of(hole, grid)},
             "shifted_sphere": {"defect": "boundary_error", "label": 1, "shift_voxels_yxz": [2, 0, 0]},
         }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))
@@ -177,13 +171,13 @@ def registration_case(
         inspected[:, zeroed] = 0.0
         defects["zeroed_field"] = {
             "defect": "residual_misalignment",
-            "box_mm": _box_of(zeroed, grid),
+            "box_mm": box_of(zeroed, grid),
             "displacement_lost_mm": float(np.linalg.norm(exact[:, zeroed], axis=0).mean()),
         }
     if fold and not clean:
         bump = _sphere(shape, (shape[0] / 2, 10, shape[2] / 2 + 12), 3)
         inspected[0, bump] += 12.0  # a 12 mm jump over a few voxels: det J < 0 at its edges
-        defects["fold"] = {"defect": "folding", "box_mm": _box_of(bump, grid)}
+        defects["fold"] = {"defect": "folding", "box_mm": box_of(bump, grid)}
     inputs = {
         "fixed": _write(fixed_image, folder / "fixed.mha"),
         "moving": _write(moving_image, folder / "moving.mha"),
@@ -259,8 +253,8 @@ def synthesis_case(
     defects: dict[str, object] = {}
     if not clean:
         defects = {
-            "bias": {"defect": "intensity_bias", "box_mm": _box_of(biased, grid), "bias_hu": 150.0},
-            "invented": {"defect": "hallucinated_structure", "box_mm": _box_of(invented, grid)},
+            "bias": {"defect": "intensity_bias", "box_mm": box_of(biased, grid), "bias_hu": 150.0},
+            "invented": {"defect": "hallucinated_structure", "box_mm": box_of(invented, grid)},
             "blur": {"defect": "blur", "sigma_voxels": 1.2},
         }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))
