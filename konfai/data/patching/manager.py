@@ -82,7 +82,7 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
-from konfai.utils.dataset import Attribute, Dataset, decompressed
+from konfai.utils.dataset import Attribute, Dataset, decompressed, is_an_image
 from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
@@ -169,6 +169,22 @@ class DatasetManager:
         # header (the grid an Elastix warp is drawn on) reads the geometry of what it draws from.
         self._landed_folding = Attribute(folding)
 
+        if (
+            patch is not None
+            and patch.patch_size is not None
+            and len(_shape) != len(patch.patch_size)
+            and not is_an_image(cache_attribute)
+        ):
+            # A set of points beside its image: an array with no geometry and not the patch's rank has no grid to
+            # cut, and is handed whole. A case cut in several patches is then refused, the counts disagreeing.
+            if patch.placement != "pad":
+                # A patch keeps its case's origin: padding before the image would move every point by its width. A
+                # free axis pads too, up to the model's downsampling multiple.
+                raise PatchError(
+                    f"Case '{name}' holds points beside an image its patch may pad before it ('{patch.placement}').",
+                    "Give the patch placement 'pad': it pads after the image, where no point moves.",
+                )
+            patch = None
         self.patch = (
             DatasetPatch(
                 # Its own list: the grid is cut lazily (``Patch._grid``), so sharing the source's list

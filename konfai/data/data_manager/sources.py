@@ -856,7 +856,9 @@ class Data(DataSources):
         shapes = self._prepared_shapes()
         if not shapes:
             return None
-        return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
+        # A group of a lower rank (a set of points beside its image) has no extent to size a patch on.
+        rank = max(len(shape) for shape in shapes)
+        return [max(int(shape[axis]) for shape in shapes if len(shape) == rank) for axis in range(rank)]
 
     def worst_case_voxels(self) -> int:
         """The most voxels one group of a prepared case or copy holds: what a case taken whole holds. The product of
@@ -1309,8 +1311,10 @@ class DataPrediction(Data):
             sizes = concretize_patch_size(patch_size, shape, multiple)
             return tuple(size if declared == 0 else declared for size, declared in zip(sizes, patch_size, strict=True))
 
+        # With the case's channels: a set of points has as many as it has points, and those stack only when equal.
         return all(
-            len({extents(shape) for manager in managers for shape in manager.shapes[copies]}) <= 1
+            len({(manager.base_shape[0], *extents(shape)) for manager in managers for shape in manager.shapes[copies]})
+            <= 1
             for managers in (self._managers or {}).values()
         )
 
