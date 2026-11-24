@@ -1379,7 +1379,7 @@ class OutputDataset(Dataset, NeedDevice):
         # device flip mid-case and hand the reduction a mixed-device list.
         if index not in self._reduce_device:
             self._reduce_device[index] = (
-                self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
+                self._reduction_device(chunks[0], self.names[index], len(chunks)) if chunks else torch.device("cpu")
             )
         reduce_device = self._reduce_device[index]
         results = []
@@ -1397,9 +1397,10 @@ class OutputDataset(Dataset, NeedDevice):
             return results[0].unsqueeze(0)
         return torch.stack(results, dim=0)
 
-    def _reduction_device(self, chunk: torch.Tensor, nb_chunks: int = 1) -> torch.device:
-        """Device for the channel-reduction transforms: this dataset's CUDA device when every chunk (plus
-        working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
+    def _reduction_device(self, chunk: torch.Tensor, name: str, nb_chunks: int = 1) -> torch.device:
+        """Device for the channel-reduction transforms of case ``name``: this dataset's CUDA device when every chunk
+        (plus working headroom, what each transform declares for the case) fits free VRAM, else CPU (the
+        memory-safe fallback)."""
         # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or self._host_only:
@@ -1408,15 +1409,14 @@ class OutputDataset(Dataset, NeedDevice):
         # own working buffers and output (a Concat's is every copy again), and the after-reduction
         # transforms work on that output: budget the whole case, plus one copy's working temp.
         copies = max(1, self.nb_data_augmentation)
+        held = [transform.case_working_multiple(name) for transform in self.after_reduction_transforms]  # for the case
         if self._copy_fold() is not None:
             # The copies are folded as they come: one in flight, the running total, and what the
             # after-reduction transforms that follow the fold work with on it.
-            rest = max((transform.working_multiple for transform in self.after_reduction_transforms[1:]), default=0.0)
-            parked, fold = 1, 1.0 + rest
+            parked, fold = 1, 1.0 + max(held[1:], default=0.0)
         else:
             folded = self.reduction.output_channels(1, copies)
-            after = max((transform.working_multiple for transform in self.after_reduction_transforms), default=0.0)
-            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + after)
+            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + max(held, default=0.0))
         needed = chunk.numel() * chunk.element_size() * max(1, nb_chunks) * (parked + 1 + fold)
         try:
             free = _free_vram(device, needed)

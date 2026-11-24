@@ -86,7 +86,7 @@ class ReductionPlan:
     source_channels: int = 0
     working_multiple: float = 0.0
     #: Volumes-worth the MEMBER CHAIN allocates beside the region it is producing
-    #: (``DatasetManager.working_multiple()``, the largest ``Transform.working_multiple`` on the
+    #: (``DatasetManager.working_multiple()``, the largest ``Transform.case_working_multiple`` on the
     #: chain). Distinct from ``working_multiple``, the OPERATOR's. Charged ONCE whatever the
     #: cohort's size: ``_fold`` accumulates the members one after another, so one chain replays.
     chain_multiple: float = 0.0

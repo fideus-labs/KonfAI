@@ -487,6 +487,21 @@ def test_get_output_hands_the_assembled_volume_on_as_a_view() -> None:
     assert torch.equal(stacked[0], torch.arange(12, dtype=torch.float32).reshape(3, 2, 2))
 
 
+def test_the_reduction_device_is_asked_for_the_case_it_reduces(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The transforms price what they hold for the case (case_working_multiple), which only its name tells them.
+    output_dataset = OutputDataset(
+        same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+    )
+    dataset = _single_patch_dataset_iter()
+    output_dataset.add_layer(0, 0, 0, torch.zeros(3, 2, 2), dataset, Attribute())
+    asked: list[str] = []
+    monkeypatch.setattr(
+        OutputDataset, "_reduction_device", lambda self, chunk, name, nb: asked.append(name) or torch.device("cpu")
+    )
+    output_dataset._get_output(0, 0, [3], dataset)
+    assert asked == ["CASE_000"]
+
+
 def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     predictor = _Predictor.__new__(_Predictor)
     predictor_any = cast(Any, predictor)
@@ -1092,7 +1107,7 @@ def test_an_out_of_memory_restart_finishes_on_the_host_only_after_an_error_in_th
     output_dataset.reset()  # the restart resets the output before it reads the record
     assert output_dataset.finish_on_host() and not output_dataset.finish_on_host()  # taken once
     assert output_dataset._accumulate_device(layer, accumulator).type == "cpu"
-    assert output_dataset._reduction_device(chunk).type == "cpu"
+    assert output_dataset._reduction_device(chunk, "case").type == "cpu"
 
     # A forward that ran out of memory while a case's accumulator sat on the device: the host frees it.
     beside = OutputDataset(
