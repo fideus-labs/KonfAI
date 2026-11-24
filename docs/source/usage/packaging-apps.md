@@ -78,7 +78,27 @@ konfai-apps infer ./dist/CT_SEG \
 
 The label image is `AppCheck/CT_TWO_CLASSES/Dataset/P000/PRED.mha`. Compare it and its geometry
 with the quickstart prediction for CASE_000. Once checked, the `CT_SEG/` folder
-can be shared as a local app or placed in a Hugging Face model repository.
+can be shared as a local app or published on Hugging Face.
+
+## Publish it on Hugging Face
+
+Log in once with `hf auth login`, using a token that can write, then:
+
+```bash
+konfai-apps publish ./dist/CT_SEG your-name/my-apps
+```
+
+The command first loads the folder as an app: an `app.json` that does not load, or a
+missing checkpoint, stops it before anything is sent. It creates the repository when
+needed, private with `--private`, uploads the folder as `CT_SEG/`, removing there
+the files an earlier publish left that the folder no longer holds, and sets
+`library_name: konfai` in the repository's model card. Hugging Face then shows the
+KonfAI library on the model page, with the commands to list and run its apps. Every file
+of the folder is uploaded, whatever a `.gitignore` says: remove anything private first.
+Anyone who can read the repository runs it with
+`konfai-apps infer your-name/my-apps@main:CT_SEG -i ./Dataset/CASE_000/CT.mha`.
+`@main` reads what you just published even where the repository carries a release tag,
+and `--force-update` fetches it again over an earlier download.
 
 An app can read another app's output. Declare it in `app.json` as `"needs": {"body": "CT_BODY_SEG"}`:
 before it predicts, the app runs the needed app on the same inputs (as many as that app declares) and
