@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
+import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Callable
@@ -48,6 +48,8 @@ MANIFEST_VERSION = 5  # 5: patch.stride under the end and spread placements
 #: A manifest blending by GaussianFloat16 or by a patch combine of the app's extension: a runtime reading version 5
 #: alone refuses it rather than blend it as Cosinus.
 FLOAT16_BLEND_VERSION = 6
+#: The bytes one ONNX file holds: protobuf's limit for a message, its weights inline.
+ONE_FILE = 2**31 - 1
 
 
 def _require(module: str) -> ModuleType:
@@ -228,13 +230,16 @@ def _write_onnx(
     free_from: int = 2,
 ) -> None:
     """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
-    inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
-    which a model handed to others does not carry. ``dynamic``: every axis of every input from ``free_from`` on (the
-    spatial axes of ``[N, C, ...]``) is left free, and the graph is checked on other sizes of those axes
-    (:func:`_check_free_axes`) before it replaces what ``onnx_path`` held: a graph refused leaves it as it was."""
-    _require("onnx")
+    inline, also past the 1.5 GiB torch moves to a file beside the graph, up to :data:`ONE_FILE`, past which the
+    export is refused. The exporter records every node's Python stack, and with it the paths of the machine that
+    exported, which a model handed to others does not carry. ``dynamic``: every axis of every input from
+    ``free_from`` on (the spatial axes of ``[N, C, ...]``) is left free, and the graph is checked on other sizes of
+    those axes (:func:`_check_free_axes`) before it replaces what ``onnx_path`` held: a graph refused leaves it as it
+    was."""
+    onnx = _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
-    from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
+    from onnx_ir import serde  # shipped with the dynamo exporter
+    from onnx_ir.passes.common import ClearMetadataAndDocStringPass
 
     # ``module`` takes its inputs as ``*inputs``: one free shape per example, under that one argument.
     free = (tuple(dict.fromkeys(range(free_from, example.dim()), torch.export.Dim.AUTO) for example in examples),)
@@ -253,19 +258,24 @@ def _write_onnx(
             ),
         )
     ClearMetadataAndDocStringPass()(program.model)
-    # One of its own: another export to the destination stages beside it.
-    descriptor, name = tempfile.mkstemp(prefix=f".{onnx_path.name}.", suffix=".partial", dir=onnx_path.parent)
-    os.close(descriptor)
-    staged = Path(name)
+    proto = serde.serialize_model(program.model)  # inline: ``program.save`` moves weights past 1.5 GiB beside it
+    if proto.ByteSize() > ONE_FILE:
+        raise PredictorError(
+            f"The exported graph holds {proto.ByteSize() / 2**30:.2f} GiB, past the 2 GiB one ONNX file holds.",
+            "Export a smaller network, or one part of it per head.",
+        )
+    # A folder of its own (another export to the destination stages beside it), the file made as any the user makes.
+    staging = Path(tempfile.mkdtemp(prefix=f".{onnx_path.name}.", suffix=".partial", dir=onnx_path.parent))
+    staged = staging / onnx_path.name
     try:
-        program.save(staged, external_data=False)
+        onnx.save(proto, staged)
         if dynamic:
             # A dynamo export always carries the program it traced, guards and all.
             traced = cast("torch.export.ExportedProgram", program.exported_program)
             _check_free_axes(module, examples, staged, input_names, free_from, traced)
         staged.replace(onnx_path)
     finally:
-        staged.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _smooth(shape: list[int], dtype: torch.dtype, free_from: int) -> torch.Tensor:
@@ -298,7 +308,8 @@ def _traced_sizes(
                 expr = sympy.Integer(extent)
             elif isinstance(size, torch.SymInt) and size.node.expr.free_symbols:
                 expr = size.node.expr
-                traced_values = size.node.shape_env.var_to_val
+                env = size.node.shape_env  # torch 2.5 calls backed_var_to_val var_to_val, later ones deprecate it
+                traced_values = env.backed_var_to_val if hasattr(env, "backed_var_to_val") else env.var_to_val
                 values.update({symbol: int(traced_values[symbol]) for symbol in sorted(expr.free_symbols, key=str)})
             else:  # an int or a symbol of one value (torch 2.5): an axis the trace fixed
                 expr = sympy.Symbol(f"fixed_{index}_{axis}")
