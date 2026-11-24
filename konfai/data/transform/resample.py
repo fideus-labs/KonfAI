@@ -663,6 +663,11 @@ class _StoredMap:
 RANGE_KEYS = ("NanMinPerChannel", "NanMaxPerChannel")
 #: The order :mod:`konfai.data.spline` reads each interpolation it serves at.
 _SPLINE_ORDERS = {"bspline": 3, "linear": 1}
+#: Why a resample through :mod:`konfai.data.spline` whose interpolation its input's dtype picks needs the whole volume.
+_BY_DTYPE = (
+    "the faces grid resamples this anisotropic case slice by slice with the interpolation its dtype picks, so this"
+    " resample holds the case whole"
+)
 
 
 def _host_array(tensor: torch.Tensor) -> np.ndarray:
@@ -978,7 +983,7 @@ class Resample(TransformInverse):
         #: The interpolation the inverse reads with, when it is not the forward's: an image resampled by B-spline
         #: whose logits are carried back linearly.
         self.inverse_interpolation = inverse_interpolation
-        self.fill_value = fill if fill == "edge" else float(fill)
+        self.fill_value = _fill_value(fill)
         #: What the inverse reads outside the grid: ``fill`` unless ``inverse_fill`` says otherwise.
         self.inverse_fill = self.fill_value if inverse_fill is None else _fill_value(inverse_fill)
         self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align, grid)
@@ -1772,29 +1777,9 @@ class Resample(TransformInverse):
             # the precision: 'fast' is a trade the device walk makes.
             with coordinate_precision(torch.float64):
                 return self._walk(
-                    sub_tensor,
-                    target,
-                    source,
-                    stages,
-                    target_slices,
-                    region_starts,
-                    mode,
-                    True,
-                    budget_bytes,
-                    self.fill_value,
+                    sub_tensor, target, source, stages, target_slices, region_starts, mode, True, budget_bytes
                 )
-        return self._walk(
-            sub_tensor,
-            target,
-            source,
-            stages,
-            target_slices,
-            region_starts,
-            mode,
-            as_itk,
-            budget_bytes,
-            self.fill_value,
-        )
+        return self._walk(sub_tensor, target, source, stages, target_slices, region_starts, mode, as_itk, budget_bytes)
 
     def _walk(
         self,
@@ -1807,11 +1792,12 @@ class Resample(TransformInverse):
         mode: str,
         as_itk: bool,
         budget_bytes: float | None,
-        fill: float | str,
+        fill: float | str | None = None,
     ) -> torch.Tensor:
         """One region through the torch walk: the device's route, and the host's where ITK's filter
         cannot answer as it answers for the whole grid. ``as_itk`` walks ITK's own index and blend
-        (:func:`~konfai.data.sampling.scanline_index`), ``fill`` outside the source."""
+        (:func:`~konfai.data.sampling.scanline_index`), ``fill`` outside the source (the forward's without)."""
+        fill = self.fill_value if fill is None else fill
         region = target.sub_grid(target_slices)
         shape = list(source.size_zyx)
         # The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
@@ -1867,12 +1853,12 @@ class Resample(TransformInverse):
         axis = self._separate_axis(case, name, forward)
         return mode == "bspline" or axis is not None, axis
 
-    def _spline_locality(self, cache_attribute: Attribute, forward: bool = True) -> PatchLocality | None:
+    def _spline_locality(self, cache_attribute: Attribute) -> PatchLocality | None:
         """How a resample through :mod:`konfai.data.spline` streams, judged from the header's spacing; None where
         it is not one (no spline, or a case already on the spacing asked for). A region reads the window
         :func:`~konfai.data.spline.window_of` gives; a B-spline clipped to its input's range (the faces grid, no axis
         apart) needs that range per channel, a statistic of the whole input."""
-        stated = self.inverse_interpolation if not forward and self.inverse_interpolation else self.interpolation
+        stated = self.interpolation
         mode = stated or "linear"
         if mode not in ("bspline", "linear") or not isinstance(self._target, _DerivedGrid):
             return None
@@ -1889,15 +1875,11 @@ class Resample(TransformInverse):
             wanted = np.where(self._target.spacing > 0, self._target.spacing, spacing)
             if np.array_equal(wanted, spacing):
                 return None  # the same grid: nothing is resampled
-        axis = self._separate_axis(spacing, "", forward)
+        axis = self._separate_axis(spacing, "", True)
         if mode == "linear" and axis is None:
             return None
         if stated is None:  # the interpolation is the dtype's, which only the tensor tells
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason="the faces grid resamples this anisotropic case slice by slice with the interpolation its"
-                " dtype picks, so this resample holds the case whole",
-            )
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_BY_DTYPE)
         clipped = self._clips((_SPLINE_ORDERS[mode], False, axis))
         return PatchLocality(
             LocalityKind.REGRID, stat_keys=frozenset(RANGE_KEYS) if clipped else frozenset(), records=frozenset()
@@ -2212,9 +2194,11 @@ class Resample(TransformInverse):
                     " assembles the volume. The forward direction streams"
                 ),
             )
-        restored = Attribute(cache_attribute)
         try:
-            self._inverse_geometry(restored)
+            # Judged on the grids the inverse samples between, as it reads them: a header without a full geometry
+            # is unit spacing there, whatever Spacing it holds.
+            size = [int(extent) for extent in cache_attribute.get_np_array("Size")]
+            held, restored = self._inverse_grids(Attribute(cache_attribute), size)
         except DatasetManagerError:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
@@ -2223,8 +2207,14 @@ class Resample(TransformInverse):
                     " invert, so the shape it restores is unknown here. The forward direction streams"
                 ),
             )
-        spline = self._spline_locality(restored, forward=False)
-        return spline if spline is not None else PatchLocality(LocalityKind.REGRID)
+        stated = self.inverse_interpolation or self.interpolation
+        route = self._spline_route(held, restored, "", forward=False, mode=stated or "linear")
+        if route is None:
+            return PatchLocality(LocalityKind.REGRID)
+        if stated is None:  # the interpolation is the dtype's, which only the tensor tells
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_BY_DTYPE)
+        clipped = frozenset(RANGE_KEYS) if self._clips(route) else frozenset()
+        return PatchLocality(LocalityKind.REGRID, stat_keys=clipped, records=frozenset())
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         try:

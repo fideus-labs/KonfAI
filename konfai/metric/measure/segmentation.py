@@ -81,12 +81,6 @@ class Dice(Criterion):
         return tensor
 
     @staticmethod
-    def _bin_index(tensor: torch.Tensor) -> torch.Tensor:
-        """``tensor`` in a dtype ``bincount`` takes: a float map (NaN voxels to be masked by the caller) as int64. Any
-        other was typed by :meth:`_typed`."""
-        return tensor.to(torch.int64) if tensor.is_floating_point() else tensor
-
-    @staticmethod
     def _bins(maps: list[torch.Tensor], labels: list[int] | None) -> tuple[list[torch.Tensor], int, int, int]:
         """The maps as bin indices, the offset a bin carries (label = bin + offset), the NaN bin (1
         when there is one, at index 0, else 0) and the bins to count.
@@ -99,7 +93,8 @@ class Dice(Criterion):
         nan_masks = [torch.isnan(tensor).flatten() if tensor.is_floating_point() else None for tensor in maps]
         indices = []
         for tensor, nan_mask in zip(maps, nan_masks, strict=True):
-            index = Dice._bin_index(tensor).flatten()
+            # A dtype bincount takes: a float map (its NaN voxels masked below) as int64, another as _typed left it.
+            index = (tensor.to(torch.int64) if tensor.is_floating_point() else tensor).flatten()
             if nan_mask is not None:
                 index = index.masked_fill_(nan_mask, 0)  # a whole number, so the minimum below is a label's
             indices.append(index)

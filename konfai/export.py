@@ -25,6 +25,9 @@ external weight data so the ``.onnx`` is a single self-contained file.
 from __future__ import annotations
 
 import json
+import math
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from importlib import import_module
@@ -227,7 +230,7 @@ def _write_onnx(
     inline. The exporter records every node's Python stack, and with it the paths of the machine that exported,
     which a model handed to others does not carry. ``dynamic``: every axis of every input from ``free_from`` on (the
     spatial axes of ``[N, C, ...]``) is left free, and the graph is checked on other sizes of those axes
-    (:func:`_check_free_axes`)."""
+    (:func:`_check_free_axes`) before it replaces what ``onnx_path`` held: a graph refused leaves it as it was."""
     _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
     from onnx_ir.passes.common import ClearMetadataAndDocStringPass  # shipped with the dynamo exporter
@@ -249,9 +252,19 @@ def _write_onnx(
             ),
         )
     ClearMetadataAndDocStringPass()(program.model)
-    program.save(onnx_path, external_data=False)
-    if dynamic:
-        _check_free_axes(module, examples, onnx_path, input_names, free_from)
+    # One of its own: another export to the destination stages beside it.
+    descriptor, name = tempfile.mkstemp(prefix=f".{onnx_path.name}.", suffix=".partial", dir=onnx_path.parent)
+    os.close(descriptor)
+    staged = Path(name)
+    try:
+        program.save(staged, external_data=False)
+        if dynamic:
+            # A dynamo export always carries the program it traced, guards and all.
+            traced = cast("torch.export.ExportedProgram", program.exported_program)
+            _check_free_axes(module, examples, staged, input_names, free_from, traced)
+        staged.replace(onnx_path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _smooth(shape: list[int], dtype: torch.dtype, free_from: int) -> torch.Tensor:
@@ -265,49 +278,182 @@ def _smooth(shape: list[int], dtype: torch.dtype, free_from: int) -> torch.Tenso
     return value.expand(shape).to(dtype).contiguous()
 
 
+def _traced_sizes(
+    traced: torch.export.ExportedProgram, shapes: list[list[int]], free_from: int
+) -> tuple[list[list[Any]], dict[Any, int]]:
+    """Each axis of the inputs of ``shapes`` as the trace holds it, an expression of its own size symbols (a size of one
+    input tied to another's is one symbol in both, ``2*s`` and ``s``), a free axis it fixed as a symbol of its own;
+    and the value of each symbol at the example, as the trace holds it."""
+    import sympy  # torch's own dependency, which it writes sizes in
+
+    users = set(traced.graph_signature.user_inputs)
+    held = [node.meta["val"].shape for node in traced.graph.nodes if node.op == "placeholder" and node.name in users]
+    sizes: list[list[Any]] = []
+    values: dict[Any, int] = {}
+    for index, (shape, symbolic) in enumerate(zip(shapes, held, strict=True)):
+        sizes.append([])
+        for axis, (extent, size) in enumerate(zip(shape, symbolic, strict=True)):
+            if axis < free_from:
+                expr = sympy.Integer(extent)
+            elif isinstance(size, torch.SymInt) and size.node.expr.free_symbols:
+                expr = size.node.expr
+                traced_values = size.node.shape_env.var_to_val
+                values.update({symbol: int(traced_values[symbol]) for symbol in sorted(expr.free_symbols, key=str)})
+            else:  # an int or a symbol of one value (torch 2.5): an axis the trace fixed
+                expr = sympy.Symbol(f"fixed_{index}_{axis}")
+                values[expr] = extent
+            sizes[-1].append(expr)
+    return sizes, values
+
+
 def _check_free_axes(
-    module: torch.nn.Module, examples: tuple[torch.Tensor, ...], onnx_path: Path, names: list[str], free_from: int
+    module: torch.nn.Module,
+    examples: tuple[torch.Tensor, ...],
+    onnx_path: Path,
+    names: list[str],
+    free_from: int,
+    traced: torch.export.ExportedProgram,
 ) -> None:
-    """Refuse a graph exported with the axes from ``free_from`` on free that answers for the example's shape alone: on
-    smooth inputs of other shapes (16 voxels more along the last axis, 32 along the one before, and so on; then the
-    same with one axis at a time twice as long, past a size the forward floors or caps at export) it must give torch's
-    shape, and torch's values as closely as on a smooth input of the example's own shape."""
+    """Refuse a graph exported with the axes from ``free_from`` on free that answers for the example's shape alone.
+
+    The shapes it is checked on set the sizes ``traced`` holds (:func:`_traced_sizes`), so a size tied to another
+    stays tied. A size its guards keep out (a branch on the size, which the example took one way), or sizes it ties
+    moved apart (a branch on two sizes equal), are refused where torch takes them: the graph would answer there with
+    the branch it traced. Then, on a smooth input whose sizes are
+    each shorter by the largest power of two up to 32 they hold, on one whose sizes are each longer by another
+    multiple of it (a model of 32-voxel blocks takes both), and on two that reverse the order of every two sizes (a
+    branch on which is the taller), the graph must give torch's shape, and torch's values as closely as on a smooth
+    input of the example's own shape. An input torch refuses checks nothing, and torch must take one of them. The inputs are on the examples' device, the graph's on the host."""
+    import sympy
+
     ort = _require("onnxruntime")
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    hint = (
+        "Compute what depends on the input's shape with symbolic sizes (torch.sym_max, no int()), or give the model a"
+        " fixed patch_size."
+    )
 
-    def gap(inputs: list[torch.Tensor]) -> tuple[float | None, list[int], str]:
-        """How far ONNX lands from torch on ``inputs``, ``None`` when it gives another shape or fails."""
-        with torch.no_grad():
-            want = module(*inputs).numpy()
+    def smooth(shapes: list[list[int]]) -> list[torch.Tensor]:
+        return [_smooth(shape, x.dtype, free_from).to(x.device) for shape, x in zip(shapes, examples, strict=True)]
+
+    def reference(inputs: list[torch.Tensor]) -> np.ndarray | None:
+        """torch's answer on ``inputs``, ``None`` where it refuses them (a size its blocks or its poolings do not
+        take), which says nothing of the graph."""
         try:
-            got = session.run(None, {name: tensor.numpy() for name, tensor in zip(names, inputs, strict=True)})[0]
-        except Exception as error:  # a graph that fixed an axis refuses the other shape outright
-            return None, list(want.shape), f"fails ({type(error).__name__})"
-        if got.shape != want.shape:
-            return None, list(want.shape), f"gives {list(got.shape)}"
-        return float(np.abs(got.astype(np.float64) - want).max(initial=0.0)), list(want.shape), ""
+            with torch.no_grad():
+                return module(*inputs).cpu().numpy()
+        except Exception:
+            return None
 
-    own, _, _ = gap([_smooth(list(example.shape), example.dtype, free_from) for example in examples])
-    own = 0.0 if own is None else own
-    rank = examples[0].dim()
-    for doubled in (None, *range(free_from, rank)):  # one axis at a time, so the probe holds twice the example at most
-        other = []
-        for example in examples:
-            shape = list(example.shape)
-            shape[free_from:] = [
-                (2 if axis == doubled else 1) * extent + 16 * (len(shape) - axis)
-                for axis, extent in enumerate(shape[free_from:], free_from)
+    def gap(inputs: list[torch.Tensor], want: np.ndarray) -> tuple[float | None, str]:
+        """How far the graph lands from torch's ``want`` on ``inputs``, over their finite values once both hold the
+        same nonfinite values at the same voxels (a maximum over a NaN is NaN, which no bound refuses); ``None`` and
+        what differs otherwise."""
+        try:
+            got = session.run(None, {name: x.cpu().numpy() for name, x in zip(names, inputs, strict=True)})[0]
+        except Exception as error:  # a graph that fixed an axis refuses the other shape outright
+            return None, f"fails ({type(error).__name__})"
+        if got.shape != want.shape:
+            return None, f"gives {list(got.shape)}"
+        finite = np.isfinite(want)
+        if not np.array_equal(np.isfinite(got), finite) or not np.array_equal(
+            got[~finite], want[~finite], equal_nan=True
+        ):
+            return None, "gives other nonfinite values"
+        return float(np.abs(got[finite].astype(np.float64) - want[finite]).max(initial=0.0)), ""
+
+    shapes = [list(example.shape) for example in examples]
+    sizes, values = _traced_sizes(traced, shapes, free_from)
+
+    def at(moved: dict[Any, int]) -> list[list[int]]:
+        """The input shapes with the symbols of ``moved`` at those values, the others at the example's."""
+        assigned = values | moved
+        return [
+            [
+                int(size) if (size := expr.subs(assigned)).is_Integer else extent
+                for expr, extent in zip(row, shape, strict=True)
             ]
-            other.append(_smooth(shape, example.dtype, free_from))
-        there, shape, answer = gap(other)
+            for row, shape in zip(sizes, shapes, strict=True)
+        ]
+
+    for symbol, bounds in traced.range_constraints.items():
+        if symbol not in values:  # an expression of the symbols (2*s), which moves with them
+            continue
+        low = int(bounds.lower) if isinstance(bounds.lower, sympy.Integer) and bounds.lower > 2 else None
+        high = int(bounds.upper) if isinstance(bounds.upper, sympy.Integer) else None
+        if high is None:
+            span = f"{low} voxels or more"
+        else:
+            span = f"at most {high} voxels" if low is None else f"{low} to {high} voxels"
+        # A least size of 2 or less is the exporter's own floor, no branch.
+        for size in ([low - 1] if low is not None else []) + ([high + 1] if high is not None else []):
+            moved = at({symbol: size})
+            if moved != shapes and reference(smooth(moved)) is not None:
+                raise PredictorError(
+                    f"The model exported with free spatial axes was traced for an axis of {span} alone, and torch"
+                    f" takes inputs of {moved[0]} too: the forward answers for the example's shape alone.",
+                    hint,
+                )
+    for symbol in values:
+        # A size the trace holds on several axes (a branch on two sizes equal, or a tie torch needs itself): one of
+        # them alone moved, each in turn: where torch takes it the graph would answer with the branch the tie traced.
+        tied = [
+            (index, axis)
+            for index, row in enumerate(sizes)
+            for axis, expr in enumerate(row)
+            if symbol in expr.free_symbols
+        ]
+        if len(tied) < 2:
+            continue
+        for index, axis in tied:
+            untied = [list(shape) for shape in shapes]
+            untied[index][axis] += math.gcd(untied[index][axis], 32)
+            if reference(smooth(untied)) is not None:
+                raise PredictorError(
+                    f"The model exported with free spatial axes was traced with sizes tied to one another, and torch"
+                    f" takes inputs of {untied[index]} too, where they are not: the forward answers for the example's"
+                    " shape alone.",
+                    hint,
+                )
+    inputs = smooth(shapes)
+    want = reference(inputs)
+    own = (gap(inputs, want)[0] if want is not None else None) or 0.0
+    checked = False
+    # Each size moved by a multiple its first axis's place in its input sets, so that no input grows with the others.
+    spread = len(shapes[0]) - free_from
+    place = {}
+    for row in sizes:
+        for axis, expr in enumerate(row[free_from:]):
+            place.update({symbol: axis for symbol in sorted(expr.free_symbols, key=str) if symbol not in place})
+    shorter = {symbol: max(1, value - math.gcd(value, 32)) for symbol, value in values.items()}
+    longer = {symbol: value + math.gcd(value, 32) * (spread - place[symbol]) for symbol, value in values.items()}
+    # The order of every two sizes reversed: those of one size at the example lengthened the other way round, the
+    # others mirrored between the example's least and greatest.
+    ascending = {symbol: value + math.gcd(value, 32) * (place[symbol] + 1) for symbol, value in values.items()}
+    least, greatest = min(values.values(), default=0), max(values.values(), default=0)
+    mirrored = {symbol: least + greatest - value for symbol, value in values.items()}
+    probes = (at(shorter), at(longer), at(ascending), at(mirrored))
+    # An axis of one voxel is no shorter: the example's own shape checks nothing of another.
+    for other in (shape for shape in probes if shape != shapes):
+        inputs = smooth(other)
+        want = reference(inputs)
+        if want is None:
+            continue
+        checked = True
+        there, answer = gap(inputs, want)
         if there is None or there > max(1e-4, 10.0 * own):
             answer = answer or f"lands {there:.3g} from torch where it lands {own:.3g} at the example's shape"
             raise PredictorError(
-                f"The model exported with free spatial axes {answer} on inputs of {list(other[0].shape)}, where torch"
-                f" gives {shape}: the forward answers for the example's shape alone.",
-                "Compute what depends on the input's shape with symbolic sizes (torch.sym_max, no int()), or give the"
-                " model a fixed patch_size.",
+                f"The model exported with free spatial axes {answer} on inputs of {other[0]}, where torch gives"
+                f" {list(want.shape)}: the forward answers for the example's shape alone.",
+                hint,
             )
+    if not checked:
+        raise PredictorError(
+            "Of the inputs the model exported with free spatial axes is checked on, torch takes none but the"
+            f" example's {shapes[0]}: nothing says the graph holds at another shape.",
+            "Give the model a fixed patch_size.",
+        )
 
 
 class _Folds(torch.nn.Module):
@@ -362,9 +508,8 @@ class _Function(torch.nn.Module):
 
 def export_case_statistic(statistic: Any, partial_path: Path, finish_path: Path, rank: int, opset: int = 18) -> None:
     """Export the class a ``CaseStatistic`` names as two float64 graphs: ``partial_path`` takes ``block`` ``[1,
-    *spatial]``, its ``rank`` spatial axes free, to ``partial`` ``[K]``; ``finish_path`` takes ``total`` ``[K]`` to
-    the 0-d ``statistic``."""
-    # ponytail: traced on one channel, a stored scalar volume; a multichannel group needs its stored count here.
+    *spatial]``, one channel (the compiler refuses a group of more), its ``rank`` spatial axes free, to ``partial``
+    ``[K]``; ``finish_path`` takes ``total`` ``[K]`` to the 0-d ``statistic``."""
     # A region of 8 voxels and the halo on both sides, as the streamed fold hands it.
     block = torch.rand(1, *([8 + 2 * int(statistic.halo)] * rank), dtype=torch.float64)
     partial = _Function(statistic.partial).eval()

@@ -316,6 +316,37 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
     torch.testing.assert_close(got, reference, atol=1e-2, rtol=0)  # ~1e-4 relative on values ~100
 
 
+@pytest.mark.parametrize("seed", range(2))
+def test_an_inverse_b_spline_streams_on_what_its_locality_declares_of_a_header_of_spacing_alone(seed: int) -> None:
+    # A header with a Spacing and no Origin nor Direction: the inverse samples between the grids it reads, unit
+    # spacing, where the faces grid clips a B-spline to its input's range, and its locality asks for that range,
+    # which the write dispatcher measures and seeds. A 4 mm axis judged on the header would ask for nothing.
+    rng = np.random.default_rng(seed)
+    volume = torch.from_numpy(rng.standard_normal((C, 24, Y, X)).astype(np.float32)) * 100.0
+    resample = Resample([1.0, 1.0, 1.0], interpolation="bspline", grid="faces")
+    attribute = Attribute()
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 4.0])  # (x, y, z), as stored
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])  # the forward's
+    attribute["Size"] = np.asarray([6, Y, X])
+    attribute["Size"] = np.asarray([24, Y, X])
+    seeded = Attribute(attribute)
+    for key in resample.inverse_patch_locality(attribute).stat_keys:
+        reduce = torch.amin if key.startswith("NanMin") else torch.amax
+        seeded[key] = reduce(volume, dim=(1, 2, 3)).double().numpy()
+    reference = resample.inverse("case", volume.clone(), Attribute(attribute))
+    got = _run_stream(
+        lambda target: resample.stream_region_target("case", target, [24, Y, X], Attribute(seeded)),
+        lambda window, target, source: resample.stream_region_inverse(
+            "case", window, RegionContext(tuple(source), tuple(target), (24, Y, X)), Attribute(seeded)
+        ),
+        [24, Y, X],
+        [6, Y, X],
+        volume,
+        _partitions(24, rng),
+    )
+    torch.testing.assert_close(got, reference, atol=1e-3, rtol=0)
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_halo_dilate_matches_whole_volume(seed: int) -> None:
     # A forward HALO stage (Dilate) rides the same window: the pull enlarges by the declared radius,

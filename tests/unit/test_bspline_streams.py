@@ -29,7 +29,7 @@ from konfai.data.transform.base import LocalityKind, PatchLocality
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.ome_zarr import write_ome_zarr
-from oracle_support import manager
+from oracle_support import manager, zoom
 
 
 def test_a_window_reads_the_whole_volume_s_b_spline() -> None:
@@ -116,7 +116,7 @@ def test_a_window_forgets_what_lies_past_it_within_its_bound() -> None:
         volume = np.zeros(extents)
         volume[60, 0, 0] = first  # 40 rows from row 50's taps, past the window's 32
         assert not window[0].start <= 60 < window[0].stop
-        whole = spline.zoom(volume, shape, 3, corners=True)
+        whole = zoom(volume, shape, 3, corners=True)
         part = spline.zoom_window(volume[tuple(window)], [w.start for w in window], extents, shape, region, 3, True)
         assert np.all(part == 0.0)
         if np.isnan(first):

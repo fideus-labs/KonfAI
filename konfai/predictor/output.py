@@ -66,7 +66,7 @@ from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_b
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset, DataStream, drop_native_form
-from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_extrema
+from konfai.utils.dataset.statistics import data_statistics
 from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
@@ -1170,13 +1170,13 @@ class OutputDataset(Dataset, NeedDevice):
         if localities[0].stat_keys:
             # Each channel's range, NaN left out, folded slab by slab as the store's statistics are: only the slab in
             # hand is moved to the host or widened.
-            extent, folded = spatial[plan.axis], None
+            extent = spatial[plan.axis]
             rows = max(1, SLAB_VOXELS // max(1, buffer.numel() // extent))
-            for first in range(0, extent, rows):
-                folded = _update_running_extrema(
-                    folded, _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
-                )
-            stats = _finalize_running_statistics(folded)
+            slabs = (
+                _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
+                for first in range(0, extent, rows)
+            )
+            stats = data_statistics(slabs, keys=[_STREAM_STATS[key] for key in RANGE_KEYS])
             seed = tuple((key, np.asarray(stats[_STREAM_STATS[key]], np.float64)) for key in RANGE_KEYS)
         tail = replace(plan, pipe_start=plan.tail_start, tail_start=len(plan.stages), to_sink=True)
         for axis in sorted(range(len(spatial)), key=lambda axis: axis != plan.axis):

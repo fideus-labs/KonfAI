@@ -443,6 +443,44 @@ def test_a_grain_whose_common_multiple_with_the_pieces_is_tall_keeps_the_pieces_
     assert rows % 26 == 0 and rows >= 26, f"{rows} rows"
 
 
+def test_a_scan_of_an_entry_shorter_than_a_piece_is_priced_on_the_rows_it_has(tmp_path: Path, image_attributes) -> None:
+    """A piece is 16384 rows of [1, 4, 4, 4]: the scan reads the entry's 4, three blocks of 256 B, and fits 1 MiB."""
+    volume = _volume((1, 4, 4, 4))
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    try:
+        set_per_rank_budget(2**20)
+        got = dataset.read_data_statistics("CT", "P0")
+    finally:
+        set_per_rank_budget(None)
+    want = statistics_module.data_statistics([volume])
+    for key in _KEYS:
+        np.testing.assert_array_equal(got[key], want[key], err_msg=key)
+
+
+@pytest.mark.parametrize("backend", ["mha", "gipl"])
+def test_a_scan_with_a_halo_holds_its_padded_blocks_within_the_budget(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """A block read with ``halo`` rows more on both sides and padded around its plane is what a scan holds: under
+    1 MiB, eight rows of [1, 64, 64, 64] float32 and a halo of 4 hold 16 x 72 x 72 voxels, three of them in flight;
+    the rows of the scan without a halo (21) would hold 29. A budget the shortest such block exceeds is refused, where
+    the store serves regions (a store read whole is held whole anyway)."""
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 64 * 64)
+    dataset = Dataset(tmp_path / "store", backend)
+    dataset.write("CT", "P0", _volume((1, 64, 64, 64)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    try:
+        set_per_rank_budget(2**20)
+        held = [block.nbytes * 3 for block in dataset.iter_data_blocks("CT", "P0", halo=4)()]
+        set_per_rank_budget(2**19)
+        if backend == "mha":
+            with pytest.raises(DatasetManagerError, match="per-rank memory budget"):
+                dataset.iter_data_blocks("CT", "P0", halo=4)
+    finally:
+        set_per_rank_budget(None)
+    assert max(held) <= 2**20, f"{max(held)} B"
+
+
 def test_a_scan_of_some_channels_folds_what_the_volume_in_hand_folds_of_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
