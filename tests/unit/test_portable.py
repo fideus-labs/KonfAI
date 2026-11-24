@@ -1271,7 +1271,7 @@ def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
     # konfai patches every group of a case on the first one's grid: a whole-volume class of the app's own that trims
     # the second is refused as konfai's own regridding stages are, and one that keeps the grid compiles, whatever
     # channels it hands on.
-    (tmp_path / "OwnGrid.py").write_text(
+    (tmp_path / "SecondGrid.py").write_text(
         "from konfai.data.transform import LocalityKind, Transform\n\n"
         "class Trim(Transform):\n"
         "    locality = LocalityKind.WHOLE_VOLUME\n\n"
@@ -1285,7 +1285,7 @@ def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
         "        return kept.repeat(self.copies, *[1] * (kept.dim() - 1))\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    config = _two_groups({"OwnGrid:Trim": {"by": trim, "copies": copies}})
+    config = _two_groups({"SecondGrid:Trim": {"by": trim, "copies": copies}})
     if refused:
         with pytest.raises(ConfigError, match="off the grid"):
             transform_manifest(config, "Predictor", extension=True)
