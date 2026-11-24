@@ -1221,6 +1221,26 @@ def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkey
     assert (bundle / "Model.py").read_text() == OWN
 
 
+def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monkeypatch):
+    # The Model.py the bundle keeps imports a support module the update no longer declares, which the update removes:
+    # the staged check reads the bundle as the update leaves it, and the import fails there.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("from scales import Scale\n")
+    (root / "scales.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    for module in ("Model", "scales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+    bundle = _cli(root, model_py=str(root / "Model.py"), support_file=["scales.py=scales.py"], support_root=str(root))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
+    assert (bundle / "scales.py").read_text() == OWN
+
+
 def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):
     # Its name beside a support file of another source is refused before anything is written, a symlink in the
     # bundle under its name is not written through, and an extension of its own name lands.
