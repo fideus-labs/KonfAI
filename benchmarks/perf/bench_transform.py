@@ -16,7 +16,7 @@
 
 """TRANSFORM against a plain loop, and the region height against the budget.
 
-    python benchmarks/perf/bench_transform.py [--gib 2] [--budgets 1,8] [--sweep] [--repeats 3] [--force] [--quick]
+    python benchmarks/perf/bench_transform.py [--gib 2] [--budgets 1,8] [--sweep] [--repeats 5] [--force] [--quick]
 
 Reuses ``benchmarks/bench_streaming.py``'s synthetic h5 volume (float32, chunked in 64-row slabs)
 and its chain ``Normalize(-1, 1) -> Write``. Three measurements:
@@ -33,6 +33,11 @@ and its chain ``Normalize(-1, 1) -> Write``. Three measurements:
 The KonfAI output is compared to the loop's slab by slab (same rescale formula as ``Normalize``) and
 the geometry attributes checked; no time is reported when they disagree. ``--sweep`` runs the budgets
 64 MiB to 8 GiB twice each, the curve the audit used to bound the planner's growth step.
+
+KonfAI's wall at each budget, and its peak where the budget is under the case's size, are the metrics
+compared to a baseline. Past that size the peak is how many regions were in flight together, which
+varies from run to run under the budget (a fact bounds it). The loop is the yardstick and the profile
+a pointer: both are reported in ``naive`` and ``cprofile``.
 """
 
 from __future__ import annotations
@@ -199,7 +204,7 @@ def main() -> None:
     parser.add_argument("--gib", type=float, default=2.0)
     parser.add_argument("--budgets", default="1,8", help="declared memory budgets in GiB")
     parser.add_argument("--sweep", action="store_true", help="budgets 0.0625..8 GiB, twice each")
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument(
@@ -242,9 +247,12 @@ def main() -> None:
         for _ in range(repeats + (0 if args.quick else 1))
     ]
     naive_timed = naive_runs[1:] if len(naive_runs) > 1 else naive_runs
-    metrics["naive_wall_s"] = round(statistics.median(r["wall_s"] for r in naive_timed), 3)
-    metrics["naive_peak_rss_gib"] = round(max(r["peak_bytes"] for r in naive_timed) / 2**30, 3)
-    result["naive_runs_s"] = [round(r["wall_s"], 3) for r in naive_runs]
+    naive = {
+        "wall_s": round(statistics.median(r["wall_s"] for r in naive_timed), 3),
+        "peak_rss_gib": round(max(r["peak_bytes"] for r in naive_timed) / 2**30, 3),
+        "runs_s": [round(r["wall_s"], 3) for r in naive_runs],
+    }
+    result["naive"] = naive
 
     sweep_rows = []
     for budget in budgets:
@@ -260,7 +268,8 @@ def main() -> None:
         wall = statistics.median(r["wall_s"] for r in timed)
         peak = max(r["peak_bytes"] for r in timed)
         metrics[f"konfai_wall_s_b{tag}"] = round(wall, 3)
-        metrics[f"konfai_peak_rss_gib_b{tag}"] = round(peak / 2**30, 3)
+        if budget < gib:
+            metrics[f"konfai_peak_rss_gib_b{tag}"] = round(peak / 2**30, 3)
         metrics[f"konfai_floor_rss_gib_b{tag}"] = round(runs[0]["floor_bytes"] / 2**30, 3)
         rows = region_rows(scratch / f"Transforms_b{tag}_0")
         sweep_rows.append(
@@ -322,7 +331,6 @@ def main() -> None:
     )
     result["cprofile"] = summary
     metrics["statistics_share_of_tottime"] = summary["family_share_of_tottime"]["statistics"]
-    metrics["statistics_max_cumtime_s"] = summary["family_max_cumtime_s"]["statistics"]
 
     check = result.get("konfai_vs_naive", {})
     ok = bool(check.get("shape_equal")) and bool(check.get("attrs_equal")) and check.get("max_abs_diff", 1.0) <= 1e-5
@@ -330,11 +338,11 @@ def main() -> None:
     result["metrics"] = metrics
     first = f"{budgets[0]:g}".replace(".", "p")
     result["headline"] = (
-        f"{gib:g} GiB: KonfAI {metrics[f'konfai_wall_s_b{first}']} s / {metrics[f'konfai_peak_rss_gib_b{first}']} GiB at "
+        f"{gib:g} GiB: KonfAI {metrics[f'konfai_wall_s_b{first}']} s / {sweep_rows[0]['peak_rss_gib']} GiB at "
         f"{budgets[0]:g} GiB budget"
         + (f", {metrics.get('konfai_wall_s_b8', '?')} s at 8 GiB" if 8 in budgets or 8.0 in budgets else "")
-        + f" | naive {metrics['naive_wall_s']} s / {metrics['naive_peak_rss_gib']} GiB | statistics scan "
-        f"{metrics['statistics_share_of_tottime'] * 100:.0f} % self, {metrics['statistics_max_cumtime_s']} s cumulative"
+        + f" | naive {naive['wall_s']} s / {naive['peak_rss_gib']} GiB | statistics scan "
+        f"{metrics['statistics_share_of_tottime'] * 100:.0f} % self, {summary['family_max_cumtime_s']['statistics']} s cumulative"
         f" | max diff {check.get('max_abs_diff', 'n/a')}"
     )
     path = write_result("transform", result, fp=fp, tag="sweep" if args.sweep else "")

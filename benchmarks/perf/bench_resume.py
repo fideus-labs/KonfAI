@@ -22,6 +22,10 @@ One TRAIN of ``--epochs`` epochs on a scratch copy, then a RESUME of the same ru
 it wrote, the epoch count doubled. Both commands' ``[KonfAI] startup`` clock (the checkpoint load is
 its own phase) and their ``[KonfAI] epoch`` lines are parsed. A resume counts only when it exits 0,
 runs exactly the epochs the checkpoint left, writes a checkpoint and prints a finite loss.
+
+The two walls, the resumed epoch's and the peak are the metrics compared to a baseline. The startup
+clock prints to a tenth of a second and only past one second, the size of what it reads here: its
+phases are in ``startup``.
 """
 
 from __future__ import annotations
@@ -118,16 +122,14 @@ def main() -> None:
     metrics = {
         "train_wall_s": train.wall_s,
         "resume_wall_s": resume.wall_s,
-        "train_startup_s": round(train.clocks.get("startup", {}).get("wall", 0.0), 3),
-        "resume_startup_s": round(resume.clocks.get("startup", {}).get("wall", 0.0), 3),
-        "resume_checkpoint_s": round(resume.clocks.get("startup", {}).get("checkpoint", 0.0), 3),
         "resume_epoch_wall_s": resumed[-1]["wall"],
         "resume_peak_rss_gib": resume.peak_rss_gib,
     }
+    startup = resume.clocks.get("startup", {})
     result["metrics"] = metrics
     result["headline"] = (
-        f"resume {metrics['resume_wall_s']} s (startup {metrics['resume_startup_s']} s, checkpoint load "
-        f"{metrics['resume_checkpoint_s']} s, epoch {metrics['resume_epoch_wall_s']} s) against train "
+        f"resume {metrics['resume_wall_s']} s (startup {startup.get('wall', 0.0)} s, checkpoint load "
+        f"{startup.get('checkpoint', 0.0)} s, epoch {metrics['resume_epoch_wall_s']} s) against train "
         f"{metrics['train_wall_s']} s, {epochs} epoch(s) each"
     )
     path = write_result("resume", result, fp=fp)

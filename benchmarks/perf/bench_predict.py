@@ -24,6 +24,9 @@ and once with ``KONFAI_STREAM_WORTH_THRESHOLD=0``, which forces the per-slab rou
 ``[KonfAI] prediction`` clock is parsed; the two outputs are compared voxel by voxel through
 SimpleITK, and against the shipped reference when it exists. A time is only reported when the voxels
 agree.
+
+The run's wall, the loop's and the peaks are the metrics compared to a baseline. The loop's phases are
+each under a second, which the clock prints to a tenth: their medians are in ``phases``.
 """
 
 from __future__ import annotations
@@ -232,6 +235,7 @@ def main() -> None:
     }
     metrics: dict[str, float] = {}
     runs: dict[str, list[CliRun]] = {"whole": [], "stream": []}
+    split: dict[str, dict[str, float]] = {}
     for route in ("whole", "stream"):
         out_dir = scratch / f"pred_{route}"
         for _ in range(repeats + (0 if args.quick else 1)):  # one warmup unless quick
@@ -247,8 +251,8 @@ def main() -> None:
             runs[route].append(run)
         timed = runs[route][1:] if len(runs[route]) > 1 else runs[route]
         metrics[f"wall_s_{route}"] = round(statistics.median(r.wall_s for r in timed), 3)
-        for key in phases(timed[0]):
-            metrics[f"{key.replace('_s', '')}_s_{route}"] = round(statistics.median(phases(r)[key] for r in timed), 3)
+        split[route] = {key: round(statistics.median(phases(r)[key] for r in timed), 3) for key in phases(timed[0])}
+        metrics[f"loop_s_{route}"] = split[route]["loop_s"]
         metrics[f"peak_rss_gib_{route}"] = round(max(r.peak_rss_gib for r in timed), 3)
         metrics[f"gpu_delta_mib_{route}"] = max(r.gpu_peak_mib - r.gpu_baseline_mib for r in timed)
         result[f"runs_{route}"] = [
@@ -285,10 +289,11 @@ def main() -> None:
         )
 
     result["clock_note"] = "the [KonfAI] clocks print only above one second: a 0.0 here means under a second, not zero"
+    result["phases"] = split
     result["metrics"] = metrics
     result["headline"] = (
-        f"prediction whole {metrics['wall_s_whole']} s (loop {metrics['loop_s_whole']}: fetch {metrics['fetch_s_whole']} + "
-        f"forward {metrics['forward_s_whole']}) | streamed {metrics['wall_s_stream']} s (loop {metrics['loop_s_stream']}) | "
+        f"prediction whole {metrics['wall_s_whole']} s (loop {metrics['loop_s_whole']}: fetch {split['whole']['fetch_s']} + "
+        f"forward {split['whole']['forward_s']}) | streamed {metrics['wall_s_stream']} s (loop {metrics['loop_s_stream']}) | "
         f"{identity['differing_voxels']} of {identity['total_voxels']} voxels differ | RSS {metrics['peak_rss_gib_whole']} GiB"
     )
     path = write_result("predict", result, fp=fp)

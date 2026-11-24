@@ -788,6 +788,14 @@ def test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_nam
     assert {"op": "crop", "nonzero": True, "id": "Crop"} in manifest["preprocessing"]
 
 
+@pytest.mark.parametrize("sink", ["OutputLayerDataset", "Custom:ConfidenceSelect"])
+def test_a_prediction_output_written_by_another_sink_is_refused_by_name(sink: str) -> None:
+    # Another sink assembles its patches its own way; the program would blend and write as OutputDataset does.
+    with pytest.raises(ConfigError, match=f"written by '{sink}'"):
+        transform_manifest(_prediction({}, {"name_class": sink}), "Predictor")
+    transform_manifest(_prediction({}, {"name_class": "OutputDataset"}), "Predictor")
+
+
 @pytest.mark.parametrize(
     ("stage", "params"),
     [("Clip", {"min_value": "min", "max_value": 1.0}), ("Standardize", {"std": 1.0, "inverse": False})],
@@ -1065,6 +1073,7 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
     "Standardize": {"lazy": True},
+    "Canonical": {"orientation": "LPS"},
     "Normalize": {"lazy": True, "channels": [0]},
     "Resample": {"transforms": "T"},
     "Write": {"scale_factors": [2]},
@@ -1145,6 +1154,10 @@ def _compile_stage(key: str, params: dict[str, object]) -> object:
     if name in OP_MAP and name not in PROGRAM_TRANSFORMS:
         return compile_pipeline({name: params}, invertible=True)[0]
     return steps([{"Expand": {"nb": 2}}, {name: params}, _WRITE], "G")[0]
+
+
+def test_canonical_reads_its_orientation_in_any_case() -> None:
+    assert _compile_stage("Canonical", {"orientation": "ras"}) == _compile_stage("Canonical", {})
 
 
 def _outcome(key: str, params: dict[str, object]) -> object:

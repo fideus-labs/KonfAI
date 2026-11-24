@@ -19,7 +19,7 @@ from konfai.data.geometry import Grid, WorldBox
 from konfai.utils.dataset import Attribute, Dataset, write_landmarks
 from konfai.utils.errors import KonfAIError
 
-from .case import InspectionCase, Volume
+from .case import MASK_ROLES, InspectionCase, Volume
 from .config import ScoutConfig
 from .derived import Derived
 from .planes import box_to_dict, same_grid, window_of
@@ -39,21 +39,24 @@ DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
         "Displacement#3": {"statistic": "max"},
     },
     "registration_landmarks": {"TRE": {}},
-    "synthesis": {"MAE": {}, "PSNR": {}, "SSIM": {}},
+    "synthesis": {"MAE": {}, "ME": {}, "PSNR": {}, "SSIM": {}},
+}
+#: When a measured value is an error, by KonfAI's result name (the third part of `PRED:TRUTH:Dice:1`). A criterion
+#: whose scale is the data's (MAE, PSNR, SSIM, displacement lengths) has none: it confirms nothing until
+#: ``ScoutConfig.thresholds`` sets one for the data at hand.
+DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
+    "Dice": {"below": 0.8},
+    "SurfaceDice": {"below": 0.8},
+    "HD95": {"above": 5.0},
+    "ASSD": {"above": 2.0},
+    "TRE": {"above": 3.0},
+    "JacobianFolding": {"above": 0.0},
+    "JacobianMin": {"below": 0.0},
 }
 
 
 class EvaluationError(RuntimeError):
     """A measurement KonfAI Eval could not make; the message is for the model."""
-
-
-def konfai_version() -> str | None:
-    try:
-        from importlib.metadata import version
-
-        return version("konfai")
-    except Exception:
-        return None
 
 
 def load_prior(evaluation: list[Path] | dict[str, Any] | None, case_name: str) -> dict[str, Any]:
@@ -223,8 +226,13 @@ class RegionEvaluator:
                 selected |= {name for name in criteria if wanted.startswith(name.split("#")[0].lower())}
         return {name: args for name, args in criteria.items() if name in selected}
 
-    def _criteria_for(self, kind: str, metrics: list[str] | None) -> dict[str, dict[str, Any]]:
-        selected = self._selected(self.criteria(kind), metrics)
+    def _criteria_for(
+        self, kind: str, metrics: list[str] | None, labels: list[int] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """The criteria of a kind, restricted to ``metrics``, per label when ``labels`` are given, without SSIM on a
+        box thinner than its window."""
+        criteria = self.criteria(kind)
+        selected = self._selected(self._with_labels(criteria, labels) if labels is not None else criteria, metrics)
         if self._dropped:
             selected = {name: args for name, args in selected.items() if name.split("#")[0] != "SSIM"}
         return selected
@@ -241,7 +249,7 @@ class RegionEvaluator:
         tree: dict[str, Any] = {}
         reference = False
         labels_used: list[int] = []
-        mask_role = {"segmentation": "mask", "registration": "fixed_mask", "synthesis": "mask"}[task]
+        mask_role = MASK_ROLES[task]
         mask_group = ""
         if mask_role in self.case.inputs:
             self._write(dataset, "MASK", self.case.volume(mask_role), window, "uint8")
@@ -250,14 +258,14 @@ class RegionEvaluator:
             pred = self._write(dataset, "PRED", self.case.volume("prediction"), window, "int32")
             if "truth" in self.case.inputs:
                 truth = self._write(dataset, "TRUTH", self.case.volume("truth"), window, "int32")
-                labels_used = sorted({int(v) for v in np.union1d(np.unique(pred), np.unique(truth)) if v != 0})
-                criteria = self._selected(self._with_labels(self.criteria("segmentation"), labels_used), metrics)
+                labels_used = _labels_in(pred, truth)
+                criteria = self._criteria_for("segmentation", metrics, labels_used)
                 if criteria:
                     tree["PRED"] = {f"TRUTH{mask_group}": criteria}
                     reference = True
         elif task == "registration":
             field = self._volume("field")
-            field_criteria = self._selected(self.criteria("registration_field"), metrics)
+            field_criteria = self._criteria_for("registration_field", metrics)
             if field is not None and field_criteria:
                 self._write(dataset, "FIELD", field, window, "float32")
                 tree["FIELD"] = {"None": field_criteria}
@@ -265,12 +273,12 @@ class RegionEvaluator:
             if warped_labels is not None and "fixed_labels" in self.case.inputs:
                 warped = self._write(dataset, "WARPED_LABELS", warped_labels, window, "int32")
                 fixed = self._write(dataset, "FIXED_LABELS", self.case.volume("fixed_labels"), window, "int32")
-                labels_used = sorted({int(v) for v in np.union1d(np.unique(warped), np.unique(fixed)) if v != 0})
-                criteria = self._selected(self._with_labels(self.criteria("registration_labels"), labels_used), metrics)
+                labels_used = _labels_in(warped, fixed)
+                criteria = self._criteria_for("registration_labels", metrics, labels_used)
                 if criteria:
                     tree["WARPED_LABELS"] = {f"FIXED_LABELS{mask_group}": criteria}
                     reference = True
-            image_criteria = self._selected(self.criteria("registration_images"), metrics)
+            image_criteria = self._criteria_for("registration_images", metrics)
             warped_image = self._volume("warped")
             if image_criteria and warped_image is not None:
                 self._write(dataset, "WARPED", warped_image, window, "float32")
@@ -281,7 +289,7 @@ class RegionEvaluator:
                 and "moving_landmarks" in self.case.inputs
                 and self.derived is not None
             ):
-                landmark_criteria = self._selected(self.criteria("registration_landmarks"), metrics)
+                landmark_criteria = self._criteria_for("registration_landmarks", metrics)
                 fixed_points = self.case.landmarks("fixed_landmarks")
                 moving_points = self.case.landmarks("moving_landmarks")
                 moved = self.derived.moved_landmarks()
@@ -310,6 +318,10 @@ class RegionEvaluator:
                     tree["SYN"] = {f"TARGET{mask_group}": criteria}
                     reference = True
         return tree, reference, labels_used
+
+
+def _labels_in(a: np.ndarray, b: np.ndarray) -> list[int]:
+    return sorted({int(v) for v in np.union1d(np.unique(a), np.unique(b)) if v != 0})
 
 
 def _criterion_name(metric: str) -> str:

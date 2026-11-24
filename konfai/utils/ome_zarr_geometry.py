@@ -148,14 +148,19 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
         orientations = {a.name: a.orientation for a in systems[0].axes if a.orientation}
     factors = _unit_factors(units, xyz)
     basis = np.eye(n)
-    for j, d in enumerate(xyz):
-        if d in orientations:
-            orientation = orientations[d]
-            value = orientation["value"] if isinstance(orientation, dict) else orientation.value
-            vector = np.asarray(anatomical_orientation_to_itk_direction(value))
-            if np.any(vector[n:] != 0):
-                raise DatasetManagerError("OME-Zarr anatomical orientation leaves the image's spatial dimensions.")
-            basis[:, j] = vector[:n]
+    columns = {
+        d: anatomical_orientation_to_itk_direction(o["value"] if isinstance(o, dict) else o.value)
+        for d, o in orientations.items()
+        if d in xyz
+    }
+    # ngff-zarr maps the six LPS terms only: any other (dorsal, rostral, ...) gives no direction, so identity.
+    if all(column is not None for column in columns.values()):
+        for j, d in enumerate(xyz):
+            if d in columns:
+                vector = np.asarray(columns[d])
+                if np.any(vector[n:] != 0):
+                    raise DatasetManagerError("OME-Zarr anatomical orientation leaves the image's spatial dimensions.")
+                basis[:, j] = vector[:n]
     scale = np.array([image.scale[d] for d in xyz])
     translation = np.array([image.translation[d] for d in xyz])
     linear = basis @ (factors[:, None] * matrix) @ np.diag(scale)

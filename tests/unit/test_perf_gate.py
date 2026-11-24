@@ -154,6 +154,7 @@ def test_the_gate_refuses_to_time_a_konfai_imported_from_another_tree(monkeypatc
     # os.getloadavg is Unix-only; the Windows lane runs this test too.
     monkeypatch.setattr(harness.os, "getloadavg", lambda: (0.0, 0.0, 0.0), raising=False)
     monkeypatch.setattr(harness, "power_profile", lambda: "performance")
+    monkeypatch.setattr(harness, "on_battery", lambda: False)
     monkeypatch.setattr(harness, "gpu_busy", lambda: None)
     monkeypatch.setattr(harness, "cpu_hogs", lambda: [])
     (tmp_path / "konfai").mkdir()

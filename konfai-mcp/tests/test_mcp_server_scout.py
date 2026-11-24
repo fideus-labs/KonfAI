@@ -69,7 +69,7 @@ def test_an_inspection_runs_as_a_job_and_its_report_reads_back(
         labels={"1": "sphere", "2": "cube"},
         provider="mock",
         mode="active",
-        max_tool_calls=12,
+        depth="standard",
     )
     assert isinstance(payload, dict) and payload["kind"] == "scout" and payload["output"].endswith("Scout/seg_demo")
     assert payload["next_actions"] == ["get_job_status", "read_scout_report"]

@@ -2181,3 +2181,16 @@ def test_a_prediction_measures_its_batch_over_copies_of_another_shape_it_pads(
     if measured:
         loader.batch_sampler.batch_size = 2
         assert sum(1 for _ in loader) == -(-len(loader.batch_sampler.sampler) // 2)
+
+
+# --------------------------------------------------------------------------------------
+# The worst case: per axis for a patch grid, per case for a run that takes each case whole
+# --------------------------------------------------------------------------------------
+
+
+def test_the_worst_case_voxels_are_those_of_one_case_not_of_the_per_axis_maximum() -> None:
+    data = object.__new__(DataPrediction)
+    data._managers = {"Volume": [SimpleNamespace(shapes=[[202, 362, 362]]), SimpleNamespace(shapes=[[89, 512, 512]])]}
+    data._validation_managers = None
+    assert data.worst_case_shape() == [202, 512, 512]
+    assert data.worst_case_voxels() == 202 * 362 * 362

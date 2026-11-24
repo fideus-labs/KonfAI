@@ -6,7 +6,7 @@ import io
 import numpy as np
 import pytest
 from konfai_scout.config import ScoutConfig
-from konfai_scout.planes import box_from_dict, box_size
+from konfai_scout.planes import box_from_dict, box_size, plane_frame
 from konfai_scout.views import DEFAULT_MODE, MODES, Renderer, ViewError
 from PIL import Image
 
@@ -81,6 +81,19 @@ def test_zoom_crops_to_the_box_and_keeps_the_size(fixtures, tmp_path):
     assert np.prod(box_size(shown)) < np.prod(box_size(case.grid.world_box())) / 10
     with pytest.raises(ViewError):
         r.render("axial", "prediction", zoom=box_from_dict({"min": [900, 900, 900], "max": [910, 910, 910]}))
+
+
+def test_a_zoom_on_an_oblique_grid_reports_where_it_looks(fixtures, tmp_path):
+    """On a tilted plane the slice's centre is far from the zoom: the position given is the zoom's, the tilt named."""
+    case, _ = fixtures["segmentation_oblique"]
+    r = renderer(fixtures, "segmentation_oblique", tmp_path)
+    world = case.grid.world_box()
+    centre = world.low_xyz + (world.high_xyz - world.low_xyz) * np.array([0.3, 0.3, 0.5])
+    _png, view = r.render("axial", "image", zoom=box_from_dict({"center": centre.tolist(), "size": 10}))
+    assert np.linalg.norm(np.asarray(view.position_mm) - centre) <= 2 * max(case.grid.spacing_xyz)
+    assert "tilted" in r._plane_name(plane_frame(r.grid, "axial"))
+    straight = renderer(fixtures, "segmentation", tmp_path / "straight")
+    assert straight._plane_name(plane_frame(straight.grid, "axial")) == "axial"
 
 
 def test_montage_tiles_cover_the_plane(fixtures, tmp_path):

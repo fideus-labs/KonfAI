@@ -16,7 +16,7 @@
 
 """What a region read costs through ``Dataset``, per layout an HDF5 store comes in.
 
-    python benchmarks/perf/bench_reads.py [--repeats 3] [--force] [--quick]
+    python benchmarks/perf/bench_reads.py [--seconds 1] [--force] [--quick]
 
 One volume, written five ways into one h5 file as a third-party tool would: contiguous (what
 ``Dataset.write`` stores), chunked with no filter in small and in large chunks, chunked with gzip,
@@ -37,6 +37,8 @@ The volume is last written whole, ``Dataset.write``, with one channel and with f
 the four is compared with the one-channel write. SimpleITK takes a vector volume pixel by pixel,
 which the region writer handed the volume whole does not. Times and ratios remain measurements,
 not machine-independent facts: compare the times to the same machine's baseline with compare.py.
+Each time is the median of the calls that fit in ``--seconds``: a read of a millisecond is sampled
+hundreds of times, where a handful of samples of it is the scheduler's noise.
 """
 
 from __future__ import annotations
@@ -44,10 +46,8 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import statistics
 import sys
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -56,7 +56,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from facts import fact
-from harness import fingerprint, machine_gate, write_result
+from harness import fingerprint, hold_performance_cores, machine_gate, steady_ms, write_result
 from konfai.utils.dataset import Attribute, Dataset
 
 SHAPE = (1, 128, 256, 256)
@@ -74,25 +74,20 @@ def _row(z: int) -> tuple[slice, ...]:
     return (slice(None), slice(z, z + 1), slice(None), slice(None))
 
 
-def _median_ms(read: Callable[[], object], repeats: int) -> float:
-    read()
-    walls = []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        read()
-        walls.append((time.perf_counter() - start) * 1e3)
-    return round(statistics.median(walls), 2)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--seconds", type=float, default=1.0, help="what each time is sampled over")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()
+    hold_performance_cores()
     gate = machine_gate(force=args.force)
     fp = fingerprint()
-    repeats = 1 if args.quick else args.repeats
+    seconds = 0.0 if args.quick else args.seconds
+
+    def timed(call: Callable[[], object]) -> float:
+        return round(steady_ms(call, seconds), 2)
+
     random.seed(0)
     rows = [random.randrange(SHAPE[1]) for _ in range(64 if args.quick else 256)]
     volume = np.random.default_rng(0).integers(-1000, 3000, size=SHAPE, dtype=np.int16)
@@ -110,18 +105,13 @@ def main() -> None:
             same = same and np.array_equal(dataset.read_data("CT", name)[0], volume)
             facts.append(fact(f"{name}_same_bytes_as_h5py", same, 1))
             step = int(options.get("chunks", SHAPE)[1])  # type: ignore[index]
-            reads, passes = [], []
-            for _ in range(repeats):
-                start = time.perf_counter()
-                for z in rows:
-                    dataset.read_data_slice("CT", name, _row(z))
-                reads.append((time.perf_counter() - start) * 1e3)
-                start = time.perf_counter()
-                for z in range(0, SHAPE[1], step):
-                    dataset.read_data_slice("CT", name, (slice(None), slice(z, z + step), slice(None), slice(None)))
-                passes.append((time.perf_counter() - start) * 1e3)
-            metrics[f"{name}_reads_ms"] = round(statistics.median(reads), 2)
-            metrics[f"{name}_pass_ms"] = round(statistics.median(passes), 2)
+            windows = [(slice(None), slice(z, z + step), slice(None), slice(None)) for z in range(0, SHAPE[1], step)]
+            metrics[f"{name}_reads_ms"] = timed(
+                lambda name=name: [dataset.read_data_slice("CT", name, _row(z)) for z in rows]
+            )
+            metrics[f"{name}_pass_ms"] = timed(
+                lambda name=name, windows=windows: [dataset.read_data_slice("CT", name, window) for window in windows]
+            )
             print(
                 f"[perf] {name}: {len(rows)} one-row reads {metrics[f'{name}_reads_ms']} ms, one pass in whole chunks {metrics[f'{name}_pass_ms']} ms"
             )
@@ -135,13 +125,10 @@ def main() -> None:
             same = all(np.array_equal(raw.read_data_slice("CT", "P000", _row(z))[0], volume[_row(z)]) for z in rows)
             same = same and np.array_equal(raw.read_data_slice("CT", "P000", whole_window)[0], volume)
             facts.append(fact(f"{fmt}_regions_same_voxels", same, 1))
-            # More repeats than the layouts: one read is a few milliseconds.
-            metrics[f"{fmt}_whole_ms"] = _median_ms(lambda raw=raw: raw.read_data("CT", "P000"), 5 * repeats)
-            metrics[f"{fmt}_window_ms"] = _median_ms(
-                lambda raw=raw: raw.read_data_slice("CT", "P000", whole_window), 5 * repeats
-            )
-            metrics[f"{fmt}_reads_ms"] = _median_ms(
-                lambda raw=raw: [raw.read_data_slice("CT", "P000", _row(z)) for z in rows], repeats
+            metrics[f"{fmt}_whole_ms"] = timed(lambda raw=raw: raw.read_data("CT", "P000"))
+            metrics[f"{fmt}_window_ms"] = timed(lambda raw=raw: raw.read_data_slice("CT", "P000", whole_window))
+            metrics[f"{fmt}_reads_ms"] = timed(
+                lambda raw=raw: [raw.read_data_slice("CT", "P000", _row(z)) for z in rows]
             )
             ratio = round(metrics[f"{fmt}_whole_ms"] / metrics[f"{fmt}_window_ms"], 3)
             metrics[f"{fmt}_whole_over_window"] = ratio
@@ -155,9 +142,8 @@ def main() -> None:
         for fmt in ("mha", "nrrd"):
             written = Dataset(f"{scratch}/written_{fmt}", fmt)
             for name, data in (("scalar", volume), ("vector", vector)):
-                metrics[f"{fmt}_{name}_write_ms"] = _median_ms(
-                    lambda written=written, name=name, data=data: written.write("CT", name, data, Attribute(geometry)),
-                    5 * repeats,
+                metrics[f"{fmt}_{name}_write_ms"] = timed(
+                    lambda written=written, name=name, data=data: written.write("CT", name, data, Attribute(geometry))
                 )
             same = np.array_equal(written.read_data("CT", "vector")[0], vector)
             facts.append(fact(f"{fmt}_vector_write_same_voxels", same, 1))
@@ -176,7 +162,7 @@ def main() -> None:
         "quick": args.quick,
         "volume_shape": list(SHAPE),
         "reads": len(rows),
-        "repeats": repeats,
+        "seconds": seconds,
         "metrics": metrics,
         "facts": facts,
         "headline": f"{len(rows)} shuffled one-row reads: "

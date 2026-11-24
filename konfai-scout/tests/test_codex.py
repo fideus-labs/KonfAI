@@ -4,6 +4,7 @@ the schemas and read-only annotations as served, images in the results, the budg
 
 import asyncio
 import json
+from functools import partial
 
 import pytest
 
@@ -15,6 +16,9 @@ from konfai_scout.config import Budget
 from konfai_scout.providers import ProviderError, check_privacy, make_provider
 from konfai_scout.providers.base import without_image_data
 from konfai_scout.providers.codex import CodexProvider, _model_of
+from test_tools import unsure_reader
+
+inspect = partial(inspect, reader=unsure_reader)  # the blind readings are not sessions of the scripted client
 
 NOTE = {
     "kind": "suspected_error",
@@ -98,13 +102,15 @@ def _provider(monkeypatch, script: list[dict], **kwargs) -> tuple[CodexProvider,
 
 def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path, monkeypatch):
     case, _ = fixtures["segmentation"]
+    world = case.grid.world_box()  # a small box at the centre, which the central slice shows
+    centre = {"center": ((world.low_xyz + world.high_xyz) / 2).tolist(), "size": 6.0}
     script = [
         {
             "calls": [
                 ("view", VIEW),
                 ("view", {**VIEW, "mode": "both"}),
                 ("region_stats", {"box_mm": {"center": [0.0, 0.0, 0.0], "size": 10.0}}),  # refused: the budget is spent
-                ("note", lambda views: {**NOTE, "views": views[:1]}),
+                ("note", lambda views: {**NOTE, "views": views[:1], "box_mm": centre}),
                 ("conclude", CONCLUDE),
             ]
         }
@@ -116,13 +122,14 @@ def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path,
     assert report.error is None and report.conclusion.by == "model" and report.conclusion.verdict == "defective"
     assert [c.tool for c in report.tool_calls] == ["view", "view", "note", "conclude"]
     assert report.budget["exhausted"].startswith("2 tool calls") and report.budget["spent"]["tool_calls"] == 2
-    assert report.observations[0].views == [report.views[3].id]
-    assert report.usage.images_sent == 5 and all((tmp_path / v.path).exists() for v in report.views)
+    assert report.observations[0].views == [[v for v in report.views if v.sent][3].id]
+    blind = sum(not v.sent for v in report.views)  # the views of the blind readings, sent to their reader
+    assert report.usage.images_sent == 5 + blind and all((tmp_path / v.path).exists() for v in report.views)
     assert report.provider["name"] == "codex" and report.provider["remote"] and report.provider["model"] == "default"
     assert (
         report.usage.input_tokens == 400 and report.usage.cache_read_tokens == 600 and report.usage.output_tokens == 50
     )
-    assert report.usage.requests == 1 and not report.usage.cost_known
+    assert report.usage.requests == 1 + blind // 4 and not report.usage.cost_known
     # the command the CLI was given
     cmd = fake.commands[0]
     assert cmd[:2] == ["codex", "exec"] and "--ignore-user-config" in cmd and "--json" in cmd and "-m" not in cmd
@@ -154,7 +161,7 @@ def test_the_cli_drives_the_tools_over_the_served_mcp_server(fixtures, tmp_path,
 
 
 def test_a_silent_turn_is_reminded_on_the_resumed_session_and_failures_are_classified(fixtures, tmp_path, monkeypatch):
-    case, _ = fixtures["segmentation_no_truth"]
+    case, _ = fixtures["segmentation_clean"]
     script = [{"calls": [], "text": "looks fine"}, {"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}]
     provider, fake = _provider(monkeypatch, script)
     config = ScoutConfig(provider="codex", allow_cloud_images=True, retry_wait_seconds=0.0, max_px=200)
@@ -165,13 +172,28 @@ def test_a_silent_turn_is_reminded_on_the_resumed_session_and_failures_are_class
     assert "Nothing was recorded" in fake.prompts[1] and not fake.prompts[1].startswith("You are KonfAI Scout")
 
     provider, fake = _provider(
-        monkeypatch, [{"fail": "rate limit exceeded (429)"}, {"calls": [("conclude", CONCLUDE)]}]
+        monkeypatch,
+        [{"fail": "rate limit exceeded (429)"}, {"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}],
     )
     report = inspect(case, config, tmp_path / "transient", provider=provider)
     assert report.error is None and len(fake.commands) == 2  # retried once, on the same thread
     provider, fake = _provider(monkeypatch, [{"fail": "boom"}])
     report = inspect(case, config, tmp_path / "fatal", provider=provider)
     assert report.error == "provider error: Codex: boom" and report.conclusion.by == "scout"
+
+
+def test_max_usd_is_said_not_enforced_for_the_codex_cli(fixtures, tmp_path, monkeypatch):
+    """Codex reports its usage once its whole loop has run: max_usd cannot stop it, and the report says so."""
+    case, _ = fixtures["segmentation_no_truth"]
+    script = [{"calls": [("conclude", {**CONCLUDE, "verdict": "acceptable"})]}]
+    budget = Budget(max_usd=0.01)
+    config = ScoutConfig(provider="codex", allow_cloud_images=True, budget=budget, max_px=200)
+    report = inspect(case, config, tmp_path / "unknown", provider=_provider(monkeypatch, list(script))[0])
+    assert "the price of default is unknown" in report.budget["not_enforced"]
+    priced = ScoutConfig(**{**config.__dict__, "prices": {"default": {"input": 1.0, "output": 1.0}}})
+    report = inspect(case, priced, tmp_path / "priced", provider=_provider(monkeypatch, list(script))[0])
+    assert "the codex CLI reports its cost only once its whole loop has run" in report.budget["not_enforced"]
+    assert "max_usd: the codex CLI" in (tmp_path / "priced" / "report.md").read_text()
 
 
 def test_the_gate_the_factory_and_the_records(tmp_path, monkeypatch):

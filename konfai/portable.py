@@ -266,6 +266,8 @@ def _refuse_lazy(stage: str, p: dict[str, Any]) -> None:
 
 
 def _op_canonical(p: dict[str, Any]) -> dict[str, Any]:
+    orientation = str(clean(p.get("orientation", "RAS"))).upper()  # konfai reads the letters in any case
+    _refuse_set("Canonical", {"orientation": orientation}, {"orientation": "RAS"})
     # resample: false permutes and flips an oblique case onto its nearest axes rather than resample it.
     return {"op": "canonical", **({"resample": False} if clean(p.get("resample", True)) is False else {})}
 
@@ -518,7 +520,8 @@ OP_MAP: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "Resample": _op_resample,
     "Padding": _op_pad,
     "Dilate": lambda p: {"op": "dilate", "radius": int(p.get("dilate", _default("Dilate", "dilate")))},
-    # Canonical reorients from the volume's own direction cosines at runtime.
+    # Canonical reorients from the volume's own direction cosines at runtime onto RAS, and refuses another
+    # orientation, which no runtime op reads yet.
     "Canonical": _op_canonical,
     # Flip and Permute move the voxels and, as konfai's do, leave the geometry untouched.
     "Flip": _op_axes("Flip"),
@@ -1872,6 +1875,7 @@ def transform_manifest(
     exports a ``CaseStatistic`` of a group past the first; without it, it is refused. ``heads`` are the channels of
     the first group the model reads and those the output chain starts from, which an app's own class is run on;
     one channel of each without them."""
+    _refuse_another_sink(config, root, output)
     _refuse_another_mirror(config, root, output)
     rank = _spatial_rank(config, root)
     first, head = heads or (1, lambda: 1)
@@ -1902,6 +1906,18 @@ def transform_manifest(
     if reads:
         manifest["reads"] = reads
     return manifest, folds, per_copy
+
+
+def _refuse_another_sink(config: dict[str, Any], root: str, output: str | None) -> None:
+    """The program assembles and writes an output as ``OutputDataset`` does: another sink (``OutputLayerDataset``,
+    a class of the app's own) blends its patches or places its grid its own way, which the runtime would not."""
+    sink = clean(output_spec(config, root, output).get("name_class"))
+    if sink not in (None, "OutputDataset", "konfai.predictor:OutputDataset"):
+        raise ConfigError(
+            f"the output is written by '{sink}', a sink with no portable form: the runtime assembles its patches"
+            " and writes them as OutputDataset does.",
+            _or_konfai("Write the output with name_class: OutputDataset", _PREDICT),
+        )
 
 
 def _refuse_another_mirror(config: dict[str, Any], root: str, output: str | None) -> None:

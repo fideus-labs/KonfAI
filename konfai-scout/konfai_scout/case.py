@@ -53,6 +53,8 @@ TRUTH_ROLES = {
     "registration": ("fixed_labels", "fixed_landmarks"),
     "synthesis": ("target",),
 }
+#: The role that restricts a task's scores to a region, as KonfAI Eval reads a mask.
+MASK_ROLES = {"segmentation": "mask", "registration": "fixed_mask", "synthesis": "mask"}
 #: Roles read as point sets, not volumes.
 POINT_ROLES = ("fixed_landmarks", "moving_landmarks")
 

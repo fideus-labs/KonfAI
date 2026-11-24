@@ -6,6 +6,7 @@ streamed by KonfAI, its results written as a dataset beside the inspection and r
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,11 @@ class Derived:
         self._ran = False
         self._volumes: dict[str, Volume] = {}
 
+    @cached_property
+    def fill(self) -> float:
+        """What the warp writes where it reads outside the moving image: its minimum (air on a CT), not 0 (water)."""
+        return self.case.volume("moving").quantile(0.0)
+
     # ------------------------------------------------------------------ the map
 
     def _map(self) -> dict[str, object]:
@@ -57,8 +63,8 @@ class Derived:
         onto_fixed = {"reference": "{case}", "reference_group": "FIXED"}
         chains: dict[str, dict[str, list[object]]] = {
             "MOVING": {
-                WARPED: [Resample(**onto_fixed, **self._map()), Write(dataset=out, group=WARPED)],
-                MOVING_ON_FIXED: [Resample(**onto_fixed), Write(dataset=out, group=MOVING_ON_FIXED)],
+                WARPED: [Resample(**onto_fixed, **self._map(), fill=self.fill), Write(dataset=out, group=WARPED)],
+                MOVING_ON_FIXED: [Resample(**onto_fixed, fill=self.fill), Write(dataset=out, group=MOVING_ON_FIXED)],
             }
         }
         if "moving_labels" in self.case.inputs and "warped_labels" not in self.case.inputs:

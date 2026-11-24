@@ -504,10 +504,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         return True
 
     def _coarser_voxels(self, measured: int | None, usable: float) -> int:
-        """The voxel budget a ``resample`` run takes after running out of memory: at most half the worst case it ran
+        """The voxel budget a ``resample`` run takes after running out of memory: at most half the largest case it ran
         at, less when the measured step says the card holds less."""
-        worst = self.dataset.worst_case_shape()
-        current = math.prod(worst) if worst is not None else 0
+        current = self.dataset.worst_case_voxels()
         voxels = current // 2
         if measured and usable > 0:
             voxels = min(voxels, int(current * usable / measured))
