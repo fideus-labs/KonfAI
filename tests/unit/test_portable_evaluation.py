@@ -132,6 +132,36 @@ def test_a_class_of_the_app_s_is_probed_on_what_its_chain_hands_it_of_the_case(t
     assert [step["op"] for step in program["groups"][0]["steps"]] == ["one_hot", "extension"]
 
 
+@pytest.mark.parametrize("per_channel", [False, True])
+def test_a_class_of_the_app_s_past_a_nested_model_is_probed_on_what_the_model_hands_on(
+    tmp_path: Path, monkeypatch, per_channel: bool
+) -> None:
+    # The nested app's head gives three channels, its own chain an argmax of them: one channel, or one for each of the
+    # two the group holds when it runs on each.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "AfterNested.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Labels(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, channels: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.channels = channels\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != self.channels:\n"
+        "            raise ValueError(f'{self.channels} channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = {"model": "Seg.onnx", "output": {"channels": 3}, "postprocessing": [{"op": "argmax"}]}
+    inference = {"repo_id": "a", "model_name": "b", "per_channel": per_channel}
+    chain = {"KonfAIInference": inference, "AfterNested:Labels": {"channels": 2 if per_channel else 1}}
+    steps = _group_steps(
+        "Seg", chain, tmp_path, {}, lambda group, _params, _out: {"id": group, "manifest": manifest}, True, (2, 3)
+    )
+    assert steps[-1]["op"] == "extension"
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")

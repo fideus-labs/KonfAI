@@ -595,7 +595,7 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
         return "int64"
     if op == "threshold_labels":
         return "uint8"
-    if op in ("one_hot", "brightness", "norm"):
+    if op in ("one_hot", "brightness", "norm", "case_statistic"):
         return "float32"
     if op in ("standardize", "normalize", "unnormalize", "softmax") and dtype not in (None, "float64"):
         return "float32"
@@ -3006,9 +3006,15 @@ def export_checkpoints(
 
 
 def _channels_after(step: dict[str, Any], held: int, rank: int) -> int:
-    """The channels a post step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
+    """The channels a step hands on of the ``held`` it is handed: an argmax one, a one-hot its classes, a mask
     channel taken off by ``keep_largest_component`` one fewer, a gradient per axis one each per spatial axis of the
-    ``rank`` the chain runs on, a folded graph its own."""
+    ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
+    channel where it runs on each."""
+    if "manifest" in step:
+        made = int(step["manifest"]["output"]["channels"])
+        for post in step["manifest"].get("postprocessing", []):
+            made = _channels_after(post, made, rank)
+        return held * made if step.get("per_channel") else made
     if step["op"] in ("argmax", "magnitude", "threshold_labels"):
         return 1
     if step["op"] == "gradient" and step["per_dim"]:

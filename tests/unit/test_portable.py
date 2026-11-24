@@ -2208,6 +2208,32 @@ def test_a_whole_class_of_the_app_s_is_probed_in_the_dtype_its_chain_hands_it(
     assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["argmax", "extension"]
 
 
+def test_a_class_of_the_app_s_past_a_case_statistic_is_probed_in_float32(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # konfai's CaseStatistic hands on float32 whatever it is handed: an int16 cast before it is no longer what the
+    # class is handed.
+    from konfai.portable import _probe_after, compile_pipeline
+
+    (tmp_path / "StatisticMap.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.float32 or tensor.shape[0] != 1:\n"
+        "            raise ValueError(f'one float32 channel, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    statistic = {"op": "case_statistic", "halo": 1, "partial": "partial.onnx", "finish": "finish.onnx"}
+    chain = {"TensorCast": {"dtype": "int16"}, "CaseStatistic": {"statistic": "x:Y"}, "StatisticMap:Floats": {}}
+    steps, _, _ = compile_pipeline(
+        chain, extension=True, case_statistic=lambda _params: statistic, probe=_probe_after(3, lambda: 1)
+    )
+    assert [step["op"] for step in steps] == ["cast", "case_statistic", "extension"]
+
+
 @pytest.mark.parametrize(
     ("transforms", "phase", "module", "body", "folded"),
     [
