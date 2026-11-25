@@ -222,6 +222,31 @@ def test_a_layers_mask_longer_than_the_model_s_outputs_fails_at_build(tmp_path) 
     fireants._ImpactCore(fireants.ModelSpec(ref=str(path)), False)
 
 
+@pytest.mark.parametrize(
+    ("distance", "pca", "mode", "refused"),
+    [
+        ("NCC", 2, "Jacobian", True),
+        ("NCC", 0, "Jacobian", False),
+        ("L2", 2, "Jacobian", False),
+        ("NCC", 2, "Static", False),
+    ],
+)
+def test_a_jacobian_ncc_layer_with_pca_is_refused_by_boxes_before_any_read(tmp_path, distance, pca, mode, refused):
+    """By boxes, a Jacobian NCC layer is pooled over the level, which a PCA basis fit box by box cannot give: the
+    pair's shapes alone refuse it, naming what registers it."""
+    from konfai.utils.errors import ConfigError
+
+    path = tmp_path / "one_layer.pt"
+    torch.jit.script(_OneLayer()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), distance=distance, pca=pca)
+    engine = _engine(deformable_method="greedy", deformable_metric="impact", mode=mode, impact_levels=[[spec]])
+    if refused:
+        with pytest.raises(ConfigError, match="--out-of-core whole"):
+            engine.check_sampled((40, 40, 40), (40, 40, 40))
+    else:
+        engine.check_sampled((40, 40, 40), (40, 40, 40))
+
+
 class _HeldConstant(torch.nn.Module):
     """A feature model holding a tensor that is neither a parameter nor a buffer, as a trace bakes a constant in:
     ``.to()`` leaves it where the file was mapped."""

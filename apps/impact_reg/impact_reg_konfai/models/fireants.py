@@ -100,7 +100,7 @@ from konfai.metric.measure.impact import (
 from konfai.network import network
 from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import Attribute, image_to_data
-from konfai.utils.errors import MeasureError
+from konfai.utils.errors import ConfigError, MeasureError
 from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
 from ..ooc import free_bytes, resized
@@ -1658,6 +1658,16 @@ class FireANTsEngine:
             )
         if self._deformable_method == "none":
             return
+        if self._deformable_metric == "impact" and self._mode == "Jacobian" and self._voxel_sampling >= 1:
+            # By boxes, a Jacobian NCC layer is the level's from the boxes' feature sums, which a PCA basis fit box
+            # by box does not project alike.
+            for spec in (spec for specs in self._impact_levels for spec in specs):
+                if spec.pca > 0 and spec.distance == "NCC":
+                    raise ConfigError(
+                        f"FireANTs by boxes cannot score '{spec.ref}' in Jacobian mode: an NCC layer with pca "
+                        f"{spec.pca} needs one PCA basis for the whole level.",
+                        "Set mode: Static or pca: 0, or choose --out-of-core whole.",
+                    )
         self._check_thin([extent for extent in fixed_shape if extent != 1] if plane else fixed_shape)
 
     def _check_thin(self, size) -> None:
