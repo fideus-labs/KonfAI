@@ -388,6 +388,44 @@ def test_blocks_start_on_the_stride_of_the_weighted_layers(kernel: int, stride: 
         assert model.block_stride("cpu") == stride and model.norm_stride("cpu") == 1
 
 
+class _Smoothed(torch.nn.Module):
+    """A 3-D convolution of 3 voxels a side, padded: features a patch around a point reads as the whole image does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [self.conv(tile)]
+
+
+def test_a_plane_is_sampled_at_its_points_as_it_is_read_whole() -> None:
+    # A 3-D network handed planes runs on a square patch around each point, lifted one voxel thick, as on the whole
+    # plane: the point's feature is the whole plane's there.
+    model = _stub_model(_Smoothed(), [1.0])
+    model.planes = True
+    plane = torch.rand(1, 1, 20, 24, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6], [10, 12], [14, 3]])
+    ((moved, fixed),) = model.sampled(plane, plane, centres, 5)
+    (whole,) = model.volume(plane)
+    expected = whole[0][:, centres[:, 0], centres[:, 1]]
+    assert torch.allclose(moved[0], expected, atol=1e-5) and torch.allclose(fixed[0], expected, atol=1e-5)
+
+
+def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
+    # Padded up to its input multiple, the whole image is normalised over its own voxels, as its blocks are: the two
+    # routes give the same features.
+    model = _stub_model(_InstanceNormed(), [1.0])
+    model.multiple = 4
+    image = torch.rand(1, 1, 18, 14, 10, generator=torch.Generator().manual_seed(2)) * torch.linspace(1, 3, 10)
+    statistics = impact._statistics(image)[0]
+    (whole,) = model.volume(image, statistics=statistics)
+    norms = model.norms(lambda: impact._blocks(image, 8, 4, 4), statistics)  # on the multiple, as volume cuts them
+    (gathered,) = model.volume(image, statistics=statistics, norms=norms)
+    assert torch.allclose(whole, gathered, atol=1e-5)
+
+
 def test_the_normalisations_of_a_tiled_volume_are_gathered_on_their_stride(monkeypatch: pytest.MonkeyPatch) -> None:
     # Blocks of 9 would start the second one on an odd voxel, its cells of 2 then not the whole image's: the pass
     # that gathers the normalisations takes its blocks and halos on their stride.

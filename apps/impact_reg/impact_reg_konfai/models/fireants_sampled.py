@@ -494,7 +494,7 @@ class _Warp:
         return tuple(self.arrays["warp"].shape[1:])
 
     def resize(self, grid: Sequence[int], resident: bool, host: bool) -> None:
-        """The warp and its moments on another grid, by trilinear interpolation (``align_corners``): what FireANTs
+        """The warp and its moments on another grid, by linear interpolation (``align_corners``): what FireANTs
         does to them between two scales, block by block when they live in files, before or after."""
         if tuple(grid) == self.grid and (resident, host) == (self.resident, self.host):
             return
@@ -504,9 +504,8 @@ class _Warp:
             for kind in self.KINDS:
                 array = self.arrays[kind]
                 if self.resident and resident:
-                    self.arrays[kind] = F.interpolate(
-                        array[None], size=tuple(grid), mode="trilinear", align_corners=True
-                    )[0]
+                    mode = "trilinear" if len(grid) == 3 else "bilinear"  # a plane's warp
+                    self.arrays[kind] = F.interpolate(array[None], size=tuple(grid), mode=mode, align_corners=True)[0]
                     continue
                 source = TensorSource(array) if self.resident else ArraySource(array, self.device)
                 if resident or host:
@@ -1190,9 +1189,12 @@ def sampled_deformable_class():
                 grid = fireants_level_sizes(fixed.shape, scale)
                 levels = self._level_sources(scale)
                 self._set_grid(grid)
+                draw = getattr(self.loss_fn, "draw", None)  # one draw an evaluation of the level, as FireANTs makes
                 if hasattr(self.loss_fn, "latch"):
                     # A loss that normalises itself on its first evaluation of a scale is given every box of the
                     # scale, one at a time: what the whole grid would give it.
+                    if draw is not None:
+                        draw()
                     self.loss_fn.latch(self._boxes(tiles(grid, self._box), grid, levels))
                 if self._samples is None:
                     # Not told how many samples an iteration draws, it takes what the device holds: every box, as
@@ -1217,6 +1219,8 @@ def sampled_deformable_class():
                     drawn = (
                         list(range(len(boxes))) if count == len(boxes) else self._draws.sample(range(len(boxes)), count)
                     )
+                    if draw is not None:
+                        draw()
                     totals = None
                     if masked:  # a draw's support stands for the level's in proportion to the boxes it holds
                         support, mean = self._level_totals([boxes[index] for index in drawn], grid, levels)

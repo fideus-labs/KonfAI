@@ -462,6 +462,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._channels: list[list[int]] = []  # Static: each model's kept layers' channels in the volumes
         self._level = -1  # the FireANTs scale running, advanced by set_current_scale_and_iterations
         self._factors: list[float] | None = None  # each layer's normalization at this level
+        self._draw: int | None = None  # the draw every piece of an iteration takes (``draw``)
 
     @property
     def cores(self) -> list[_ImpactCore]:
@@ -470,8 +471,13 @@ class ImpactFeatureLoss(torch.nn.Module):
     def reset(self) -> None:
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
-        self._level, self._factors = -1, None
+        self._level, self._factors, self._draw = -1, None, None
         self._generator.manual_seed(self._seed)
+
+    def draw(self) -> None:
+        """An iteration evaluated by pieces of the level begins: every piece takes this draw (the channels a layer
+        keeps, the axis a 2-D network sweeps), as one evaluation of the whole level does."""
+        self._draw = int(torch.randint(2**31 - 1, (1,), generator=self._generator))
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
@@ -599,7 +605,7 @@ class ImpactFeatureLoss(torch.nn.Module):
             moved, fixed = moved[:, :-1], fixed[:, :-1]
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         # One draw per evaluation, the same channels in every patch and in the checkpoints' second pass.
-        seed = int(torch.randint(2**31 - 1, (1,), generator=self._generator))
+        seed = self._draw if self._draw is not None else int(torch.randint(2**31 - 1, (1,), generator=self._generator))
         weights = [weight for index in level for weight in layer_weights([self._specs[index]])]
         if self._mode == "Jacobian" and self._sampling < 1:
             values = []

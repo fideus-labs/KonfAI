@@ -656,14 +656,16 @@ def draw_centres(
 
 
 def _patches(image: torch.Tensor, centres: torch.Tensor, patch: int) -> torch.Tensor:
-    """The ``patch`` cube of ``image`` [1, C, D, H, W] around each of ``centres`` [n, 3], as [n, C, patch, patch,
-    patch]: a gather, so the gradient flows back to the image."""
-    _, height, width = image.shape[2:]
+    """The ``patch`` cube (a square on a plane) of ``image`` [1, C, *spatial] around each of ``centres`` [n, dims], as
+    [n, C, patch, ...]: a gather, so the gradient flows back to the image."""
+    shape = image.shape[2:]
     offsets = torch.arange(patch, device=centres.device) - patch // 2
-    z = (centres[:, 0, None] + offsets)[:, :, None, None]
-    y = (centres[:, 1, None] + offsets)[:, None, :, None]
-    x = (centres[:, 2, None] + offsets)[:, None, None, :]
-    return image.flatten(2)[0][:, (z * height + y) * width + x].movedim(0, 1)
+    index = torch.zeros((), dtype=torch.long, device=centres.device)
+    for axis, extent in enumerate(shape):
+        along = [centres.shape[0], *[1] * len(shape)]
+        along[1 + axis] = patch
+        index = index * extent + (centres[:, axis, None] + offsets).view(along)
+    return image.flatten(2)[0][:, index].movedim(0, 1)
 
 
 def _spacing(shape: tuple[int, ...], extent: list[float] | None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1161,10 +1163,20 @@ class ImpactFeatureModel:
         # Padded with the image's minimum: a block of a larger image as the whole image is.
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple, float(statistics["ImageMin"]))
         if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
-            # Blocks and halos on the normalisations' stride, so that each meets their cells as the whole image does.
-            stride = self.norm_stride(image.device)
+            # Blocks and halos on the normalisations' stride and the input multiple, so that each meets their cells,
+            # and is padded at the image's end, as the whole image is.
+            stride = max(self.norm_stride(image.device), self.multiple, 1)
             block = -(-patch // stride) * stride
             norms = self.norms(lambda: _blocks(image, block, self._halo(stride), stride), statistics)
+        elif (
+            norms is None
+            and not 0 < patch < max(image.shape[2:])
+            and self.multiple > 1
+            and any(extent % self.multiple for extent in image.shape[2:])
+        ):
+            # One pass, padded up to the input multiple: normalised over the image's own cells, as its blocks are.
+            whole = tuple(slice(0, extent) for extent in image.shape[2:])
+            norms = self.norms(lambda: [(image, whole)], statistics)
         accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
             outputs = network(*self.inputs(tile, statistics, norms or ()))
@@ -1195,7 +1207,7 @@ class ImpactFeatureModel:
         that resolution (``_cube_grids``), laid out in mm over ``extent`` (L, P, S). A batch that does not fit the card
         is halved, and ``batch`` keeps it."""
         network, grids = self.network(moved.device), None
-        if self.dim == 2:
+        if self.dim == 2 and not self.planes:
             network = cast(torch.nn.Module, self.model)  # the network itself: one plane per point, not a sweep
             grids = _plane_grids(centres, patch, tuple(moved.shape[2:]), extent, seed, self.voxel_size)
         elif self.voxel_size is not None:
@@ -1203,7 +1215,7 @@ class ImpactFeatureModel:
         moved_inputs = self.inputs(moved, _statistics(moved)[0])
         fixed_inputs = self.inputs(fixed, _statistics(fixed)[0])
         kept = self.kept
-        self.batch = self.batch or max(1, PATCH_BUDGET // patch**3)
+        self.batch = self.batch or max(1, PATCH_BUDGET // patch ** (moved.dim() - 2))
 
         def run() -> list[tuple[torch.Tensor, ...]]:
             # No early stop: the centre features are the last tensors the recomputation saves, inside the TorchScript

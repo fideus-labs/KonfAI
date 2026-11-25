@@ -853,6 +853,23 @@ def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypa
     assert all(np.abs(warps[0] - other).max() < 1e-4 for other in warps[1:])
 
 
+@SHAPES
+def test_a_warp_held_on_the_device_is_resized_as_one_held_in_files(tmp_path, size):
+    """Between two scales a warp goes to the finer grid by linear interpolation, a plane's as a volume's, wherever it
+    lives."""
+    from impact_reg_konfai.models.fireants_sampled import _Warp
+
+    coarse = [extent // 2 for extent in size]
+    values = torch.from_numpy(np.random.default_rng(0).random((len(size), *coarse)).astype(np.float32))
+    resized = []
+    for resident in (True, False):
+        warp = _Warp(tmp_path, f"w{resident}", coarse, "cpu", resident, False)
+        warp.arrays["warp"][:] = values if resident else values.numpy()
+        warp.resize(size, resident, False)
+        resized.append(torch.as_tensor(np.asarray(warp.arrays["warp"])))
+    assert resized[0].shape == (len(size), *size) and torch.allclose(resized[0], resized[1], atol=1e-5)
+
+
 def test_a_source_kept_on_its_device_reads_the_same_boxes_as_copies(monkeypatch):
     import impact_reg_konfai.ooc as ooc
 
