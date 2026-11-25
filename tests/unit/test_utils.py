@@ -94,6 +94,7 @@ def test_state_is_the_one_runtime_re_exports() -> None:
         ("a link to a file", "a link"),
         ("a link to nothing", "a link"),
         ("a file shared with another path", "shared with another path"),
+        ("a file of another case", "named 'MANIFEST.json' in another case"),
     ],
 )
 def test_a_destination_is_nothing_or_a_file_of_its_own(tmp_path, planted: str, refused: str | None) -> None:
@@ -116,6 +117,8 @@ def test_a_destination_is_nothing_or_a_file_of_its_own(tmp_path, planted: str, r
         destination.symlink_to(tmp_path / "gone.json")
     elif planted == "a file shared with another path":
         os.link(elsewhere, destination)
+    elif planted == "a file of another case":  # one file on a file system telling no case apart
+        (tmp_path / "MANIFEST.json").write_text("the folder's")
     if refused is None:
         assert owned_destination(destination) == destination
     else:
