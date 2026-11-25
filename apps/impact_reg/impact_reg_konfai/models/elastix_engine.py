@@ -532,7 +532,10 @@ class ElastixEngine:
         moving_image: sitk.Image | None,
         extra: tuple[str, ...] = (),
     ) -> sitk.Transform:
-        """elastix on the image files, its output in ``work``: the composite transform of its last parameter map."""
+        """elastix on the image files, its output in ``work``: the composite transform of its last parameter map. It
+        runs in ``work``, and is handed every path absolute."""
+        work, fixed, moving = Path(work).resolve(), Path(fixed).resolve(), Path(moving).resolve()
+        fixed_mask, moving_mask = (None if mask is None else Path(mask).resolve() for mask in (fixed_mask, moving_mask))
         args = [str(self._elastix_bin), "-f", str(fixed), "-m", str(moving)]
         for flag, mask in (("-fMask", fixed_mask), ("-mMask", moving_mask)):
             if mask is not None:
