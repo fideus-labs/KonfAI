@@ -1447,7 +1447,7 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
     assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
 
 
-@pytest.mark.parametrize("group", ["aux/mask", "..", ""])
+@pytest.mark.parametrize("group", ["aux/mask", "..", "", "C:mask", "aux\\mask"])
 def test_a_nested_app_s_group_is_one_name(tmp_path, group):
     # Its graph lands beside the configs as <group>.onnx: a group that names a path is refused before anything is read.
     from konfai_apps.bundle import export_nested_model
@@ -1554,6 +1554,7 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
         "a module the update drops",
         "an empty folder of the module's name",
         "a folder of examples of the module's name",
+        "a folder named as the module's file",
         "a bundle left aside",
     ],
 )
@@ -1591,6 +1592,10 @@ def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_p
         (bundle / "einops" / "examples").mkdir(parents=True)
         if made == "a folder of examples of the module's name":
             (bundle / "einops" / "examples" / "example.py").write_text("")
+    elif made == "a folder named as the module's file":
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        (bundle / "einops.py").mkdir()  # no module file
     else:
         bundle = _cli(root, model_py=str(root / "Model.py"))
         (bundle / "requirements.txt").unlink()
@@ -1654,13 +1659,20 @@ def test_the_check_of_a_bundle_holding_a_module_named_as_python_s_own_runs(tmp_p
     assert (bundle / "own.wasm").is_file()
 
 
-def test_requirements_are_named_requirements_txt(tmp_path):
-    # konfai-apps installs requirements.txt by that name: a support file of another case would be no requirements on
-    # a file system telling case apart, and the same file as a draft on one that does not.
+@pytest.mark.parametrize("held", ["a support file", "a file the bundle keeps"])
+def test_requirements_are_named_requirements_txt(tmp_path, held):
+    # konfai-apps installs requirements.txt by that name: a file of another case, brought or kept, would be no
+    # requirements on a file system telling case apart, and the same file as a draft on one that does not.
     root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
     (root / "listed.txt").write_text("numpy-stl\n")
+    given: dict = {"support_file": ["Requirements.txt=listed.txt"], "support_root": str(root)}
+    if held == "a file the bundle keeps":
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").rename(bundle / "Requirements.txt")
+        given = {}
     with pytest.raises(AppMetadataError, match=r"Requirements\.txt is named apart from requirements\.txt"):
-        _cli(root, support_file=["Requirements.txt=listed.txt"], support_root=str(root))
+        _cli(root, model_py=str(root / "Model.py"), **given)
 
 
 @pytest.mark.parametrize("kept", ["docs/notes.txt", "cache/lookup.pt"])

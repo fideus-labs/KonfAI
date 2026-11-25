@@ -548,7 +548,7 @@ def export_nested_model(group_name: str, inference: dict[str, Any], out_dir: Pat
     from konfai_apps.app import KonfAIApp
 
     # Its graph lands beside the configs as <group>.onnx: a group naming a path would land elsewhere.
-    if group_name in ("", ".", "..") or Path(group_name).name != group_name:
+    if group_name in ("", ".", "..") or {Path(group_name).name, PureWindowsPath(group_name).name} != {group_name}:
         raise AppMetadataError(f"nested model group '{group_name}' is no one name, which its graph is written under.")
     # Several checkpoints would make the nested export emit `program.json` + per-fold onnx instead of the
     # `model.onnx` + `manifest.json` this step copies, so refuse it here rather than fail on a missing file.
@@ -730,11 +730,6 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     # author's it keeps), gets one drafted from its imports, less its own modules. Packaging deliberately does not
     # execute code to discover dependencies: the draft is reviewed.
     planned = set(resolve_support_files(support, args.get("support_root")))
-    if odd := [name for name in planned if name.lower() == "requirements.txt" and name != "requirements.txt"]:
-        raise AppMetadataError(
-            f"The support file {odd[0]} is named apart from requirements.txt, the name konfai-apps installs.",
-            "Name it requirements.txt, or pass it with --requirements.",
-        )
     left = out.with_name(f".{out.name}.previous")  # the bundle an earlier update left aside, which it takes back
     held = [folder for folder in (out, left) if folder.is_dir()][:1]
     drafting = not args.get("requirements") and "requirements.txt" not in planned
@@ -744,10 +739,16 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     drafted: list[str] = []
 
     def draft(update: Path) -> None:
+        # konfai-apps installs requirements.txt by that name: one of another case, brought or kept, is none.
+        if odd := [path.name for path in update.iterdir() if path.name.lower() == "requirements.txt" != path.name]:
+            raise AppMetadataError(
+                f"{odd[0]} is named apart from requirements.txt, the name konfai-apps installs.",
+                "Name it requirements.txt, or pass it with --requirements.",
+            )
         if (update / "Model.py").is_file() and not os.path.lexists(update / "requirements.txt"):
             # What an import resolves to in the bundle: a module file, or a package (its __init__.py) of the name.
-            local = {path.stem for path in update.glob("*.py")} | {
-                path.parent.name for path in update.glob("*/__init__.py")
+            local = {path.stem for path in update.glob("*.py") if path.is_file()} | {
+                path.parent.name for path in update.glob("*/__init__.py") if path.is_file()
             }
             drafted[:] = derive_requirements([update / "Model.py"], local)
         if drafted:
