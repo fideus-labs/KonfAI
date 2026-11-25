@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from konfai.data.sampling import _where
 from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse, sitk
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
@@ -471,7 +472,7 @@ class KeepLargestComponent(Transform):
             labels = tensor[mask] if self.per_label else tensor[mask] != 0
         kept = torch.from_numpy(largest_component(labels.cpu().numpy(), self.rows, self.per_label, self.full))
         kept = kept.to(values.device)
-        return torch.where(kept, values, torch.zeros((), dtype=values.dtype, device=values.device))
+        return _where(kept, values, torch.zeros((), dtype=values.dtype, device=values.device))
 
 
 class Otsu(Transform):

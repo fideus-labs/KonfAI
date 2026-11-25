@@ -673,6 +673,40 @@ def test_euler_source_coordinates_build_on_the_block_s_device() -> None:
     assert (on_device.cpu() - host).abs().max().item() <= 1e-5 * max(full)
 
 
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32, np.uint64])
+def test_a_cut_or_a_placed_mask_keeps_an_unsigned_group_bit_for_bit(dtype: type, tmp_path: Path) -> None:
+    """torch 2.12 has no where for uint16, uint32 or uint64, 2.15 has: on either both draws keep such a group in its
+    dtype, its values past the signed half too, and fill the voxels a run on int16 fills."""
+    sitk = pytest.importorskip("SimpleITK")
+    sitk.WriteImage(sitk.GetImageFromArray(np.eye(7, 8, dtype=np.uint8)[None].repeat(6, 0)), str(tmp_path / "m.mha"))
+    top = dtype(np.iinfo(dtype).max)
+    for draw in (CutOUT(0.5, 0.0), PlacedMask(str(tmp_path / "m.mha"), 0)):
+        draw._state_init(0, [[6, 7, 8]], [Attribute()])
+        kept = draw._compute("case", 0, 0, torch.ones((1, 6, 7, 8), dtype=torch.int16)).numpy() != 0
+        got = draw._compute("case", 0, 0, torch.from_numpy(np.full((1, 6, 7, 8), top, dtype))).numpy()
+        assert kept.any() and not kept.all()
+        assert got.dtype == dtype and np.array_equal(got, np.where(kept, top, dtype(0))), type(draw).__name__
+
+
+@pytest.mark.parametrize(("dtype", "value"), [(torch.uint16, -1), (torch.int8, 300)])
+def test_a_cut_whose_fill_the_group_cannot_hold_widens_it_to_float(dtype: torch.dtype, value: int) -> None:
+    """A fill out of the group's range widens the copy: never wrapped into it, -1 as 65535 in a uint16 group."""
+    draw = CutOUT(0.5, value)
+    draw._state_init(0, [[6, 7, 8]], [Attribute()])
+    cut = draw._apply(0, 0, torch.ones((1, 6, 7, 8), dtype=dtype), (0, 0, 0), (6, 7, 8))
+    assert cut.dtype == torch.float32 and sorted(cut.unique().tolist()) == sorted([1.0, float(value)])
+
+
+def test_a_cut_keeps_the_gradient_of_what_it_keeps() -> None:
+    """A discriminator's augmentation cuts the generator's output (DiffusionGAN's): the gradient flows through the
+    voxels kept, and none through the voxels cut."""
+    fake = torch.ones((1, 6, 7, 8), requires_grad=True)
+    draw = CutOUT(0.5, 0.0)
+    draw._state_init(0, [[6, 7, 8]], [Attribute()])
+    draw._apply(0, 0, fake, (0, 0, 0), (6, 7, 8)).sum().backward()
+    assert fake.grad is not None and 0 < int(fake.grad.sum()) < fake.numel()
+
+
 def test_cutout_broadcasts_its_mask_over_the_channels() -> None:
     """One bool mask over the volume, broadcast over the channels: the same voxels are cut, in
     every channel, as when the mask was repeated per channel and re-tested against 1."""

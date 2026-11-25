@@ -3673,7 +3673,6 @@ _REFUSED: dict[Any, tuple[str, ...]] = {
     "FlatLabel": ("uint16", "uint32", "uint64"),
     "Gradient": ("bool", "uint16", "uint32", "uint64"),
     "HistogramMatching": tuple(dtype for dtype in _DTYPES if dtype not in ("float16", "float32")),
-    "KeepLargestComponent": ("uint16", "uint32", "uint64"),
     "Mask": ("uint16", "uint32", "uint64"),
     "Normalize": ("bool", "uint16", "uint32", "uint64", "bfloat16"),
     "SelectLabel": ("uint16", "uint32", "uint64"),

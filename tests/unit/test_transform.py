@@ -1894,6 +1894,20 @@ def test_keep_largest_component_sends_every_voxel_outside_it_to_0(per_label: boo
     assert torch.equal(KeepLargestComponent(per_label=True)("case", floats, Attribute()), floats)
 
 
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32, np.uint64])
+def test_keep_largest_component_keeps_an_unsigned_map_bit_for_bit(dtype: type) -> None:
+    # torch 2.12 has no where for uint16, uint32 or uint64, 2.15 has: on either the stage keeps such a map in its dtype,
+    # its values past the signed half too.
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    top = dtype(np.iinfo(dtype).max)
+    kept = KeepLargestComponent()(
+        "case", torch.from_numpy(np.array([[[[top, top // 2 + 1, 0, 1]]]], dtype)), Attribute()
+    )
+    assert kept.numpy().dtype == dtype and kept.numpy().tolist() == [[[[top, top // 2 + 1, 0, 0]]]]
+
+
 @pytest.mark.parametrize("rows", [1, 64])
 def test_keep_largest_component_per_label_keeps_the_first_of_two_of_one_size(rows: int) -> None:
     pytest.importorskip("SimpleITK")
