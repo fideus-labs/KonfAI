@@ -2452,7 +2452,8 @@ def hoist_ensemble_tail(
                     _or_konfai("Undo that Resample in each model (no ensemble), or use grid: konfai", _PREDICT),
                 )
             placed = {key: forward[key] for key in ("align", "spacing") if "align" in forward and key in forward}
-            placed |= {"fill": step["fill"]} if "fill" in step else {}
+            if "fill" in step:
+                placed["fill"] = step["fill"]
             resample = _body_resample(step["interpolation"], f"the inverse of '{of}'")
             tail.append({"op": resample, **placed, "extra": ["input"]})
             continue
