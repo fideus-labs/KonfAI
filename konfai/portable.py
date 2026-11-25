@@ -598,6 +598,13 @@ def _blended(manifest: dict[str, Any]) -> tuple[int, str]:
 _MEMBER_FOLD_OPS = ("variance", "standard_deviation", "segmentation_disagreement")
 
 
+def _floating(dtype: str) -> bool:
+    """Whether ``dtype`` is a floating one, bfloat16 among them, as torch tells it."""
+    import torch
+
+    return bool(getattr(torch, dtype).is_floating_point)
+
+
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
@@ -623,7 +630,7 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     # A median_lower, an InferenceStack's median, selects a member: it keeps their dtype.
     over_integers = ("percentage", "mean", "median", "normalize", "unnormalize", "softmax")
     if (op in over_integers or (op == "gradient" and not step.get("per_dim"))) and dtype is not None:
-        return dtype if dtype.startswith("float") else "float32"
+        return dtype if _floating(dtype) else "float32"
     return dtype
 
 
@@ -678,7 +685,7 @@ def _reduced_dtype(dtype: str, reduction: str) -> str:
     if name in ("Vote", "Concat"):
         return dtype
     if name in ("Mean", "Median"):
-        return dtype if dtype.startswith("float") else "float32"
+        return dtype if _floating(dtype) else "float32"
     raise ConfigError(
         f"The test-time copies fold by '{reduction}', and the portable runtime folds by Mean, Median, Vote or Concat.",
         _or_konfai("Use one of those reductions", _PREDICT),
@@ -2293,7 +2300,7 @@ def _post_chain(
     # konfai folds integer copies into `folded`, and a mean stack casts its average back to it. The runtime
     # does neither, so the cast is written where the copies fold, past the index selections left per copy.
     mean_stack = stack is not None and stack.get("mode") != "median"
-    if not dtype.startswith("float") and (folded != dtype or mean_stack):
+    if not _floating(dtype) and (folded != dtype or mean_stack):
         post.insert(split_post(post, pre, len(before)), {"op": "cast", "dtype": folded})
     elif mean_stack and dtype != "float32":
         # A mean stack of floating members averages them in float32 and rounds the mean back to theirs: each copy is

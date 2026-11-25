@@ -1903,7 +1903,7 @@ def test_the_dtype_integer_copies_fold_into_is_cast_where_they_fold(
     ]
 
 
-@pytest.mark.parametrize("members", ["float16", "float64"])
+@pytest.mark.parametrize("members", ["float16", "bfloat16", "float64"])
 def test_a_mean_stack_of_float_members_is_averaged_in_float32_as_konfai_s(members: str) -> None:
     # konfai's stack averages its members in float32 and rounds the mean back to theirs: each copy is widened before
     # the copies fold, and their mean cast back past it.
@@ -2683,19 +2683,15 @@ def test_a_class_of_the_app_s_handed_a_known_dtype_states_what_it_returns_of_it(
         "        return tensor.float()\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    config = _prediction(
-        {"KnownLabels:Same": {}}, {"after_reduction_transforms": {"Argmax": {}, "KnownLabels:Bytes": {}}}
-    )
+    config = _prediction({}, {"after_reduction_transforms": {"Argmax": {}, "KnownLabels:Bytes": {}}})
     manifest, _folds, _per_copy = transform_manifest(config, "Predictor", extension=True)
     (step,) = [step for step in manifest["postprocessing"] if step.get("class") == "KnownLabels:Bytes"]
     assert step["dtype"] == "uint8"
-    (same,) = [step for step in manifest["preprocessing"] if step.get("class") == "KnownLabels:Same"]
-    assert "dtype" not in same
-    # A second input's chain starts from its stored dtype too: a class returning float32 of any says so.
-    manifest, _folds, _per_copy = transform_manifest(
-        _two_groups({"KnownLabels:Floats": {}}), "Predictor", extension=True
-    )
-    assert manifest["reads"][0]["preprocessing"][0]["dtype"] == "float32"
+    # A second input's chain starts from its stored dtype, with no cast before the class: one returning what it reads
+    # states no dtype, one returning float32 of any says so.
+    for name, stated in (("KnownLabels:Same", None), ("KnownLabels:Floats", "float32")):
+        manifest, _folds, _per_copy = transform_manifest(_two_groups({name: {}}), "Predictor", extension=True)
+        assert manifest["reads"][0]["preprocessing"][0].get("dtype") == stated, name
 
 
 @pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
@@ -3512,11 +3508,12 @@ _DTYPE_VARIANTS = {
     "Standardize": [{}, {"nonzero": True, "inverse": False}],
     "TensorCast": [{"dtype": "int16"}, {"dtype": "float32"}],
 }
-_DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "float32", "float64")
+_DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "bfloat16", "float32", "float64")
 #: The dtypes konfai's stage refuses, each a row the portable runtime is tested against: any other failure fails.
 _REFUSED = {
     "Clip": ("uint8", "int8"),  # bounds past the dtype's range
-    "HistogramMatching": ("uint8", "int8", "int16", "int32", "int64", "float64"),  # float16 and float32 alone
+    "HistogramMatching": ("uint8", "int8", "int16", "int32", "int64", "bfloat16", "float64"),  # float16, float32 alone
+    "Normalize": ("bfloat16",),
 }
 
 

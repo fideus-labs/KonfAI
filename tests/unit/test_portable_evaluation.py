@@ -163,29 +163,37 @@ def test_a_class_of_the_app_s_past_a_nested_model_is_probed_on_what_the_model_ha
 
 
 @pytest.mark.parametrize(
-    "before",
-    [{"TensorCast": {"dtype": "int16"}}, {"KonfAIInference": {"repo_id": "a", "model_name": "b"}}],
+    ("before", "handed"),
+    [
+        ({"TensorCast": {"dtype": "int16"}}, "int16"),
+        ({"KonfAIInference": {"repo_id": "a", "model_name": "b"}}, "int64"),
+    ],
     ids=["past-a-cast", "past-a-nested-model's-argmax"],
 )
 def test_a_class_of_the_app_s_in_an_evaluation_chain_is_probed_in_the_dtype_it_is_handed(
-    tmp_path: Path, monkeypatch, before: dict
+    tmp_path: Path, monkeypatch, before: dict, handed: str
 ) -> None:
-    # Past a cast to int16, or a nested app whose chain ends on an argmax, konfai hands the class integer labels,
-    # which a bitwise test takes and a float32 volume does not.
+    # Past a cast to int16, or a nested app whose chain ends on an argmax, konfai hands the class integer labels of
+    # that dtype, which the class takes alone.
     from konfai.portable_evaluation import _group_steps
 
     (tmp_path / "EvaluatedLabels.py").write_text(
         "from konfai.data.transform import LocalityKind, Transform\n\n"
         "class Odd(Transform):\n"
         "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, dtype: str = 'int64') -> None:\n"
+        "        super().__init__()\n"
+        "        self.dtype = dtype\n\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if str(tensor.dtype) != f'torch.{self.dtype}':\n"
+        "            raise TypeError(f'{self.dtype}, not {tensor.dtype}')\n"
         "        return tensor & 1\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     manifest = {"model": "Seg.onnx", "output": {"channels": 3}, "postprocessing": [{"op": "argmax"}]}
     steps = _group_steps(
         "Seg",
-        {**before, "EvaluatedLabels:Odd": {}},
+        {**before, "EvaluatedLabels:Odd": {"dtype": handed}},
         tmp_path,
         {},
         lambda group, _params, _out: {"id": group, "manifest": manifest},
