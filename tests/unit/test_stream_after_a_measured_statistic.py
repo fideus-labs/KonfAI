@@ -637,9 +637,9 @@ def test_a_case_statistic_of_a_store_read_whole_folds_it_by_slabs(tmp_path, monk
 
 @pytest.mark.parametrize(("extension", "grain"), [("mha", None), ("mha", 8), ("gipl", None)])
 def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_path, monkeypatch, extension, grain):
-    # Three float32 blocks in flight fit the budget at 26 rows, and at 24 on the grain of 8; the fold holds each block
-    # in float64 and the class's partial three float64 copies more, 32 B an element over the 12 the blocks in flight
-    # cost, beside the volume a store read whole holds.
+    # Three float32 blocks in flight fit the budget at 26 rows, and at 24 on the grain of 8, each block starting and
+    # stopping on it; the fold holds each block in float64 and the class's partial three float64 copies more, 32 B an
+    # element over the 12 the blocks in flight cost, beside the volume a store read whole holds.
     import konfai.utils.dataset.statistics as statistics
     from konfai.utils.budget import set_per_rank_budget
     from oracle_support import Roughness
@@ -653,7 +653,16 @@ def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_pa
     sizes: list[int] = []
     partial = Roughness.partial
     monkeypatch.setattr(Roughness, "partial", lambda self, block: sizes.append(block.numel()) or partial(self, block))
-    stage, budget = CaseStatistic("oracle_support:Roughness"), 400_000
+    blocks: list[slice] = []  # the rows each block reads along the first spatial axis, its halo of 1 included
+    read_slice = Dataset.read_data_slice
+
+    def read(self, groups, name, slices):
+        if len(slices) == 4 and slices[2] == slice(None):
+            blocks.append(slices[1])
+        return read_slice(self, groups, name, slices)
+
+    monkeypatch.setattr(Dataset, "read_data_slice", read)
+    stage, budget = CaseStatistic("oracle_support:Roughness"), 1_500_000
     set_per_rank_budget(budget)
     try:
         stage._measure(dataset, "CT", CASE_NAME)
@@ -662,6 +671,11 @@ def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_pa
 
     resident = volume.nbytes if extension == "gipl" else 0
     assert sizes and max(sizes) * (3 * 4 + 4 * 8) + resident <= budget, f"blocks of {max(sizes)} elements"
+    if grain:
+        edges = [block.start + 1 for block in blocks if block.start] + [
+            block.stop - 1 for block in blocks if block.stop < 40
+        ]
+        assert edges and all(edge % grain == 0 for edge in edges), blocks
 
 
 @pytest.mark.parametrize("extension", ["mha", "gipl"])
