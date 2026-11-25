@@ -1057,6 +1057,44 @@ def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypa
     assert all(np.abs(warps[0][1] - field).max() < 5e-3 for _, field in warps[1:])
 
 
+def test_the_syn_inverse_goes_on_the_device_only_where_it_fits_beside_the_warps(tmp_path, monkeypatch):
+    """SyN's field reads a third warp, the reverse one's inverse, beside the two the device was measured for: it goes
+    on the device only where what is free then holds it, and the field is the same wherever it lives."""
+    import impact_reg_konfai.models.fireants_sampled as module
+
+    fixed, moving = texture(), texture((1.3, -0.8, 0.6))
+    two_warps = 4 * 3 * 4 * math.prod(SIZE) * 2
+    fields, homes = [], []
+    # Room for many warps, then for the two alone, which leave none once they are on the device.
+    for free, left in ((two_warps * 10, two_warps * 10), (two_warps * 4 / 3, 0)):
+        monkeypatch.setattr(module, "free_bytes", lambda device, free=free: free)
+        (tmp_path / str(free)).mkdir()
+        sampled = sampled_deformable_class()(
+            fixed_images=HeaderImages(image_of(fixed), 1, "cpu"),
+            moving_images=HeaderImages(image_of(moving), 1, "cpu"),
+            fixed=ArraySource(fixed[None], "cpu"),
+            moving=ArraySource(moving[None], "cpu"),
+            scratch=tmp_path / str(free),
+            symmetric=True,
+            loss_type="cc",
+            init_affine=AFFINE.clone(),
+            box=16,
+            **DEFORMABLE,
+        )
+        assert sampled.resident
+        sampled.optimize()
+        monkeypatch.setattr(module, "free_bytes", lambda device, left=left: left)
+        sampled._inverse = lambda block, inverse=sampled._inverse: (
+            (warp := inverse(block)),
+            homes.append(warp.resident),
+        )[0]
+        fields.append(np.zeros((*SIZE, 3), dtype=np.float32))
+        sampled.write_field(fields[-1], block=20)
+        sampled.close()
+    assert homes == [True, False]
+    assert np.abs(fields[0] - fields[1]).max() < 5e-3
+
+
 @SHAPES
 def test_a_warp_held_on_the_device_is_resized_as_one_held_in_files(tmp_path, size):
     """Between two scales a warp goes to the finer grid by linear interpolation, a plane's as a volume's, wherever it

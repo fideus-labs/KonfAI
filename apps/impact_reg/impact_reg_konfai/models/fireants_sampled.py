@@ -1121,12 +1121,14 @@ def sampled_deformable_class():
             levels = self._levels[scale]
             return (levels[0], moving) if len(levels) == 1 else levels
 
-        def _placement(self, grid: Sequence[int], count: int) -> tuple[bool, bool]:
+        def _placement(self, grid: Sequence[int], count: int, measured: bool = True) -> tuple[bool, bool]:
             """Where ``count`` warps on ``grid`` live: on the device while they fit three quarters of it (a coarser
             scale than one the device cannot hold may fit it), off it in host memory while this rank's budget holds
-            them, in files beyond, where every step's writes go to the disk."""
+            them, in files beyond, where every step's writes go to the disk. Warps the device's room was not
+            ``measured`` for at the start (SyN's inverse, beside the two it holds) fit what it has free now."""
             voxels, a_voxel = math.prod(grid), 4 * len(grid) * 4 * count  # 4 arrays of a float32 channel an axis
-            resident = self.resident or (self._forced is None and voxels * a_voxel <= free_bytes(self.device) * 3 / 4)
+            fits = voxels * a_voxel <= free_bytes(self.device) * 3 / 4
+            resident = self._forced if self._forced is not None else (self.resident and measured) or fits
             return resident, not resident and voxels <= (max_voxels(None, a_voxel, None) or 0)
 
         def _set_grid(self, grid: Sequence[int]) -> None:
@@ -1497,7 +1499,7 @@ def sampled_deformable_class():
             # voxels, or a last scale above 1, keeps it off the fixed grid.
             reverse = self._warps["rev"]
             last = list(reverse.grid)
-            inverse = _Warp(self._scratch, "inv", last, self.device, *self._placement(last, 1))
+            inverse = _Warp(self._scratch, "inv", last, self.device, *self._placement(last, 1, measured=False))
             for start, stop in tiles(last, block):
                 inverse.write("warp", start, -reverse.read("warp", start, stop))
             peaks = [reverse.peak(channel) for channel in range(dims)]  # r at a scale, interpolated, is no larger
@@ -1507,7 +1509,7 @@ def sampled_deformable_class():
                 for scale, iterations in zip(self.scales, self.iterations, strict=True):
                     self.convergence_monitor.reset()
                     grid = fireants_level_sizes(full, scale)
-                    inverse.resize(grid, *self._placement(grid, 1))
+                    inverse.resize(grid, *self._placement(grid, 1, measured=False))
                     # The reference as the operator reads it: its own grid scaled down by the largest ratio of the
                     # image to u's grid.
                     ratio = max(n / g for n, g in zip(full, grid, strict=True))
@@ -1537,7 +1539,7 @@ def sampled_deformable_class():
                         reference.close()
             finally:
                 self._warps, self._lr, self._warp_gaussians, self._step_halo = saved
-            inverse.resize(full, *self._placement(full, 1))  # a last scale coarser than the image
+            inverse.resize(full, *self._placement(full, 1, measured=False))  # a last scale coarser than the image
             return inverse
 
         @torch.no_grad()
