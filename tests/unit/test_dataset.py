@@ -459,6 +459,81 @@ def test_landmarks_round_trip_through_a_dataset(tmp_path: Path) -> None:
     np.testing.assert_array_equal(data, _POINTS)
 
 
+@pytest.mark.parametrize(
+    ("extension", "is_directory"),
+    [
+        ("mha", False),  # the dataset's own format
+        ("nii.gz", False),  # another supported format, of a compound suffix
+        ("itk.txt", False),  # a sidecar that is looked for before the fiducial file
+        ("h5", False),  # what ':itktransform' writes
+        ("zarr", True),  # a store is a directory
+        ("ome.zarr", True),  # its dotted spelling, which no format token carries
+    ],
+)
+def test_an_entry_a_fiducial_file_shares_is_refused(tmp_path: Path, extension: str, is_directory: bool) -> None:
+    """Looked for first, ``CT.fcsv`` would be read as the group ``CT`` in place of the entry beside it: every
+    path that resolves the entry names both files, and the refusal is not kept once one of them is gone."""
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    _fiducial_file(case / "CT.fcsv", "LPS")
+    other = case / f"CT.{extension}"
+    other.mkdir() if is_directory else other.touch()
+    backend = Dataset.SitkFile(f"{case}/", True, "mha")
+    backend.resolved_paths = {}
+    whole = (slice(None), slice(None))
+    reads = [
+        lambda: backend._probe_data_path(f"{case}/CT"),
+        lambda: backend.get_infos("", "CT"),
+        lambda: backend.file_to_data("", "CT"),
+        lambda: backend.file_to_data_slice("", "CT", whole),
+        lambda: backend.read_granularity("CT"),
+        lambda: backend.bounded_region_reads("CT"),
+    ]
+    if not is_directory:  # a root whose cases hold stores is not this backend's
+        dataset = Dataset(tmp_path / "Dataset", "mha")
+        assert dataset.is_dataset_exist("CT", "CASE_000")
+        reads += [
+            lambda: dataset.get_infos("CT", "CASE_000"),
+            lambda: dataset.read_data("CT", "CASE_000"),
+            lambda: dataset.read_data_slice("CT", "CASE_000", whole),
+        ]
+
+    assert backend.is_exist("CT")  # it is there: the header and the reads say why it is not served
+    for read in reads:
+        with pytest.raises(DatasetManagerError) as refused:
+            read()
+        assert f"'{case}/CT.fcsv' and '{other}' are stored under the same entry" in str(refused.value)
+        assert "group of its own" in str(refused.value)
+    assert backend.resolved_paths == {}
+
+    other.rmdir() if is_directory else other.unlink()
+    np.testing.assert_array_equal(backend.file_to_data("", "CT")[0], [[1.0, 2.0, 3.0]])
+    assert backend.resolved_paths == {f"{case}/CT": f"{case}/CT.fcsv"}
+
+
+def test_a_directory_named_as_a_fiducial_file_shares_its_entry_too(tmp_path: Path) -> None:
+    case = tmp_path / "Dataset" / "CASE_000"
+    (case / "CT.fcsv").mkdir(parents=True)
+    (case / "CT.mha").touch()
+
+    with pytest.raises(DatasetManagerError, match="stored under the same entry"):
+        Dataset(tmp_path / "Dataset", "mha").get_infos("CT", "CASE_000")
+
+
+def test_a_fiducial_file_beside_another_group_is_read(tmp_path: Path) -> None:
+    """Extensions, not a glob: ``CT.mask.mha`` is the group ``CT.mask``, and a form KonfAI stores no entry
+    under (``CT.raw``, a store's files as ``CT/``) is no entry."""
+    case = tmp_path / "Dataset" / "CASE_000"
+    (case / "CT").mkdir(parents=True)
+    _fiducial_file(case / "CT.fcsv", "LPS")
+    (case / "CT.mask.mha").touch()
+    (case / "CT.raw").touch()
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+
+    assert dataset.get_infos("CT", "CASE_000")[0] == [1, 3]
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], [[1.0, 2.0, 3.0]])
+
+
 def test_a_polydata_round_trips_through_a_dataset(tmp_path: Path) -> None:
     vtk = pytest.importorskip("vtk")
     points = vtk.vtkPoints()

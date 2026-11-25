@@ -230,6 +230,9 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
 _WHOLE_BY_STREAM = ("mha", "nrrd")
 #: The ':mha.gz' tokens, each to the suffix the compressed file carries.
 _COMPRESSED_FORMS = {f"{extension}.gz": extension for extension in COMPRESSED_IN_FILE}
+#: The forms an entry is stored under beside a fiducial file's own, in the order they are looked for: every
+#: supported extension, then the store's dotted spelling, which no token carries.
+_BESIDE_A_FIDUCIAL_FILE = (*(extension for extension in SUPPORTED_EXTENSIONS if extension != "fcsv"), "ome.zarr")
 
 
 class SitkFile(AbstractFile):
@@ -351,6 +354,17 @@ class SitkFile(AbstractFile):
         return path
 
     def _probe_data_path(self, base: str) -> str | None:
+        fiducials = f"{base}.fcsv"
+        if os.path.exists(fiducials):
+            # Looked for first, the points would stand in for the entry stored beside them, in silence. Each form
+            # is asked of the file system as written, which is how `is_exist` counts an entry: a suffix in
+            # another case is that entry only where the file system says so.
+            for extension in _BESIDE_A_FIDUCIAL_FILE:
+                if os.path.exists(f"{base}.{extension}"):
+                    raise DatasetManagerError(
+                        f"'{fiducials}' and '{base}.{extension}' are stored under the same entry.",
+                        "Store the fiducial file under a group of its own (rename one of the two), or remove one.",
+                    )
         for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
             candidate = f"{base}{suffix}"
             if os.path.exists(candidate):
