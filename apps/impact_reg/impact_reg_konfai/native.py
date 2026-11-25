@@ -146,6 +146,7 @@ def write_twin(
     positive: bool = False,
     axis_map: AxisMap | None = None,
     mirror: Sequence[int] = (),
+    shift: Sequence[float] | None = None,
 ) -> Path:
     """The entry ``(group, name)`` written to ``target``: an HDF5 image in ITK's layout, its voxels chunked
     ``chunk``^3, where it ends in ``.h5``, an uncompressed MetaImage otherwise; from one read of the entry by bands
@@ -153,13 +154,15 @@ def write_twin(
     a band). ``clip`` winsorises it, as the whole-image run winsorises the images of the engine that reads it;
     ``dtype`` "uint8" makes a mask (any non-zero voxel on, or with ``positive`` the positive ones). ``axis_map``
     writes the entry as that view of it (``AxisMap``): a band of the entry lands in a band of the twin where the map
-    keeps the outer axis outer. ``mirror`` reverses those axes of the entry (NumPy order), its header kept, as a
-    test-time copy's flip does. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
+    keeps the outer axis outer. ``mirror`` reverses those axes of the entry (NumPy order), its header kept but its
+    origin moved by ``shift`` (mm, ITK order), as a test-time copy's flip does. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
     a pair). The headers are ITK's own, written by it for a one-voxel image of the same geometry and voxel type."""
     shape, attributes = dataset.get_infos(group, name)
     extents = [int(extent) for extent in shape[1:]]
     axis_map = axis_map or AxisMap.identity_of(len(extents))
     geometry = axis_map.geometry(*(attributes.get_np_array(key) for key in ("Spacing", "Origin", "Direction")), extents)
+    if shift is not None:
+        geometry = (geometry[0], list(np.add(geometry[1], shift)), geometry[2])
     if mirror:  # the voxels reversed where the header is not
         axis_map = AxisMap(
             axis_map.axes, tuple(f != (a in mirror) for a, f in zip(axis_map.axes, axis_map.flips, strict=True))

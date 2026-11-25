@@ -1101,6 +1101,46 @@ def _numpy_axes(dims: Sequence[int], ndim: int) -> tuple[int, ...]:
     return tuple(dim - 1 - (3 - ndim) for dim in dims if dim - 1 - (3 - ndim) >= 0)
 
 
+def _mirrored_views(run: "_SampledRun", index: int, mirror: Sequence[int]) -> list[int]:
+    """The axes of case ``index``'s twins (the fixed image's view, ``maps``) a test-time copy reverses: the fixed
+    image's own axes the tensor dims ``mirror`` name, as the predictor flips a pair it holds on the fixed grid."""
+    fixed_map = run.maps[index]["Fixed"]
+    return [fixed_map.inverse().axes[axis] for axis in _numpy_axes(mirror, len(fixed_map.axes))]
+
+
+def _copy_reflection(run: "_SampledRun", index: int, group: str) -> tuple[tuple[int, ...], np.ndarray]:
+    """What a test-time copy does to the image of ``group`` of case ``index`` for its twin to be the image reflected
+    through the fixed grid's mirror planes (each through the fixed grid's centre, normal to a mirrored axis): the
+    image's own grid axes to reverse, and the shift (mm) of its origin that takes its own centre's planes onto the
+    fixed grid's. An axis of the image not along the fixed one's would need resampling, and is refused."""
+    views = _mirrored_views(run, index, run.mirror)
+    dims = len(run.headers[index][group][0]) - 1
+    shift = np.zeros(dims)
+    if not views:
+        return (), shift
+
+    def centre(header) -> tuple[np.ndarray, np.ndarray]:
+        extents, steps, start, axes = header
+        matrix = np.reshape(np.asarray(axes, dtype=np.float64), (dims, dims))
+        half = np.asarray(steps, dtype=np.float64) * (np.asarray(extents[1:][::-1], dtype=np.float64) - 1) / 2
+        return np.asarray(start, dtype=np.float64) + matrix @ half, matrix
+
+    fixed_centre, fixed_axes = centre(run.headers[index]["Fixed"])
+    own_centre, own_axes = centre(run.headers[index][group])
+    for view in views:
+        column = dims - 1 - view  # ITK's axis of a NumPy one
+        normal = fixed_axes[:, column]
+        if abs(abs(float(own_axes[:, column] @ normal)) - 1) > 1e-6:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{run.cases[index]}: a test-time copy mirrors the pair on the fixed grid, along which the {group}"
+                " image has no axis; by boxes it is not resampled onto it.",
+                "Drop --tta, or choose --out-of-core whole or tiled.",
+            )
+        shift += 2 * float((fixed_centre - own_centre) @ normal) * normal
+    return tuple(run.maps[index][group].axes[view] for view in views), shift
+
+
 def _tta_mirrors(config: dict, copies: int, preset: str) -> list[tuple[int, ...]]:
     """The flips of the ``copies`` test-time copies a run of the preset's ``config`` makes, as the channel-first tensor
     dims each reverses: its ``Flip`` takes the distinct mirrors of the axes it may flip in turn, at prediction, and
@@ -2008,9 +2048,11 @@ class ImpactRegKonfAIApp:
         for copy, mirror in enumerate(_tta_mirrors(config, tta, preset), 1):
             copy_work = work / _workspace(f"{preset}_copy{copy}")
             copied.append((copy_work, mirror, route(dataclasses.replace(run, work=copy_work, mirror=mirror))))
-        for case in fields if copied else ():
-            ndim = len(headers[run.cases.index(case)]["Fixed"][0]) - 1
-            fold_mirrored(fields[case], [(found[case], _numpy_axes(mirror, ndim)) for _, mirror, found in copied])
+        for index, case in enumerate(run.cases if copied else ()):
+            # The fields lie on the fixed twin, in the view the twins were mirrored in.
+            fold_mirrored(
+                fields[case], [(found[case], _mirrored_views(run, index, mirror)) for _, mirror, found in copied]
+            )
         for copy_work, _, _ in copied:
             shutil.rmtree(copy_work, ignore_errors=True)
         if copied:  # the mean of the copies' fields is no copy's transform
@@ -2130,6 +2172,7 @@ class ImpactRegKonfAIApp:
                     run.quiet,
                 )
                 source = root / "on_grid" / case / f"{group}.mha"
+            mirror, shift = _copy_reflection(run, index, image_group)  # a mask is on its image's grid
             staged, _, backend = _stage_group(root / "stage", group, {case: source}).rpartition(":")
             dataset = Dataset(staged, backend)
             clip = None
@@ -2147,7 +2190,8 @@ class ImpactRegKonfAIApp:
                 voxel=min(run.headers[index]["Fixed"][1]),
                 positive=positive,
                 axis_map=run.maps[index][image_group],
-                mirror=_numpy_axes(run.mirror, len(run.headers[index][image_group][0]) - 1),
+                mirror=mirror,
+                shift=shift,
             )
 
         masks = {}
