@@ -19,6 +19,7 @@ letting konfai cut the registration into patches: the IMPACT metric in checkpoin
 correlation a few channels at a time. Both are the same value with the same gradient."""
 
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import torch
@@ -122,29 +123,34 @@ def _static_loss(tmp_path: Path) -> "fireants.ImpactFeatureLoss":
     return fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the tile is measured on a CUDA device")
-def test_a_static_extraction_too_large_for_one_pass_tiles_both_images_alike(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The tile is sized before the pass, from what a probe took: both images go through it in one pass each, and
-    # pointwise features come back as the whole image's.
-    from konfai.metric.measure.impact import ImpactFeatureModel
+class _Averaged(torch.nn.Module):
+    """Two layers with a receptive field of 3 voxels: the input averaged over 3^3 voxels, and its square."""
 
-    patches: list[int] = []
-    volume = ImpactFeatureModel.volume
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layers: torch.Tensor,
+        stats: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+        direction: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+    ) -> list[torch.Tensor]:
+        y = x[:, :1]
+        return [torch.nn.functional.avg_pool3d(y, 3, 1, 1), y * y]
 
-    def recorded(self, image, normalization="none", patch=0, overlap=0.25, statistics=None, norms=None):
-        patches.append(patch)
-        return volume(self, image, normalization, patch, overlap, statistics, norms)
 
-    fixed, moving = torch.rand(1, 1, 64, 80, 96, device="cuda"), torch.rand(1, 1, 60, 80, 90, device="cuda")
-    assembled = 2 * 4 * (fixed.numel() + moving.numel())  # two one-channel layers of each image, in float32
-    monkeypatch.setattr(ImpactFeatureModel, "volume", recorded)
-    monkeypatch.setattr(fireants, "free_bytes", lambda device: 2 * (assembled + (4 << 20)))
-    fixed_volume, moving_volume = _static_loss(tmp_path).extract(fixed, moving, 0, 0.25)
-    assert patches[0] == 0 and 0 < patches[1] == patches[2] < 96  # the probe, then both images in the same tile
-    torch.testing.assert_close(fixed_volume, torch.cat([fixed * 2.0, fixed * fixed], dim=1))
-    assert moving_volume.shape == (1, 2, 60, 80, 90)
+def test_a_static_extraction_in_patches_is_the_one_pass_s_for_both_images(tmp_path: Path) -> None:
+    # Too large for one pass, or given a patch, every model is predicted by blocks as a segmentation is: both images
+    # come back as the one pass gives them, whatever their extents (a fixed image tiled where the moving one is not).
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    whole = loss.extract(fixed, moving, 0, 0.25)
+    patched = loss.extract(fixed, moving, 16, 0.25)
+    for reference, found in zip(whole, patched, strict=True):
+        assert found.shape == reference.shape
+        torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
 
 
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:

@@ -670,6 +670,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         size in mm along L, P, S) and its features are brought back onto the image's grid, as elastix interpolates
         its feature maps at its points: FireANTs registers them at the image's resolution."""
         fixed_sides, moving_sides, self._channels = [], [], []
+        resampled_images = []
         for core in self.cores:
             images = {"fixed": fixed, "moving": moving}
             if core.model.voxel_size is not None:
@@ -677,14 +678,17 @@ class ImpactFeatureLoss(torch.nn.Module):
                     side: resampled(image, grid_size(extent, core.model.voxel_size, tuple(image.shape[2:])))
                     for (side, image), extent in zip(images.items(), extents, strict=True)
                 }
-            # Both images through the same tile, two volumes assembled alike (a model that sees the whole image, as
-            # anatomix does, gives other features in tiles): the preset's, or on a GPU the widest that fits.
-            tile = patch or _fitting_tile(core, images)
-            if tile != patch:
-                print(
-                    f"[FireANTs] feature extraction does not fit whole: extracted in tiles of {tile} voxels.",
-                    flush=True,
-                )
+            resampled_images.append(images)
+        # One pass over each image, or, where a model does not fit one (or the preset gives a patch), every model by
+        # blocks as a segmentation is predicted, which gives the one pass's features whatever each image's extent.
+        tiles = [
+            patch or _fitting_tile(core, images) for core, images in zip(self.cores, resampled_images, strict=True)
+        ]
+        swept = any(core.dimension < DIM and core.model.voxel_size is not None for core in self.cores)
+        if any(tiles) and not swept:
+            print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
+            return self._by_blocks(fixed, moving, max(tiles), extents)
+        for core, images, tile in zip(self.cores, resampled_images, tiles, strict=True):
             fixed_layers, moving_layers = (
                 core.model.volume(images[side], core.normalization, tile, overlap) for side in ("fixed", "moving")
             )
@@ -703,6 +707,22 @@ class ImpactFeatureLoss(torch.nn.Module):
             moving_sides += moving_layers
         # A single layer is returned as it is: concatenating it would copy the whole volume.
         return tuple(sides[0] if len(sides) == 1 else torch.cat(sides, dim=1) for sides in (fixed_sides, moving_sides))
+
+    def _by_blocks(
+        self, fixed: torch.Tensor, moving: torch.Tensor, block: int, extents: tuple[list[float] | None, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Both images' feature volumes predicted by blocks of ``block`` voxels a side at least, as the sampled route
+        predicts them (``static_feature_sources``): the one pass's features, the fixed image's PCA basis projecting
+        both."""
+        from ..ooc import TensorSource
+        from .fireants_sampled import static_feature_sources
+
+        with tempfile.TemporaryDirectory(prefix="impact_static_") as directory:
+            sources = static_feature_sources(
+                self, TensorSource(fixed[0]), TensorSource(moving[0]), Path(directory), block=block, extents=extents
+            )
+            volumes = [source.read([0] * len(source.shape), list(source.shape)).to(fixed.device) for source in sources]
+        return volumes[0], volumes[1]
 
     def _reach(self, index: int, shape: tuple[int, ...]) -> int:
         """The cube, in voxels of this level, that model ``index``'s sampled patch spans: its receptive field, wider when
