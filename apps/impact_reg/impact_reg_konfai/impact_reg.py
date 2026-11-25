@@ -32,6 +32,7 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 - ``uncertainty`` : from the per-preset displacement fields, compute the voxel-wise spread map.
 """
 
+import dataclasses
 import itertools
 import json
 import math
@@ -201,7 +202,7 @@ def _compose_padding(headers: "list[dict[str, _Header]]", budget: int, reach: fl
 
     widest = [0, 0, 0]
     for case in headers:
-        shape, spacing = case["Fixed"][0][-3:], case["Fixed"][1]
+        shape, spacing = case["Fixed"][0][1:], case["Fixed"][1]
         coarse = coarse_spacing(list(shape), list(spacing), budget) or spacing
         for axis, (step, goal) in enumerate(zip(spacing, coarse, strict=True)):
             widest[axis] = max(widest[axis], math.ceil(max(8 * goal, reach + goal) / step))
@@ -468,11 +469,11 @@ class _Route:
     tiled: bool
 
 
-def _route(choice: str, preset: str, voxels: list[int], flat: bool, plan: tuple[int | None, int | None]) -> _Route:
+def _route(choice: str, preset: str, voxels: list[int], plan: tuple[int | None, int | None]) -> _Route:
     """Each case's route under ``choice`` (``ROUTES``), from ``voxels``, the largest image of each case, and the
-    preset's ``plan``. Under auto, a case over the budget goes where the preset can take it: sampled for a volume of an
-    engine the sampled route drives, else in two passes where the preset declares them, else whole on a grid KonfAI
-    resamples to fit. tiled refuses a preset with no tile pass or no declared cost to size it by."""
+    preset's ``plan``. Under auto, a case over the budget goes where the preset can take it: sampled for an engine the
+    sampled route drives, else in two passes where the preset declares them, else whole on a grid KonfAI resamples to
+    fit. tiled refuses a preset with no tile pass or no declared cost to size it by."""
     budget, tile_budget = plan
     tiles = bool((_manifest(preset).get("tiling") or {}).get("tile")) and bool(budget and tile_budget)
     if choice == "tiled" and not tiles:
@@ -484,7 +485,7 @@ def _route(choice: str, preset: str, voxels: list[int], flat: bool, plan: tuple[
     over = [index for index, size in enumerate(voxels) if budget and size > budget]
     if choice == "sampled":
         return _Route(budget, tile_budget, list(range(len(voxels))), False)
-    if choice == "auto" and over and not flat and _sampled_engine(preset):
+    if choice == "auto" and over and _sampled_engine(preset):
         return _Route(budget, tile_budget, over, False)
     return _Route(budget, tile_budget, [], choice == "tiled" or (choice == "auto" and bool(over) and tiles))
 
@@ -762,7 +763,7 @@ def _same_grid(first: _Header, second: _Header) -> bool:
         index = np.array(list(itertools.product(*[(0, extent - 1) for extent in shape[:0:-1]])), dtype=float)
         return np.asarray(origin) + (index * spacing) @ np.reshape(direction, (len(spacing), len(spacing))).T
 
-    return first[0][-3:] == second[0][-3:] and np.abs(corners(first) - corners(second)).max() <= 1e-3 * min(first[1])
+    return first[0][1:] == second[0][1:] and np.abs(corners(first) - corners(second)).max() <= 1e-3 * min(first[1])
 
 
 def _neutral_fixed_masks(work: Path, fixed: list[Path]) -> list[Path]:
@@ -823,9 +824,9 @@ def _check_space(work: Path, headers: list[dict[str, _Header]], presets: list[st
     reverse, each with its next step and its two Adam moments (96 bytes a fixed voxel), and an eighth more while a
     scale's generation stands beside the next one's."""
     count = len(presets)
-    need = sum(math.prod(case["Fixed"][0][-3:]) for case in headers) * (24 * (count + (count > 1)) + 40)
+    need = sum(math.prod(case["Fixed"][0][1:]) for case in headers) * (24 * (count + (count > 1)) + 40)
     if sampled:
-        sizes = [{group: math.prod(case[group.removesuffix("Mask")][0][-3:]) for group in case} for case in headers]
+        sizes = [{group: math.prod(case[group.removesuffix("Mask")][0][1:]) for group in case} for case in headers]
         need += sum(size for case in sizes for group, size in case.items() if group.endswith("Mask"))
         need += max(4 * (case["Fixed"] + case["Moving"]) for case in sizes)
         if any(split_preset(preset)[0] == "FireANTs" for preset in presets):
@@ -1112,8 +1113,8 @@ def _partial_masks(twins: dict[str, Path], case: str) -> tuple[list[Path | None]
 def _viewed(header: _Header, axis_map: "AxisMap") -> _Header:
     """``header`` as ``axis_map`` (``native.AxisMap``) views its grid."""
     shape, spacing, origin, direction = header
-    geometry = axis_map.geometry(spacing, origin, direction, shape[-3:])
-    return ([*shape[:-3], *axis_map.extents(shape[-3:])], *geometry)
+    geometry = axis_map.geometry(spacing, origin, direction, shape[1:])
+    return ([shape[0], *axis_map.extents(shape[1:])], *geometry)
 
 
 def _config_output_group(config: dict) -> str:
@@ -1385,31 +1386,39 @@ class ImpactRegKonfAIApp:
             headers = self._headers(inputs, work)
             _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
-            lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
-            if flat and out_of_core == "sampled":  # before the planes are lifted, which reads a plane whole
-                raise KonfAIError(
-                    "ImpactReg",
-                    "--out-of-core sampled registers volumes, and this pair is 2-D.",
-                    "Register it with --out-of-core auto, whole or tiled.",
-                )
-            if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
+            flat = is_flat(headers[0]["Fixed"][0])
+            voxels = [max(math.prod(header[0][1:]) for header in case.values()) for case in headers]
+            routes = {
+                preset: _route(out_of_core, preset, voxels, _plan(_manifest(preset), gpu, max_voxels, self._remote))
+                for preset in presets
+            }
+            if flat:  # a case of a 2-D pair is on its own grid for every preset of an ensemble, or one plane thick
+                sampled = sorted({index for route in routes.values() for index in route.sampled})
+                for preset, route in routes.items():
+                    if sampled and route.sampled != sampled and _sampled_engine(preset) is None:
+                        raise KonfAIError(
+                            "ImpactReg",
+                            f"{preset} has no sampled route, which the other presets of this 2-D ensemble take.",
+                            "Register the presets apart, or choose --out-of-core whole or tiled.",
+                        )
+                    routes[preset] = dataclasses.replace(route, sampled=sampled, tiled=route.tiled and not sampled)
+            sampled_presets = [preset for preset, route in routes.items() if route.sampled]
+            sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
+            # The sampled route registers a case on its own grid, of any dimension; the presets a case of a 2-D pair
+            # on volumes one plane thick, on one z grid (plane.py), which reads a plane whole.
+            native_headers, lifted = headers, inputs
+            if flat:
+                kept = [index for index in range(len(headers)) if f"P{index:03d}" not in sampled_cases]
                 lifted = {
                     group: [
-                        lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
+                        unit
+                        if index not in kept
+                        else lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
                         for index, unit in enumerate(units)
                     ]
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
-            voxels = [max(math.prod(header[0][-3:]) for header in case.values()) for case in headers]
-            routes = {
-                preset: _route(
-                    out_of_core, preset, voxels, flat, _plan(_manifest(preset), gpu, max_voxels, self._remote)
-                )
-                for preset in presets
-            }
-            sampled_presets = [preset for preset, route in routes.items() if route.sampled]
-            sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
             if sampled_presets and self._remote is not None:
                 raise KonfAIError(
                     "ImpactReg",
@@ -1447,7 +1456,7 @@ class ImpactRegKonfAIApp:
                     fields_by_preset[preset] = sampled = self._register_sampled(
                         preset,
                         _some_cases(inputs, over),
-                        [headers[index] for index in over],
+                        [native_headers[index] for index in over],
                         [f"P{index:03d}" for index in over],
                         work,
                         gpu,
@@ -1583,8 +1592,10 @@ class ImpactRegKonfAIApp:
                 else:
                     # An ensemble is konfai-apps' (konfai_apps/ensemble.py): every member reduced into the field,
                     # slab by slab, the members on one grid, in ``form``. With --uncertainty their stack is kept
-                    # beside it, built here, or for a 2-D pair once its members are planes again (below).
-                    stack = case_out / stack_file(form) if uncertainty and not flat else None
+                    # beside it, built here, or for a 2-D pair lifted to volumes once its members are planes again
+                    # (below); a case registered on its own grid has planes already.
+                    lifted_case = flat and case not in sampled_cases
+                    stack = case_out / stack_file(form) if uncertainty and not lifted_case else None
                     combine(sources, "Mean", case_out / f"{group}{form}", token, stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                 # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
@@ -1597,6 +1608,7 @@ class ImpactRegKonfAIApp:
                 self._derive_moved(
                     dict(zip(cases, lifted["Moving"], strict=True)),
                     dict(zip(cases, lifted["Fixed"], strict=True)),
+                    sampled_cases if flat else set(),
                     group,
                     output,
                     work,
@@ -1606,6 +1618,8 @@ class ImpactRegKonfAIApp:
                 )
             if flat:
                 for case, moving in zip(cases, moving_units, strict=True):
+                    if case in sampled_cases:  # registered on its own grid: its outputs are 2-D already
+                        continue
                     project_field(_the_output(output / case, group))
                     if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
                         moved = _the_output(output / case, "Moved")
@@ -1993,15 +2007,16 @@ class ImpactRegKonfAIApp:
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
         visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
         # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.
-        samples, region_size = run.samples, run.region_size
-        if samples is not None:
-            region_size = min(region_size, max(8, round(samples ** (1 / 3))))
+        samples = run.samples
         fields_root = run.work / _workspace(f"{run.preset}_fields")
         fields: dict[str, Path] = {}
         compact: dict[str, list[Path]] = {}
         # The stages read the images as they are, as ConvexAdam does.
         for index, case, native, masks, _ in self._native_twins(run, chunked=True, clipped=False):
-            size = [int(extent) for extent in run.headers[index]["Fixed"][0][-3:]][::-1]
+            size = [int(extent) for extent in run.headers[index]["Fixed"][0][1:]][::-1]
+            region_size = run.region_size
+            if samples is not None:  # boxes that hold no more than an iteration draws, in the pair's dimension
+                region_size = min(region_size, max(8, round(samples ** (1 / len(size)))))
             grid_shrink = engine._grid_shrink
             geometry = region_geometry(size, grid_shrink, region_size)
             if not run.quiet and "fine" not in engine._stages:
@@ -2035,7 +2050,7 @@ class ImpactRegKonfAIApp:
                     f"[ImpactReg] {run.preset} {case}: fine stage by random boxes (itk-impact ImpactFineRegistration) on"
                     f" {' x '.join(map(str, size))} native voxels, {start}: control grid every"
                     f" {grid_shrink} voxels ({cells:,} cells, about"
-                    f" {cells * 3 * 4 * 5 / 2**20:,.0f} MiB on the device), boxes of {region_size} voxels"
+                    f" {cells * len(size) * 4 * 5 / 2**20:,.0f} MiB on the device), boxes of {region_size} voxels"
                     f" ({geometry['regions']} boxes) read with their halo from HDF5 chunks; {schedule}.",
                     flush=True,
                 )
@@ -2186,7 +2201,7 @@ class ImpactRegKonfAIApp:
 
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
         for index in range(len(run.cases)):
-            engine.check_sampled(*(run.headers[index][group][0][-3:] for group in ("Fixed", "Moving")))
+            engine.check_sampled(*(run.headers[index][group][0][1:] for group in ("Fixed", "Moving")))
         fields: dict[str, Path] = {}
         # FireANTs keeps a mask's positive voxels (``fireants.py``), the other engines its non-zero ones.
         for index, case, raw, masks, _ in self._native_twins(run, chunked=False, clipped=False, positive=True):
@@ -2194,7 +2209,7 @@ class ImpactRegKonfAIApp:
             out.mkdir(parents=True, exist_ok=True)
             fields[case] = out / f"{run.output_group}.mha"
             if not run.quiet:
-                shape = run.headers[index]["Fixed"][0][-3:]
+                shape = run.headers[index]["Fixed"][0][1:]
                 drawn = (
                     f"{run.samples:,} voxels at once" if run.samples is not None else "what the device holds at once"
                 )
@@ -2264,7 +2279,7 @@ class ImpactRegKonfAIApp:
         cases = [f"P{index:03d}" for index in range(len(inputs["Fixed"]))]
         fixed = dict(zip(cases, inputs["Fixed"], strict=True))
         if not quiet:
-            shape = max((case["Fixed"][0][-3:] for case in headers), key=math.prod)
+            shape = max((case["Fixed"][0][1:] for case in headers), key=math.prod)
             tiles = f"native tiles of at most {tile_budget:,} voxels"
             plan = (
                 f"the preset on {tiles}"
@@ -2350,6 +2365,7 @@ class ImpactRegKonfAIApp:
         self,
         cases: dict[str, Path],
         fixed: dict[str, Path],
+        planes: set[str],
         group: str,
         output: Path,
         work: Path,
@@ -2358,8 +2374,9 @@ class ImpactRegKonfAIApp:
         quiet: bool,
     ) -> None:
         """The moved images, derived from the transforms, one streamed run over the cohort for each form its
-        transforms take: a cohort routed case by case holds the dense field of a case registered sampled beside the
-        native form of one registered whole, and a staged root has one backend.
+        transforms and moving images take: a cohort routed case by case holds the dense field of a case registered
+        sampled beside the native form of one registered whole, and a staged root has one backend. ``planes`` are the
+        cases of a 2-D pair registered on their own grid, apart from the others, lifted to volumes one plane thick.
 
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
@@ -2377,15 +2394,15 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        forms: dict[tuple[str, bool], dict[str, Path]] = {}
+        forms: dict[tuple[str, bool, str, bool], dict[str, Path]] = {}
         for case, field in fields.items():
-            forms.setdefault((_form(field).lower(), _is_field(field)), {})[case] = field
-        for number, ((_, dense), members) in enumerate(forms.items()):
+            key = (_form(field).lower(), _is_field(field), _form(cases[case]).lower(), case in planes)
+            forms.setdefault(key, {})[case] = field
+        for number, ((_, dense, _, _), members) in enumerate(forms.items()):
             stage, root = work / "moved_stage" / str(number), work / "moved" / str(number)
             moving = {case: cases[case] for case in members}
             # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form
-            # may be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
-            # below, so the first case's form speaks for the others.
+            # may be an ITK transform file, which cannot hold an image. The members' moving images share one form.
             backend = self._moved_format or _backend(next(iter(moving.values())))
             roots = [_stage_group(stage, "Moving", moving), _stage_group(stage, "DVF", members)]
             if dense:

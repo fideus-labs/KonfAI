@@ -57,11 +57,11 @@ def _prediction(classpath: str, model: Path) -> dict:
 
 @pytest.fixture
 def presets(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A local preset repository: a ConvexAdam preset with a tile pass, an elastix one and one of another engine."""
+    """A local preset repository: a ConvexAdam preset with a tile pass, two elastix ones and one of another engine."""
     repo = tmp_path_factory.mktemp("presets")
     model = repo / "model.pt"
     model.write_bytes(b"jit")
-    for name, classpath in (("Convex", CONVEXADAM), ("Other", OTHER), ("Elx", ELASTIX)):
+    for name, classpath in (("Convex", CONVEXADAM), ("Other", OTHER), ("Elx", ELASTIX), ("Elx2", ELASTIX)):
         (repo / name).mkdir()
         manifest = {"task": "registration", "vram_bytes_per_voxel": 100, "ram_bytes_per_voxel": 100}
         # What konfai-apps reads of an app it resolves, as the sampled route resolves it for its requirements.
@@ -497,18 +497,65 @@ def test_seed_seeds_each_pass_whose_engine_draws_with_one(monkeypatch: pytest.Mo
     assert shares["P"]["global"] == share and shares["P"]["tile"] == share
 
 
-def test_sampled_mode_refuses_a_plane_over_the_budget_before_lifting_it(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("ensemble", [["Elx"], ["Elx", "Elx2"]], ids=["preset", "ensemble"])
+def test_sampled_mode_registers_a_plane_on_its_own_grid(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ensemble: list[str]
 ) -> None:
+    """A 2-D pair is registered sampled as a volume is, on its own grid, never lifted to a plane thick volume (which
+    reads it whole): the elastix route hands the engine 2-D twins along LPS and writes a 2-D field on the fixed grid,
+    an ensemble with its members' stack under --uncertainty."""
+    from impact_reg_konfai.models import intensity
+
     paths = []
     for name in ("fixed", "moving"):
+        image = sitk.GetImageFromArray(np.random.default_rng(0).random((60, 70)).astype(np.float32))
+        image.SetSpacing((2.0, 4.0))
+        image.SetDirection((-1.0, 0.0, 0.0, 1.0))
         paths.append(tmp_path / f"{name}.mha")
-        sitk.WriteImage(sitk.GetImageFromArray(np.zeros((16, 16), dtype=np.float32)), str(paths[-1]))
+        sitk.WriteImage(image, str(paths[-1]))
+    seen = {}
+
+    class Engine:
+        _feature_models = ()
+        _elastix_bin = "elastix"
+        _moments_init = "none"
+
+        def supports_mapped_images(self) -> bool:
+            return True
+
+        def register_mapped(self, fixed, moving, fixed_mask, moving_mask, device_index, work, spacing, voxels):
+            twin = sitk.ReadImage(str(fixed))
+            seen.update(size=twin.GetSize(), direction=twin.GetDirection(), spacing=spacing)
+            return sitk.TranslationTransform(2, (1.0, -2.0))
+
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
     monkeypatch.setattr(reg, "lift_plane", lambda *args: pytest.fail("the plane was lifted"))
-    with pytest.raises(KonfAIError, match="this pair is 2-D"):
-        reg.ImpactRegKonfAIApp().register(
-            ["Convex"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", max_voxels=100
-        )
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ensemble,
+        [paths[0]],
+        [paths[1]],
+        output=tmp_path / "out",
+        out_of_core="sampled",
+        fields_only=True,
+        uncertainty=len(ensemble) > 1,
+    )
+    assert (
+        seen["size"] == (70, 60) and np.allclose(seen["direction"], np.eye(2).ravel()) and seen["spacing"] == (1.0, 2.0)
+    )
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha"))
+    assert (
+        field.GetDimension() == 2 and field.GetSize() == (70, 60) and np.allclose(field.GetDirection(), (-1, 0, 0, 1))
+    )
+    assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0))
+    if len(ensemble) > 1:
+        stack = sitk.ReadImage(str(tmp_path / "out" / "P000" / "InferenceStack.mha"))  # members x components
+        assert stack.GetSize() == (70, 60) and stack.GetNumberOfComponentsPerPixel() == 4
+        assert stack.GetMetaData("konfai_members") == "2"
 
 
 def test_sampled_mode_runs_the_region_stage_on_a_pair_over_the_budget(presets: Path, tmp_path: Path) -> None:

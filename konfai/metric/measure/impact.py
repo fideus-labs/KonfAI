@@ -540,6 +540,23 @@ class _SliceSweep(torch.nn.Module):
         return [layer.reshape(batch, depth, *layer.shape[1:]).movedim(1, 2) for layer in layers]
 
 
+class _PlaneLift(torch.nn.Module):
+    """A 3-D network handed a plane ``[B, C, H, W]``: the plane lifted to a volume one voxel thick, as a run on the
+    whole pair lifts a 2-D pair, each output layer brought back to a plane; its normalisations (``norm_count``,
+    ``norm_input``) likewise, the network having them."""
+
+    def __init__(self, network: torch.nn.Module) -> None:
+        super().__init__()
+        self.network = network
+        if hasattr(network, "norm_count"):
+            norm_input = cast(Callable[..., torch.Tensor], network.norm_input)
+            self.norm_count = network.norm_count
+            self.norm_input = lambda tensor, *rest: norm_input(tensor.unsqueeze(2), *rest).squeeze(2)
+
+    def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
+        return [layer.squeeze(2) for layer in self.network(image.unsqueeze(2), *rest)]
+
+
 def _statistics(tensor: torch.Tensor) -> list[Attribute]:
     """Each sample's own ``[ImageMin, ImageMax, ImageMean, ImageStd]``, for a caller with no KonfAI attributes."""
     detached = tensor.detach().float()  # not flattened: a permuted tensor is reduced in place, not copied
@@ -866,6 +883,9 @@ class ImpactFeatureModel:
         self.direction: torch.Tensor | None = None
         self.voxel_size: list[float] | None = None
         self.half = False
+        # A 3-D network handed planes, lifted to volumes one voxel thick (``_PlaneLift``), as a run on the whole pair
+        # lifts a 2-D pair.
+        self.lift = False
         # Each tile under a checkpoint (see _masked_feature_loss): for a caller that differentiates through
         # the network on volumes too large to keep every tile's activations.
         self.checkpoint = False
@@ -931,7 +951,8 @@ class ImpactFeatureModel:
         probe of 64 voxels a side, each normalisation fed the probe's own statistics of the ones before it."""
         if self._norm_stride is None:
             side = max(64, self.multiple)
-            probe = torch.rand((1, self.in_channels, *[side] * self.dim), device=device)  # a spread to normalise
+            dims = self.dim - self.lift  # a plane for a 3-D network lifted to one
+            probe = torch.rand((1, self.in_channels, *[side] * dims), device=device)  # a spread to normalise
             network = self.network(probe.device)
             norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
             norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
@@ -963,7 +984,9 @@ class ImpactFeatureModel:
         along its first spatial axis."""
         network = self._on(device)
         network = network.half() if self._half(device) else network.float()
-        return _SliceSweep(network) if self.dim == 2 else network
+        if self.dim == 2:
+            return _SliceSweep(network)
+        return _PlaneLift(network) if self.lift else network
 
     def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
         """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat

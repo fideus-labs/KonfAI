@@ -635,8 +635,9 @@ class ImpactFeatureLoss(torch.nn.Module):
                 # A mask that keeps no voxel stays on the whole maps, where the masked mean is 0.
                 centres = draw_centres(tuple(moved.shape[2:]), mask, 1, self._sampling, self._generator, moved.device)
                 if centres is not None:
-                    _, height, width = moved.shape[2:]
-                    voxels = (centres[:, 0] * height + centres[:, 1]) * width + centres[:, 2]
+                    voxels = centres[:, 0]  # each centre's index in the flattened grid, a plane's or a volume's
+                    for axis, extent in enumerate(moved.shape[3:], start=1):
+                        voxels = voxels * extent + centres[:, axis]
                     moved, fixed, mask = moved.flatten(2)[:, :, voxels], fixed.flatten(2)[:, :, voxels], None
             # Half as many channels a LNCC pass when it does not fit, kept for the registration.
             values = halve_on_oom(
@@ -1291,11 +1292,11 @@ class FireANTsEngine:
         if (
             self._deformable_metric == "impact"
             and self._mode == "Static"
-            and any(core.dimension != 3 for core in self._impact_loss().cores)
+            and any(core.dimension < len(fixed_shape) for core in self._impact_loss().cores)
         ):
             raise NotImplementedError(
-                "Static mode by blocks takes 3D feature models at the image's own resolution: a 2D network and a"
-                " voxel_size both lay their features out over the whole image."
+                "Static mode by blocks takes feature models of the image's dimension at its own resolution: a 2D"
+                " network on a volume and a voxel_size both lay their features out over the whole image."
             )
         if min(fixed_shape) < MIN_IMG_SIZE:
             raise NotImplementedError(
@@ -1375,10 +1376,12 @@ class FireANTsEngine:
         if self._linear_method != "none":
             init_translation: str | torch.Tensor = "cof"
             if self._moments_init == "none":
-                init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
+                init_translation = torch.zeros((1, mapped["fixed"].array.ndim), device=device, dtype=torch.float32)
             elif self._moments_init == "com":
                 centres = [mapped_centre(mapped[side], masks[side], "com") for side in ("moving", "fixed")]
-                init_translation = torch.tensor(np.subtract(*centres), device=device, dtype=torch.float32).reshape(1, 3)
+                init_translation = torch.tensor(np.subtract(*centres), device=device, dtype=torch.float32).reshape(
+                    1, -1
+                )
             pair = sources(self._affine_metric, masked)
             affine_matrix = sampled_linear_alignment(
                 readers["fixed"],
@@ -1396,7 +1399,7 @@ class FireANTsEngine:
                 # it less than boxes apart. Not told how many to draw, _TOGETHER voxels an iteration, as elastix draws
                 # its points: a level they hold whole is FireANTs' own iteration.
                 box=max(box // 3, 8),
-                boxes=max(1, (samples or _TOGETHER) // max(box // 3, 8) ** 3),
+                boxes=max(1, (samples or _TOGETHER) // max(box // 3, 8) ** mapped["fixed"].array.ndim),
                 together=samples or _TOGETHER,
                 seed=self._seed,
                 affine=self._linear_method != "rigid",
@@ -1414,6 +1417,8 @@ class FireANTsEngine:
             custom_loss = self._impact_loss()
             custom_loss._masked = deformable_masked
             custom_loss.reset()
+            for core in custom_loss.cores:  # a 3-D network on a plane: lifted to a volume one voxel thick
+                core.model.lift = core.dimension > mapped["fixed"].array.ndim
             extent = [
                 size * step
                 for size, step in zip(readers["fixed"].GetSize(), readers["fixed"].GetSpacing(), strict=True)

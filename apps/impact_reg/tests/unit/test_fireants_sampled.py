@@ -16,8 +16,10 @@
 
 """FireANTs' stages over boxes against FireANTs on the whole image, on synthetic volumes, on the CPU."""
 
+import functools
 import math
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -50,12 +52,15 @@ from impact_reg_konfai.ooc import (  # noqa: E402
 )
 
 SIZE = (34, 40, 44)  # z, y, x
+PLANE = SIZE[1:]  # y, x: the sampled stages take a plane as they take a volume
+SHAPES = pytest.mark.parametrize("size", [SIZE, PLANE], ids=["volume", "plane"])
 
 
-def texture(shift=(0.0, 0.0, 0.0)) -> np.ndarray:
-    """A smooth texture f(x + shift), in [0, 1): waves a dozen voxels long and a blob."""
-    z, y, x = np.meshgrid(*(np.arange(n, dtype=np.float64) for n in SIZE), indexing="ij")
-    x, y, z = x + shift[0], y + shift[1], z + shift[2]
+def texture(shift=(0.0, 0.0, 0.0), size=SIZE) -> np.ndarray:
+    """A smooth texture f(x + shift), in [0, 1): waves a dozen voxels long and a blob; on a plane, its section z = 8."""
+    grids = np.meshgrid(*(np.arange(n, dtype=np.float64) for n in size), indexing="ij")
+    z = grids[0] + shift[2] if len(size) == 3 else np.full_like(grids[-1], 8.0)
+    x, y = grids[-1] + shift[0], grids[-2] + shift[1]
     waves = np.sin(x / 2.6) * np.cos(y / 3.1) + 0.5 * np.sin((x + y + 2 * z) / 4.2) + 0.7 * np.cos(z / 2.9 + x / 5.3)
     blob = 2.0 * np.exp(-((x - 22) ** 2 + (y - 20) ** 2 + (z - 17) ** 2) / 60.0)
     values = waves + blob
@@ -64,7 +69,7 @@ def texture(shift=(0.0, 0.0, 0.0)) -> np.ndarray:
 
 def image_of(array: np.ndarray) -> sitk.Image:
     image = sitk.GetImageFromArray(array)
-    image.SetSpacing((1.0, 1.0, 1.0))
+    image.SetSpacing((1.0,) * array.ndim)
     return image
 
 
@@ -191,9 +196,10 @@ def test_a_level_far_coarser_than_its_source_reads_bounded_blocks():
 OFF_GRID = torch.tensor([[0.3, -0.2, 0.1]])
 
 
+@SHAPES
 @pytest.mark.parametrize("scales,iterations", [([1], [6]), ([2, 1], [4, 3])])
-def test_every_box_reproduces_the_whole_image_rigid(scales, iterations):
-    fixed, moving = texture(), texture((1.5, -1.0, 0.5))
+def test_every_box_reproduces_the_whole_image_rigid(scales, iterations, size):
+    fixed, moving = texture(size=size), texture((1.5, -1.0, 0.5), size)
     settings = {
         "scales": scales,
         "iterations": iterations,
@@ -201,7 +207,7 @@ def test_every_box_reproduces_the_whole_image_rigid(scales, iterations):
         "optimizer": "Adam",
         "optimizer_lr": 0.02,
         "optimizer_params": {"eps": 1.0},  # the step proportional to the gradient: float noise does not flip it
-        "init_translation": OFF_GRID,
+        "init_translation": OFF_GRID[:, : len(size)],
     }
     from fireants.registration.rigid import RigidRegistration
 
@@ -212,11 +218,13 @@ def test_every_box_reproduces_the_whole_image_rigid(scales, iterations):
     assert torch.allclose(whole.get_rigid_matrix(), sampled.get_rigid_matrix(), atol=1e-5)
 
 
+@SHAPES
 @pytest.mark.parametrize("loss", ["mse", "cc", "mi"])
-def test_every_box_reproduces_the_whole_image_affine(loss):
-    fixed, moving = texture(), texture((1.5, -1.0, 0.5))
-    start = torch.eye(3, 4).unsqueeze(0)
-    start[:, :, 3] = OFF_GRID
+def test_every_box_reproduces_the_whole_image_affine(loss, size):
+    fixed, moving = texture(size=size), texture((1.5, -1.0, 0.5), size)
+    dims = len(size)
+    start = torch.eye(dims, dims + 1).unsqueeze(0)
+    start[:, :, dims] = OFF_GRID[:, :dims]
     settings = {
         "scales": [2, 1],
         "iterations": [4, 3],
@@ -232,7 +240,7 @@ def test_every_box_reproduces_the_whole_image_affine(loss):
     whole.optimize()
     # Packets of two boxes: the level is never scored whole.
     sampled = sampled_registration(
-        sampled_affine_class(), fixed, moving, box=16, boxes=10_000, together=2 * 16**3, **settings
+        sampled_affine_class(), fixed, moving, box=16, boxes=10_000, together=2 * 16**dims, **settings
     )
     sampled.optimize()
     assert torch.allclose(whole.get_affine_matrix(), sampled.get_affine_matrix(), atol=1e-5)
@@ -492,6 +500,51 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
         assert torch.allclose(found * signs, reference, atol=1e-5)
 
 
+class _Convolved(torch.nn.Module):
+    """A 3-D convolution of 3 voxels a side: a layer at the image's resolution."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 4, 3, padding=1)
+        for parameter in self.conv.parameters():
+            torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(1))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layer: torch.Tensor,
+        stats: torch.Tensor | None = None,
+        direction: torch.Tensor | None = None,
+    ) -> list[torch.Tensor]:
+        return [self.conv(x)]
+
+
+def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path):
+    """A 3-D network on a 2-D pair sees the plane lifted to a volume one voxel thick, as a run on the whole pair lifts
+    it: block by block it gives the whole plane's features, and the PCA fitted over the blocks its components."""
+    from impact_reg_konfai.models import fireants as engine
+    from impact_reg_konfai.models.fireants_sampled import static_feature_sources
+
+    path = tmp_path / "convolved.pt"
+    torch.jit.script(_Convolved()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), layers_mask="1", pca=2, distance="LNCC", feature_normalization="l2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
+    loss.cores[0].model.fov, loss.cores[0].model.lift = [3], True
+    fixed, moving = texture(size=PLANE)[:21, :25], texture((1.5, -1.0, 0.5), PLANE)[:21, :25]
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    sources = static_feature_sources(
+        loss,
+        ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
+        ArraySource(np.ascontiguousarray(moving)[None], "cpu"),
+        tmp_path,
+        block=8,
+    )
+    blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
+    signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3))).view(1, -1, 1, 1)
+    for reference, found in zip(whole, blocks, strict=True):
+        assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
+
+
 def test_a_rescaled_source_and_a_mask_of_ones_read_by_boxes():
     source = RescaledSource(ArraySource(np.arange(27, dtype=np.float32).reshape(1, 3, 3, 3), "cpu"), 5.0, 20.0, 0.5)
     box = source.read([0, 0, 0], [3, 3, 3])
@@ -501,13 +554,24 @@ def test_a_rescaled_source_and_a_mask_of_ones_read_by_boxes():
 
 #: A warp the deformable stages start from, in voxels: at zero the fixed image is read exactly at its voxels, where
 #: the derivative of the interpolation is one-sided and its side the rounding's.
-OFF_CENTRES = torch.tensor([0.31, -0.23, 0.17]) * 2 / (max(SIZE) - 1)
-AFFINE = torch.eye(4)[None].clone()
-AFFINE[0, :3, 3] = torch.tensor([0.4, -0.3, 0.2])
+def off_centres(size=SIZE) -> torch.Tensor:
+    return torch.tensor([0.31, -0.23, 0.17][: len(size)]) * 2 / (max(size) - 1)
+
+
+def start_affine(size=SIZE) -> torch.Tensor:
+    """The affine the deformable stages start from: a translation of a few tenths of a voxel."""
+    dims = len(size)
+    affine = torch.eye(dims + 1)[None].clone()
+    affine[0, :dims, dims] = torch.tensor([0.4, -0.3, 0.2][:dims])
+    return affine
+
+
+OFF_CENTRES = off_centres()
+AFFINE = start_affine()
 DEFORMABLE = {"scales": [2, 1], "iterations": [4, 3], "cc_kernel_size": 5, "optimizer_lr": 0.25}
 
 
-def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = None, mask=None):
+def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = None, mask=None, size=SIZE):
     """FireANTs' compositive greedy or SyN on the whole pair, and the same stage over boxes of 16 voxels. With
     ``mask``, FireANTs' masked mode: that mask on the fixed image, ones on the moving one."""
     from fireants.io import BatchedImages, Image
@@ -515,7 +579,7 @@ def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = 
     from fireants.registration.greedy import GreedyRegistration
     from fireants.registration.syn import SyNRegistration
 
-    fixed, moving = texture(), texture((1.3, -0.8, 0.6))
+    fixed, moving = texture(size=size), texture((1.3, -0.8, 0.6), size)
     images = {}
     if mask is not None:
         loss = f"masked_{loss}"
@@ -532,7 +596,7 @@ def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = 
             loss_type=loss,
             deformation_type="compositive",
             optimizer="Adam",
-            init_affine=AFFINE.clone(),
+            init_affine=start_affine(size),
             **DEFORMABLE,
         )
         if images
@@ -543,19 +607,19 @@ def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = 
             loss_type=loss,
             deformation_type="compositive",
             optimizer="Adam",
-            init_affine=AFFINE.clone(),
+            init_affine=start_affine(size),
             **DEFORMABLE,
         )
     )
     whole_warps = {"fwd": whole.fwd_warp, "rev": whole.rev_warp} if symmetric else {"fwd": whole.warp}
     for warp in whole_warps.values():
-        warp.warp.data += OFF_CENTRES
+        warp.warp.data += off_centres(size)
     whole.optimize()
     sources = [ArraySource(fixed[None], "cpu"), ArraySource(moving[None], "cpu")]
     if mask is not None:
         sources = [
             StackedSource([sources[0], ArraySource(mask[None], "cpu")]),
-            StackedSource([sources[1], OnesSource(SIZE, "cpu")]),
+            StackedSource([sources[1], OnesSource(size, "cpu")]),
         ]
     channels = 2 if mask is not None else 1
     sampled = sampled_deformable_class()(
@@ -566,19 +630,19 @@ def deformable_pair(tmp_path, symmetric: bool, loss: str, samples: int | None = 
         scratch=tmp_path,
         symmetric=symmetric,
         loss_type=loss,
-        init_affine=AFFINE.clone(),
+        init_affine=start_affine(size),
         box=16,
         samples=samples,
         **DEFORMABLE,
     )
-    sampled._set_grid(fireants_level_sizes(SIZE, DEFORMABLE["scales"][0]))
+    sampled._set_grid(fireants_level_sizes(size, DEFORMABLE["scales"][0]))
     for warp in sampled._warps.values():
-        warp.arrays["warp"][:] = OFF_CENTRES.numpy()[:, None, None, None]
+        warp.arrays["warp"][:] = off_centres(size).numpy().reshape(-1, *[1] * len(size))
     sampled.optimize()
     return whole, {name: warp.warp.detach() for name, warp in whole_warps.items()}, sampled
 
 
-def warp_gap(sampled, whole_warps) -> float:
+def warp_gap(sampled, whole_warps, size=SIZE) -> float:
     """The largest difference, in voxels, between the warps of the two runs."""
     return (
         max(
@@ -590,18 +654,20 @@ def warp_gap(sampled, whole_warps) -> float:
             for name, warp in whole_warps.items()
         )
         * 0.5
-        * (max(SIZE) - 1)
+        * (max(size) - 1)
     )
 
 
 @pytest.mark.parametrize("symmetric,loss", [(False, "mse"), (False, "cc"), (True, "cc")])
-def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, loss):
-    whole, whole_warps, sampled = deformable_pair(tmp_path, symmetric, loss)
-    assert warp_gap(sampled, whole_warps) < 1e-3
+@SHAPES
+def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, loss, size):
+    whole, whole_warps, sampled = deformable_pair(tmp_path, symmetric, loss, size=size)
+    assert warp_gap(sampled, whole_warps, size) < 1e-3
     if not symmetric:  # the field FireANTs writes; SyN's goes through its own inverse of the reverse warp
-        whole.save_as_ants_transforms(str(tmp_path / "whole.nii"))
+        with mock.patch.object(sitk, "GetImageFromArray", functools.partial(sitk.GetImageFromArray, isVector=True)):
+            whole.save_as_ants_transforms(str(tmp_path / "whole.nii"))  # a plane's (H, W, 2) read as vectors
         expected = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "whole.nii")))
-        field = np.zeros((*SIZE, 3), dtype=np.float32)
+        field = np.zeros((*size, len(size)), dtype=np.float32)
         sampled.write_field(field, block=20)
         assert np.abs(field - expected).max() < 1e-3
     sampled.close()
@@ -771,5 +837,5 @@ def test_a_static_model_of_two_dimensions_is_refused_before_the_pair_is_read(tmp
     engine = FireANTsEngine(
         **settings, deformable_method="syn", deformable_metric="impact", seed=0, impact_levels=[[spec], [spec]]
     )
-    with pytest.raises(NotImplementedError, match="Static mode by blocks takes 3D feature models"):
+    with pytest.raises(NotImplementedError, match="Static mode by blocks takes feature models of the image"):
         engine.check_sampled((40, 40, 40), (40, 40, 40))

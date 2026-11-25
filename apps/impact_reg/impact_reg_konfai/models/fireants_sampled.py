@@ -459,11 +459,11 @@ def sampled_linear_alignment(
 
 
 class _Warp:
-    """A warp of the deformable stage on a level's grid with its Adam moments, channel-first ``[3, *grid]``, read and
-    written by boxes (channel-last, as FireANTs holds a warp): tensors on the device when ``resident``, float32 arrays
-    in host memory when ``host``, float32 memmaps in files of ``directory`` otherwise. ``next`` is the warp an
-    iteration steps to, box by box, while every box still reads the iteration's own: ``swap`` makes it the warp,
-    ``keep`` the boxes of it a draw stepped."""
+    """A warp of the deformable stage on a level's grid with its Adam moments, channel-first ``[d, *grid]`` (a component
+    an axis), read and written by boxes (channel-last, as FireANTs holds a warp): tensors on the device when
+    ``resident``, float32 arrays in host memory when ``host``, float32 memmaps in files of ``directory`` otherwise.
+    ``next`` is the warp an iteration steps to, box by box, while every box still reads the iteration's own: ``swap``
+    makes it the warp, ``keep`` the boxes of it a draw stepped."""
 
     KINDS = ("warp", "mean", "square")
 
@@ -479,14 +479,14 @@ class _Warp:
 
     def _new(self, kind: str, grid: Sequence[int]) -> None:
         if self.resident:
-            self.arrays[kind] = torch.zeros((3, *grid), device=self.device)
+            self.arrays[kind] = torch.zeros((len(grid), *grid), device=self.device)
             return
         if self.host:
-            self.arrays[kind] = np.zeros((3, *grid), dtype=np.float32)
+            self.arrays[kind] = np.zeros((len(grid), *grid), dtype=np.float32)
             return
         self.paths[kind] = self.directory / f"{self.name}_{kind}_{self.generation}.npy"
         self.arrays[kind] = np.lib.format.open_memmap(
-            str(self.paths[kind]), mode="w+", dtype=np.float32, shape=(3, *grid)
+            str(self.paths[kind]), mode="w+", dtype=np.float32, shape=(len(grid), *grid)
         )
 
     @property
@@ -713,8 +713,8 @@ def static_feature_sources(
         """The device bytes a voxel of a block takes, through the network, its layers placed and, with a PCA, their
         moments, measured on a probe of 64 voxels a side."""
         side = max(64, core.model.multiple)
-        probe = torch.zeros((1, 1, *[side] * 3), device=fixed.device)
-        own = (slice(0, side),) * 3
+        probe = torch.zeros((1, 1, *[side] * len(fixed.shape)), device=fixed.device)
+        own = (slice(0, side),) * len(fixed.shape)
         norms = core.model.norms(lambda: [(probe, own)], statistics)
 
         def run() -> None:
@@ -758,7 +758,7 @@ def static_feature_sources(
             layers = retained.pop(at, None) or layers_of(core, source, (start, stop), halo, statistics[side], norms)
             for layer, features in enumerate(layers):
                 if core.pca > 0:
-                    centred = features - means[layer].to(features.device).view(1, -1, 1, 1, 1)
+                    centred = features - means[layer].to(features.device).view(1, -1, *[1] * len(source.shape))
                     features = torch.einsum("bc...,ck->bk...", centred, bases[layer].to(features.device))
                 if layer == len(arrays):
                     arrays.append(
@@ -789,10 +789,10 @@ def static_feature_sources(
     loss._channels = []
     with torch.no_grad():
         for index, core in enumerate(loss.cores):
-            if core.dimension != 3 or core.model.voxel_size is not None:
+            if core.dimension < len(fixed.shape) or core.model.voxel_size is not None:
                 raise NotImplementedError(
-                    "Static mode by blocks takes 3D feature models at the image's own resolution: a 2D network and a"
-                    " voxel_size both lay their features out over the whole image."
+                    "Static mode by blocks takes feature models of the image's dimension at its own resolution: a 2D"
+                    " network on a volume and a voxel_size both lay their features out over the whole image."
                 )
             # Blocks and halos on the input multiple and on the stride of the normalisations gathered over them.
             stride = max(1, int(core.model.multiple), core.model.norm_stride(fixed.device))
@@ -812,7 +812,7 @@ def static_feature_sources(
                 with contextlib.suppress(torch.cuda.OutOfMemoryError), out_of_memory_as_torch(cuda):
                     if cuda:
                         cost = block_cost(core, statistics["fixed"])
-                        widest = int((free_bytes(fixed.device) / 2 / cost) ** (1 / 3))
+                        widest = int((free_bytes(fixed.device) / 2 / cost) ** (1 / len(fixed.shape)))
                         blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
                 for side, source in sources.items():
                     arrays, bases = halve_on_oom(
@@ -903,7 +903,7 @@ def sampled_deformable_class():
             # boxes' work (``_fitting_box``). What does not fit stays in files, where each step moves it through the
             # host.
             room = free_bytes(fixed.device) * 3 / 4
-            needed = 4 * 3 * 4 * math.prod(fixed.shape) * (2 if symmetric else 1)
+            needed = 4 * len(fixed.shape) * 4 * math.prod(fixed.shape) * (2 if symmetric else 1)
             self._forced = resident
             if resident is None:
                 resident = needed <= room
@@ -932,7 +932,9 @@ def sampled_deformable_class():
             self._halo = int(loss_halo) + grad_tail
             self._step_halo = warp_tail + max(1, math.ceil(float(optimizer_lr) / 2))
             affine = (
-                torch.eye(self.dims + 1, device=device) if init_affine is None else init_affine.reshape(-1, 4, 4)[0]
+                torch.eye(self.dims + 1, device=device)
+                if init_affine is None
+                else init_affine.reshape(-1, self.dims + 1, self.dims + 1)[0]
             )
             self._affine = affine.to(device, self.dtype)
             self._warps: dict[str, _Warp] = {}
@@ -968,7 +970,7 @@ def sampled_deformable_class():
         def _set_grid(self, grid: Sequence[int]) -> None:
             names = ("fwd", "rev") if self._symmetric else ("fwd",)
             # A coarser scale than one the device cannot hold may fit it: its warps stay there while they do.
-            voxels, a_voxel = math.prod(grid), 4 * 3 * 4 * len(names)  # 4 arrays of 3 float32 channels a warp
+            voxels, a_voxel = math.prod(grid), 4 * len(grid) * 4 * len(names)  # 4 arrays of a float32 channel an axis
             resident = self.resident or (self._forced is None and voxels * a_voxel <= free_bytes(self.device) * 3 / 4)
             # Off the device, host memory while this rank's budget holds them: in files, every step's writes go to
             # the disk.

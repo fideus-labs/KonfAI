@@ -62,32 +62,37 @@ def _slabs(shape: Sequence[int], itemsize: int, most: int | None = None) -> Iter
 
 @dataclass(frozen=True)
 class AxisMap:
-    """A grid's voxels seen with its axes permuted and read backwards, in NumPy order (z, y, x): axis ``k`` of the view
-    is axis ``axes[k]`` of the grid, reversed where ``flips[k]``. ``to_lps`` is the view SimpleITK's DICOMOrient gives
-    a run on the whole pair: each voxel axis along the LPS axis nearest to it and pointing its way, nothing resampled
-    (an oblique grid keeps the rotation left)."""
+    """A grid's voxels seen with its axes permuted and read backwards, in NumPy order ((z,) y, x), of any dimension:
+    axis ``k`` of the view is axis ``axes[k]`` of the grid, reversed where ``flips[k]``. ``to_lps`` is the view
+    SimpleITK's DICOMOrient gives a run on the whole pair: each voxel axis along the LPS axis nearest to it and pointing
+    its way, nothing resampled (an oblique grid keeps the rotation left)."""
 
-    axes: tuple[int, ...] = (0, 1, 2)
-    flips: tuple[bool, ...] = (False, False, False)
+    axes: tuple[int, ...]
+    flips: tuple[bool, ...]
+
+    @classmethod
+    def identity_of(cls, dimension: int) -> AxisMap:
+        return cls(tuple(range(dimension)), (False,) * dimension)
 
     @classmethod
     def to_lps(cls, direction: Sequence[float]) -> AxisMap:
-        # Column j of an ITK direction (row-major) is voxel axis j, ITK order (x, y, z), in LPS; NumPy axis k is ITK
-        # axis 2 - k.
-        matrix = np.reshape(np.asarray(direction, dtype=float), (3, 3))
-        nearest = max(itertools.permutations(range(3)), key=lambda p: sum(abs(matrix[i, p[i]]) for i in range(3)))
+        # Column j of an ITK direction (row-major) is voxel axis j, ITK order ((x, y), z), in LPS; NumPy axis k is ITK
+        # axis n - 1 - k.
+        n = math.isqrt(len(direction))
+        matrix = np.reshape(np.asarray(direction, dtype=float), (n, n))
+        nearest = max(itertools.permutations(range(n)), key=lambda p: sum(abs(matrix[i, p[i]]) for i in range(n)))
         return cls(
-            tuple(2 - nearest[2 - k] for k in range(3)),
-            tuple(bool(matrix[2 - k, nearest[2 - k]] < 0) for k in range(3)),
+            tuple(n - 1 - nearest[n - 1 - k] for k in range(n)),
+            tuple(bool(matrix[n - 1 - k, nearest[n - 1 - k]] < 0) for k in range(n)),
         )
 
     @property
     def identity(self) -> bool:
-        return self.axes == (0, 1, 2) and not any(self.flips)
+        return self.axes == tuple(range(len(self.axes))) and not any(self.flips)
 
     def inverse(self) -> AxisMap:
         """The map from the view back to the grid."""
-        axes, flips = [0, 0, 0], [False, False, False]
+        axes, flips = [0] * len(self.axes), [False] * len(self.axes)
         for k, (axis, flip) in enumerate(zip(self.axes, self.flips, strict=True)):
             axes[axis], flips[axis] = k, flip
         return AxisMap(tuple(axes), tuple(flips))
@@ -104,8 +109,9 @@ class AxisMap:
         )
 
     def view(self, values: np.ndarray) -> np.ndarray:
-        """``values``, a block of the grid ((z, y, x) first, any components after), laid out as the view lays it."""
-        values = values.transpose(*self.axes, *range(3, values.ndim))
+        """``values``, a block of the grid (its spatial axes first, any components after), laid out as the view lays
+        it."""
+        values = values.transpose(*self.axes, *range(len(self.axes), values.ndim))
         flipped = [k for k, flip in enumerate(self.flips) if flip]
         return np.ascontiguousarray(np.flip(values, flipped) if flipped else values)
 
@@ -114,13 +120,14 @@ class AxisMap:
     ) -> tuple[list[float], list[float], list[float]]:
         """The view's spacing, origin and direction (ITK order, the direction row-major) of a grid of ``extents`` and
         that geometry: the same voxels at the same physical points."""
-        matrix = np.reshape(np.asarray(direction, dtype=float), (3, 3))
-        corner = [0, 0, 0]  # the grid's voxel the view starts at, NumPy order
+        n = len(self.axes)
+        matrix = np.reshape(np.asarray(direction, dtype=float), (n, n))
+        corner = [0] * n  # the grid's voxel the view starts at, NumPy order
         for axis, flip in zip(self.axes, self.flips, strict=True):
             corner[axis] = extents[axis] - 1 if flip else 0
         start = np.asarray(origin, dtype=float) + matrix @ (np.asarray(spacing, dtype=float) * corner[::-1])
-        columns = [2 - self.axes[2 - i] for i in range(3)]  # view ITK axis i is the grid's ITK axis columns[i]
-        signs = [-1.0 if self.flips[2 - i] else 1.0 for i in range(3)]
+        columns = [n - 1 - self.axes[n - 1 - i] for i in range(n)]  # view ITK axis i is the grid's ITK axis columns[i]
+        signs = [-1.0 if self.flips[n - 1 - i] else 1.0 for i in range(n)]
         view = np.stack([sign * matrix[:, column] for sign, column in zip(signs, columns, strict=True)], axis=1)
         return [float(spacing[column]) for column in columns], start.tolist(), view.reshape(-1).tolist()
 
@@ -147,9 +154,9 @@ def write_twin(
     writes the entry as that view of it (``AxisMap``): a band of the entry lands in a band of the twin where the map
     keeps the outer axis outer. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
     a pair). The headers are ITK's own, written by it for a one-voxel image of the same geometry and voxel type."""
-    axis_map = axis_map or AxisMap()
     shape, attributes = dataset.get_infos(group, name)
     extents = [int(extent) for extent in shape[1:]]
+    axis_map = axis_map or AxisMap.identity_of(len(extents))
     geometry = axis_map.geometry(*(attributes.get_np_array(key) for key in ("Spacing", "Origin", "Direction")), extents)
     view = axis_map.extents(extents)
     with contextlib.ExitStack() as stack:
@@ -168,7 +175,7 @@ def write_twin(
             )
             voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(view))
         for depth, rows in _slabs(extents, 4, band or chunk):  # read as float32
-            slices = (slice(0, 1), depth, rows, slice(None))
+            slices = (slice(0, 1), depth, rows, *(slice(None) for _ in extents[2:]))
             values = np.asarray(dataset.read_data_slice(group, name, slices)[0][0], dtype=np.float32)
             if dtype == "uint8":
                 values = ((values > 0) if positive else (values != 0)).astype(np.uint8)
@@ -176,7 +183,9 @@ def write_twin(
                 values = values.astype(dtype, copy=False)
             if clip is not None:
                 values = np.clip(values, clip[0], clip[1])
-            box = axis_map.box((depth.start, rows.start, 0), (depth.stop, rows.stop, extents[2]), extents)
+            box = axis_map.box(
+                (depth.start, rows.start, *[0] * len(extents[2:])), (depth.stop, rows.stop, *extents[2:]), extents
+            )
             voxels[box] = axis_map.view(values)
         if isinstance(voxels, np.memmap):
             voxels.flush()
@@ -394,7 +403,8 @@ def remap(path: Path, axis_map: AxisMap) -> None:
     beside it, its components as they are (a field's are physical), then put in its place."""
     reader, dtype, shape, offset = _pixels(path)
     source = np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=shape)
-    extents, view = list(shape[:3]), axis_map.extents(shape[:3])
+    extents = list(shape[:-1])
+    view = axis_map.extents(extents)
     spacing, origin, direction = axis_map.geometry(
         reader.GetSpacing(), reader.GetOrigin(), reader.GetDirection(), extents
     )
@@ -402,11 +412,11 @@ def remap(path: Path, axis_map: AxisMap) -> None:
     geometry.SetSpacing(spacing)
     geometry.SetDirection(direction)
     staged = path.with_name(f".{path.name}.view")
-    start = _new_metaimage(staged, geometry, view, shape[3] * dtype.itemsize)
-    target = np.memmap(staged, dtype=dtype, mode="r+", offset=start, shape=(*view, shape[3]))
+    start = _new_metaimage(staged, geometry, view, shape[-1] * dtype.itemsize)
+    target = np.memmap(staged, dtype=dtype, mode="r+", offset=start, shape=(*view, shape[-1]))
     for depth, rows in _slabs(shape, dtype.itemsize):
-        box = axis_map.box((depth.start, rows.start, 0), (depth.stop, rows.stop, extents[2]), extents)
-        target[box] = axis_map.view(np.asarray(source[depth, rows]))
+        low, high = (depth.start, rows.start, *[0] * len(extents[2:])), (depth.stop, rows.stop, *extents[2:])
+        target[axis_map.box(low, high, extents)] = axis_map.view(np.asarray(source[depth, rows]))
     target.flush()
     del source, target
     os.replace(staged, path)

@@ -311,6 +311,7 @@ class ConvexAdamEngine:
             ):
                 if model.dim > dimension:
                     model = feature_model(plane_model(spec))
+                    model.dim = dimension  # its 2-D version, which a local file's absent registry entry calls 3-D
                 # Patch size 0 is the whole image in one piece: the overlap only places and blends patches.
                 voxel = ([float(v) for v in spec.voxel_size[:dimension]] if spec.voxel_size is not None else None) or [
                     0.0
@@ -613,16 +614,19 @@ class ConvexAdamEngine:
             readers.append(source)
             return source.GetOutput()
 
-        fixed_image = reader(fixed, _image_f(DIM))
-        moving_image = reader(moving, _image_f(DIM))
-        mask_type = itk.Image[itk.UC, DIM]
+        from ..native import read_information
+
+        dimension = read_information(fixed).GetDimension()  # the pair's, a plane or a volume
+        fixed_image = reader(fixed, _image_f(dimension))
+        moving_image = reader(moving, _image_f(dimension))
+        mask_type = itk.Image[itk.UC, dimension]
         fixed_mask_image = reader(fixed_mask, mask_type) if fixed_mask is not None else None
         moving_mask_image = reader(moving_mask, mask_type) if moving_mask is not None else None
         if fixed_mask_image is not None and moving_mask_image is None:
             # As a run on the whole pair: a whole-image mask on the moving side, warped with it, drops the fixed
             # voxels the field sends out of the moving image. Ones wherever the moving image is, computed as a box
             # asks for them.
-            ones = itk.BinaryThresholdImageFilter[_image_f(DIM), mask_type].New(Input=moving_image, InsideValue=1)
+            ones = itk.BinaryThresholdImageFilter[_image_f(dimension), mask_type].New(Input=moving_image, InsideValue=1)
             ones.UpdateOutputInformation()
             readers.append(ones)
             moving_mask_image = ones.GetOutput()
@@ -645,7 +649,7 @@ class ConvexAdamEngine:
                 readers.append(change)
                 return change.GetOutput()
 
-            moving_image = placed(moving_image, _image_f(DIM))
+            moving_image = placed(moving_image, _image_f(dimension))
             moving_mask_image = None if moving_mask_image is None else placed(moving_mask_image, mask_type)
 
         def finish(output, grid) -> Path:
@@ -693,7 +697,7 @@ class ConvexAdamEngine:
         if samples is not None:
             # An iteration steps the boxes it draws, anew at each one, as elastix steps on the points it draws; a box
             # steps as often on average as the engine's own run iterates.
-            drawn = min(drawn, max(1, samples // region_size**DIM))
+            drawn = min(drawn, max(1, samples // region_size**dimension))
         if device_index >= 0:
             torch.cuda.init()  # the peak is read off the allocator, which exists once CUDA is initialised
             torch.cuda.reset_peak_memory_stats(device_index)
@@ -942,6 +946,10 @@ def region_geometry(size_xyz: list[int], grid_shrink: int, region_size: int) -> 
 
 def _write_streamed(output, field: Path, fixed_image) -> None:
     """Write a stage's dense field on the fixed grid to ``field`` by slabs, each computed as the writer asks for it."""
-    writer = itk.ImageFileWriter[itk.Image[itk.Vector[itk.F, DIM], DIM]].New(Input=output, FileName=str(field))
-    writer.SetNumberOfStreamDivisions(max(1, math.ceil(math.prod(itk.size(fixed_image)) * DIM * 4 / _SLAB_BYTES)))
+    dimension = fixed_image.GetImageDimension()
+    writer = itk.ImageFileWriter[itk.Image[itk.Vector[itk.F, dimension], dimension]].New(
+        Input=output, FileName=str(field)
+    )
+    voxels = math.prod(itk.size(fixed_image))
+    writer.SetNumberOfStreamDivisions(max(1, math.ceil(voxels * dimension * 4 / _SLAB_BYTES)))
     writer.Update()

@@ -281,6 +281,14 @@ def test_a_mask_takes_its_image_s_grid_where_it_lies_on_it_and_is_resampled_onto
         assert on_grid.GetOrigin() == image.GetOrigin() and np.array_equal(sitk.GetArrayFromImage(on_grid), expected)
 
 
+def _saved(model: torch.jit.ScriptModule, stem: Path) -> str:
+    """``model`` saved as its 3-D and its 2-D version (the one a plane takes, ``impact_loss.plane_model``): it reads
+    either; the 3-D one's path."""
+    for dims in ("2D", "3D"):
+        model.save(str(stem.with_name(f"{stem.name}_{dims}.pt")))
+    return str(stem.with_name(f"{stem.name}_3D.pt"))
+
+
 def _intensity_model(tmp_path: Path) -> str:
     """A TorchScript feature model returning the image, scaled so the data term outweighs the regulariser the way
     MIND's features do."""
@@ -289,9 +297,7 @@ def _intensity_model(tmp_path: Path) -> str:
         def forward(self, image: torch.Tensor) -> list[torch.Tensor]:
             return [10.0 * image]
 
-    model = tmp_path / "intensity.pt"
-    torch.jit.script(Intensity()).save(str(model))
-    return str(model)
+    return _saved(torch.jit.script(Intensity()), tmp_path / "intensity")
 
 
 def _box_model(tmp_path: Path) -> str:
@@ -300,11 +306,11 @@ def _box_model(tmp_path: Path) -> str:
 
     class Box(torch.nn.Module):
         def forward(self, image: torch.Tensor) -> list[torch.Tensor]:
+            if image.dim() == 4:  # a plane
+                return [10.0 * torch.nn.functional.avg_pool2d(image, 3, stride=1, padding=1, count_include_pad=True)]
             return [10.0 * torch.nn.functional.avg_pool3d(image, 3, stride=1, padding=1, count_include_pad=True)]
 
-    model = tmp_path / "box.pt"
-    torch.jit.script(Box()).save(str(model))
-    return str(model)
+    return _saved(torch.jit.script(Box()), tmp_path / "box")
 
 
 def _body(image: sitk.Image) -> sitk.Image:
@@ -567,8 +573,9 @@ def test_the_region_route_starts_from_the_translation_between_the_centres_too(tm
 
 
 @pytest.mark.slow  # itk-impact runs the coarse stage by regions on the CPU
+@pytest.mark.parametrize("plane", [False, True], ids=["volume", "plane"])
 @pytest.mark.parametrize(("build", "fov"), [(_intensity_model, 1), (_box_model, 3)], ids=["point-wise", "3 voxels"])
-def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path, build, fov) -> None:
+def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path, build, fov, plane) -> None:
     # A preset with the coarse stage alone (ConvexAdam#coarse, #impact_mrct) runs by regions too: its field,
     # interpolated from its grid for each region the writer asks, is the whole run's, a model's regions read with
     # half its receptive field around them.
@@ -582,6 +589,8 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
     ):
         pytest.skip("itk-impact 0.2 is not installed")
     fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
+    if plane:  # a plane of it, by the same regions: the region route takes the pair's dimension
+        fixed, moving = fixed[:, :, 16], (_ct_phantom((4.0, -3.0, 0.0)) + 1000.0)[:, :, 16]
     models = {"0": convexadam.ModelSpec(ref=build(tmp_path), distance="L1")}
     engine = _net(tmp_path, models=models, grid_spacing=2, displacement_half_width=2, stages=["coarse"])
     engine = engine["Registration"]._engine
@@ -604,8 +613,10 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
 
 
 @pytest.mark.slow  # itk-impact runs both fine stages by regions on the CPU
-def test_every_fine_stage_runs_by_regions_as_it_runs_whole(tmp_path: Path) -> None:
-    # A chain of two fine stages refines twice by regions, the second from the first's grid, as it does whole.
+@pytest.mark.parametrize("plane", [False, True], ids=["volume", "plane"])
+def test_every_fine_stage_runs_by_regions_as_it_runs_whole(tmp_path: Path, plane: bool) -> None:
+    # A chain of two fine stages refines twice by regions, the second from the first's grid, as it does whole, on a
+    # volume and on a plane.
     import itk
     from impact_reg_konfai import impact_reg as reg
     from impact_reg_konfai.native import write_twin
@@ -616,6 +627,8 @@ def test_every_fine_stage_runs_by_regions_as_it_runs_whole(tmp_path: Path) -> No
     ):
         pytest.skip("itk-impact 0.2 is not installed")
     fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
+    if plane:
+        fixed, moving = fixed[:, :, 16], (_ct_phantom((4.0, -3.0, 0.0)) + 1000.0)[:, :, 16]
     models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
     engine = _net(tmp_path, models=models, iterations=4, stages=["fine", "fine"])["Registration"]._engine
     for stage_models in engine._feature_models.values():

@@ -1491,20 +1491,19 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
 
 
 @pytest.mark.parametrize(
-    ("choice", "flat", "sampled", "tiled"),
+    ("choice", "engine", "sampled", "tiled"),
     [
-        ("auto", False, [1], False),  # the case over the budget sampled, the other whole
-        ("auto", True, [], True),  # a 2-D pair over the budget in two passes: the sampled route takes volumes
-        ("whole", False, [], False),
-        ("tiled", False, [], True),
-        ("sampled", False, [0, 1], False),  # the case that fits too
+        ("auto", "fireants", [1], False),  # the case over the budget sampled, the other whole
         ("auto", None, [], True),  # an engine the sampled route does not drive: two passes
+        ("whole", "fireants", [], False),
+        ("tiled", "fireants", [], True),
+        ("sampled", "fireants", [0, 1], False),  # the case that fits too
     ],
 )
-def test_each_route_places_every_case(monkeypatch: pytest.MonkeyPatch, choice, flat, sampled, tiled) -> None:
+def test_each_route_places_every_case(monkeypatch: pytest.MonkeyPatch, choice, engine, sampled, tiled) -> None:
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"tiling": {"tile": "Prediction_tile.yml"}})
-    monkeypatch.setattr(reg, "_sampled_engine", lambda preset: None if flat is None else "fireants")
-    route = reg._route(choice, "P", [10, 1000], bool(flat), (100, 50))
+    monkeypatch.setattr(reg, "_sampled_engine", lambda preset: engine)
+    route = reg._route(choice, "P", [10, 1000], (100, 50))
     assert (route.sampled, route.tiled, route.budget, route.tile_budget) == (sampled, tiled, 100, 50)
 
 
