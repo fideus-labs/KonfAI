@@ -748,6 +748,45 @@ def test_static_features_of_a_volume_swept_by_a_2d_network_are_the_whole_volume_
         assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
 
 
+def test_a_2d_jacobian_model_at_a_voxel_size_reads_a_halo_for_every_axis_it_sweeps(tmp_path, monkeypatch):
+    """A 2-D network sweeps a volume along any of its axes: its two voxel_size values fall on any two of the pair's,
+    and the halo the deformable stage reads around a box is the widest they give."""
+    from impact_reg_konfai.models import fireants as engine
+    from impact_reg_konfai.models import fireants_sampled
+
+    spacing = (1.0, 2.0, 0.5)
+    paths = []
+    for name, array in (("fixed", texture()), ("moving", texture((1.0, 0.0, 0.0)))):
+        image = image_of(array)
+        image.SetSpacing(spacing)
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    path = tmp_path / "convolved.pt"
+    torch.jit.script(_Convolved()).save(str(path))
+    settings = {"scales": [1], "affine_iterations": [1], "deformable_iterations": [1], "cc_kernel": 3}
+    settings |= {"affine_metric": "mse", "affine_lr": 0.01, "moments_init": "none", "linear_method": "none"}
+    settings |= {"deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0, "seed": 0}
+    spec = engine.ModelSpec(ref=str(path), layers_mask="1", distance="L2", voxel_size=[1.5, 3.0, 1.0])
+    fireants = engine.FireANTsEngine(
+        **settings, deformable_method="greedy", deformable_metric="impact", mode="Jacobian", impact_levels=[[spec]]
+    )
+    core = fireants._impact_loss().cores[0]  # a local file is a 3-D model to the registry: the 2-D network handed in
+    core.model.model, core.model.dim, core.dimension = torch.jit.script(_Convolved(2)), 2, 2
+    core.model.fov, core.model.voxel_size = [3], [1.5, 3.0]
+    halos = []
+
+    class Stage:
+        def __init__(self, *args, loss_halo, **kwargs) -> None:
+            halos.append(loss_halo)
+            raise InterruptedError
+
+    monkeypatch.setattr(fireants_sampled, "sampled_deformable_class", lambda: Stage)
+    with pytest.raises(InterruptedError):
+        fireants.register_sampled(*paths, None, None, -1, tmp_path / "work", tmp_path / "field.mha", 16)
+    reach = core.model.receptive_field - 1 + 2 * core.model.block_stride("cpu")
+    assert halos == [math.ceil(reach * max(core.model.voxel_size) / min(spacing))]
+
+
 def test_a_rescaled_source_and_a_mask_of_ones_read_by_boxes():
     source = RescaledSource(ArraySource(np.arange(27, dtype=np.float32).reshape(1, 3, 3, 3), "cpu"), 5.0, 20.0, 0.5)
     box = source.read([0, 0, 0], [3, 3, 3])

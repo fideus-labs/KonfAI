@@ -1862,8 +1862,14 @@ class FireANTsEngine:
                     try:
                         reach = core.model.receptive_field - 1
                         if core.model.voxel_size is not None:
-                            spacing = readers["fixed"].GetSpacing()
-                            ratio = max(size / step for size, step in zip(core.model.voxel_size, spacing, strict=True))
+                            sizes, spacing = core.model.voxel_size, readers["fixed"].GetSpacing()
+                            # A network of another dimension than the pair's (a 2-D one sweeping any axis of a volume)
+                            # has its values along any of the pair's axes.
+                            ratio = (
+                                max(size / step for size, step in zip(sizes, spacing, strict=True))
+                                if len(sizes) == len(spacing)
+                                else max(sizes) / min(spacing)
+                            )
                             reach = math.ceil((reach + 2 * core.model.block_stride(device)) * max(ratio, 1.0))
                         loss_halo = max(loss_halo, reach)
                     except MeasureError:
