@@ -882,6 +882,18 @@ def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, lo
     assert not list(tmp_path.glob("*.npy"))
 
 
+THIN = (20, 40, 44)  # z under FireANTs' MIN_IMG_SIZE: its grid has 32 nodes along it
+
+
+@pytest.mark.parametrize("loss", ["cc", "mi"])
+def test_every_box_reproduces_the_whole_image_syn_on_a_thin_axis(tmp_path, loss):
+    """An axis under MIN_IMG_SIZE: SyN's grid is finer than the image along it, the fixed image interpolated onto it at
+    the last scale as FireANTs interpolates it; every box at every iteration gives FireANTs' warps."""
+    _, whole_warps, sampled = deformable_pair(tmp_path, True, loss, size=THIN)
+    assert warp_gap(sampled, whole_warps, THIN) < 1e-3
+    sampled.close()
+
+
 @pytest.mark.parametrize("loss", ["cc", "mi"])
 def test_every_box_reproduces_the_whole_image_masked_deformable(tmp_path, loss):
     """With a mask that keeps some boxes more than others, every box at every iteration is still FireANTs' masked

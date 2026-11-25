@@ -1101,26 +1101,37 @@ def sampled_deformable_class():
 
         def _level_sources(self, scale: int) -> tuple[RegionSource, RegionSource]:
             """The images of a scale as FireANTs computes them: the fixed one smoothed and downsampled; the moving
-            one smoothed on its own grid for SyN, smoothed and downsampled for greedy."""
+            one smoothed on its own grid for SyN, smoothed and downsampled for greedy. At the last scale SyN
+            interpolates the fixed image onto its grid, unsmoothed: the image itself, unless an axis is under
+            MIN_IMG_SIZE, where the grid is finer than the image."""
             fixed, moving = self._sources
             # One scale's levels at a time: SyN's moving one is as large as the image at every scale.
             for other in [held_scale for held_scale in self._levels if held_scale != scale]:
                 for level in self._levels.pop(other):
                     level.close()
-            if scale == 1:
+            size = fireants_level_sizes(fixed.shape, scale)
+            if scale == 1 and size == list(fixed.shape):
                 return self._sources
             if scale not in self._levels:
-                size = fireants_level_sizes(fixed.shape, scale)
-                gaussians = fireants_gaussians(fixed.shape, size, fixed.device)
                 settings = {"mask_channel": self.masked, "directory": self._scratch}
-                if self._symmetric:
-                    moving_level = blur_level(moving, gaussians, **settings)
+                gaussians = fireants_gaussians(fixed.shape, size, fixed.device) if scale > 1 else None
+                if scale == 1:
+                    levels = (build_level(fixed, size, None, **settings),)  # the moving image as it is
+                elif self._symmetric:
+                    levels = (
+                        build_level(fixed, size, gaussians, **settings),
+                        blur_level(moving, gaussians, **settings),
+                    )
                 else:
-                    moving_level = build_level(moving, fireants_level_sizes(moving.shape, scale), gaussians, **settings)
-                fixed_level = build_level(fixed, size, gaussians, **settings)
+                    moving_size = fireants_level_sizes(moving.shape, scale)
+                    levels = (
+                        build_level(fixed, size, gaussians, **settings),
+                        build_level(moving, moving_size, gaussians, **settings),
+                    )
                 # On the device while they fit half of what it has left, as the sources are.
-                self._levels[scale] = tuple(held((fixed_level, moving_level), free_bytes(fixed.device) / 2))
-            return self._levels[scale]
+                self._levels[scale] = tuple(held(levels, free_bytes(fixed.device) / 2))
+            levels = self._levels[scale]
+            return (levels[0], moving) if len(levels) == 1 else levels
 
         def _set_grid(self, grid: Sequence[int]) -> None:
             names = ("fwd", "rev") if self._symmetric else ("fwd",)

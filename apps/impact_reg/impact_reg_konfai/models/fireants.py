@@ -1319,22 +1319,7 @@ class FireANTsEngine:
             # their voxel axes in one order, so the fixed and moving features compare the same descriptors.
             fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
         _require_fireants()
-        from fireants.utils.globals import MIN_IMG_SIZE
-
-        # FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a
-        # fixed image with a thinner axis, and SyN cannot invert a warp larger than the image on every axis.
-        # Both fail only once the optimisation is over, so the sizes are checked before it starts.
-        thin = [extent < MIN_IMG_SIZE for extent in fixed.GetSize()]
-        if self._deformable_method == "greedy" and any(thin):
-            raise ValueError(
-                f"FireANTs' greedy registration needs every axis of the fixed image to span at least {MIN_IMG_SIZE} "
-                f"voxels, got {fixed.GetSize()}: use deformable_method 'syn', which takes a thin axis."
-            )
-        if self._deformable_method == "syn" and all(thin):
-            raise ValueError(
-                f"FireANTs' SyN needs one axis of the fixed image to span at least {MIN_IMG_SIZE} voxels, got "
-                f"{fixed.GetSize()}: register the whole image, or tiles of at least {MIN_IMG_SIZE} a side."
-            )
+        self._check_thin(fixed.GetSize())
         if self._deformable_metric == "impact" and self._deformable_method != "none":
             loss = self._impact_loss()  # before any compute: a model that cannot be had or probed fails here
             for core in loss.cores:  # the model grids and the sampled patches are laid out in mm
@@ -1568,8 +1553,6 @@ class FireANTsEngine:
         """Refuse what ``register_sampled`` cannot register, from the pair's voxel shapes ((z, y, x)) alone, before
         anything is read."""
         _require_fireants()
-        from fireants.utils.globals import MIN_IMG_SIZE
-
         if 1 in (*fixed_shape, *moving_shape):
             raise NotImplementedError(
                 "an image with an axis of one voxel has no extent along it for FireANTs' normalized coordinates:"
@@ -1577,11 +1560,24 @@ class FireANTsEngine:
             )
         if self._deformable_method == "none":
             return
-        if min(fixed_shape) < MIN_IMG_SIZE:
-            raise NotImplementedError(
-                f"FireANTs resamples an axis under {MIN_IMG_SIZE} voxels to that many at every scale, where the"
-                f" deformable stage by boxes reads the fixed image's own grid: this one has an axis of"
-                f" {min(fixed_shape)}."
+        self._check_thin(fixed_shape)
+
+    def _check_thin(self, size) -> None:
+        """FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a fixed
+        image with a thinner axis, and SyN cannot invert a warp larger than the image on every axis. Both fail only
+        once the optimisation is over, so the sizes are checked before it starts, whole or by boxes."""
+        from fireants.utils.globals import MIN_IMG_SIZE
+
+        thin = [extent < MIN_IMG_SIZE for extent in size]
+        if self._deformable_method == "greedy" and any(thin):
+            raise ValueError(
+                f"FireANTs' greedy registration needs every axis of the fixed image to span at least {MIN_IMG_SIZE} "
+                f"voxels, got {tuple(size)}: use deformable_method 'syn', which takes a thin axis."
+            )
+        if self._deformable_method == "syn" and all(thin):
+            raise ValueError(
+                f"FireANTs' SyN needs one axis of the fixed image to span at least {MIN_IMG_SIZE} voxels, got "
+                f"{tuple(size)}: register the whole image, or tiles of at least {MIN_IMG_SIZE} a side."
             )
 
     def register_sampled(
