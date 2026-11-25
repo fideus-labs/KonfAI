@@ -1716,6 +1716,31 @@ def test_a_test_time_copy_is_drawn_on_every_group_the_model_reads() -> None:
     assert program["steps"][1]["in"] == ["input", "MASK"]
 
 
+def _copies(config: dict) -> list[dict]:
+    """The manifest of each test-time copy of ``config``, as an export assembles them."""
+    manifest, _folds, per_copy = transform_manifest(config, "Predictor")
+    passes = tta_passes(config, "Predictor")
+    program = assemble_program([{"id": "m", "manifest": manifest}], reduce="mean", passes=passes, per_copy=per_copy)
+    return [step["manifest"] for step in program["steps"][: len(passes)]]
+
+
+def test_a_test_time_copy_runs_nothing_on_a_group_a_stage_alone_reads() -> None:
+    # konfai hands a stage the group it names as stored, and makes its copies from the case the chain prepared: the
+    # mask a Clip reads beside the case (examples/Synthesis/Prediction.yml) stays the entry no chain prepares, which
+    # the runtime keeps from the graph.
+    masked = {"Clip": {"min_value": "min", "max_value": 1.0, "mask": "MASK"}}
+    identity, copy = _copies(_prediction(masked, {}, flips=1))
+    assert copy["preprocessing"][-1]["op"] == "flip"
+    assert copy["reads"] == identity["reads"] == [{"group": "MASK", "channels": 1, "preprocessing": []}]
+    # A group the model reads through a chain is drawn with the copy, whichever stage reads it as stored too.
+    both = _two_groups({"Clip": {"min_value": 0, "max_value": 1}})
+    both["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = masked
+    both["Predictor"]["Dataset"]["augmentations"] = {"T": {"nb": 1, "data_augmentations": {"Flip": {"f_prob": [1]}}}}
+    identity, copy = _copies(both)
+    assert [step["op"] for step in identity["reads"][0]["preprocessing"]] == ["clip"]
+    assert [step["op"] for step in copy["reads"][0]["preprocessing"]] == ["clip", "flip"]
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
 def test_a_quarter_turn_draw_is_the_permute_and_flip_konfai_applies(seed: int) -> None:
     # konfai reads a quarter turn as a signed permutation and applies it with `apply_remap`, a permute

@@ -34,7 +34,7 @@ import random
 import re
 import shutil
 import warnings
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain, combinations, islice, repeat, takewhile
@@ -2311,6 +2311,22 @@ def _post_chain(
     return post, len(before)
 
 
+def _named_beside(steps: Iterable[dict[str, Any]]) -> Iterator[tuple[str, str]]:
+    """Each group a stage of ``steps`` reads beside the case, under the key that names it, in the order they name
+    them."""
+    for step in steps:
+        for key in ("mask_group", "reference_group", "source_group", "field_group"):
+            if group := step.get(key):
+                yield key, group
+
+
+def _a_stages_alone(read: dict[str, Any], named: Collection[str]) -> bool:
+    """Whether an entry of ``reads`` is a stage's alone, ``named`` being the groups the chains' stages read beside the
+    case (:func:`_named_beside`): one a stage names and no chain prepares, which konfai hands the stage as stored.
+    Every other entry feeds the graph, through its chain."""
+    return read["group"] in named and not read.get("preprocessing")
+
+
 def _reads_of(
     config: dict[str, Any],
     root: str,
@@ -2331,12 +2347,12 @@ def _reads_of(
     ]
     named = {read["group"] for read in reads}
     companions: dict[str, int] = {}
-    for step in [*pre, *(step for read in reads for step in read["preprocessing"])]:
-        if group := step.get("mask_group") or step.get("reference_group") or step.get("source_group"):
-            companions.setdefault(group, 1)
-        elif group := step.get("field_group"):
+    for key, beside in _named_beside(chain(pre, *(read["preprocessing"] for read in reads))):
+        if key != "field_group":
+            companions.setdefault(beside, 1)
+        else:
             # A displacement field holds one component per spatial axis of the case the patch cuts.
-            companions.setdefault(group, len(inference_patch(config, root).get("patch_size") or [0, 0, 0]))
+            companions.setdefault(beside, len(inference_patch(config, root).get("patch_size") or [0, 0, 0]))
     return reads + [
         {"group": group, "channels": channels, "preprocessing": []}
         for group, channels in companions.items()
@@ -2736,9 +2752,16 @@ def _copy_manifest(manifest: dict[str, Any], ops: list[dict[str, Any]]) -> dict[
     if not ops:
         return manifest
     drawn = [{**op, "id": f"__tta_{index}"} for index, op in enumerate(ops)]
-    # konfai shares one draw across every group of a case, so a copy flips them all; only the first
-    # group's is undone, since the output chain undoes that one alone.
-    reads = [{**read, "preprocessing": [*read.get("preprocessing", []), *ops]} for read in manifest.get("reads") or []]
+    # konfai shares one draw across every group of a case, so a copy flips every group the graph takes; only the
+    # first group's is undone, since the output chain undoes that one alone. A group a stage alone reads is handed
+    # to it as stored, before the draw: the copy runs nothing on it.
+    reads = manifest.get("reads") or []
+    chains = chain(manifest.get("preprocessing", []), *(read.get("preprocessing", []) for read in reads))
+    named = {group for _key, group in _named_beside(chains)}
+    reads = [
+        read if _a_stages_alone(read, named) else {**read, "preprocessing": [*read.get("preprocessing", []), *ops]}
+        for read in reads
+    ]
     return {
         **manifest,
         "preprocessing": [*manifest.get("preprocessing", []), *drawn],
