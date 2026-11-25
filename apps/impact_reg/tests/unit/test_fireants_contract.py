@@ -116,6 +116,7 @@ def _bare_loss(mode: str, core: torch.nn.Module, spec: "fireants.ModelSpec") -> 
     loss._generator = torch.Generator().manual_seed(0)
     loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
     loss._statistics, loss._cells, loss._layer_sums, loss._level_weight, loss._place = {}, {}, {}, 0.0, None
+    loss._bases = {}
     return loss
 
 
@@ -223,23 +224,28 @@ def test_a_layers_mask_longer_than_the_model_s_outputs_fails_at_build(tmp_path) 
 
 
 @pytest.mark.parametrize(
-    ("distance", "pca", "mode", "refused"),
+    ("dimension", "distance", "pca", "mode", "refused"),
     [
-        ("NCC", 2, "Jacobian", True),
-        ("NCC", 0, "Jacobian", False),
-        ("L2", 2, "Jacobian", False),
-        ("NCC", 2, "Static", False),
+        (2, "NCC", 2, "Jacobian", True),
+        (3, "NCC", 2, "Jacobian", False),
+        (2, "NCC", 0, "Jacobian", False),
+        (2, "L2", 2, "Jacobian", False),
+        (2, "NCC", 2, "Static", False),
     ],
 )
-def test_a_jacobian_ncc_layer_with_pca_is_refused_by_boxes_before_any_read(tmp_path, distance, pca, mode, refused):
-    """By boxes, a Jacobian NCC layer is pooled over the level, which a PCA basis fit box by box cannot give: the
-    pair's shapes alone refuse it, naming what registers it."""
+def test_a_2d_jacobian_ncc_layer_with_pca_is_refused_by_boxes_before_any_read(
+    tmp_path, dimension, distance, pca, mode, refused
+):
+    """By boxes, a Jacobian NCC layer reduced by PCA takes the whole fixed map's basis from the boxes' sums, which a 2-D
+    network's, fitted on slices spread over the map, cannot: the pair's shapes alone refuse it, naming what
+    registers it."""
     from konfai.utils.errors import ConfigError
 
     path = tmp_path / "one_layer.pt"
     torch.jit.script(_OneLayer()).save(str(path))
     spec = fireants.ModelSpec(ref=str(path), distance=distance, pca=pca)
     engine = _engine(deformable_method="greedy", deformable_metric="impact", mode=mode, impact_levels=[[spec]])
+    engine._impact_loss().cores[0].dimension = dimension  # a local file is a 3-D model to the registry
     if refused:
         with pytest.raises(ConfigError, match="--out-of-core whole"):
             engine.check_sampled((40, 40, 40), (40, 40, 40))

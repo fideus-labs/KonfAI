@@ -97,6 +97,7 @@ def test_the_static_lncc_falls_back_to_fewer_channels(monkeypatch: pytest.Monkey
     loss._generator = torch.Generator().manual_seed(0)
     loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
     loss._statistics, loss._cells, loss._layer_sums, loss._level_weight, loss._place = {}, {}, {}, 0.0, None
+    loss._bases = {}
     whole = loss(moved, fixed)
     (whole_gradient,) = torch.autograd.grad(whole, moved)
 

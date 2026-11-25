@@ -262,7 +262,7 @@ def _patch_distances(
     kept: list[int],
     terms: list[tuple[str, int]],
     normalization: str,
-    project: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None,
+    project: Callable[[int, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None,
     seed: int,
     kernel: int,
     pooled: "dict[int, tuple[torch.Tensor, float, float]] | None" = None,
@@ -277,7 +277,7 @@ def _patch_distances(
         moved_features = normalized_features(moved_layers[layer].float(), normalization)
         fixed_features = normalized_features(fixed_layers[layer].float(), normalization)
         if project is not None:
-            moved_features, fixed_features = project(moved_features, fixed_features)
+            moved_features, fixed_features = project(index, moved_features, fixed_features)
         moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
         layer_mask = None
         if mask is not None:
@@ -290,6 +290,22 @@ def _patch_distances(
         else:
             values.append(distance(name, moved_features, fixed_features, layer_mask, kernel, 0))
     return torch.stack(values)
+
+
+def _on_basis(feature: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
+    """``feature`` ``[B, C, *spatial]`` on the PCA ``basis`` ``[C, K]``, uncentred: a piece centred by its own mean
+    would not add up to the level, and an NCC takes each component's mean off itself."""
+    return torch.einsum("bc...,ck->bk...", feature, basis.to(feature.device, feature.dtype))
+
+
+def _level_basis(total: tuple[torch.Tensor, torch.Tensor, torch.Tensor], components: int) -> torch.Tensor:
+    """The basis ``[C, K]`` of the ``components`` principal components of a layer from its level sums (``pca_sums``:
+    its cells, their channels' sums and cross-products), as ``pca_project`` fits it on the whole map."""
+    count, sums, products = total
+    mean = sums / count
+    covariance = (products - count * torch.outer(mean, mean)) / max(float(count) - 1, 1.0)
+    channels = covariance.shape[0]
+    return torch.linalg.eigh(covariance)[1][:, channels - min(components, channels) :].float()
 
 
 def _level_ncc(total: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -365,11 +381,17 @@ class _ImpactCore(torch.nn.Module):
         seed: int,
         kernel: int,
         pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None,
+        bases: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Each kept layer's distance, averaged over the patches the mask reaches (the whole image when untiled)."""
+        """Each kept layer's distance, averaged over the patches the mask reaches (the whole image when untiled);
+        ``bases``, each layer's PCA basis when the level's sums gave it (``ImpactFeatureLoss.pool``)."""
         network = self.model.network(moved.device)
         moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
-        project = self._pca_project if self.pca > 0 else None
+        project = None
+        if bases is not None:
+            project = lambda index, moved, fixed: (_on_basis(moved, bases[index]), _on_basis(fixed, bases[index]))  # noqa: E731
+        elif self.pca > 0:
+            project = lambda index, moved, fixed: self._pca_project(moved, fixed)  # noqa: E731
         patches = [
             (moved_patch, fixed_patch, mask_patch)
             for moved_patch, fixed_patch, mask_patch in _patch_views(
@@ -405,11 +427,13 @@ class _ImpactCore(torch.nn.Module):
         statistics: tuple[Attribute, Attribute] | None = None,
         pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None,
         place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+        bases: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Each kept layer's distance over the whole image, or over tiles once the whole image has run out of memory.
         ``statistics`` are the moved and fixed images' intensity statistics when the two tensors are pieces of them
         (``ImpactFeatureLoss.pool``), their own otherwise; ``pooled``, the NCC layers whose level sums it gave;
-        ``place``, where a piece lies in its level (``_prepared``).
+        ``place``, where a piece lies in its level (``_prepared``); ``bases``, the layers' PCA bases the level's
+        sums gave.
 
         A level that runs out is scored again in tiles half as wide, and in tiles half as wide again if it
         still does not fit; the tile is kept for that level, so the retry happens once per registration.
@@ -426,7 +450,7 @@ class _ImpactCore(torch.nn.Module):
             # (SyN warps the fixed one too), so a whole-image pass keeps two networks' activations until the backward.
             # The intensity statistics stay the whole image's, so every tile is normalised alike.
             self.model.shape, self.model.checkpoint = tile, tile is not None
-            return self._scored(moved, fixed, mask, statistics, terms, seed, kernel, pooled)
+            return self._scored(moved, fixed, mask, statistics, terms, seed, kernel, pooled, bases)
 
         with no_texpr_fuser():
             return halve_on_oom(run, self._narrow_tile, moved.is_cuda)
@@ -440,9 +464,11 @@ class _ImpactCore(torch.nn.Module):
         terms: list[tuple[str, int]],
         seed: int,
         place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+        bases: list[torch.Tensor] | None = None,
     ) -> dict[int, torch.Tensor]:
-        """Each NCC layer's ``ncc_sums`` over one piece, the voxels ``weight`` keeps on its grid: what the level's sums
-        add up from it (``ImpactFeatureLoss.pool``). The network runs on the whole piece, as ``distances`` does."""
+        """Each NCC layer's ``ncc_sums`` over one piece, the voxels ``weight`` keeps on its grid, its features on its
+        PCA basis when ``bases`` gives it: what the level's sums add up from it (``ImpactFeatureLoss.pool``). The
+        network runs on the whole piece, as ``distances`` does."""
         moved, fixed, weight = self._prepared(moved, fixed, weight, seed, place)
         network = self.model.network(moved.device)
         moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
@@ -454,11 +480,35 @@ class _ImpactCore(torch.nn.Module):
                 continue
             moved_features = normalized_features(moved_layers[layer].float(), self.normalization)
             fixed_features = normalized_features(fixed_layers[layer].float(), self.normalization)
+            if bases is not None:
+                moved_features, fixed_features = (_on_basis(f, bases[index]) for f in (moved_features, fixed_features))
             moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
             layer_weight = torch.nn.functional.interpolate(
                 weight.float(), size=moved_features.shape[2:], mode="nearest"
             )
             sums[index] = ncc_sums(moved_features, fixed_features, layer_weight).cpu()
+        return sums
+
+    def pca_sums(
+        self,
+        fixed: torch.Tensor,
+        region: torch.Tensor,
+        statistics: Attribute,
+        seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Each kept layer's fixed features over the cells of one piece ``region`` covers on its grid: their count,
+        their channels' sums and cross-products, in double. Over the pieces of a level they add up to what ``pca_project``
+        fits its basis on, every cell of the whole map (``_level_basis``)."""
+        fixed, _, region = self._prepared(fixed, fixed, region, seed, place)
+        with torch.no_grad(), no_texpr_fuser():
+            layers = self.model.network(fixed.device)(*self.model.inputs(fixed, statistics))
+        sums = []
+        for layer in self.kept:
+            features = normalized_features(layers[layer].float(), self.normalization)
+            weight = torch.nn.functional.interpolate(region.float(), size=features.shape[2:], mode="nearest")
+            flat, kept = features[0].flatten(1).double(), weight.flatten().double()
+            sums.append(((kept.sum()).cpu(), (flat @ kept).cpu(), ((flat * kept) @ flat.t()).cpu()))
         return sums
 
     def layer_cells(self, weight: torch.Tensor) -> list[float]:
@@ -658,6 +708,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
         # Jacobian: each model's NCC layers' derivative and value from the level's sums, and the level's weight
         self._layer_sums: dict[int, dict[int, tuple[torch.Tensor, float]]] = {}
+        self._bases: dict[int, list[torch.Tensor]] = {}  # each model's layers' PCA bases over the level (``pool``)
         self._level_weight = 0.0
 
     @property
@@ -668,7 +719,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
         self._level, self._factors, self._draw, self._pooled, self._place = -1, None, None, None, None
-        self._statistics, self._cells, self._layer_sums = {}, {}, {}
+        self._statistics, self._cells, self._layer_sums, self._bases = {}, {}, {}, {}
         self._generator.manual_seed(self._seed)
 
     def draw(self) -> None:
@@ -679,7 +730,7 @@ class ImpactFeatureLoss(torch.nn.Module):
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
         self._level, self._factors, self._pooled = self._level + 1, None, None
-        self._statistics, self._cells, self._layer_sums = {}, {}, {}
+        self._statistics, self._cells, self._layer_sums, self._bases = {}, {}, {}, {}
 
     def start_at(self, level: int) -> None:
         """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
@@ -948,21 +999,41 @@ class ImpactFeatureLoss(torch.nn.Module):
         """Jacobian mode: each NCC layer's sums over the voxels the pieces own, their networks run on the level's
         intensities (a second pass, once those are known), and the level's weight as the stage weighs a piece (its
         voxels, or those both masks keep)."""
-        self._layer_sums = {}
+        self._layer_sums, self._bases = {}, {}
         assert self._draw is not None
         models = [index for index in level if any(name == "NCC" for name, _ in self._terms(index))]
         if not models or any(index not in self._statistics for index in models):
             return
+        # A PCA is fitted on the whole fixed map, every cell (``pca_project``): its basis from the pieces' sums.
+        reduced = [index for index in models if self.cores[index].pca > 0]
+        if reduced:
+            fitted: dict[int, list] = {}
+            for _, fixed, region in read():
+                fixed = fixed[:, :-1] if self._masked else fixed
+                for index in reduced:
+                    seed = self._draw + 1000 * index
+                    piece = self.cores[index].pca_sums(fixed, region, self._statistics[index][1], seed, self._place)
+                    fitted[index] = (
+                        piece
+                        if index not in fitted
+                        else [
+                            tuple(a + b for a, b in zip(total, part, strict=True))
+                            for total, part in zip(fitted[index], piece, strict=True)
+                        ]
+                    )
+            self._bases = {
+                index: [_level_basis(total, self.cores[index].pca) for total in totals]
+                for index, totals in fitted.items()
+            }
         totals: dict[tuple[int, int], torch.Tensor] = {}
         for pieces in read():
             moved, fixed, weight = self._split(*pieces)
             for index in models:
                 seed = self._draw + 1000 * index
-                for layer, piece in (
-                    self.cores[index]
-                    .ncc_sums(moved, fixed, weight, self._statistics[index], self._terms(index), seed, self._place)
-                    .items()
-                ):
+                core, terms, bases = self.cores[index], self._terms(index), self._bases.get(index)
+                for layer, piece in core.ncc_sums(
+                    moved, fixed, weight, self._statistics[index], terms, seed, self._place, bases
+                ).items():
                     totals[(index, layer)] = piece if (index, layer) not in totals else totals[(index, layer)] + piece
         for (index, layer), total in totals.items():
             self._layer_sums.setdefault(index, {})[layer] = _level_ncc(total)
@@ -1015,6 +1086,7 @@ class ImpactFeatureLoss(torch.nn.Module):
                     self._statistics.get(index),
                     {layer: (d, v, scale) for layer, (d, v) in pooled.items()} or None,
                     self._place,
+                    self._bases.get(index),
                 )
                 if index in self._cells:
                     # A layer's mean over the piece's cells, weighed as the stage weighs the piece (its voxels of the
@@ -1672,13 +1744,13 @@ class FireANTsEngine:
         if self._deformable_method == "none":
             return
         if self._deformable_metric == "impact" and self._mode == "Jacobian" and self._voxel_sampling >= 1:
-            # By boxes, a Jacobian NCC layer is the level's from the boxes' feature sums, which a PCA basis fit box
-            # by box does not project alike.
-            for spec in (spec for specs in self._impact_levels for spec in specs):
-                if spec.pca > 0 and spec.distance == "NCC":
+            # By boxes, a Jacobian NCC layer reduced by PCA takes the basis of the whole fixed map from the boxes'
+            # sums; a 2-D network's is fitted on slices spread over the map, which no box holds.
+            for spec, core in zip(self._impact_loss()._specs, self._impact_loss().cores, strict=True):
+                if spec.pca > 0 and spec.distance == "NCC" and core.dimension < DIM:
                     raise ConfigError(
-                        f"FireANTs by boxes cannot score '{spec.ref}' in Jacobian mode: an NCC layer with pca "
-                        f"{spec.pca} needs one PCA basis for the whole level.",
+                        f"FireANTs by boxes cannot score '{spec.ref}' in Jacobian mode: a 2-D network's NCC layer with"
+                        f" pca {spec.pca} fits its basis on slices spread over the whole level.",
                         "Set mode: Static or pca: 0, or choose --out-of-core whole.",
                     )
         self._check_thin([extent for extent in fixed_shape if extent != 1] if plane else fixed_shape)

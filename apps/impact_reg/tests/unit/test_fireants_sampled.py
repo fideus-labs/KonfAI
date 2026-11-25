@@ -1305,16 +1305,18 @@ class _Averaged(torch.nn.Module):
         return [torch.cat([torch.nn.functional.avg_pool3d(y, 3, 1, 1), y * y], 1)]
 
 
+@pytest.mark.parametrize("pca", [0, 1])
 @pytest.mark.parametrize("masked", [False, True])
-def test_a_jacobian_ncc_layer_by_boxes_has_the_level_s_value_and_gradient(tmp_path, masked):
+def test_a_jacobian_ncc_layer_by_boxes_has_the_level_s_value_and_gradient(tmp_path, masked, pca):
     """Evaluated box by box, each box read with the receptive field's halo and weighed as the stage weighs it, a
     Jacobian NCC layer has the level's value and gradient: the boxes' sums (``pool``, a second pass over them once the
-    level's intensities are known) give each box the level's NCC and its derivative."""
+    level's intensities are known) give each box the level's NCC and its derivative, on the PCA basis the whole fixed
+    map gives when the model reduces its layers."""
     from impact_reg_konfai.models import fireants as engine
 
     path = tmp_path / "averaged.pt"
     torch.jit.script(_Averaged()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), distance="NCC")
+    spec = engine.ModelSpec(ref=str(path), distance="NCC", pca=pca)
     loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False, masked=masked)
     loss._level = 0
     generator = torch.Generator().manual_seed(3)
