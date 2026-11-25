@@ -702,7 +702,7 @@ class ConvexAdamEngine:
             # steps as often on average as the engine's own run iterates.
             drawn = min(drawn, max(1, samples // region_size**DIM))
         fine.SetRegionsPerIteration(0 if drawn == geometry["regions"] else drawn)
-        fine.SetNumberOfIterations(int(epochs) * math.ceil(geometry["regions"] / drawn))
+        fine.SetNumberOfIterations(math.ceil(int(epochs) * geometry["regions"] / drawn))
         if device_index >= 0:
             torch.cuda.init()  # the peak is read off the allocator, which exists once CUDA is initialised
             torch.cuda.reset_peak_memory_stats(device_index)

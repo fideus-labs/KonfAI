@@ -872,7 +872,7 @@ def sampled_deformable_class():
         is drawn; a draw of every box is FireANTs' iteration on the whole grid, whatever the boxes, and what the
         stage does without ``samples``, on boxes as large as the device holds. An iteration holds its boxes and no
         more, whatever the image. ``iterations`` counts, per scale, the steps a box takes
-        on average: a scale runs that many times the draws that cover its grid once.
+        on average: a scale runs the draws that hold that many steps of every box, rounded up to a whole draw.
 
         The warps and their Adam moments stay on the device when ``resident``; otherwise in host memory while this
         rank's budget holds them, in files of ``scratch`` beyond. By default each scale keeps them on the device when
@@ -1180,7 +1180,7 @@ def sampled_deformable_class():
                 # The steps each box has taken at this scale, laid out as the boxes are (tiles' order is C order).
                 steps = np.zeros([math.ceil(extent / side) for extent in grid], dtype=np.int64)
                 peaks = {name: _Largest(len(boxes)) for name in self._warps}  # each box's largest direction, last seen
-                for _ in range(epochs * math.ceil(len(boxes) / count)):
+                for _ in range(math.ceil(epochs * len(boxes) / count)):
                     # Every box, or a draw of ``count`` that costs ``count``, not the boxes.
                     drawn = (
                         list(range(len(boxes))) if count == len(boxes) else self._draws.sample(range(len(boxes)), count)
