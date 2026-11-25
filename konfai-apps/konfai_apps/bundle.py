@@ -707,12 +707,17 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     # The bundle the update makes, where it holds a Model.py and no requirements.txt (passed, a support file, or the
     # author's it keeps), gets one drafted from its imports, less its own modules. Packaging deliberately does not
     # execute code to discover dependencies: the draft is reviewed.
-    planned = {name.lower() for name in resolve_support_files(support, args.get("support_root"))}
+    planned = set(resolve_support_files(support, args.get("support_root")))
+    if odd := [name for name in planned if name.lower() == "requirements.txt" and name != "requirements.txt"]:
+        raise AppMetadataError(
+            f"The support file {odd[0]} is named apart from requirements.txt, the name konfai-apps installs.",
+            "Name it requirements.txt, or pass it with --requirements.",
+        )
     left = out.with_name(f".{out.name}.previous")  # the bundle an earlier update left aside, which it takes back
     held = [folder for folder in (out, left) if folder.is_dir()][:1]
     drafting = not args.get("requirements") and "requirements.txt" not in planned
     drafting = drafting and bool(
-        args.get("model_py") or "model.py" in planned or any((folder / "Model.py").is_file() for folder in held)
+        args.get("model_py") or "Model.py" in planned or any((folder / "Model.py").is_file() for folder in held)
     )
     drafted: list[str] = []
 
@@ -739,12 +744,19 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             told = Path(scratch) / "report.json"
             spec["report"] = str(told)
-            # The app's modules are the update's (:func:`_import_path`); bytecode neither written into the update nor
-            # read from it, but under a folder of its own.
+            # The check is loaded first, its modules Python's and the packages'; then the app's are the update's
+            # (:func:`_import_path`), as when the app runs. Bytecode neither written into the update nor read from it,
+            # but under a folder of its own.
             env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode")}
-            env["PYTHONPATH"] = os.pathsep.join(_import_path(sys.path, out, update))
-            code = "import json, sys; from konfai_apps.bundle import _finish_update; _finish_update(json.loads(sys.argv[1]))"
-            done = subprocess.run([sys.executable, "-c", code, json.dumps(spec)], cwd=update, env=env, check=False)  # nosec B603
+            path = _import_path(sys.path, out, update)
+            app = [entry for entry in path if Path(entry).is_relative_to(update.absolute())]
+            env["PYTHONPATH"] = os.pathsep.join(entry for entry in path if entry not in app)
+            code = (
+                "import json, sys; from konfai_apps.bundle import _finish_update;"
+                " sys.path[:0] = json.loads(sys.argv[2]); _finish_update(json.loads(sys.argv[1]))"
+            )
+            command = [sys.executable, "-P", "-c", code, json.dumps(spec), json.dumps(app)]
+            done = subprocess.run(command, cwd=update, env=env, check=False)  # nosec B603
             if told.is_file():
                 report.update(json.loads(told.read_text()))
         if done.returncode:

@@ -1612,6 +1612,32 @@ def test_a_link_the_update_re_points_keeps_the_link_it_names(tmp_path):
     assert os.readlink(bundle / "Alias.py") == "Bridge.py"
 
 
+def test_the_check_of_a_bundle_holding_a_module_named_as_python_s_own_runs(tmp_path):
+    # A json.py of the bundle's is the app's module, imported once the check is loaded: the check's own json is
+    # Python's, as when the app runs.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "json.py").write_text("raise ImportError('the bundle json')\n")
+
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / "own.wasm").is_file()
+
+
+def test_requirements_are_named_requirements_txt(tmp_path):
+    # konfai-apps installs requirements.txt by that name: a support file of another case would be no requirements on
+    # a file system telling case apart, and the same file as a draft on one that does not.
+    root = _support_workspace(tmp_path)
+    (root / "listed.txt").write_text("numpy-stl\n")
+    with pytest.raises(AppMetadataError, match=r"Requirements\.txt is named apart from requirements\.txt"):
+        _cli(root, support_file=["Requirements.txt=listed.txt"], support_root=str(root))
+
+
 def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path):
     # The app's code the check runs writes a file the bundle keeps below its top level, in place, and the update is
     # refused: the bundle's file is as it was, the update holding a copy of every file but the weights.
