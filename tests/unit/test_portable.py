@@ -477,7 +477,11 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
 
 @pytest.mark.parametrize(
     "forward",
-    [{"reference": {"group": "REF"}}, {"spacing": [1.5, 1.5]}, {"spacing": [1.5, 1.5], "align": "extent"}],
+    [
+        {"reference": {"entry": "c", "datasets": [{"root": "./References", "format": "mha", "group": "REF"}]}},
+        {"spacing": [1.5, 1.5]},
+        {"spacing": [1.5, 1.5], "align": "extent"},
+    ],
     ids=["by-a-reference", "by-a-spacing", "by-its-extent"],
 )
 def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict) -> None:
