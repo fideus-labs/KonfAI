@@ -3601,12 +3601,37 @@ _DTYPE_VARIANTS = {
     "Standardize": [{}, {"nonzero": True, "inverse": False}],
     "TensorCast": [{"dtype": "int16"}, {"dtype": "float32"}],
 }
-_DTYPES = ("uint8", "int8", "int16", "int32", "int64", "float16", "bfloat16", "float32", "float64")
-#: The dtypes konfai's stage refuses, each a row the portable runtime is tested against: any other failure fails.
-_REFUSED = {
-    "Clip": ("uint8", "int8"),  # bounds past the dtype's range
-    "HistogramMatching": ("uint8", "int8", "int16", "int32", "int64", "bfloat16", "float64"),  # float16, float32 alone
-    "Normalize": ("bfloat16",),
+_DTYPES = (
+    "bool",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+)
+#: The dtypes konfai's stage refuses, each a row the portable runtime is tested against: any other failure fails. A
+#: variant refusing otherwise than its stage is keyed by the stage and its parameters.
+_REFUSED: dict[Any, tuple[str, ...]] = {
+    "Argmax": ("bool",),
+    "Clip": ("uint8", "int8", "uint16", "uint32", "uint64"),  # bounds past the dtype's range
+    "Dilate": ("uint16", "uint32", "uint64"),
+    "FlatLabel": ("uint16", "uint32", "uint64"),
+    "Gradient": ("bool", "uint16", "uint32", "uint64"),
+    "HistogramMatching": tuple(dtype for dtype in _DTYPES if dtype not in ("float16", "float32")),
+    "KeepLargestComponent": ("uint16", "uint32", "uint64"),
+    "Mask": ("uint16", "uint32", "uint64"),
+    "Normalize": ("bool", "uint16", "uint32", "uint64", "bfloat16"),
+    "SelectLabel": ("uint16", "uint32", "uint64"),
+    "Standardize": ("bool",),
+    ("Standardize", '{"inverse": false, "nonzero": true}'): (),  # a mask of the nonzero voxels takes bool
+    "UnNormalize": ("uint16", "uint32", "uint64"),
 }
 
 
@@ -3652,7 +3677,8 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
             ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
             rows.append((step, dtype, ran[-1][2]))
         assert ran, f"{stage} {params} takes none of {_DTYPES}"
-        assert tuple(refused) == _REFUSED.get(stage, ()), (stage, params, refused)  # no other failure
+        stated = _REFUSED.get((stage, json.dumps(params, sort_keys=True)), _REFUSED.get(stage, ()))
+        assert tuple(refused) == stated, (stage, params, refused)  # no other failure
         assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
         for row in rows:  # tabled once every check of the stage holds
             _tabled(*row)
