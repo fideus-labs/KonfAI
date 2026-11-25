@@ -1425,7 +1425,12 @@ def test_bytecode_the_bundle_holds_is_none_the_check_reads(tmp_path):
 
 @pytest.mark.parametrize(
     "planted",
-    ["a directory at the manifest", "a link at the requirements the bundle holds"],
+    [
+        "a directory at the manifest",
+        "a link at the requirements the bundle holds",
+        "a folder at the requirements",
+        "a graph kept in another case",
+    ],
 )
 def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_own(tmp_path, planted):
     # What the update writes, beside the configs or once published, it writes whole: into no directory, through no
@@ -1438,6 +1443,16 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
         (bundle / "manifest.json").mkdir()
         with pytest.raises(AppMetadataError, match=r"manifest\.json' is a directory"):
             _cli(root, **exporting)
+    elif planted == "a folder at the requirements":
+        (root / "Model.py").write_text("import einops\n")
+        (bundle / "requirements.txt").mkdir()
+        with pytest.raises(AppMetadataError, match=r"requirements\.txt is no file"):
+            _cli(root, model_py=str(root / "Model.py"))
+    elif planted == "a graph kept in another case":
+        (bundle / "MODEL.onnx").write_bytes(b"the bundle's")
+        with pytest.raises(AppMetadataError, match=r"'MODEL\.onnx' and 'model\.onnx' are one file"):
+            _cli(root, **exporting)
+        assert not (bundle / "model.onnx").exists()
     else:
         # The requirements the bundle holds are its author's: no draft is written over them, nor through them.
         (root / "Model.py").write_text("import einops\n")

@@ -356,6 +356,15 @@ def assemble_bundle(
                         break
         _replace_bundle(staging, update, metadata["models"])
         finish(update)
+        # What finish wrote (a graph, a program) beside what the update keeps, in one spelling each.
+        spellings: dict[str, str] = {}
+        for path in sorted(update.rglob("*")):
+            name = path.relative_to(update).as_posix()
+            if (first := spellings.setdefault(name.lower(), name)) != name:
+                raise AppMetadataError(
+                    f"Bundle paths collide: {first!r} and {name!r} are one file on a file system telling no case apart.",
+                    "Spell it as the bundle does, or remove the kept one.",
+                )
         if bundle.exists():
             bundle.rename(previous)
             try:
@@ -739,11 +748,15 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
     drafted: list[str] = []
 
     def draft(update: Path) -> None:
-        # konfai-apps installs requirements.txt by that name: one of another case, brought or kept, is none.
+        # konfai-apps installs requirements.txt by that name, a file: one of another case, brought or kept, is none.
         if odd := [path.name for path in update.iterdir() if path.name.lower() == "requirements.txt" != path.name]:
             raise AppMetadataError(
                 f"{odd[0]} is named apart from requirements.txt, the name konfai-apps installs.",
                 "Name it requirements.txt, or pass it with --requirements.",
+            )
+        if os.path.lexists(update / "requirements.txt") and not (update / "requirements.txt").is_file():
+            raise AppMetadataError(
+                "The bundle's requirements.txt is no file.", "Remove it, or pass the requirements with --requirements."
             )
         if (update / "Model.py").is_file() and not os.path.lexists(update / "requirements.txt"):
             # What an import resolves to in the bundle: a module file, or a package (its __init__.py) of the name.
