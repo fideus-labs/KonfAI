@@ -1067,6 +1067,7 @@ def sampled_deformable_class():
             # on a whole number of the networks' stride, so that a strided layer meets the whole level's cells.
             stride = getattr(custom_loss, "stride", None)
             self._stride = int(stride(device)) if callable(stride) else 1
+            self._box = max(self._stride, self._box - self._box % self._stride)
             self._halo = -(-(int(loss_halo) + grad_tail) // self._stride) * self._stride
             self._step_halo = warp_tail + max(1, math.ceil(float(optimizer_lr) / 2))
             affine = (

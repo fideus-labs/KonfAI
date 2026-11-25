@@ -1380,3 +1380,38 @@ def test_a_jacobian_strided_layer_by_aligned_boxes_has_the_level_s_gradient(tmp_
         own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
         gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
     assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)
+
+
+@pytest.mark.parametrize("distance", ["L2", "NCC"])
+def test_a_jacobian_level_s_normalisation_is_the_whole_level_s_whatever_the_box(tmp_path, distance):
+    """The deformable stage latches a strided Jacobian layer's normalisation on boxes of any side, a multiple of the
+    network's stride or not: the whole level's."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "strided.pt"
+    torch.jit.script(_Strided()).save(str(path))
+    generator = torch.Generator().manual_seed(2)
+    fixed, moving = (torch.rand(SIZE, generator=generator).numpy() for _ in range(2))
+
+    def latched(box: int) -> list[float]:
+        spec = engine.ModelSpec(ref=str(path), layers_mask="01", distance=distance)
+        loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", True, 5, 0, 0, False)
+        sampled = sampled_deformable_class()(
+            [1],
+            [0],
+            HeaderImages(image_of(fixed), 1, "cpu"),
+            HeaderImages(image_of(moving), 1, "cpu"),
+            ArraySource(fixed[None], "cpu"),
+            ArraySource(moving[None], "cpu"),
+            scratch=tmp_path,
+            symmetric=False,
+            loss_type="custom",
+            custom_loss=loss,
+            loss_halo=4,
+            box=box,
+        )
+        sampled.optimize()
+        sampled.close()
+        return loss._factors
+
+    assert np.allclose(latched(9), latched(64), rtol=1e-5)
