@@ -211,16 +211,25 @@ class _RunningStatistics:
         self._state = _update_running_statistics(self._state, block.detach().cpu().numpy().reshape(1, -1))
 
     def write_into(self, attribute: Attribute) -> None:
-        """Seed the attribute the way the rest of KonfAI spells these keys: Min/Max bare scalars,
+        """Seed the attribute with :data:`SEEDED_KEYS` the way the rest of KonfAI spells them: Min/Max bare scalars,
         Mean/Std one-element arrays."""
         if self._state is None or not self._state["count"]:
             raise ReductionError("Statistics were requested over an empty volume.", "Check the output extent.")
         statistics = _finalize_running_statistics(self._state)
+        seeds = {
+            "Min": np.float32(statistics["min"]),
+            "Max": np.float32(statistics["max"]),
+            "Mean": np.asarray([statistics["mean"]], dtype=np.float32),
+            "Std": np.asarray([statistics["std"]], dtype=np.float32),
+        }
         attribute["StatisticsSeeded"] = np.float32(1.0)
-        attribute["Min"] = np.float32(statistics["min"])
-        attribute["Max"] = np.float32(statistics["max"])
-        attribute["Mean"] = np.asarray([statistics["mean"]], dtype=np.float32)
-        attribute["Std"] = np.asarray([statistics["std"]], dtype=np.float32)
+        for key in SEEDED_KEYS:
+            attribute[key] = seeds[key]
+
+
+#: The statistics the pass over the reduction measures and seeds a later stage with: a stage after the
+#: ``Reduce`` reading any other (a percentile, a statistic of its own) would read it off the region it is handed.
+SEEDED_KEYS = ("Min", "Max", "Mean", "Std")
 
 
 def split_chain(transforms: list[Transform]) -> tuple[list[Transform], Reduce | None, list[Transform]]:
@@ -238,8 +247,9 @@ def check_post_stages(post: list[Transform], output: str) -> None:
     follow: a stage reading across space would seam at every region boundary. End the chain and read
     the written volume back in a second one instead.
 
-    A statistic may follow the reduction, but only over stages that leave the values alone: the stat
-    pass measures the FOLD (``stat_seed_valid``, the per-case planner's rule).
+    A statistic may follow the reduction, but only one the stat pass measures (:data:`SEEDED_KEYS`), and only over
+    stages that leave the values alone: the stat pass measures the FOLD (``stat_seed_valid``, the per-case planner's
+    rule).
     """
     localities: list[PatchLocality] = []
     for index, stage in enumerate(post):
@@ -253,6 +263,15 @@ def check_post_stages(post: list[Transform], output: str) -> None:
                 " region boundary.",
                 f"Only voxel-local stages can follow a reduction. End this chain, and put '{name}' in a"
                 f" second chain that reads '{output}' back.",
+            )
+        unseeded = sorted(locality.stat_keys - set(SEEDED_KEYS))
+        if kind is LocalityKind.GLOBAL_STAT and (unseeded or not locality.stat_keys):
+            reads = f"the statistics {', '.join(unseeded)}" if unseeded else "a statistic it measures itself"
+            raise ReductionError(
+                f"stage {index} '{name}' follows the Reduce into '{output}' and reads {reads}, which the statistics"
+                f" pass over the reduction does not measure: it seeds {', '.join(SEEDED_KEYS)}, and each region"
+                " would be measured as the whole volume.",
+                f"End this chain, and put '{name}' in a second chain that reads '{output}' back.",
             )
         if kind is LocalityKind.GLOBAL_STAT and not stat_seed_valid(localities, locality.stat_keys):
             raise ReductionError(
