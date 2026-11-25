@@ -98,8 +98,9 @@ from konfai.network import network
 from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import image_to_data
 from konfai.utils.errors import MeasureError
-from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch
+from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
+from ..ooc import free_bytes
 from .impact_loss import (
     FeatureMapUpdateInterval,
     LevelSpec,
@@ -123,6 +124,25 @@ from .intensity import (
 from .orientation import world_aligned_pair
 
 DIM = 3
+
+
+def _fitting_tile(core, images: dict[str, torch.Tensor]) -> int:
+    """The tile a Static extraction takes ``images`` in on their CUDA device: 0, each whole, when one pass over the
+    larger fits half the free memory beside the layers both leave, else the widest cube that does, a whole number of
+    the input multiple; measured on a corner of the larger, 64 voxels a side. 0 off CUDA."""
+    larger = max(images.values(), key=lambda image: image.numel())
+    if not larger.is_cuda:
+        return 0
+    probe = larger[(slice(None), slice(None), *[slice(0, max(64, core.model.multiple))] * (larger.dim() - 2))]
+    layers, taken = peak_bytes(lambda: core.model.volume(probe, core.normalization, 0, 0.0), larger.device)
+    voxels = probe[0, 0].numel()
+    left = sum(layer.numel() * layer.element_size() for layer in layers) / voxels
+    room = free_bytes(larger.device) / 2 - left * sum(image[0, 0].numel() for image in images.values())
+    if taken / voxels * larger[0, 0].numel() <= room:
+        return 0
+    step = max(MIN_TILE, core.model.multiple)
+    return max(step, int((max(room, 0.0) * voxels / taken) ** (1 / (larger.dim() - 2))) // step * step)
+
 
 #: Linear stages a preset may ask for. The engine checks against this rather than trusting the
 #: ``Literal`` annotation, which only binds a config-driven call and not a direct Python one.
@@ -504,16 +524,17 @@ class ImpactFeatureLoss(torch.nn.Module):
                     side: resampled(image, grid_size(extent, core.model.voxel_size, tuple(image.shape[2:])))
                     for (side, image), extent in zip(images.items(), extents, strict=True)
                 }
-            # Both images through the same tile, the larger first: two volumes assembled alike (a model that sees the
-            # whole image, as anatomix does, gives other features in tiles).
-            layers, tile = {}, patch
-            for side, image in sorted(images.items(), key=lambda item: -item[1].numel()):
-                layers[side], tile = core.model.volume(image, core.normalization, tile, overlap)
+            # Both images through the same tile, two volumes assembled alike (a model that sees the whole image, as
+            # anatomix does, gives other features in tiles): the preset's, or on a GPU the widest that fits.
+            tile = patch or _fitting_tile(core, images)
             if tile != patch:
                 print(
-                    f"[FireANTs] feature extraction did not fit whole: extracted in tiles of {tile} voxels.", flush=True
+                    f"[FireANTs] feature extraction does not fit whole: extracted in tiles of {tile} voxels.",
+                    flush=True,
                 )
-            fixed_layers, moving_layers = layers["fixed"], layers["moving"]
+            fixed_layers, moving_layers = (
+                core.model.volume(images[side], core.normalization, tile, overlap) for side in ("fixed", "moving")
+            )
             if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
                 for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
                     moving_layers[index], fixed_layers[index] = core._pca_project(moving_layer, fixed_layer)
@@ -1576,9 +1597,8 @@ class RegistrationNet(network.Network):
         feature_patch: Annotated[
             int,
             "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
-            "at once. Tiles share the 'feature_overlap' share of their width and are blended by a cosine "
-            "window, so a volume larger than the card still goes through; a pass that runs out of memory is "
-            "retried in tiles half as wide (256 voxels after a whole image).",
+            "at once, or on a GPU the widest tile its free memory holds when the whole image does not fit. "
+            "Tiles share the 'feature_overlap' share of their width and are blended by a cosine window.",
             Range(0, 1024),
         ] = 0,
         feature_chunk: Annotated[

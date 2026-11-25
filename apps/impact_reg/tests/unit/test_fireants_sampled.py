@@ -463,16 +463,16 @@ class _Strided(torch.nn.Module):
         return [y, torch.nn.functional.avg_pool3d(y, 2)]
 
 
-@pytest.mark.parametrize("shape", [(20, 24, 28), (21, 25, 27)])  # the second not a whole number of cells long
+@pytest.mark.parametrize("shape", [(20, 24, 28), (21, 25, 27)])
 def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
-    """Blocks read with the receptive field around them, on the network's stride, give the features of the whole
-    image, and the PCA fitted on each layer's own grid its components."""
+    """Blocks read with half the receptive field around them give a full-resolution layer as the whole image does,
+    and the PCA fitted over the blocks its components."""
     from impact_reg_konfai.models import fireants as engine
     from impact_reg_konfai.models.fireants_sampled import static_feature_sources
 
     path = tmp_path / "strided.pt"
     torch.jit.script(_Strided()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), layers_mask="01", pca=2, distance="LNCC", feature_normalization="l2")
+    spec = engine.ModelSpec(ref=str(path), layers_mask="10", pca=2, distance="LNCC", feature_normalization="l2")
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
     loss.cores[0].model.fov = [3, 4]
     crop = tuple(slice(0, extent) for extent in shape)

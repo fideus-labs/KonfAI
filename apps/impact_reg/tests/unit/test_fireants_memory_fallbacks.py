@@ -121,32 +121,29 @@ def _static_loss(tmp_path: Path) -> "fireants.ImpactFeatureLoss":
     return fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
 
 
-def test_a_static_extraction_that_does_not_fit_tiles_both_images_alike(
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the tile is measured on a CUDA device")
+def test_a_static_extraction_too_large_for_one_pass_tiles_both_images_alike(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The whole-image pass runs out of memory: the larger image finds the tile that fits, the other goes straight
-    # through the same one, and a thin axis is one tile of its own rather than padded up to a 256-voxel cube
-    # (an overlap of 64 voxels did not even fit a 40-voxel axis).
+    # The tile is sized before the pass, from what a probe took: both images go through it in one pass each, and
+    # pointwise features come back as the whole image's.
     from konfai.metric.measure.impact import ImpactFeatureModel
 
-    torch.manual_seed(0)
-    tiles: list[tuple[tuple[int, ...], int]] = []
-    volume = ImpactFeatureModel._volume
+    patches: list[int] = []
+    volume = ImpactFeatureModel.volume
 
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap, statistics=None, norms=None):
-        tiles.append((tuple(image.shape[2:]), patch))
-        if patch == 0:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
+    def recorded(self, image, normalization="none", patch=0, overlap=0.25, statistics=None, norms=None):
+        patches.append(patch)
         return volume(self, image, normalization, patch, overlap, statistics, norms)
 
-    monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
-    loss = _static_loss(tmp_path)
-    loss.cores[0].model.multiple = 16
-    fixed, moving = torch.rand(1, 1, 20, 40, 300), torch.rand(1, 1, 24, 40, 280)
-    fixed_volume, moving_volume = loss.extract(fixed, moving, 0, 0.25)
-    assert tiles == [((24, 40, 280), 0), ((24, 40, 280), 256), ((20, 40, 300), 256)]
+    fixed, moving = torch.rand(1, 1, 64, 80, 96, device="cuda"), torch.rand(1, 1, 60, 80, 90, device="cuda")
+    assembled = 2 * 4 * (fixed.numel() + moving.numel())  # two one-channel layers of each image, in float32
+    monkeypatch.setattr(ImpactFeatureModel, "volume", recorded)
+    monkeypatch.setattr(fireants, "free_bytes", lambda device: 2 * (assembled + (4 << 20)))
+    fixed_volume, moving_volume = _static_loss(tmp_path).extract(fixed, moving, 0, 0.25)
+    assert patches[0] == 0 and 0 < patches[1] == patches[2] < 96  # the probe, then both images in the same tile
     torch.testing.assert_close(fixed_volume, torch.cat([fixed * 2.0, fixed * fixed], dim=1))
-    assert moving_volume.shape == (1, 2, 24, 40, 280)
+    assert moving_volume.shape == (1, 2, 60, 80, 90)
 
 
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:

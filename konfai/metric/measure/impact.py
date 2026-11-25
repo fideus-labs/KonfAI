@@ -573,8 +573,6 @@ def _denormalized(tensor: torch.Tensor, attributes: list[Attribute]) -> torch.Te
 
 #: The smallest tile, per axis, a feature pass is cut into when the whole image does not fit the card.
 MIN_TILE = 16
-#: The tile a volume extraction falls back to when the whole image does not fit the card; halved after.
-FIRST_FEATURE_TILE = 256
 #: Input voxels one batch of a sampled pass feeds the network (patches x patch volume); halved when it does not fit.
 PATCH_BUDGET = 1 << 22
 
@@ -928,7 +926,7 @@ class ImpactFeatureModel:
 
     def _half(self, device: torch.device) -> bool:
         # float16 has no 3-D pooling on the CPU.
-        return self.half and device.type == "cuda"
+        return self.half and torch.device(device).type == "cuda"
 
     def _on(self, device: torch.device) -> torch.nn.Module:
         """The network on ``device``, its file mapped there: loaded at its first use, and again when the device
@@ -981,7 +979,7 @@ class ImpactFeatureModel:
             total: torch.Tensor | None = None
             count = 0
             for box, own in boxes():
-                # Padded as ``_volume`` pads a tile, up to the input multiple after the block's own voxels.
+                # Padded as ``volume`` pads a tile, up to the input multiple after the block's own voxels.
                 (box,) = next(iter(_feature_grid(tuple(box.shape[2:]), 0, 0.0, self.multiple).disassemble(box)))
                 tensor, _, stats, *direction = self.inputs(box, statistics)
                 layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
@@ -1001,19 +999,23 @@ class ImpactFeatureModel:
         return [index for index, weight in enumerate(self.weights) if weight]
 
     @torch.no_grad()
-    def _volume(
+    def volume(
         self,
         image: torch.Tensor,
-        normalization: str,
-        patch: int,
-        overlap: float,
+        normalization: str = "none",
+        patch: int = 0,
+        overlap: float = 0.25,
         statistics: Attribute | None = None,
         norms: Sequence[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
-        """``volume`` in tiles of ``patch``: the intensity statistics are the whole image's, and so are the network's
-        normalisations (``norms``, gathered over the image when not given), so every tile is normalised as the whole
-        image. Each layer is blended on its own grid, a segmentation network's deeper ones coarser, and normalised
-        there, as itk-impact's ImageToFeaturesMap does."""
+        """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
+        layer's own grid (``onto_image_grid`` brings it onto the image's), in one pass: tiles of ``patch`` a side (0:
+        the whole image) sharing ``overlap`` of their width, blended by a cosine window. ``statistics``: the
+        ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` the network normalises its input by, when ``image`` is a
+        block of a larger image (``image``'s own otherwise); ``norms``, its normalisations' (``norms``, gathered over
+        the image when not given), so every tile is normalised as the whole image. Each layer is blended on its own
+        grid, a segmentation network's deeper ones coarser, and normalised there, as itk-impact's ImageToFeaturesMap
+        does."""
         network = self.network(image.device)
         statistics = statistics if statistics is not None else _statistics(image)[0]
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
@@ -1031,42 +1033,6 @@ class ImpactFeatureModel:
                 accumulators[rank].add_layer(index, layer)
             del outputs
         return [normalized_features(accumulator.assemble(), normalization) for accumulator in accumulators]
-
-    def volume(
-        self,
-        image: torch.Tensor,
-        normalization: str = "none",
-        patch: int = 0,
-        overlap: float = 0.25,
-        statistics: Attribute | None = None,
-        norms: Sequence[torch.Tensor] | None = None,
-    ) -> tuple[list[torch.Tensor], int]:
-        """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
-        layer's own grid (``onto_image_grid`` brings it onto the image's), and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
-        width blended by a cosine window. A pass that does not fit the card runs again in tiles of
-        ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time.
-        ``statistics``: the ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` the network normalises its input by,
-        when ``image`` is a block of a larger image (``image``'s own otherwise); ``norms``, its normalisations' (``norms``)."""
-        tile = patch
-
-        def narrow() -> bool:
-            nonlocal tile
-            if 0 < tile <= 2 * MIN_TILE:
-                return False
-            if tile == 0:
-                tile = FIRST_FEATURE_TILE
-                while tile > 2 * MIN_TILE and tile >= max(image.shape[2:]):
-                    tile //= 2
-            else:
-                tile //= 2
-            return True
-
-        return (
-            halve_on_oom(
-                lambda: self._volume(image, normalization, tile, overlap, statistics, norms), narrow, image.is_cuda
-            ),
-            tile,
-        )
 
     def sampled(
         self,

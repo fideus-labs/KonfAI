@@ -323,8 +323,8 @@ class _Constant(torch.nn.Module):
 
 def test_a_tiled_volume_leaves_no_seam() -> None:
     # KonfAI's cosine window sums to one over the overlap: constant features come back constant.
-    (volume,), tile = _stub_model(_Constant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32, overlap=0.25)
-    assert tile == 32 and volume.shape == (1, 2, 40, 24, 70)
+    (volume,) = _stub_model(_Constant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32, overlap=0.25)
+    assert volume.shape == (1, 2, 40, 24, 70)
     assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
 
 
@@ -356,7 +356,7 @@ def test_blocks_normalised_by_the_gathered_statistics_give_the_whole_images_feat
     # over the blocks, each block's own voxels get the whole image's features.
     model, image = _stub_model(_InstanceNormed(), [1.0]), torch.rand(1, 1, 20, 16, 12) * torch.linspace(1, 3, 12)
     statistics = impact._statistics(image)[0]
-    (whole,), _ = model.volume(image, statistics=statistics)
+    (whole,) = model.volume(image, statistics=statistics)
     norms = model.norms(lambda: impact._blocks(image, 8, 2), statistics)
     errors = {}
     for given in (None, norms):
@@ -367,7 +367,7 @@ def test_blocks_normalised_by_the_gathered_statistics_give_the_whole_images_feat
             box = image[
                 (..., *(slice(lo, min(o.stop + 2, n)) for lo, o, n in zip(low, own, image.shape[2:], strict=True)))
             ]
-            (layer,), _ = model.volume(box, statistics=statistics, norms=given)
+            (layer,) = model.volume(box, statistics=statistics, norms=given)
             tiled[(..., *own)] = layer[
                 (..., *(slice(o.start - lo, o.stop - lo) for o, lo in zip(own, low, strict=True)))
             ]
@@ -406,7 +406,7 @@ def test_a_volume_rounds_its_input_up_to_the_models_multiple() -> None:
     with pytest.raises(RuntimeError, match="sizes of tensors"):
         model.volume(image)
     model.multiple = 16
-    assert model.volume(image)[0][0].shape == (1, 4, 40, 40, 40)
+    assert model.volume(image)[0].shape == (1, 4, 40, 40, 40)
 
 
 class _TwoResolutions(torch.nn.Module):
@@ -423,10 +423,10 @@ class _HalfConstant(torch.nn.Module):
 def test_a_volume_blends_each_layer_on_its_own_grid() -> None:
     # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel tile). As in
     # itk-impact, they are blended and normalised on their grid, the tiles scaled to it, and read at the image voxels.
-    layers, _ = _stub_model(_TwoResolutions(), [1.0, 1.0]).volume(torch.rand(1, 1, 16, 16, 16))
+    layers = _stub_model(_TwoResolutions(), [1.0, 1.0]).volume(torch.rand(1, 1, 16, 16, 16))
     assert [tuple(layer.shape) for layer in layers] == [(1, 3, 16, 16, 16), (1, 5, 8, 8, 8)]
-    (coarse,), tile = _stub_model(_HalfConstant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32)
-    assert tile == 32 and coarse.shape == (1, 5, 20, 12, 35)
+    (coarse,) = _stub_model(_HalfConstant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32)
+    assert coarse.shape == (1, 5, 20, 12, 35)
     assert torch.allclose(coarse, torch.full_like(coarse, 3.0), atol=1e-5)
     assert onto_image_grid(coarse, (40, 24, 70)).shape == (1, 5, 40, 24, 70)
 
@@ -440,23 +440,8 @@ class _WithHead(torch.nn.Module):
 def test_a_volume_takes_a_segmentation_head_as_float_features() -> None:
     # The TotalSegmentator models end on a one-hot head in int64, which the l2 normalisation refused.
     image = torch.rand(1, 1, 16, 16, 16)
-    (volume,), _ = _stub_model(_WithHead(), [0.0, 1.0]).volume(image, "l2")
+    (volume,) = _stub_model(_WithHead(), [0.0, 1.0]).volume(image, "l2")
     assert volume.dtype == torch.float32 and torch.equal(volume[:, 1:], (image > 0.5).float())
-
-
-def test_a_volume_that_does_not_fit_is_extracted_again_in_smaller_tiles(monkeypatch) -> None:
-    # A whole image that runs out of memory is cut in FIRST_FEATURE_TILE tiles, halved below the longest axis.
-    model, passes = _stub_model(_Constant(), [1.0]), []
-    whole = ImpactFeatureModel._volume
-
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap, statistics=None, norms=None):
-        passes.append(patch)
-        if patch == 0:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
-        return whole(self, image, normalization, patch, overlap, statistics, norms)
-
-    monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
-    assert model.volume(torch.rand(1, 1, 20, 40, 100))[1] == 64 and passes == [0, 64]
 
 
 def test_draw_centres_keeps_every_patch_inside_the_image_and_the_mask() -> None:
