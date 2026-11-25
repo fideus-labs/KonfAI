@@ -19,11 +19,13 @@ backends (modes, locking, transforms, path resolution), and ``get_infos`` shape 
 
 import multiprocessing
 import os
+import re
 import stat
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -459,6 +461,12 @@ def test_landmarks_round_trip_through_a_dataset(tmp_path: Path) -> None:
     np.testing.assert_array_equal(data, _POINTS)
 
 
+def _named(refusal: BaseException) -> list[Path]:
+    """The files a refusal names, as paths: KonfAI spells a root with forward slashes on every system, where a
+    test's own paths take the system's separator."""
+    return [Path(name) for name in re.findall(r"'([^']+)'", str(refusal))]
+
+
 @pytest.mark.parametrize(
     ("extension", "is_directory"),
     [
@@ -478,11 +486,12 @@ def test_an_entry_a_fiducial_file_shares_is_refused(tmp_path: Path, extension: s
     _fiducial_file(case / "CT.fcsv", "LPS")
     other = case / f"CT.{extension}"
     other.mkdir() if is_directory else other.touch()
-    backend = Dataset.SitkFile(f"{case}/", True, "mha")
+    root = case.as_posix()  # as a dataset opens its backend
+    backend = Dataset.SitkFile(f"{root}/", True, "mha")
     backend.resolved_paths = {}
     whole = (slice(None), slice(None))
     reads = [
-        lambda: backend._probe_data_path(f"{case}/CT"),
+        lambda: backend._probe_data_path(f"{root}/CT"),
         lambda: backend.get_infos("", "CT"),
         lambda: backend.file_to_data("", "CT"),
         lambda: backend.file_to_data_slice("", "CT", whole),
@@ -502,13 +511,13 @@ def test_an_entry_a_fiducial_file_shares_is_refused(tmp_path: Path, extension: s
     for read in reads:
         with pytest.raises(DatasetManagerError) as refused:
             read()
-        assert f"'{case}/CT.fcsv' and '{other}' are stored under the same entry" in str(refused.value)
-        assert "group of its own" in str(refused.value)
+        assert _named(refused.value) == [case / "CT.fcsv", other]
+        assert "are stored under the same entry" in str(refused.value) and "group of its own" in str(refused.value)
     assert backend.resolved_paths == {}
 
     other.rmdir() if is_directory else other.unlink()
     np.testing.assert_array_equal(backend.file_to_data("", "CT")[0], [[1.0, 2.0, 3.0]])
-    assert backend.resolved_paths == {f"{case}/CT": f"{case}/CT.fcsv"}
+    assert backend.resolved_paths == {f"{root}/CT": f"{root}/CT.fcsv"}
 
 
 def test_a_directory_named_as_a_fiducial_file_shares_its_entry_too(tmp_path: Path) -> None:
@@ -532,6 +541,105 @@ def test_a_fiducial_file_beside_another_group_is_read(tmp_path: Path) -> None:
 
     assert dataset.get_infos("CT", "CASE_000")[0] == [1, 3]
     np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], [[1.0, 2.0, 3.0]])
+
+
+def _an_image(dataset: Dataset, group: str, attributes: Attribute, channels: int = 1) -> None:
+    dataset.write(group, "CASE_000", np.zeros((channels, 2, 3, 4), np.float32), attributes)
+
+
+def _a_stream(dataset: Dataset, group: str, attributes: Attribute) -> None:
+    shape = [1, 2, 3, 4]
+    stream = dataset.open_data_stream(group, "CASE_000", shape, np.dtype(np.float32), attributes)
+    if stream is None:  # a format written whole, as a caller then writes it
+        return _an_image(dataset, group, attributes)
+    with stream:
+        stream.write_slice(tuple(slice(0, extent) for extent in shape), np.zeros(shape, np.float32))
+
+
+def _a_node(dataset: Dataset, group: str, _attributes: Attribute) -> None:
+    attributes = Attribute()
+    attributes["path"] = "level1:level2"
+    dataset.write(group, "CASE_000", np.asarray([1.5]), attributes)
+
+
+#: Every write of the backend that leaves another form than a fiducial file, each a route of its own.
+_WRITES = {
+    "an image": _an_image,
+    "an image of two channels, by regions": lambda dataset, group, attributes: _an_image(dataset, group, attributes, 2),
+    "a stream": _a_stream,
+    "a transform": lambda dataset, group, _: dataset.write(group, "CASE_000", sitk.Euler3DTransform(), Attribute()),
+    "attributes": _a_node,
+    "an array": lambda dataset, group, _: dataset.write(group, "CASE_000", np.arange(5.0), Attribute()),
+}
+
+
+@pytest.mark.parametrize("written", sorted(_WRITES))
+@pytest.mark.parametrize("file_format", ["mha", "mhd"])
+def test_a_write_beside_a_fiducial_file_is_refused_before_anything_lands(
+    tmp_path: Path, image_attributes, written: str, file_format: str
+) -> None:
+    """The shared entry is refused where it is made: the write names both files and leaves the case as it was, no
+    staging file among it."""
+    case = tmp_path / "Dataset" / "CASE_000"
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    dataset.write("CT", "CASE_000", _POINTS, Attribute())
+    geometry = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+
+    with pytest.raises(DatasetManagerError, match="would be stored under the same entry") as refused:
+        _WRITES[written](dataset, "CT", geometry)
+
+    fiducials, beside, kept = _named(refused.value)
+    assert fiducials == kept == case / "CT.fcsv" and beside.parent == case and beside.name.startswith("CT.")
+    assert [entry.name for entry in case.iterdir()] == ["CT.fcsv"]
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], _POINTS)
+    # Another group of the case is another entry, whatever its name starts with.
+    _WRITES[written](dataset, "CT.mask", geometry)
+
+
+@pytest.mark.parametrize("extension", ["mha", "nii.gz", "itk.txt", "ome.zarr"])
+def test_a_fiducial_file_written_beside_another_entry_is_refused_before_it_lands(
+    tmp_path: Path, extension: str
+) -> None:
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    (case / "CT.mask.mha").touch()  # another group
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    dataset.write("CT", "CASE_000", _POINTS, Attribute())
+    dataset.write("CT", "CASE_000", 2 * _POINTS, Attribute())  # written over itself: one entry still
+    (case / "CT.fcsv").unlink()
+    other = case / f"CT.{extension}"
+    other.mkdir() if extension == "ome.zarr" else other.touch()
+
+    with pytest.raises(DatasetManagerError, match="would be stored under the same entry") as refused:
+        Dataset.SitkFile(f"{case.as_posix()}/", False, "mha").data_to_file("CT", _POINTS, Attribute())
+
+    assert _named(refused.value) == [case / "CT.fcsv", other, other]
+    assert {entry.name for entry in case.iterdir()} == {"CT.mask.mha", other.name}
+
+
+def test_a_polydata_written_beside_a_fiducial_file_is_refused_before_its_writer_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Refused before anything of vtk is used: the route is seen with or without the library.
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    _fiducial_file(case / "CT.fcsv", "LPS")
+    backend = Dataset.SitkFile(f"{case.as_posix()}/", False, "mha")
+    monkeypatch.setitem(sys.modules, "vtk", SimpleNamespace())
+    monkeypatch.setattr(backend, "is_vtk_polydata", lambda data: True)
+
+    with pytest.raises(DatasetManagerError, match="would be stored under the same entry"):
+        backend.data_to_file("CT", object())
+
+    assert [entry.name for entry in case.iterdir()] == ["CT.fcsv"]
+
+
+def test_an_image_is_written_over_itself(tmp_path: Path, image_attributes) -> None:
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+    geometry = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    for value in (1.0, 2.0):
+        dataset.write("CT", "CASE_000", np.full((1, 2, 3, 4), value, np.float32), geometry)
+    assert float(dataset.read_data("CT", "CASE_000")[0].max()) == 2.0
 
 
 def test_a_polydata_round_trips_through_a_dataset(tmp_path: Path) -> None:
