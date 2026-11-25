@@ -86,6 +86,22 @@ def test_state_is_the_one_runtime_re_exports() -> None:
 
 
 @pytest.mark.parametrize(
+    ("held", "asked", "refused"), [("Engine.wasm", "Engine.wasm", False), ("Engine.wasm", "engine.wasm", True)]
+)
+def test_a_destination_s_own_name_is_its_own_in_any_case(tmp_path, held: str, asked: str, refused: bool) -> None:
+    # A file kept under the very name asked is replaced; one its folder holds in another case is refused.
+    from konfai.utils.errors import ConfigError
+    from konfai.utils.utils import owned_destination
+
+    (tmp_path / held).write_text("old")
+    if refused:
+        with pytest.raises(ConfigError, match=f"named '{held}' in another case"):
+            owned_destination(tmp_path / asked)
+    else:
+        assert owned_destination(tmp_path / asked) == tmp_path / asked
+
+
+@pytest.mark.parametrize(
     ("planted", "refused"),
     [
         ("nothing", None),

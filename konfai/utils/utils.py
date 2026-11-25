@@ -43,7 +43,8 @@ def owned_destination(path: Path) -> Path:
     if held is None and path.exists() and (not path.is_file() or path.stat().st_nlink > 1):
         held = "shared with another path" if path.is_file() else "no regular file"
     if held is None and path.parent.is_dir():
-        twin = next((entry for entry in os.listdir(path.parent) if entry.lower() == path.name.lower() != entry), None)
+        named = path.name.lower()
+        twin = next((entry for entry in os.listdir(path.parent) if entry != path.name and entry.lower() == named), None)
         held = None if twin is None else f"named '{twin}' in another case"
     if held is not None:
         raise ConfigError(
