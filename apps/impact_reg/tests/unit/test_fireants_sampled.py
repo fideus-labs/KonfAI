@@ -1261,15 +1261,19 @@ def test_a_jacobian_ncc_layer_by_boxes_has_the_level_s_value_and_gradient(tmp_pa
 
 @pytest.mark.parametrize("distance", ["L2", "NCC"])
 @pytest.mark.parametrize("masked", [False, True])
-def test_a_jacobian_model_at_a_voxel_size_by_boxes_has_the_level_s_gradient(tmp_path, masked, distance):
+@pytest.mark.parametrize("strided", [False, True])
+def test_a_jacobian_model_at_a_voxel_size_by_boxes_has_the_level_s_gradient(tmp_path, masked, distance, strided):
     """A Jacobian model with a voxel_size reads the level on its own grid: a box takes the cells of that grid it
-    holds (``place``), normalised by the level's intensities there, its mean weighed by its cells' share of the
-    level's, and the boxes' gradients are the whole level's."""
+    holds (``place``), from one on its layers' stride (a layer at half the grid, anchored at the end of an axis its
+    network flips), normalised by the level's intensities there, its mean weighed by its cells' share of the level's,
+    and the boxes' gradients are the whole level's."""
     from impact_reg_konfai.models import fireants as engine
 
-    path = tmp_path / "averaged.pt"
-    torch.jit.script(_Averaged()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), distance=distance, voxel_size=[1.4, 1.3, 1.7])
+    path = tmp_path / "model.pt"
+    torch.jit.script(_Strided(flipped=True) if strided else _Averaged()).save(str(path))
+    spec = engine.ModelSpec(
+        ref=str(path), distance=distance, voxel_size=[1.4, 1.3, 1.7], layers_mask="01" if strided else "1"
+    )
     loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False, masked=masked)
     loss._level, loss.cores[0].extent = 0, [28.0, 24.0, 20.0]  # one voxel a mm along L, P, S
     generator = torch.Generator().manual_seed(4)
@@ -1285,7 +1289,7 @@ def test_a_jacobian_model_at_a_voxel_size_by_boxes_has_the_level_s_gradient(tmp_
     (expected,) = torch.autograd.grad(loss(whole, fixed), whole)
     boxes = []
     for tile in tiles(shape, 9):
-        low, high, core = box_region(tile, 5, shape)
+        low, high, core = box_region(tile, 10, shape)
         region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
         region[(slice(None), slice(None), *core)] = 1
         crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))

@@ -197,24 +197,36 @@ def _box_on_model_grid(
     mask: torch.Tensor | None,
     place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
     size: tuple[int, ...],
+    stride: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """A box of the pair (``place``: its ``low`` and ``high`` in a level of ``grid`` voxels) on the cells of the
-    level's model grid of ``size`` it holds (``_model_cells``), interpolated as ``resampled`` interpolates the whole
-    level: linearly, its mask at the nearest voxel, zero past the level's end."""
+    level's model grid of ``size`` it holds (``_model_cells``), from one on ``stride`` to one as far from the grid's end
+    as a whole number of it, so that a strided layer meets the whole grid's cells; interpolated as ``resampled``
+    interpolates the whole level: linearly, zero past the level's end, its mask at the level's nearest voxel, ties
+    broken alike in every box."""
     low, high, grid = place
-    axes = []
+    axes, nearest = [], []
     for a, b, voxels, cells in zip(low, high, grid, size, strict=True):
         first, last = _model_cells(a, b, voxels, cells)
-        position = torch.arange(first, last, dtype=torch.float64) * voxels / cells - a
-        axes.append(2 * position / max(b - a - 1, 1) - 1)
+        first = -(-first // stride) * stride
+        last = max(first, last - (cells - last) % stride)
+        position = torch.arange(first, last, dtype=torch.float64) * voxels / cells
+        axes.append(2 * (position - a) / max(b - a - 1, 1) - 1)
+        nearest.append((torch.floor(position + 0.5).long() - a).clamp(0, b - a))  # b - a: past the level's end
     coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij")[::-1], dim=-1)[None]
 
-    def sample(tensor: torch.Tensor, mode: str) -> torch.Tensor:
+    def sample(tensor: torch.Tensor) -> torch.Tensor:
         source = tensor if tensor.is_floating_point() else tensor.float()
         grid_ = coordinates.to(source.device, source.dtype).expand(source.shape[0], *coordinates.shape[1:])
-        return torch.nn.functional.grid_sample(source, grid_, mode=mode, padding_mode="zeros", align_corners=True)
+        return torch.nn.functional.grid_sample(source, grid_, mode="bilinear", padding_mode="zeros", align_corners=True)
 
-    return sample(moved, "bilinear"), sample(fixed, "bilinear"), None if mask is None else sample(mask, "nearest")
+    def pick(tensor: torch.Tensor) -> torch.Tensor:
+        for axis, index in enumerate(nearest):
+            padded = torch.nn.functional.pad(tensor, [0, 0] * (tensor.dim() - 3 - axis) + [0, 1])  # zeros past it
+            tensor = padded.index_select(2 + axis, index.to(tensor.device))
+        return tensor
+
+    return sample(moved), sample(fixed), None if mask is None else pick(mask.float())
 
 
 def _require_fireants() -> None:
@@ -502,7 +514,8 @@ class _ImpactCore(torch.nn.Module):
             if place is None:
                 moved, fixed, mask = _on_model_grid(moved, fixed, mask, size)
             else:
-                moved, fixed, mask = _box_on_model_grid(moved, fixed, mask, place, size)
+                stride = self.model.block_stride(moved.device)
+                moved, fixed, mask = _box_on_model_grid(moved, fixed, mask, place, size, stride)
         if self.dimension < DIM:
             order = swept_order(seed)
             moved, fixed, mask = (
@@ -934,7 +947,7 @@ class ImpactFeatureLoss(torch.nn.Module):
             total.requires_grad_()
             value = ncc_of_sums(total)
             (derivative,) = torch.autograd.grad(value, total)
-            self._layer_sums.setdefault(index, {})[layer] = (derivative, float(value))
+            self._layer_sums.setdefault(index, {})[layer] = (derivative, float(value.detach()))
 
     def _values(
         self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
@@ -1829,11 +1842,17 @@ class FireANTsEngine:
             else:
                 # A network's feature at a voxel reads its receptive field around it, and so does the feature's
                 # gradient: twice its radius; half a box for a model that sees whole images, as patches overlap.
-                # ponytail: in the model's own voxels; a voxel_size coarser than the image's reads wider.
+                # A model with a voxel_size reads its field in its own cells, a stride more either side for a box to
+                # start on it (``_box_on_model_grid``): counted in the image's voxels.
                 loss_halo = 0
                 for core in custom_loss.cores:
                     try:
-                        loss_halo = max(loss_halo, core.model.receptive_field - 1)
+                        reach = core.model.receptive_field - 1
+                        if core.model.voxel_size is not None:
+                            spacing = readers["fixed"].GetSpacing()
+                            ratio = max(size / step for size, step in zip(core.model.voxel_size, spacing, strict=True))
+                            reach = math.ceil((reach + 2 * core.model.block_stride(device)) * max(ratio, 1.0))
+                        loss_halo = max(loss_halo, reach)
                     except MeasureError:
                         loss_halo = max(loss_halo, box // 2)
         else:
