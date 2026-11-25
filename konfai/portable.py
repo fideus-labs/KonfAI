@@ -3118,6 +3118,15 @@ def export_checkpoints(
         # runtime's buffers are float32. Several models are averaged first: their mean is entered by a graph of
         # its own (`compile_output`).
         fold_post = [lambda tensor: fold.enter(tensor.transpose(0, 1)).transpose(0, 1).float()]
+    # The stages the compiler folds into the model's graph before the network are traced alone first: a cast of
+    # floats to integers is no fold of a graph (`export_folds`). The app's Fold enters each patch as it states.
+    if folds:
+        import tempfile
+
+        from konfai.export import export_folds
+
+        with tempfile.TemporaryDirectory() as scratch:
+            export_folds(folds, Path(scratch) / "pre.onnx", channels or 1, rank)
     # konfai runs `batch_size` patches through each forward; the runtime batches them alike where the
     # device holds them.
     batch = int(clean((config.get(root, {}).get("Dataset") or {}).get("batch_size")) or 1)
@@ -3399,6 +3408,7 @@ def compile_output(
             out_dir / f"{enter}.onnx",
             int(manifest["output"]["channels"]),
             int(manifest["patch"]["dim"]),
+            stages=False,
         )
         manifest = manifest | {"output": manifest["output"] | {"channels": channels}}
         models = [*models, {"id": enter, "manifest": manifest}]

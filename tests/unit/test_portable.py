@@ -2851,6 +2851,62 @@ def test_an_output_chain_folds_an_apps_own_class_through_a_plain_fold_out(
     assert folded == [1] and [step["op"] for step in steps] == ["onnx"]
 
 
+@pytest.mark.parametrize(
+    ("module", "body", "handed", "op"),
+    [
+        ("CastToBytes", "(tensor * 10).to(torch.uint8)", "float32", "extension"),
+        ("CastToBool", "tensor.bool()", "float32", "extension"),
+        ("CastLabels", "tensor.to(torch.uint8)", "int64", "onnx"),
+        ("CastToHalf", "tensor.half()", "float32", "onnx"),
+    ],
+    ids=["floats-to-uint8", "floats-to-bool", "integers-to-uint8", "floats-to-half"],
+)
+def test_a_class_casting_floats_to_integers_is_no_fold_of_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: str, body: str, handed: str, op: str
+) -> None:
+    # Past their range backends cast floats to integers apart (one wraps, one saturates, one refuses), where the
+    # program's own steps run torch's rule: such a class runs from the app's extension; a cast between integers, or to
+    # a float, still folds.
+    from konfai.portable import compile_pipeline
+
+    (tmp_path / f"{module}.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Cast(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        f"        return {body}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": "uint8"}
+
+    steps, _, _ = compile_pipeline({f"{module}:Cast": {}}, fold_out=fold_out, extension=True, dtype=handed)
+    assert [step["op"] for step in steps] == [op]
+
+
+def test_a_patch_transform_casting_floats_to_integers_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A patch transform is baked into the model's graph, where a cast of floats to integers runs apart on backends.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    held = json.loads(config.read_text())
+    group = held["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]
+    group["patch_transforms"] = {"TensorCast": {"dtype": "int16", "inverse": False}}
+    config.write_text(json.dumps(held))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    with pytest.raises(ConfigError, match="casts floating values to int16"):
+        compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", tmp_path / "out" / "p.json")
+    assert not (tmp_path / "out" / "model.onnx").exists()
+
+
 def test_a_case_statistic_of_a_group_of_several_channels_is_refused_before_its_graphs_are_traced() -> None:
     # Its partial graph is traced on one channel, a stored scalar volume, and would refuse a block of two at run time.
     from konfai.portable import _probe_after, compile_pipeline

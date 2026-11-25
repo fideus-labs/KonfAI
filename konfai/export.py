@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 import numpy as np
 import torch
 
-from konfai.utils.errors import PredictorError
+from konfai.utils.errors import ConfigError, PredictorError
 from konfai.utils.utils import Placement, owned_destination
 
 if TYPE_CHECKING:
@@ -228,6 +228,7 @@ def _write_onnx(
     opset: int = 18,
     dynamic: bool = False,
     free_from: int = 2,
+    folded: str | None = None,
 ) -> None:
     """Write ``module``, traced on ``examples``, as one self-contained ONNX file at ``onnx_path``: the weights go
     inline, also past the 1.5 GiB torch moves to a file beside the graph, up to :data:`ONE_FILE`, past which the
@@ -235,7 +236,8 @@ def _write_onnx(
     exported, which a model handed to others does not carry. ``dynamic``: every axis of every input from
     ``free_from`` on (the spatial axes of ``[N, C, ...]``) is left free, and the graph is checked on other sizes of
     those axes (:func:`_check_free_axes`) before it replaces what ``onnx_path`` held: a graph refused leaves it as it
-    was."""
+    was. ``folded``: the dtype konfai hands the stages the compiler folds there, refused where they cast floats to
+    integers (:func:`floats_cast_to_integers`)."""
     onnx = _require("onnx")
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
     from onnx_ir import serde  # shipped with the dynamo exporter
@@ -269,6 +271,12 @@ def _write_onnx(
     staged = staging / onnx_path.name
     try:
         onnx.save(proto, staged)
+        if folded is not None and (integers := floats_cast_to_integers(staged, folded)):
+            raise ConfigError(
+                f"A graph the compiler folds casts floating values to {', '.join(integers)}, which backends run apart"
+                " past the range (one wraps where another saturates): the program runs such a cast as konfai does.",
+                "Cast with a TensorCast in the chain, a program step, or run the stage from the app's extension.",
+            )
         if dynamic:
             # A dynamo export always carries the program it traced, guards and all.
             traced = cast("torch.export.ExportedProgram", program.exported_program)
@@ -276,6 +284,24 @@ def _write_onnx(
         staged.replace(owned_destination(onnx_path))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def floats_cast_to_integers(path: Path, handed: str = "float32") -> list[str]:
+    """The integer or bool types the graph at ``path`` casts a floating tensor to, as its types infer: all but its
+    first cast to the ``handed`` dtype, of its input, the runtime's float32 buffer, holding values of that dtype."""
+    onnx = _require("onnx")
+    graph = onnx.shape_inference.infer_shapes(onnx.load(str(path))).graph
+    held = {value.name: value.type.tensor_type.elem_type for value in [*graph.input, *graph.value_info, *graph.output]}
+    held |= {tensor.name: tensor.data_type for tensor in graph.initializer}
+    floating = {onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16}
+    casts = [node for node in graph.node if node.op_type == "Cast" and held.get(node.input[0]) in floating]
+    targets = [next(attribute.i for attribute in node.attribute if attribute.name == "to") for node in casts]
+    held_as = (
+        None if getattr(torch, handed).is_floating_point else onnx.helper.np_dtype_to_tensor_dtype(np.dtype(handed))
+    )
+    if held_as in targets:
+        targets.remove(held_as)
+    return list(dict.fromkeys(onnx.TensorProto.DataType.Name(to).lower() for to in targets if to not in floating))
 
 
 def _smooth(shape: list[int], dtype: torch.dtype, free_from: int) -> torch.Tensor:
@@ -504,10 +530,13 @@ def export_folds(
     rank: int,
     dtype: str = "float32",
     opset: int = 18,
+    stages: bool = True,
 ) -> tuple[int, str]:
     """Export pointwise transforms of an output chain to one ONNX graph at ``onnx_path``, its input ``C =
     channels`` float32 (the runtime's buffers) cast inside the graph to the ``dtype`` konfai hands them, and its
-    ``rank`` spatial axes free; return the channel count and the dtype konfai's transforms hand back."""
+    ``rank`` spatial axes free; return the channel count and the dtype konfai's transforms hand back. ``stages``: the
+    transforms are a chain's stages, refused where they cast floats to integers, not an app Fold's ``enter``, which
+    holds its patches as it states."""
     example = torch.randn(1, channels, *([8] * rank))
     with torch.no_grad():
         out = example[0].to(getattr(torch, dtype))
@@ -515,7 +544,9 @@ def export_folds(
             out = fold(out)
     module = _Folds(folds, getattr(torch, dtype)).eval()
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_onnx(module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True)
+    _write_onnx(
+        module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True, folded=dtype if stages else None
+    )
     return int(out.shape[0]), str(out.dtype).removeprefix("torch.")
 
 
