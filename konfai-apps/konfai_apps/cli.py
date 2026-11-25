@@ -769,6 +769,35 @@ def run_publish_cli(kwargs: dict[str, Any]) -> None:
         )
 
 
+def add_remote_arguments(parser: argparse.ArgumentParser) -> None:
+    """The options that send a command to a konfai-apps server (``remote_server`` reads them back)."""
+    parser.add_argument("--host", type=str, default=None, help="Server host")
+    parser.add_argument("--port", type=int, default=8000, help="Server port")
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=os.environ.get("KONFAI_API_TOKEN"),
+        help="Bearer token (or use KONFAI_API_TOKEN env var)",
+    )
+    parser.add_argument("--https", action="store_true", help="Reach the server over HTTPS.")
+    parser.add_argument(
+        "--ca-cert",
+        "--ca_cert",
+        dest="ca_cert",
+        type=str,
+        default=None,
+        help="The certificate (PEM) the server's is checked against, for a server whose certificate no system "
+        "authority signed; implies --https. With --https alone, KONFAI_API_CA_CERT is that certificate.",
+    )
+
+
+def remote_server(arguments: dict[str, Any]) -> RemoteServer | None:
+    """The server ``add_remote_arguments``'s options name, popped from ``arguments``; None without ``--host``."""
+    host, port, token, https = (arguments.pop(key) for key in ("host", "port", "token", "https"))
+    ca_cert = arguments.pop("ca_cert") or ((os.environ.get("KONFAI_API_CA_CERT") or None) if https else None)
+    return RemoteServer(host, port, token, https, ca_cert) if host is not None else None
+
+
 @_exit_on_refusal()
 def main_apps() -> None:
     """Entry point for the `konfai-apps` command-line interface."""
@@ -786,24 +815,7 @@ def main_apps() -> None:
             help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets"
             + ("; several, an ensemble of their members" if several else ""),
         )
-        parser.add_argument("--host", type=str, default=None, help="Server host")
-        parser.add_argument("--port", type=int, default=8000, help="Server port")
-        parser.add_argument(
-            "--token",
-            type=str,
-            default=os.environ.get("KONFAI_API_TOKEN"),
-            help="Bearer token (or use KONFAI_API_TOKEN env var)",
-        )
-        parser.add_argument("--https", action="store_true", help="Reach the server over HTTPS.")
-        parser.add_argument(
-            "--ca-cert",
-            "--ca_cert",
-            dest="ca_cert",
-            type=str,
-            default=None,
-            help="The certificate (PEM) the server's is checked against, for a server whose certificate no system "
-            "authority signed; implies --https. With --https alone, KONFAI_API_CA_CERT is that certificate.",
-        )
+        add_remote_arguments(parser)
         _add_app_io(parser, fine_tune=is_fine_tune)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
@@ -1084,15 +1096,10 @@ def main_apps() -> None:
         _save_preset(kwargs["app"], kwargs["name"], kwargs["description"], kwargs["config_overrides"] or [])
         return
 
-    host = kwargs.pop("host")
-    port = kwargs.pop("port")
-    token = kwargs.pop("token")
-    https = kwargs.pop("https")
-    ca_cert = kwargs.pop("ca_cert") or ((os.environ.get("KONFAI_API_CA_CERT") or None) if https else None)
+    remote = remote_server(kwargs)
 
     from . import app as app_module
 
-    remote = RemoteServer(host, port, token, https, ca_cert) if host is not None else None
     output_format, seed = kwargs.pop("output_format", None), kwargs.pop("seed", None)
     if kwargs.pop("dense_transforms", False):
         os.environ[DENSE_TRANSFORMS_ENV] = "1"
