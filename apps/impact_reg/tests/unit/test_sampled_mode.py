@@ -701,7 +701,9 @@ def test_a_plane_larger_than_a_band_is_read_and_written_by_rows(tmp_path: Path, 
     image.SetSpacing((0.5, 1.5, 2.0))
     sitk.WriteImage(image, str(tmp_path / "image.mha"), useCompression=False)
     mapped = native.mmap_image(tmp_path / "image.mha")
-    transform = sitk.TranslationTransform(3, (1.0, -2.0, 0.5))
+    transform = sitk.AffineTransform(3)  # a displacement that varies along the rows: a row block's origin shows
+    transform.SetMatrix((1.1, 0.0, 0.0, 0.0, 0.9, 0.05, 0.1, 0.0, 1.0))
+    transform.SetTranslation((1.0, -2.0, 0.5))
     centre = native.mapped_centre(mapped, None, "com")
     native.write_field(tmp_path / "bands.mha", mapped, transform)
 

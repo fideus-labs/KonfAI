@@ -618,7 +618,7 @@ def test_every_box_reproduces_the_whole_image_masked_deformable(tmp_path):
     sampled.close()
 
 
-def test_a_draw_the_mask_misses_steps_nothing(tmp_path):
+def test_a_draw_the_mask_misses_keeps_the_warps_finite(tmp_path):
     """With a mask in one corner, most draws of one box miss it: they hold no voxel of the loss, and the warps stay
     finite."""
     mask = np.zeros(SIZE, dtype=np.float32)
@@ -666,7 +666,12 @@ def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypa
     )
     fixed, moving = texture(), texture((1.3, -0.8, 0.6))
     warps = []
-    for resident, host in ((False, False), (False, True), (True, False), (None, False)):
+    for resident, host, kind in (
+        (False, False, np.memmap),
+        (False, True, np.ndarray),
+        (True, False, torch.Tensor),
+        (None, False, np.memmap),  # the finest scale in files
+    ):
         monkeypatch.setattr(module, "max_voxels", lambda vram, ram, gpu, host=host: 2**40 if host else 1)
         if resident is None:  # three quarters of it hold the finest scale's warps of SyN, not the coarser one's
             monkeypatch.setattr(module, "free_bytes", lambda device: 4 * 3 * 4 * math.prod(SIZE) * 2)
@@ -686,7 +691,7 @@ def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypa
         )
         sampled.optimize()
         stored = sampled._warps["fwd"].arrays["warp"]
-        assert isinstance(stored, torch.Tensor) or isinstance(stored, np.memmap) != host
+        assert type(stored) is kind
         field = np.zeros((*SIZE, 3), dtype=np.float32)
         sampled.write_field(field, block=20)
         warps.append(field)
