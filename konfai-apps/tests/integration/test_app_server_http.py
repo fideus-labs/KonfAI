@@ -14,7 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -259,3 +262,66 @@ def test_a_refused_job_answers_its_refusal_and_a_crash_its_exit_code(
 
     assert result.status_code == status
     assert result.json()["error"] == error
+
+
+def test_a_session_is_refused_before_any_worker_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
+    monkeypatch.setattr(app_server, "_APPS", ["demo"])
+    image = {"image": ("image.mha", b"not an image")}
+    with TestClient(app_server.app) as client:
+        assert client.post("/apps/other/sessions", files=image).status_code == 404
+        assert client.post("/apps/demo/sessions", files=image, data={"gpu": "99"}).status_code == 400
+        assert client.post("/apps/demo/sessions", files=image, data={"gpu": ""}).status_code == 422
+        # A few compressed bytes declaring a volume far larger than the server's memory: refused from the header.
+        header = b"ObjectType = Image\nNDims = 3\nDimSize = 4096 4096 4096\nElementType = MET_UCHAR\n"
+        huge = header + b"CompressedData = True\nCompressedDataSize = 8\nElementDataFile = LOCAL\n" + bytes(8)
+        assert client.post("/apps/demo/sessions", files={"image": ("image.mha", huge)}).status_code == 413
+        assert client.post("/sessions/unknown/predict").status_code == 404
+        assert client.delete("/sessions/unknown").status_code == 404
+        monkeypatch.setattr(app_server, "MAX_SESSIONS", 0)
+        assert client.post("/apps/demo/sessions", files=image).status_code == 429
+        assert not app_server.SERVER_STATE.sessions
+
+
+def test_an_idle_session_is_closed_with_its_worker_and_its_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+    run_dir = tmp_path / "session"
+    run_dir.mkdir()
+    session = app_server.Session("idle", run_dir, worker, None)
+    session.last_used -= app_server.SESSION_IDLE_SECONDS + 1
+    monkeypatch.setitem(app_server.SERVER_STATE.sessions, "idle", session)
+    asyncio.run(app_server._close_idle_sessions())
+    assert "idle" not in app_server.SERVER_STATE.sessions
+    assert worker.poll() is not None
+    assert not run_dir.exists()
+
+
+def test_a_prediction_past_its_deadline_closes_its_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
+    monkeypatch.setattr(app_server, "SESSION_PREDICT_SECONDS", 0.5)
+    stuck = "import sys, time; sys.stdin.readline(); time.sleep(600)"  # takes the request, never answers
+    worker = subprocess.Popen(
+        [sys.executable, "-c", stuck], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True
+    )
+    run_dir = tmp_path / "session"
+    run_dir.mkdir()
+    with TestClient(app_server.app) as client:
+        monkeypatch.setitem(
+            app_server.SERVER_STATE.sessions, "stuck", app_server.Session("stuck", run_dir, worker, None)
+        )
+        response = client.post("/sessions/stuck/predict")
+        assert response.status_code == 504
+        assert "stuck" not in app_server.SERVER_STATE.sessions
+        assert worker.poll() is not None
+
+
+def test_a_local_app_named_relatively_reaches_the_session_worker_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The worker runs in the session's folder: a path relative to the server's would name nothing there.
+    (tmp_path / "models" / "demo").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    assert app_server._worker_app("./models/demo#fast") == f"{tmp_path / 'models' / 'demo'}#fast"
+    assert app_server._worker_app("VBoussot/ImpactSynth:MR") == "VBoussot/ImpactSynth:MR"

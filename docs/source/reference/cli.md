@@ -275,6 +275,8 @@ ONNX export has no subcommand: it is a Python function ({doc}`../usage/python-ap
 | `KONFAI_API_TOKEN` | Bearer token of `konfai-apps` in remote mode and of `konfai-apps-server`. |
 | `KONFAI_APPS_INSTALL_REQUIREMENTS` | `0` stops `konfai-apps` from installing an app's `requirements.txt` ({doc}`../usage/apps`). |
 | `KONFAI_APPS_MAX_DATASET_BYTES` | Largest fine-tune dataset `konfai-apps-server` accepts (default 64 GiB; above, HTTP 413). |
+| `KONFAI_APPS_MAX_SESSIONS` | Interactive sessions `konfai-apps-server` holds at once (default 4; above, HTTP 429). |
+| `KONFAI_APPS_SESSION_IDLE_SECONDS` | Seconds without a request after which `konfai-apps-server` closes an interactive session (default 900). |
 | `KONFAI_DECOMPRESSED_DIRECTORY` | Where compressed images are decompressed for region reads (default `~/.cache/konfai/decompressed`). |
 | `KONFAI_TENSORBOARD_HOST` | The address TensorBoard binds (default `127.0.0.1`). TensorBoard has no authentication: from another machine, forward the port with `ssh -N -L <port>:127.0.0.1:<port> user@server`. |
 | `KONFAI_DEBUG` | `1` shows the full traceback of a KonfAI refusal, and records the last layer reached in `KONFAI_DEBUG_LAST_LAYER`. |
