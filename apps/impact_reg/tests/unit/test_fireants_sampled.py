@@ -746,3 +746,24 @@ def test_an_unknown_deformable_method_is_refused_before_any_stage():
     settings |= {"deformable_metric": "cc", "deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0}
     with pytest.raises(ValueError, match="deformable_method"):  # by boxes it would have run greedy
         FireANTsEngine(**settings, deformable_method="syyn", seed=0, impact_levels=[])
+
+
+def test_a_static_model_of_two_dimensions_is_refused_before_the_pair_is_read(tmp_path, monkeypatch):
+    import json
+
+    from impact_reg_konfai.models.fireants import FireANTsEngine, ModelSpec
+
+    path = tmp_path / "planes.pt"
+    torch.jit.script(_Pointwise()).save(str(path))
+    registry = tmp_path / "models.json"
+    registry.write_text(json.dumps({str(path): {"dimension": 2, "numberofchannels": 1}}), encoding="utf-8")
+    monkeypatch.setenv("KONFAI_IMPACT_MODELS_REGISTRY", str(registry))
+    settings = {"scales": [2, 1], "affine_iterations": [2, 2], "deformable_iterations": [2, 2], "cc_kernel": 5}
+    settings |= {"affine_metric": "mi", "affine_lr": 0.03, "moments_init": "cof", "linear_method": "rigid_affine"}
+    settings |= {"deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0, "mode": "Static"}
+    spec = ModelSpec(ref=str(path), distance="L2")
+    engine = FireANTsEngine(
+        **settings, deformable_method="syn", deformable_metric="impact", seed=0, impact_levels=[[spec], [spec]]
+    )
+    with pytest.raises(NotImplementedError, match="Static mode by blocks takes 3D feature models"):
+        engine.check_sampled((40, 40, 40), (40, 40, 40))

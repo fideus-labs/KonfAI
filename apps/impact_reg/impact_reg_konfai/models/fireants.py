@@ -1267,6 +1267,15 @@ class FireANTsEngine:
                 "a model's voxel_size is read against the whole image, where the deformable stage reads its boxes or"
                 " its blocks: by boxes the models see the image at its own resolution."
             )
+        if (
+            self._deformable_metric == "impact"
+            and self._mode == "Static"
+            and any(core.dimension != 3 for core in self._impact_loss().cores)
+        ):
+            raise NotImplementedError(
+                "Static mode by blocks takes 3D feature models at the image's own resolution: a 2D network and a"
+                " voxel_size both lay their features out over the whole image."
+            )
         if min(fixed_shape) < MIN_IMG_SIZE:
             raise NotImplementedError(
                 f"FireANTs resamples an axis under {MIN_IMG_SIZE} voxels to that many at every scale, where the"
