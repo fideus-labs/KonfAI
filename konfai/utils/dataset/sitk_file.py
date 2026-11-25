@@ -724,9 +724,13 @@ class SitkFile(AbstractFile):
         stream, types = _STREAMS[self.file_format]
         if element_dtype.name not in types or (stream is not _MhaDataStream and dimension not in (2, 3)):
             return None
-        _refuse_a_shared_entry(f"{self.filename}{name}", self.file_format)
+        base, form = f"{self.filename}{name}", self.file_format
+        _refuse_a_shared_entry(base, form)
         os.makedirs(self.filename, exist_ok=True)
-        return stream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
+        opened = stream(f"{base}.{form}", shape, element_dtype, attributes)
+        # Asked again where the entry lands: a fiducial file written while the stream was open did not see it.
+        opened._before_publish = lambda: _refuse_a_shared_entry(base, form)
+        return opened
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
         base = f"{self.filename}{group}"

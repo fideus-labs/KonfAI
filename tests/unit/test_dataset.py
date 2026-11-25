@@ -634,6 +634,29 @@ def test_a_polydata_written_beside_a_fiducial_file_is_refused_before_its_writer_
     assert [entry.name for entry in case.iterdir()] == ["CT.fcsv"]
 
 
+@pytest.mark.parametrize("file_format", ["mha", "nii", "nii.gz", "nrrd"])
+def test_a_stream_closed_beside_a_fiducial_file_written_meanwhile_is_refused(
+    tmp_path: Path, image_attributes, file_format: str
+) -> None:
+    """A fiducial file written while a stream is open does not see the stream's entry: the stream asks again where
+    it lands, and leaves the case as the fiducial file made it."""
+    case = tmp_path / "Dataset" / "CASE_000"
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    shape = [1, 2, 3, 4]
+    geometry = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    stream = dataset.open_data_stream("CT", "CASE_000", shape, np.dtype(np.float32), geometry)
+    assert stream is not None
+    stream.write_slice(tuple(slice(0, extent) for extent in shape), np.zeros(shape, np.float32))
+    dataset.write("CT", "CASE_000", _POINTS, Attribute())
+
+    with pytest.raises(DatasetManagerError, match="would be stored under the same entry") as refused:
+        stream.close()
+
+    assert _named(refused.value) == [case / "CT.fcsv", case / f"CT.{file_format}", case / "CT.fcsv"]
+    assert [entry.name for entry in case.iterdir()] == ["CT.fcsv"]
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_000")[0], _POINTS)
+
+
 def test_an_image_is_written_over_itself(tmp_path: Path, image_attributes) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
     geometry = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
