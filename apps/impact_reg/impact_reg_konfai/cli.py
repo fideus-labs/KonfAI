@@ -231,8 +231,8 @@ convention): resampling the moving image through it gives Moved.""",
         help="Samples an iteration of the sampled mode draws, anew at each one: an iteration's memory and time follow "
         "them, not the image, so that a smaller number registers a larger pair on a smaller machine. A sample is a "
         "centre: what is read is each centre with what the loss or the model reads around it (its field of view). "
-        "elastix draws that many points; ConvexAdam and FireANTs that many voxels, in random boxes, whose centres "
-        "share what they read. Default: what the device holds (ConvexAdam and FireANTs then step every box at every "
+        "elastix draws that many points; ConvexAdam and FireANTs that many voxels in whole random boxes (one box at "
+        "least, 8 voxels a side at least), whose centres share what they read. Default: what the device holds (ConvexAdam and FireANTs then step every box at every "
         "iteration, as on the whole pair), what its preset says for elastix.",
     )
     reg.add_argument(

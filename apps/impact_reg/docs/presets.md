@@ -39,10 +39,12 @@ last column is how `register` handles a pair larger than what the preset registe
 | microscopy (ExaSPIM light-sheet) | `FireANTs#syn` | `ConvexAdam#composite`, `Elastix#rigid_bspline` | the TotalSegmentator presets, made for human anatomy at millimetre scale |
 
 **The feature layers follow the IMPACT guideline**: TotalSegmentator MR (`TS/M730`) layer 2 for CT/CBCT, layer 7 with
-MIND for MR/CT, in each engine. For MR/CT it holds in all three: layer 7 with MIND took FireANTs from 0.562 to 0.602
-Dice on AbdomenMRCT and 0.674 to 0.684 on head and neck, and ConvexAdam from 0.543 to 0.627 on the abdomen (0.659 to
-0.630 on head and neck). `Elastix#impact_static` goes one layer further at its two fine levels, the segmentation head,
-which beat layer 7 everywhere on both sets (0.772 and 0.693 against 0.731 and 0.663). For CT/CBCT, layer 2 lifted
+MIND for MR/CT. On MR/CT the benchmark held it in all three engines: layer 7 with MIND took FireANTs from 0.562 to
+0.602 Dice on AbdomenMRCT and 0.674 to 0.684 on head and neck, and ConvexAdam from 0.543 to 0.627 on the abdomen
+(0.659 to 0.630 on head and neck). `Elastix#impact_static` goes one layer further at its two fine levels, the
+segmentation head, which beat layer 7 everywhere on both sets (0.772 and 0.693 against 0.731 and 0.663), and
+`ConvexAdam#impact_mrct` ships the segmentation head too, with its coarse stage alone: the ConvexAdam figures above
+are layer 7's. For CT/CBCT, layer 2 lifted
 ConvexAdam by 0.005 to 0.021; in FireANTs it matched TotalSegmentator CT (`TS/M291`) on the thorax and the abdomen and
 lost on head and neck (0.736 against 0.800), so `FireANTs#impact` keeps `TS/M291`. The deep layers need the whole
 image around them: `ConvexAdam#impact_mrct`, like the elastix IMPACT presets, registers a pair too large for the device

@@ -251,11 +251,11 @@ on the whole pair resampled to fit, then its deformable stage on native tiles of
 ```
 
 `--out-of-core sampled` is the second strategy: the preset in one pass on the native pair, never resampled and never
-held whole, its engine scoring a random subset of the pair at every iteration. ConvexAdam: the coarse stage's cost
-built by boxes of its grid, the fine stage's loss on random boxes, the control grid alone on the GPU. FireANTs: its
-rigid, affine and deformable stages on random boxes, the warps on the GPU when they fit, else in host memory while
-the memory budget holds them, in files beyond. elastix: its own samples, with its images mapped from files and paged
-by the kernel.
+held whole, an iteration on every box of the pair or, with `--samples`, on a random draw of them. ConvexAdam: the
+coarse stage's cost built by boxes of its grid, the fine stage on boxes of its control grid, the pooled feature maps
+on the GPU where they fit and in files otherwise. FireANTs: its rigid, affine and deformable stages on boxes, the
+warps on the GPU when they fit, else in host memory while the memory budget holds them, in files beyond. elastix: its
+own samples, with its images mapped from files and paged by the kernel.
 
 Everything around the presets is streamed, outputs included (`.mha`, `.nii`, `.nii.gz`, `.nrrd`, OME-Zarr). Pin
 `--max-voxels` for reproducible runs. SlicerImpactReg is not streamed: it loads the moved image and, for uncertainty,
