@@ -520,9 +520,11 @@ class _Warp:
             raise
         previous, self.paths = self.paths, paths
         self.resident, self.host = resident, host
-        self._new("next", grid)
-        for path in previous.values():
-            path.unlink(missing_ok=True)
+        try:
+            self._new("next", grid)
+        finally:  # the old generation is no longer in ``paths``: close() would not find it
+            for path in previous.values():
+                path.unlink(missing_ok=True)
 
     def swap(self) -> None:
         """The stepped warp becomes the warp."""
