@@ -18,6 +18,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -605,6 +606,32 @@ def test_a_model_on_a_device_is_checked_on_that_device(tmp_path):
 
     example = torch.randn(1, 1, 8, 10, 12, device="cuda")
     export_to_onnx(_Conv().cuda().eval(), tmp_path, example, "head", dynamic=True)
+
+
+def test_a_cast_of_floats_to_integers_is_found_in_a_branch_of_the_graph(tmp_path):
+    # An If holds its branches as graphs of their own: a cast in one is one of the graph's.
+    onnx = pytest.importorskip("onnx")
+    from konfai.export import floats_cast_to_integers
+    from onnx import TensorProto, helper
+
+    def branch(name: str, op: str) -> Any:
+        node = helper.make_node(op, ["x"], [f"{name}_y"], **({"to": TensorProto.INT32} if op == "Cast" else {}))
+        dtype = TensorProto.INT32 if op == "Cast" else TensorProto.FLOAT
+        return helper.make_graph([node], name, [], [helper.make_tensor_value_info(f"{name}_y", dtype, [1])])
+
+    then, otherwise = branch("then", "Cast"), branch("otherwise", "Identity")
+    node = helper.make_node("If", ["cond"], ["y"], then_branch=then, else_branch=otherwise)
+    graph = helper.make_graph(
+        [node],
+        "branched",
+        [
+            helper.make_tensor_value_info("x", TensorProto.FLOAT, [1]),
+            helper.make_tensor_value_info("cond", TensorProto.BOOL, []),
+        ],
+        [helper.make_tensor_value_info("y", TensorProto.UNDEFINED, None)],
+    )
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)]), tmp_path / "branched.onnx")
+    assert floats_cast_to_integers(tmp_path / "branched.onnx") == ["int32"]
 
 
 def test_a_case_statistic_s_graphs_land_in_folders_made_for_both_before_either_is_written(tmp_path):

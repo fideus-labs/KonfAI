@@ -287,15 +287,30 @@ def _write_onnx(
 
 
 def floats_cast_to_integers(path: Path, handed: str = "float32") -> list[str]:
-    """The integer or bool types the graph at ``path`` casts a floating tensor to, as its types infer: all but its
-    first cast to the ``handed`` dtype, of its input, the runtime's float32 buffer, holding values of that dtype."""
+    """The integer or bool types the graph at ``path`` casts a floating tensor to, as its types infer, in its branches
+    and bodies too (an If's, a Loop's): all but its first cast to the ``handed`` dtype, of its input, the runtime's
+    float32 buffer, holding values of that dtype."""
     onnx = _require("onnx")
-    graph = onnx.shape_inference.infer_shapes(onnx.load(str(path))).graph
-    held = {value.name: value.type.tensor_type.elem_type for value in [*graph.input, *graph.value_info, *graph.output]}
-    held |= {tensor.name: tensor.data_type for tensor in graph.initializer}
+    held: dict[str, int] = {}
+    casts: list[Any] = []
+
+    def visit(graph: Any) -> None:
+        held.update({value.name: value.type.tensor_type.elem_type for value in [*graph.input, *graph.value_info]})
+        held.update({value.name: value.type.tensor_type.elem_type for value in graph.output})
+        held.update({tensor.name: tensor.data_type for tensor in graph.initializer})
+        for node in graph.node:
+            casts.extend([node] if node.op_type == "Cast" else [])
+            for attribute in node.attribute:
+                for inner in [attribute.g] if attribute.type == onnx.AttributeProto.GRAPH else attribute.graphs:
+                    visit(inner)
+
+    visit(onnx.shape_inference.infer_shapes(onnx.load(str(path))).graph)
     floating = {onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16}
-    casts = [node for node in graph.node if node.op_type == "Cast" and held.get(node.input[0]) in floating]
-    targets = [next(attribute.i for attribute in node.attribute if attribute.name == "to") for node in casts]
+    targets = [
+        next(attribute.i for attribute in node.attribute if attribute.name == "to")
+        for node in casts
+        if held.get(node.input[0]) in floating
+    ]
     held_as = (
         None if getattr(torch, handed).is_floating_point else onnx.helper.np_dtype_to_tensor_dtype(np.dtype(handed))
     )
