@@ -401,6 +401,71 @@ def test_sampled_mode_takes_an_empty_mask_as_the_engines_take_it_on_the_whole_pa
         assert registered == [(None, None), (None, None)] and np.allclose(field, (1.0, 0.0, 0.0))
 
 
+def test_sampled_mode_takes_the_test_time_copies_a_run_of_the_preset_whole_takes(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--tta by boxes, as the predictor runs it: each copy the pair flipped as the preset's Flip flips it in turn, the
+    headers kept, its field flipped back with its vectors reflected, and the case's field the mean of the original's
+    and the copies'. The engine here gives the translation between the images' centres of mass."""
+    from impact_reg_konfai.models import intensity
+
+    def blob(centre, origin) -> sitk.Image:
+        z, y, x = np.mgrid[:9, :10, :11].astype(np.float32)
+        array = np.exp(-((x - centre[0]) ** 2 + (y - centre[1]) ** 2 + (z - centre[2]) ** 2) / 4.0).astype(np.float32)
+        image = sitk.GetImageFromArray(array)
+        image.SetOrigin(origin)
+        return image
+
+    def centre_of_mass(image: sitk.Image, mirrored=()) -> np.ndarray:
+        array = sitk.GetArrayFromImage(image)
+        array = np.flip(array, [2 - c for c in mirrored]) if mirrored else array  # ITK component c: NumPy axis 2 - c
+        indices = np.stack(np.meshgrid(*(np.arange(n) for n in array.shape), indexing="ij"), -1)[..., ::-1]
+        mean = (indices * array[..., None]).sum((0, 1, 2)) / array.sum()
+        return np.asarray(image.TransformContinuousIndexToPhysicalPoint(mean.tolist()))
+
+    images = {"fixed": blob((4.0, 5.0, 3.5), (0.0, 0.0, 0.0)), "moving": blob((6.0, 3.5, 4.0), (1.5, -2.0, 0.5))}
+    paths = {}
+    for name, image in images.items():
+        paths[name] = tmp_path / f"{name}.mha"
+        sitk.WriteImage(image, str(paths[name]))
+
+    class Engine:
+        _feature_models = ()
+        _elastix_bin = "elastix"
+        _moments_init = "cof"
+
+        def supports_mapped_images(self) -> bool:
+            return True
+
+        def register_mapped(self, fixed, moving, *args) -> sitk.Transform:
+            shift = centre_of_mass(sitk.ReadImage(str(moving))) - centre_of_mass(sitk.ReadImage(str(fixed)))
+            return sitk.TranslationTransform(3, shift.tolist())
+
+    manifest = json.loads((presets / "Elx" / "app.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {**manifest, "tta": 2})  # an app that allows two copies
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
+    flip = {"Flip": {"f_prob": [0, 0.5, 0.5], "vector_field": True, "prob": 1}}
+    config["Predictor"]["Dataset"] = {"augmentations": {"DataAugmentation_0": {"data_augmentations": flip, "nb": 2}}}
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF", "reduction": "Mean"}}}
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ["Elx"], [paths["fixed"]], [paths["moving"]], output=tmp_path / "out", out_of_core="sampled", tta=2,
+        fields_only=True,
+    )  # fmt: skip
+    # The copies flip y, then x (tensor dims 2 and 3): ITK components 1 and 0.
+    shifts = []
+    for mirrored in ((), (1,), (0,)):
+        shift = centre_of_mass(images["moving"], mirrored) - centre_of_mass(images["fixed"], mirrored)
+        shift[list(mirrored)] *= -1
+        shifts.append(shift)
+    field = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha")))
+    assert np.allclose(field, np.mean(shifts, axis=0), atol=1e-4)
+    assert not np.allclose(field, shifts[0], atol=1e-2)  # the copies count
+
+
 def test_sampled_convexadam_stages_no_mask_its_stages_do_not_read(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -657,13 +722,16 @@ def test_a_compact_transform_never_outlives_its_field(
 def test_tta_on_the_sampled_route_is_capped_as_konfai_apps_caps_it(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: int
 ) -> None:
-    """--tta runs the copies the app allows (app.json 'tta', 0 for every shipped preset): none, said, as konfai-apps
-    says it on the other routes; an app that allows some is refused, the sampled route registering a pair once."""
+    """--tta runs the copies the app allows (app.json 'tta', 0 for every shipped preset), said when it caps them, as
+    konfai-apps says it on the other routes."""
 
     class Reached(Exception):
         pass
 
+    copies = []
+
     def sampled(*args, **kwargs):
+        copies.append(args[-1])
         raise Reached
 
     manifest = reg._manifest
@@ -671,8 +739,9 @@ def test_tta_on_the_sampled_route_is_capped_as_konfai_apps_caps_it(
     fixed, moving = _pair(tmp_path)
     app = reg.ImpactRegKonfAIApp()
     app._register_sampled = sampled  # type: ignore[method-assign]
-    with pytest.raises(KonfAIError if allowed else Reached):
-        app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", tta=2)
+    with pytest.raises(Reached):
+        app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", tta=3)
+    assert copies == [min(3, allowed)]
 
 
 @pytest.mark.parametrize(
@@ -784,7 +853,7 @@ def test_sampled_mode_runs_the_region_stage_on_a_pair_over_the_budget(presets: P
     app = reg.ImpactRegKonfAIApp()
     seen = {}
 
-    def sampled(preset, inputs, headers, cases, work, gpu, cpu, quiet, overrides, region, samples, epochs):
+    def sampled(preset, inputs, headers, cases, work, gpu, cpu, quiet, overrides, region, samples, epochs, tta):
         seen.update(preset=preset, region=region, samples=samples, epochs=epochs, gpu=gpu)
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True)

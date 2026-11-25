@@ -145,6 +145,7 @@ def write_twin(
     voxel: float = 1.0,
     positive: bool = False,
     axis_map: AxisMap | None = None,
+    mirror: Sequence[int] = (),
 ) -> Path:
     """The entry ``(group, name)`` written to ``target``: an HDF5 image in ITK's layout, its voxels chunked
     ``chunk``^3, where it ends in ``.h5``, an uncompressed MetaImage otherwise; from one read of the entry by bands
@@ -152,12 +153,17 @@ def write_twin(
     a band). ``clip`` winsorises it, as the whole-image run winsorises the images of the engine that reads it;
     ``dtype`` "uint8" makes a mask (any non-zero voxel on, or with ``positive`` the positive ones). ``axis_map``
     writes the entry as that view of it (``AxisMap``): a band of the entry lands in a band of the twin where the map
-    keeps the outer axis outer. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
+    keeps the outer axis outer. ``mirror`` reverses those axes of the entry (NumPy order), its header kept, as a
+    test-time copy's flip does. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
     a pair). The headers are ITK's own, written by it for a one-voxel image of the same geometry and voxel type."""
     shape, attributes = dataset.get_infos(group, name)
     extents = [int(extent) for extent in shape[1:]]
     axis_map = axis_map or AxisMap.identity_of(len(extents))
     geometry = axis_map.geometry(*(attributes.get_np_array(key) for key in ("Spacing", "Origin", "Direction")), extents)
+    if mirror:  # the voxels reversed where the header is not
+        axis_map = AxisMap(
+            axis_map.axes, tuple(f != (a in mirror) for a, f in zip(axis_map.axes, axis_map.flips, strict=True))
+        )
     with _new_twin(target, geometry, axis_map.extents(extents), dtype, chunk, voxel) as voxels:
         for depth, rows in _slabs(extents, 4, band or chunk):  # read as float32
             slices = (slice(0, 1), depth, rows, *(slice(None) for _ in extents[2:]))
@@ -433,6 +439,38 @@ def shift_origin(path: Path, shift) -> None:
     origin = np.subtract(reader.GetOrigin(), shift)
     with open(path, "r+b") as file:
         file.write(_metaimage_header(geometry_of(reader, origin), list(shape[:-1]), length=offset))
+
+
+def _mirrored(block: slice, extent: int, mirrored: bool) -> slice:
+    return slice(extent - block.stop, extent - block.start) if mirrored else block
+
+
+def fold_mirrored(target: Path, copies: Sequence[tuple[Path, Sequence[int]]]) -> None:
+    """The mean, in place at ``target``, of the uncompressed field there and of ``copies``, band by band: each the
+    field, on the same grid, of the pair mirrored along those of its axes (NumPy order, its header kept: a test-time
+    copy's flip), brought back first as the predictor undoes the flip: mirrored again, its vectors reflected through
+    the plane normal to each mirrored axis's direction."""
+    reader, dtype, shape, offset = _pixels(target)
+    total = np.memmap(target, dtype=dtype, mode="r+", offset=offset, shape=shape)
+    dims = len(shape) - 1
+    direction = np.reshape(np.asarray(reader.GetDirection(), dtype=np.float64), (dims, dims))
+    sources = [
+        (np.memmap(path, dtype=dtype, mode="r", offset=_pixels(path)[3], shape=shape), sorted(axes))
+        for path, axes in copies
+    ]
+    for depth, rows in _slabs(shape, dtype.itemsize):
+        folded = np.asarray(total[depth, rows], dtype=np.float64)
+        for source, axes in sources:
+            values = np.asarray(
+                source[_mirrored(depth, shape[0], 0 in axes), _mirrored(rows, shape[1], 1 in axes)], dtype=np.float64
+            )
+            values = np.flip(values, axes) if axes else values
+            for axis in axes:  # the ITK column of a NumPy axis: its world direction
+                normal = direction[:, dims - 1 - axis]
+                values = values - 2 * (values @ normal)[..., None] * normal
+            folded += values
+        total[depth, rows] = (folded / (len(sources) + 1)).astype(dtype)
+    total.flush()
 
 
 def to_millimetres(path: Path, voxel: float) -> None:

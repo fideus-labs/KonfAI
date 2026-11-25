@@ -22,7 +22,7 @@ import argparse
 from pathlib import Path
 
 #: What a client's ``--arg NAME=VALUE`` may set, and how it is read: never a path.
-_ARGS = {"set": str, "samples": int, "epochs": int, "region_size": int, "groups": str}
+_ARGS = {"set": str, "samples": int, "epochs": int, "region_size": int, "groups": str, "tta": int}
 _GROUPS = ("Fixed", "Moving", "FixedMask", "MovingMask")
 
 
@@ -71,4 +71,5 @@ def main(argv: list[str]) -> None:
         region_size=last("region_size") or 64,
         samples=last("samples"),
         epochs=last("epochs"),
+        tta=last("tta") or 0,
     )

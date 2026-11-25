@@ -1095,6 +1095,41 @@ def _config_engine(config: dict) -> str | None:
     return next((m for m in _SAMPLED_ENGINES if classpath == f"{__package__}.models.{m}:RegistrationNet"), None)
 
 
+def _numpy_axes(dims: Sequence[int], ndim: int) -> tuple[int, ...]:
+    """The NumPy axes of an image of ``ndim`` axes the channel-first tensor dims ``dims`` of the volume a run of the
+    preset reads name (a 2-D image is read one plane thick, its plane's axes the last two)."""
+    return tuple(dim - 1 - (3 - ndim) for dim in dims if dim - 1 - (3 - ndim) >= 0)
+
+
+def _tta_mirrors(config: dict, copies: int, preset: str) -> list[tuple[int, ...]]:
+    """The flips of the ``copies`` test-time copies a run of the preset's ``config`` makes, as the channel-first tensor
+    dims each reverses: its ``Flip`` takes the distinct mirrors of the axes it may flip in turn, at prediction, and
+    the copies' fields are averaged (``reduction: Mean``). Any other test-time augmentation or reduction, which the
+    sampled route does not undo, is refused."""
+    if copies <= 0:
+        return []
+    predictor = config["Predictor"]
+    stages = list(((predictor.get("Dataset") or {}).get("augmentations") or {}).values())
+    draws = (stages[0] or {}).get("data_augmentations") or {} if len(stages) == 1 else {}
+    flip = draws.get("Flip") if list(draws) == ["Flip"] else None
+    reductions = {
+        str((sink.get("OutputDataset", sink) or {}).get("reduction", "Mean"))
+        for sink in (predictor.get("outputs_dataset") or {}).values()
+        if isinstance(sink, dict)
+    }
+    if flip is None or not (flip or {}).get("vector_field") or reductions - {"Mean"}:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset}: the sampled route takes test-time copies that flip the pair (Flip, vector_field: true) and"
+            " averages their fields (reduction: Mean); its config asks for other ones.",
+            "Drop --tta, or choose --out-of-core whole or tiled.",
+        )
+    probabilities = (flip or {}).get("f_prob", [0.33, 0.33, 0.33])
+    axes = [dim for dim, probability in zip((1, 2, 3), probabilities, strict=False) if probability > 0]
+    mirrors = [mirror for size in range(1, len(axes) + 1) for mirror in itertools.combinations(axes, size)]
+    return [mirrors[copy % len(mirrors)] if mirrors else () for copy in range(copies)]
+
+
 def _sampled_engine(preset: str, overrides: Sequence[str] = ()) -> str | None:
     """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``: the classpath of its config, or the
     one a --set of ``overrides`` gives it; None for any other class."""
@@ -1121,6 +1156,8 @@ class _SampledRun:
     # Each case's view of its fixed and moving image (``native.AxisMap.to_lps``): the twins, and ``headers``, are the
     # pair as a run on the whole pair reorients it.
     maps: "list[dict[str, AxisMap]]"
+    #: The channel-first tensor dims a test-time copy reverses in every image, its headers kept (``_tta_mirrors``).
+    mirror: tuple[int, ...] = ()
 
     @property
     def device_index(self) -> int:
@@ -1480,6 +1517,7 @@ class ImpactRegKonfAIApp:
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
+            copies: dict[str, int] = {}  # each sampled preset's test-time copies
             for preset in sampled_presets if tta else []:
                 # --tta as konfai-apps takes it on the other routes: up to the copies the app allows (app.json 'tta').
                 allowed = int(_manifest(preset).get("tta") or 0)
@@ -1489,12 +1527,7 @@ class ImpactRegKonfAIApp:
                         f" (app.json 'tta'): running {allowed}.",
                         flush=True,
                     )
-                if min(tta, allowed):
-                    raise KonfAIError(
-                        "ImpactReg",
-                        f"{preset}: the sampled route registers a pair once, with no test-time augmentation.",
-                        "Drop --tta, or choose --out-of-core whole or tiled.",
-                    )
+                copies[preset] = min(tta, allowed)
             # The twins of a sampled run are written where it runs: on the server, with --host.
             _check_space(work, headers, presets, bool(sampled_presets) and self._remote is None)
             on_grid = None
@@ -1522,6 +1555,7 @@ class ImpactRegKonfAIApp:
                         region_size,
                         samples,
                         epochs,
+                        copies.get(preset, 0),
                     )
                     if not rest:
                         continue
@@ -1891,6 +1925,7 @@ class ImpactRegKonfAIApp:
         region_size: int,
         samples: int | None,
         epochs: int | None,
+        tta: int = 0,
     ) -> tuple[str, dict[str, Path]]:
         """One preset on pairs too large for the device by the second out-of-core strategy (``--out-of-core
         sampled``): the preset whole (the config a pair that fits registers with) on the native pair of each of
@@ -1908,13 +1943,16 @@ class ImpactRegKonfAIApp:
           warps on the device, in host memory or in files.
 
         Each leaves the dense field on the native fixed grid, written by regions, and a compact transform beside it.
+        With ``tta`` test-time copies, as a run of the preset whole: each copy, the pair flipped as the preset's
+        ``Flip`` flips it (``_tta_mirrors``), is registered the same way, its field brought back, and the fields'
+        mean is the case's, dense.
         """
         import importlib
 
         from konfai_apps.app_repository import get_app_repository_info
 
         from .models.intensity import world_transform
-        from .native import AxisMap, remap, to_millimetres
+        from .native import AxisMap, fold_mirrored, remap, to_millimetres
 
         config = _preset_config(preset, "Prediction.yml")
         # A --set of the classpath may name another of ImpactReg's engines, whose class then checks the other --set.
@@ -1963,8 +2001,20 @@ class ImpactRegKonfAIApp:
             cases,
             maps,
         )
-        fields = getattr(self, f"_sampled_{module}")(run)
+        route = getattr(self, f"_sampled_{module}")
+        fields = route(run)
         shutil.rmtree(work / _workspace(f"{preset}_native"), ignore_errors=True)
+        copied = []
+        for copy, mirror in enumerate(_tta_mirrors(config, tta, preset), 1):
+            copy_work = work / _workspace(f"{preset}_copy{copy}")
+            copied.append((copy_work, mirror, route(dataclasses.replace(run, work=copy_work, mirror=mirror))))
+        for case in fields if copied else ():
+            ndim = len(headers[run.cases.index(case)]["Fixed"][0]) - 1
+            fold_mirrored(fields[case], [(found[case], _numpy_axes(mirror, ndim)) for _, mirror, found in copied])
+        for copy_work, _, _ in copied:
+            shutil.rmtree(copy_work, ignore_errors=True)
+        if copied:  # the mean of the copies' fields is no copy's transform
+            self._compact[preset] = {}
         # The engines measured the pair in the fixed image's finest voxel: the fields and the compact transforms
         # come back in millimetres, a field on the fixed image's own grid.
         for index, case in enumerate(run.cases):
@@ -1993,6 +2043,7 @@ class ImpactRegKonfAIApp:
         region_size: int,
         samples: int | None,
         epochs: int | None,
+        tta: int = 0,
     ) -> tuple[str, dict[str, Path]]:
         """``_register_sampled`` on the konfai-apps server ``--host`` names, by its runner ``impact_reg_sampled``
         (``remote.py``): the cases' images go up in a stream, the server registers them as this machine would, and
@@ -2005,6 +2056,7 @@ class ImpactRegKonfAIApp:
         args = [f"groups={','.join(names)}", f"region_size={region_size}"]
         args += [f"set={override}" for override in config_overrides["global"]]
         args += [f"{name}={value}" for name, value in (("samples", samples), ("epochs", epochs)) if value is not None]
+        args += [f"tta={tta}"] if tta else []
         out = work / _workspace(f"{preset}_remote")
         KonfAIAppClient(app_id(IMPACT_REG_KONFAI_REPO, app), self._remote).run(
             "impact_reg_sampled",
@@ -2095,6 +2147,7 @@ class ImpactRegKonfAIApp:
                 voxel=min(run.headers[index]["Fixed"][1]),
                 positive=positive,
                 axis_map=run.maps[index][image_group],
+                mirror=_numpy_axes(run.mirror, len(run.headers[index][image_group][0]) - 1),
             )
 
         masks = {}
