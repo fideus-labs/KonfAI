@@ -19,6 +19,7 @@
 import functools
 import math
 from types import SimpleNamespace
+from typing import Optional
 from unittest import mock
 
 import numpy as np
@@ -1073,3 +1074,60 @@ def test_an_unknown_deformable_method_is_refused_before_any_stage():
     settings |= {"deformable_metric": "cc", "deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0}
     with pytest.raises(ValueError, match="deformable_method"):  # by boxes it would have run greedy
         FireANTsEngine(**settings, deformable_method="syyn", seed=0, impact_levels=[])
+
+
+class _Standardized(torch.nn.Module):
+    """A layer that is its input standardised by the statistics it is handed: what a model normalising by the whole
+    image's intensities (TotalSegmentator) does before its first convolution."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layers: torch.Tensor,
+        stats: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+        direction: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+    ) -> list[torch.Tensor]:
+        if stats is None or stats.numel() != 4:  # as itk-impact's models: the tensor's own statistics
+            return [(x[:, :1] - x[:, :1].mean()) / x[:, :1].std()]
+        return [(x[:, :1] - stats[2]) / stats[3]]
+
+
+def test_jacobian_boxes_normalise_by_the_level_s_intensities(tmp_path):
+    """Evaluated box by box, a Jacobian loss whose network normalises by its input's intensity statistics runs it on
+    the whole warped images' (``pool``), as the whole level's evaluation does: the level's value and gradient."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "standardized.pt"
+    torch.jit.script(_Standardized()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), distance="L2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False)
+    loss._level = 0
+    generator = torch.Generator().manual_seed(2)
+    shape = (20, 24, 28)
+    moved, fixed = torch.rand((1, 1, *shape), generator=generator), torch.rand((1, 1, *shape), generator=generator)
+    whole = moved.clone().requires_grad_()
+    expected_value = loss(whole, fixed)
+    (expected,) = torch.autograd.grad(expected_value, whole)
+    boxes = []
+    for tile in tiles(shape, 9):
+        low, high, core = box_region(tile, 2, shape)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        boxes.append((low, core, crop, region))
+    assert loss.pools
+    loss.pool([(moved[crop], fixed[crop], region) for _, _, crop, region in boxes])
+    gathered, value = torch.zeros_like(moved), 0.0
+    for low, core, crop, region in boxes:
+        box = moved[crop].clone().requires_grad_()
+        own = (slice(None), slice(None), *core)
+        voxels = math.prod(c.stop - c.start for c in core)
+        # The box's own voxels' share of the level's mean, as the stage weighs a box.
+        share = loss._values(box, fixed[crop], region)[1][0]
+        share = share * voxels / math.prod(shape)
+        (gradient,) = torch.autograd.grad(share, box)
+        value += float(share)
+        placed = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
+        gathered[(slice(None), slice(None), *placed)] = gradient[own]
+    assert math.isclose(value, float(expected_value), rel_tol=1e-5)
+    assert torch.allclose(gathered, expected, atol=1e-7)

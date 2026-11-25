@@ -1358,10 +1358,9 @@ def sampled_deformable_class():
                 # Over several boxes, a mutual information is the level's histogram's and a masked mean is weighed
                 # against the level's: one pass more an iteration.
                 information = len(boxes) > 1 and type(self.loss_fn) is GlobalMutualInformationLoss
-                pools = bool(getattr(self.loss_fn, "pools", False))  # an IMPACT loss's NCC layers
-                if pools and len(boxes) == 1:  # the box is the level: its own NCC is the level's, no sums to read
-                    self.loss_fn.pool([])
-                    pools = False
+                # An IMPACT loss's level sums (its NCC layers', Jacobian mode's intensities), read over the boxes'
+                # own voxels however many there are: a box read with its halo is more than the level it holds.
+                pools = bool(getattr(self.loss_fn, "pools", False))
                 masked = (
                     not information
                     and len(boxes) > 1
@@ -1378,7 +1377,7 @@ def sampled_deformable_class():
                     )
                     if draw is not None:
                         draw()
-                    if pools:  # the level's NCC sums over the boxes drawn, under this iteration's draw
+                    if pools:  # the level's sums over the boxes drawn, under this iteration's draw
                         self.loss_fn.pool(self._boxes([boxes[index] for index in drawn], grid, levels))
                     totals: _Information | tuple[float, float] | None = None
                     if information:

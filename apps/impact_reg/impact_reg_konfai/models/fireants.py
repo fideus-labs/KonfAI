@@ -98,7 +98,7 @@ from konfai.metric.measure.impact import (
 )
 from konfai.network import network
 from konfai.utils.config import Choices, Range
-from konfai.utils.dataset import image_to_data
+from konfai.utils.dataset import Attribute, image_to_data
 from konfai.utils.errors import MeasureError
 from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
@@ -235,6 +235,31 @@ def _patch_distances(
     return torch.stack(values)
 
 
+class _Intensities:
+    """An image's intensity statistics over the voxels pieces of it own, added piece by piece: what ``_statistics``
+    reads off the whole image (its unbiased standard deviation, over every channel)."""
+
+    def __init__(self) -> None:
+        self.count, self.total, self.squares = 0, 0.0, 0.0
+        self.low, self.high = math.inf, -math.inf
+
+    def add(self, image: torch.Tensor, region: torch.Tensor) -> None:
+        values = image[0][:, region[0, 0] > 0.5].double()
+        if values.numel() == 0:
+            return
+        self.count += values.numel()
+        self.total += float(values.sum())
+        self.squares += float((values * values).sum())
+        self.low, self.high = min(self.low, float(values.min())), max(self.high, float(values.max()))
+
+    def attribute(self) -> Attribute:
+        mean = self.total / self.count
+        variance = max(self.squares - self.count * mean * mean, 0.0) / max(self.count - 1, 1)
+        return Attribute(
+            {"ImageMin": self.low, "ImageMax": self.high, "ImageMean": mean, "ImageStd": math.sqrt(variance)}
+        )
+
+
 class _ImpactCore(torch.nn.Module):
     """One IMPACT feature model: its network (KonfAI's ``ImpactFeatureModel``, which prepares the inputs as itk-impact
     does) and its kept layers' distances between two images, for Jacobian mode, or its feature volumes, for Static.
@@ -305,8 +330,11 @@ class _ImpactCore(torch.nn.Module):
         terms: list[tuple[str, int]],
         seed: int,
         kernel: int,
+        statistics: tuple[Attribute, Attribute] | None = None,
     ) -> torch.Tensor:
         """Each kept layer's distance over the whole image, or over tiles once the whole image has run out of memory.
+        ``statistics`` are the moved and fixed images' intensity statistics when the two tensors are pieces of them
+        (``ImpactFeatureLoss.pool``), their own otherwise.
 
         A level that runs out is scored again in tiles half as wide, and in tiles half as wide again if it
         still does not fit; the tile is kept for that level, so the retry happens once per registration.
@@ -335,7 +363,7 @@ class _ImpactCore(torch.nn.Module):
                 None if mask is None else mask.permute(order),
             )
         shape = self._last_shape = tuple(moved.shape[2:])
-        statistics = (_statistics(moved)[0], _statistics(fixed)[0])
+        statistics = statistics or (_statistics(moved)[0], _statistics(fixed)[0])
 
         def run() -> torch.Tensor:
             tile = self._tiles.get(shape)
@@ -466,6 +494,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._factors: list[float] | None = None  # each layer's normalization at this level
         self._draw: int | None = None  # the draw every piece of an iteration takes (``draw``)
         self._pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None  # NCC layers' level sums (``pool``)
+        self._statistics: tuple[Attribute, Attribute] | None = None  # Jacobian: the level's intensities (``pool``)
 
     @property
     def cores(self) -> list[_ImpactCore]:
@@ -474,7 +503,7 @@ class ImpactFeatureLoss(torch.nn.Module):
     def reset(self) -> None:
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
-        self._level, self._factors, self._draw, self._pooled = -1, None, None, None
+        self._level, self._factors, self._draw, self._pooled, self._statistics = -1, None, None, None, None
         self._generator.manual_seed(self._seed)
 
     def draw(self) -> None:
@@ -484,7 +513,7 @@ class ImpactFeatureLoss(torch.nn.Module):
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
-        self._level, self._factors, self._pooled = self._level + 1, None, None
+        self._level, self._factors, self._pooled, self._statistics = self._level + 1, None, None, None
 
     def start_at(self, level: int) -> None:
         """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
@@ -615,10 +644,13 @@ class ImpactFeatureLoss(torch.nn.Module):
 
     @property
     def pools(self) -> bool:
-        """Static mode at a level with an NCC layer, the whole volumes compared: an NCC is no mean of its voxels'
-        values, and evaluated by pieces of the level it needs the level's sums first (``pool``)."""
-        if self._mode != "Static" or self._sampling < 1 or not self._levels:
+        """Whether an evaluation by pieces of the level needs the level's sums first (``pool``): Jacobian mode, whose
+        networks normalise their inputs by the whole images' intensity statistics, and Static mode at a level with an
+        NCC layer, an NCC being no mean of its voxels' values."""
+        if self._sampling < 1 or not self._levels:
             return False
+        if self._mode == "Jacobian":
+            return True
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         return any(name == "NCC" for index in level for name, _ in self._terms(index))
 
@@ -631,18 +663,25 @@ class ImpactFeatureLoss(torch.nn.Module):
         assert self._draw is not None
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         totals: dict[int, torch.Tensor] = {}
+        intensities = {"moved": _Intensities(), "fixed": _Intensities()}
         with torch.no_grad():
             for moved, fixed, region in pieces:
                 mask = region
                 if self._masked:
                     mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
                     moved, fixed = moved[:, :-1], fixed[:, :-1]
+                if self._mode == "Jacobian":
+                    intensities["moved"].add(moved, region)
+                    intensities["fixed"].add(fixed, region)
+                    continue
                 for layer, (name, moved_layer, fixed_layer) in enumerate(
                     self._static_layers(level, moved, fixed, self._draw)
                 ):
                     if name == "NCC":
                         piece = ncc_sums(moved_layer, fixed_layer, mask).cpu()
                         totals[layer] = piece if layer not in totals else totals[layer] + piece
+        counted = intensities["moved"].count > 0
+        self._statistics = (intensities["moved"].attribute(), intensities["fixed"].attribute()) if counted else None
         self._pooled = {}
         for layer, total in totals.items():
             total.requires_grad_()
@@ -690,7 +729,7 @@ class ImpactFeatureLoss(torch.nn.Module):
                 value
                 for index in level
                 for value in self.cores[index].distances(
-                    moved, fixed, mask, self._terms(index), seed + 1000 * index, self._kernel
+                    moved, fixed, mask, self._terms(index), seed + 1000 * index, self._kernel, self._statistics
                 )
             ]
         else:
