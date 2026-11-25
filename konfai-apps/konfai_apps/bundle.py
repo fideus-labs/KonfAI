@@ -345,7 +345,7 @@ def assemble_bundle(
             for link in [path for path in update.rglob("*") if path.is_symlink()]:
                 # What the link names, its folders read as the system reads them, its last part not followed: a chain
                 # of links into the bundle is kept a chain.
-                named = Path(os.readlink(link))
+                named = Path(_read_link(link))
                 held = bundle.absolute() / link.relative_to(update).parent
                 last = named.name not in ("", ".", "..")
                 target = Path(os.path.realpath(held / (named.parent if last else named))) / (named.name if last else "")
@@ -459,6 +459,17 @@ def _run_by_konfai_edge(config: Path) -> bool:
     except (UnicodeDecodeError, yaml.YAMLError):  # no text, or no YAML: nothing KonfAI Edge reads
         return False
     return isinstance(loaded, dict) and ("Predictor" in loaded or "Evaluator" in loaded)
+
+
+def _read_link(link: Path) -> str:
+    r"""What ``link`` names. Windows reads an absolute target back in its extended form, ``\\?\C:\...`` (``\\?\UNC\``
+    for a share), in which no path of the bundle is spelled: it is read as the absolute path it extends. Any other
+    extended form (a volume named by its GUID) extends none, and stays."""
+    named = os.readlink(link)
+    if os.name != "nt" or not named.startswith("\\\\?\\"):
+        return named
+    plain = "\\" + named[7:] if named.startswith("\\\\?\\UNC\\") else named[4:]
+    return plain if os.path.isabs(plain) else named
 
 
 def _carried(bundle: Path, checkpoints: Collection[str], source: str, target: str) -> None:
@@ -777,8 +788,14 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             spec["report"] = str(told)
             # The check is loaded first, its modules Python's and the packages'; then the app's are the update's
             # (:func:`_import_path`), as when the app runs. Bytecode neither written into the update nor read from it,
-            # but under a folder of its own.
-            env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode")}
+            # but under a folder of its own. Its output in UTF-8: off a console Windows gives it the ANSI code page,
+            # which holds few of the characters the app's modules may print.
+            env = {
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPYCACHEPREFIX": str(Path(scratch) / "bytecode"),
+                "PYTHONIOENCODING": "utf-8",
+            }
             path = _import_path(sys.path, out, update)
             app = [entry for entry in path if Path(entry).is_relative_to(update.absolute())]
             env["PYTHONPATH"] = os.pathsep.join(entry for entry in path if entry not in app)

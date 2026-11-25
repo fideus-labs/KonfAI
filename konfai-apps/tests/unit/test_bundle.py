@@ -1368,6 +1368,17 @@ def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path):
     assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
 
 
+def test_an_export_runs_whatever_code_page_its_output_is_in(tmp_path, monkeypatch):
+    # The export's interpreter writes to the output it is handed, which on Windows off a console is in the ANSI code
+    # page: a ✅ the app prints (torch.onnx printed one) is none of cp1252's characters, and the export died on it.
+    pytest.importorskip("onnxscript")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    root, _config, exporting = _exporting(tmp_path)
+    with open(root / "TinySeg.py", "a", encoding="utf-8") as module:
+        module.write('\nprint("\u2705")\n')
+    assert (_cli(root, **exporting) / "model.onnx").is_file()
+
+
 def test_an_update_whose_export_stops_short_is_refused(tmp_path):
     # The model's module ends the interpreter cleanly before the export: no graph, so no update.
     root, config, exporting = _exporting(tmp_path)
@@ -1644,9 +1655,45 @@ def test_a_bundle_s_name_is_none_of_the_command_s_scratch_folders(tmp_path):
         _cli(root, name=".Seg.previous")
 
 
-def test_a_link_the_update_re_points_keeps_the_link_it_names(tmp_path):
+@pytest.mark.parametrize(
+    ("system", "read", "named"),
+    [
+        ("nt", r"\\?\UNC\host\share\Seg\Bridge.py", r"\\host\share\Seg\Bridge.py"),
+        ("nt", r"\\?\Volume{0}\Seg\Bridge.py", r"\\?\Volume{0}\Seg\Bridge.py"),
+        ("posix", r"\\?\C:\out", r"\\?\C:\out"),  # a name like any other
+    ],
+)
+def test_a_link_windows_reads_back_in_its_extended_form_names_the_path_it_extends(monkeypatch, system, read, named):
+    # A share's extended form is \\?\UNC\host\share\..., read as \\host\share\...; a volume's by its GUID extends
+    # no such path; on POSIX the name is a name.
+    import ntpath
+    import types
+
+    import konfai_apps.bundle as bundle_module
+
+    monkeypatch.setattr(
+        bundle_module, "os", types.SimpleNamespace(name=system, readlink=lambda link: read, path=ntpath)
+    )
+    assert bundle_module._read_link("Alias.py") == named
+
+
+@pytest.mark.parametrize("read_back", ["as written", "as Windows reads it"])
+def test_a_link_the_update_re_points_keeps_the_link_it_names(tmp_path, monkeypatch, read_back):
     # Alias.py names Bridge.py by its absolute path, which names Model.py: re-pointed into the update, it names
-    # Bridge.py still, and the update keeps the bundle's chain of links.
+    # Bridge.py still, and the update keeps the bundle's chain of links. Windows reads an absolute target back as
+    # \\?\C:\..., in which no path of the bundle is spelled.
+    if read_back == "as Windows reads it":
+        import types
+
+        import konfai_apps.bundle as bundle_module
+
+        def extended(link):
+            named = os.readlink(link)
+            return "\\\\?\\" + named if os.path.isabs(named) and not named.startswith("\\\\?\\") else named
+
+        monkeypatch.setattr(
+            bundle_module, "os", types.SimpleNamespace(**{**vars(os), "name": "nt", "readlink": extended})
+        )
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text("import einops\n")
     bundle = _cli(root, model_py=str(root / "Model.py"))
@@ -1776,11 +1823,14 @@ def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path, spelled):
     (tmp_path / "out" / "shared" / "sub").mkdir(parents=True)
     (tmp_path / "out" / "shared" / "icon.png").write_bytes(b"shared")
     (bundle / "icon.png").write_bytes(b"the bundle's")
-    (bundle / "pivot").symlink_to("../shared/sub")
-    (bundle / "Alias.png").symlink_to("pivot/../icon.png")
+    # It reads what it read, as the system reads '..': past the link on POSIX (shared), off the name on Windows (the
+    # bundle's). The targets are in the system's separators: Windows reads no '/' in a link's target.
+    (bundle / "pivot").symlink_to(os.path.join("..", "shared", "sub"))
+    (bundle / "Alias.png").symlink_to(os.path.join("pivot", "..", "icon.png"))
+    read = (bundle / "Alias.png").read_bytes()
     (root / "Model.py").write_text(OWN)
     _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
-    assert (bundle / "Alias.png").read_bytes() == b"shared"
+    assert (bundle / "Alias.png").read_bytes() == read
 
 
 def test_a_copy_an_earlier_update_left_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
