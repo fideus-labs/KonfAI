@@ -848,6 +848,47 @@ def test_an_auto_budget_reads_what_the_process_holds_once(monkeypatch: pytest.Mo
     assert measured.total_bytes == (32000 * 2**20 - (1 << 30)) * budget.AUTO_MEMORY_SAFETY_FRACTION
 
 
+def test_spawned_ranks_share_the_node_s_auto_budget_with_what_each_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two ranks on a node of an 8 GiB SLURM grant, each holding 2.5 GiB: a rank that measured the node itself left
+    out what the other holds, and the two took 9.4 GiB. What each may take for its work and what each holds stay
+    within the share of the grant an auto budget offers."""
+    from konfai.utils.runtime.distributed import DistributedObject
+
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", str(8 * 1024))  # MB
+    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
+    monkeypatch.setattr("konfai.utils.ome_zarr.bound_chunk_cache", lambda *args, **kwargs: None)
+    _fake_host_available(monkeypatch, 512 * 2**30)
+    monkeypatch.setattr(budget, "held_bytes", lambda: 2**29)  # the launcher
+    grant, held, works = 8 * 2**30, int(2.5 * 2**30), []
+
+    def spawn(run_rank, args, nprocs) -> None:
+        workflow = args[0]
+        for rank in range(nprocs):  # each rank its own process, holding its own
+            monkeypatch.setattr(budget.os, "getpid", lambda rank=rank: -1 - rank)
+            monkeypatch.setattr(budget, "held_bytes", lambda: held)
+            workflow._bound_chunk_cache(nprocs)
+            works.append(budget.per_rank_budget_bytes())
+
+    class Workflow(DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("ranks")
+            self.dataset = SimpleNamespace(resolved_budget=lambda: budget.resolve_memory_budget("auto"))
+
+        def setup(self, world_size: int) -> None:
+            pass
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    monkeypatch.setattr("konfai.utils.runtime.distributed.mp.spawn", spawn)
+    Workflow().launch_ranks(2)
+    assert len(works) == 2 and sum(works) + 2 * held <= AUTO_MEMORY_SAFETY_FRACTION * grant
+
+
 def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

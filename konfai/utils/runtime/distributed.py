@@ -53,7 +53,7 @@ except ImportError:
 from konfai import (
     cuda_visible_devices,
 )
-from konfai.utils.budget import available_cpus, node_local_ranks, set_per_rank_budget
+from konfai.utils.budget import MemoryBudget, available_cpus, node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import StartupClock, restart_startup_clock, startup_clock
 from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.runtime.environment import ClusterKwargs
@@ -181,6 +181,8 @@ class DistributedObject(ABC):
         self.size = 1
         #: The launcher's clock, handed over before the ranks start; rank 0 reports it.
         self.startup_clock: StartupClock | None = None
+        #: The memory budget the launcher resolved for the ranks it spawns, handed over as the clock is.
+        self.launch_budget: MemoryBudget | None = None
 
     @property
     def run_seed(self) -> int | None:
@@ -260,6 +262,11 @@ class DistributedObject(ABC):
         if _runs_inline(world_size):
             self(0)
             return
+        dataset = getattr(self, "dataset", None)
+        if world_size > 1 and dataset is not None and hasattr(dataset, "resolved_budget"):
+            # An auto budget measures the node: measured once here, before the ranks hold anything, it is the
+            # node's for each of them, where a rank's own measure leaves out what the others hold.
+            self.launch_budget = dataset.resolved_budget()
         with tempfile.TemporaryDirectory(prefix="konfai_ranks_") as refusals:
             try:
                 mp.spawn(_run_rank, args=(self, refusals), nprocs=world_size)
@@ -286,8 +293,9 @@ class DistributedObject(ABC):
 
         dataset = getattr(self, "dataset", None)
         if dataset is not None and hasattr(dataset, "resolved_budget"):
+            budget = self.launch_budget or dataset.resolved_budget()
             # work_bytes and not per_rank_bytes: the resident interpreter and libraries are already paid.
-            set_per_rank_budget(dataset.resolved_budget().work_bytes(node_local_ranks(world_size)))
+            set_per_rank_budget(budget.work_bytes(node_local_ranks(world_size)))
             bound_chunk_cache()
 
     def _bound_allocator(self) -> None:
