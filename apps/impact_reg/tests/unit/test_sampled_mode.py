@@ -451,9 +451,10 @@ def test_sampled_mode_registers_whole_a_pair_the_device_holds(presets: Path, tmp
 
 def test_sampled_mode_registers_whole_the_cases_the_device_holds(presets: Path, tmp_path: Path) -> None:
     """A cohort is routed case by case: a pair over the budget registers sampled, a smaller one whole as it would
-    alone (an oblique one included, which the sampled route refuses for features), each under its own case ID."""
+    alone (an oblique one included, which the sampled route refuses for features), each under its own case ID, and
+    the moved image of each comes through its own form of transform (a dense field, a native affine)."""
     paths = {}
-    for case, size, direction in (("small", 8, (0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)), ("large", 12, None)):
+    for case, size, direction in (("large", 12, None), ("small", 8, (0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))):
         for side in ("fixed", "moving"):
             image = sitk.GetImageFromArray(np.zeros((size,) * 3, dtype=np.float32))
             if direction is not None:
@@ -462,40 +463,45 @@ def test_sampled_mode_registers_whole_the_cases_the_device_holds(presets: Path, 
             sitk.WriteImage(image, str(paths[case, side]))
     seen = {}
 
-    def field(work: Path, label: str, case: str, reference: Path) -> Path:
-        path = Path(work) / label / case / "DVF.mha"
-        path.parent.mkdir(parents=True)
-        image = sitk.ReadImage(str(reference))
-        vectors = sitk.Image(image.GetSize(), sitk.sitkVectorFloat32, 3)
-        vectors.CopyInformation(image)
-        sitk.WriteImage(vectors, str(path))
-        return path
-
     def sampled(preset, inputs, headers, cases, work, *args):
         seen["sampled"] = (cases, inputs["Fixed"])
-        return "DVF", {
-            case: field(work, "sampled", case, fixed) for case, fixed in zip(cases, inputs["Fixed"], strict=True)
-        }
+        fields = {}
+        for case, fixed in zip(cases, inputs["Fixed"], strict=True):
+            fields[case] = Path(work) / "sampled" / case / "DVF.mha"
+            fields[case].parent.mkdir(parents=True)
+            image = sitk.ReadImage(str(fixed))
+            vectors = sitk.Image(image.GetSize(), sitk.sitkVectorFloat32, 3)
+            vectors.CopyInformation(image)
+            sitk.WriteImage(vectors, str(fields[case]))
+        return "DVF", fields
 
     def whole(preset, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         seen["whole"] = fixed_images
-        return "DVF", {f"P{i:03d}": field(work, "whole", f"P{i:03d}", fixed) for i, fixed in enumerate(fixed_images)}
+        transforms = {}
+        for index in range(len(fixed_images)):
+            transforms[f"P{index:03d}"] = Path(work) / "whole" / f"P{index:03d}" / "DVF.h5"
+            transforms[f"P{index:03d}"].parent.mkdir(parents=True)
+            sitk.WriteTransform(sitk.AffineTransform(3), str(transforms[f"P{index:03d}"]))
+        return "DVF", transforms
 
     app = reg.ImpactRegKonfAIApp()
     app._register_sampled = sampled  # type: ignore[method-assign]
     app._infer_preset = whole  # type: ignore[method-assign]
     app.register(
         ["Convex"],
-        [paths["small", "fixed"], paths["large", "fixed"]],
-        [paths["small", "moving"], paths["large", "moving"]],
+        [paths["large", "fixed"], paths["small", "fixed"]],
+        [paths["large", "moving"], paths["small", "moving"]],
         output=tmp_path / "out",
         out_of_core="sampled",
         max_voxels=1000,
-        fields_only=True,
     )
-    assert seen == {"sampled": (["P001"], [paths["large", "fixed"]]), "whole": [paths["small", "fixed"]]}
-    sizes = [sitk.ReadImage(str(tmp_path / "out" / case / "DVF.mha")).GetSize() for case in ("P000", "P001")]
-    assert sizes == [(8, 8, 8), (12, 12, 12)]
+    assert seen == {"sampled": (["P000"], [paths["large", "fixed"]]), "whole": [paths["small", "fixed"]]}
+    out = tmp_path / "out"
+    assert (
+        sitk.ReadImage(str(out / "P000" / "DVF.mha")).GetSize() == (12, 12, 12) and (out / "P001" / "DVF.h5").exists()
+    )
+    sizes = [sitk.ReadImage(str(out / case / "Moved.mha")).GetSize() for case in ("P000", "P001")]
+    assert sizes == [(12, 12, 12), (8, 8, 8)]
 
 
 def test_the_hdf5_twin_streams_the_entry_in_itk_s_layout(tmp_path: Path) -> None:

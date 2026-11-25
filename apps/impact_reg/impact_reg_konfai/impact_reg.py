@@ -2222,7 +2222,9 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """The moved images, derived from the transforms, one streamed run over the whole cohort.
+        """The moved images, derived from the transforms, one streamed run over the cohort for each form its
+        transforms take: a cohort routed case by case holds the dense field of a case registered sampled beside the
+        native form of one registered whole, and a staged root has one backend.
 
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
@@ -2240,42 +2242,49 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
-        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
-        # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
-        backend = self._moved_format or _backend(next(iter(cases.values())))
-        roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
-        if _is_field(next(iter(fields.values()))):
-            resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
-        else:
-            roots.append(_stage_group(work / "moved_stage", "Fixed", fixed))
-            resample = Resample(
-                reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
-            )
-        # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
-        # store, here or left by an earlier run, a moved file would come out as a store.
-        root = work / "moved"
-        _run_transform(
-            "impact_reg_moved",
-            roots,
-            {
-                "Moving": {
-                    "Moved": [
-                        resample,
-                        Write(
-                            dataset=f"{root}:{backend}",
-                            scale_factors="auto" if backend == "omezarr" else None,
-                        ),
-                    ]
+        forms: dict[tuple[str, bool], dict[str, Path]] = {}
+        for case, field in fields.items():
+            forms.setdefault((_form(field).lower(), _is_field(field)), {})[case] = field
+        for number, ((_, dense), members) in enumerate(forms.items()):
+            stage, root = work / "moved_stage" / str(number), work / "moved" / str(number)
+            moving = {case: cases[case] for case in members}
+            # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form
+            # may be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+            # below, so the first case's form speaks for the others.
+            backend = self._moved_format or _backend(next(iter(moving.values())))
+            roots = [_stage_group(stage, "Moving", moving), _stage_group(stage, "DVF", members)]
+            if dense:
+                resample = Resample(
+                    reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"
+                )
+            else:
+                roots.append(_stage_group(stage, "Fixed", {case: fixed[case] for case in members}))
+                resample = Resample(
+                    reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
+                )
+            # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside
+            # a store, here or left by an earlier run, a moved file would come out as a store.
+            _run_transform(
+                f"impact_reg_moved_{number}",
+                roots,
+                {
+                    "Moving": {
+                        "Moved": [
+                            resample,
+                            Write(
+                                dataset=f"{root}:{backend}",
+                                scale_factors="auto" if backend == "omezarr" else None,
+                            ),
+                        ]
+                    },
                 },
-            },
-            work,
-            gpu,
-            cpu,
-            quiet,
-        )
-        for case in fields:
-            _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
+                work,
+                gpu,
+                cpu,
+                quiet,
+            )
+            for case in members:
+                _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
 
     # ------------------------------------------------------------------ evaluate
 
