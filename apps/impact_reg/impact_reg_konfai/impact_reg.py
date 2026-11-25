@@ -1500,7 +1500,6 @@ class ImpactRegKonfAIApp:
                         samples,
                         epochs,
                     )
-                    rest = [index for index in rest if index not in over]
                     if not rest:
                         continue
                 if over and not quiet:

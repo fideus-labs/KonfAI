@@ -783,15 +783,26 @@ def _centre_features(
 
 
 def block_region(
-    start: Sequence[int], stop: Sequence[int], halo: Sequence[int], shape: Sequence[int], stride: int = 1
+    start: Sequence[int],
+    stop: Sequence[int],
+    halo: Sequence[int],
+    shape: Sequence[int],
+    stride: int = 1,
+    least: int = 1,
 ) -> tuple[list[int], list[int], tuple[slice, ...]]:
     """The voxels ``[low, high)`` a block ``[start, stop)`` of an image of ``shape`` is read over, ``halo`` before it
-    and at least as many after it, and the slices of its own voxels in them. A block that starts on a multiple of
-    ``stride`` ends as far from the image's end as a whole number of it: a network that anchors a layer's cells at the
-    end of what it is handed (one that flips an axis, as TotalSegmentator's reorientation does) then meets the whole
-    image's cells, as one that anchors them at the start does."""
+    and at least as many after it, widened inside the image to ``least`` voxels along an axis where it has them, and
+    the slices of its own voxels in them. A block that starts on a multiple of ``stride`` ends as far from the image's
+    end as a whole number of it: a network that anchors a layer's cells at the end of what it is handed (one that
+    flips an axis, as TotalSegmentator's reorientation does) then meets the whole image's cells, as one that anchors
+    them at the start does."""
     low = [max(0, a - h) for a, h in zip(start, halo, strict=True)]
     high = [min(n, b + h) for b, h, n in zip(stop, halo, shape, strict=True)]
+    for axis, extent in enumerate(shape):
+        side = min(least, extent)
+        if high[axis] - low[axis] < side:
+            high[axis] = min(extent, low[axis] + side)
+            low[axis] = high[axis] - side
     high = [end + (n - end) % stride for end, n in zip(high, shape, strict=True)]
     return low, high, tuple(slice(a - lo, b - lo) for a, b, lo in zip(start, stop, low, strict=True))
 
@@ -1010,12 +1021,6 @@ class ImpactFeatureModel:
             raise MeasureError(f"'{self.model_path}' weighs its layer {deepest + 1}, past the {len(self.fov)} it has.")
         return int(self.fov[deepest])
 
-    def _halo(self, step: int = 1) -> int:
-        """The voxels a block needs around it for its own to read as in the whole image: half the receptive field,
-        rounded up to the input multiple and to ``step``."""
-        step = max(self.multiple, step, 1)
-        return -(-(self.receptive_field // 2) // step) * step
-
     def _probe_side(self) -> int:
         """64 voxels, rounded up to the input multiple."""
         multiple = max(1, self.multiple)
@@ -1180,11 +1185,12 @@ class ImpactFeatureModel:
         # Padded with the image's minimum: a block of a larger image as the whole image is.
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple, float(statistics["ImageMin"]))
         if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
-            # Blocks and halos on the normalisations' stride and the input multiple, so that each meets their cells,
-            # and is padded at the image's end, as the whole image is.
+            # Blocks and halos (half the receptive field) on the normalisations' stride and the input multiple, so
+            # that each meets their cells, and is padded at the image's end, as the whole image is.
             stride = max(self.norm_stride(image.device), self.multiple, 1)
             block = -(-patch // stride) * stride
-            norms = self.norms(lambda: _blocks(image, block, self._halo(stride), stride), statistics)
+            halo = -(-(self.receptive_field // 2) // stride) * stride
+            norms = self.norms(lambda: _blocks(image, block, halo, stride), statistics)
         elif (
             norms is None
             and not 0 < patch < max(image.shape[2:])

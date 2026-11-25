@@ -35,6 +35,7 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from konfai.data.patching.sweep import _sweep_targets
+from konfai.metric.measure.impact import block_region
 
 #: What a slab copied to the device holds on its way through the host.
 _SLAB_BYTES = 64 << 20
@@ -66,21 +67,19 @@ def tiles(shape: Sequence[int], box: int) -> list[tuple[tuple[int, ...], tuple[i
 
 
 def box_region(
-    tile, halo: int | Sequence[int], shape: Sequence[int], least: int = 1
+    tile, halo: int | Sequence[int], shape: Sequence[int], least: int = 1, stride: int = 1
 ) -> tuple[list[int], list[int], tuple[slice, ...]]:
-    """A box ``(start, stop)`` with ``halo`` voxels around (the same along every axis, or one count an axis), within a
-    ``shape`` grid, and widened inside it to ``least`` voxels along an axis where the grid has them; and the slices of
-    the box's own voxels in it."""
-    start, stop = tile
+    """``block_region`` of a box ``(start, stop)`` with ``halo`` voxels around (the same along every axis, or one
+    count an axis)."""
     halos = [halo] * len(shape) if isinstance(halo, int) else list(halo)
-    low = [max(0, a - h) for a, h in zip(start, halos, strict=True)]
-    high = [min(extent, b + h) for b, h, extent in zip(stop, halos, shape, strict=True)]
-    for axis, extent in enumerate(shape):
-        side = min(least, extent)
-        if high[axis] - low[axis] < side:
-            high[axis] = min(extent, low[axis] + side)
-            low[axis] = high[axis] - side
-    return low, high, tuple(slice(a - lo, b - lo) for a, b, lo in zip(start, stop, low, strict=True))
+    return block_region(*tile, halos, shape, stride, least)
+
+
+def resized(tensor: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
+    """``tensor`` (``[N, C, *grid]``, a volume's or a plane's) on a grid of ``size`` by linear interpolation
+    (``align_corners``), as FireANTs resizes a warp."""
+    mode = "trilinear" if len(size) == 3 else "bilinear"
+    return torch.nn.functional.interpolate(tensor, size=tuple(size), mode=mode, align_corners=True)
 
 
 def to_device(region: np.ndarray, device: str) -> torch.Tensor:
@@ -276,6 +275,14 @@ class ResampledSource(RegionSource):
         return self.source.bytes_read
 
 
+def voxel_frame(geometry) -> tuple[np.ndarray, np.ndarray]:
+    """The affine map of a grid's voxel indices ((x, y, z) order) to physical points, ``p = A i + b``, from the
+    SimpleITK image ``geometry`` that carries it."""
+    dims = geometry.GetDimension()
+    direction = np.reshape(np.asarray(geometry.GetDirection(), dtype=np.float64), (dims, dims))
+    return direction * np.asarray(geometry.GetSpacing(), dtype=np.float64), np.asarray(geometry.GetOrigin())
+
+
 class HeaderImages:
     """What FireANTs' registrations read of a ``BatchedImages`` to set themselves up, from an image's header alone:
     the torch (normalized, align_corners) to physical mapping, the shape and the device. ``__call__`` has no image to
@@ -284,11 +291,8 @@ class HeaderImages:
     def __init__(self, image: sitk.Image, channels: int, device: str) -> None:
         dims = image.GetDimension()
         size = np.array(image.GetSize(), dtype=np.float64)
-        spacing = np.array(image.GetSpacing(), dtype=np.float64)[None]
-        direction = np.array(image.GetDirection(), dtype=np.float64).reshape(dims, dims)
         px2phy = np.eye(dims + 1)
-        px2phy[:dims, -1] = np.array(image.GetOrigin(), dtype=np.float64)
-        px2phy[:dims, :dims] = direction * spacing
+        px2phy[:dims, :dims], px2phy[:dims, -1] = voxel_frame(image)
         torch2px = np.eye(dims + 1)
         half = (size - 1) * 0.5
         torch2px[:dims, :dims] = np.diag(half)
@@ -328,6 +332,16 @@ def fireants_gaussians(shape: Sequence[int], size: Sequence[int], device: str) -
         [extent / down for extent, down in zip(shape, size, strict=True)], device=device, dtype=torch.float32
     )
     return [gaussian_1d(sigma, truncated=2) for sigma in sigmas]
+
+
+def _smoothed(span: torch.Tensor, gaussians: Sequence[torch.Tensor], mask_channel: bool) -> torch.Tensor:
+    """``span``'s image channels smoothed by ``gaussians`` (``'same'``, zero outside), its mask channel (the last one,
+    with ``mask_channel``) as it is."""
+    from fireants.losses.cc import separable_filtering
+
+    if not mask_channel:
+        return separable_filtering(span, list(gaussians))
+    return torch.cat([separable_filtering(span[:, :-1], list(gaussians)), span[:, -1:]], dim=1)
 
 
 @contextlib.contextmanager
@@ -374,8 +388,6 @@ def build_level(
     reads the voxels it needs, with the kernels' tails around: the level equals the whole-image one wherever it is
     read. Written to a float32 memmap at ``path``, or to a file of its own in ``directory``, deleted with the source
     returned; to an array in memory with ``memory``."""
-    from fireants.losses.cc import separable_filtering
-
     dims = len(source.shape)
     size = [int(extent) for extent in size]
     tails = [0] * dims
@@ -394,9 +406,8 @@ def build_level(
                 for j1, r, tail, extent in zip(stops, ratios, tails, source.shape, strict=True)
             ]
             span = source.read(low, high)
-            image, mask = (span[:, :-1], span[:, -1:]) if mask_channel else (span, None)
             if gaussians is not None:
-                image = separable_filtering(image, list(gaussians))
+                span = _smoothed(span, gaussians, mask_channel)
             # The samples, in the span's own normalized coordinates, (x, y, z) last as grid_sample takes them.
             axes = []
             for d in range(dims):
@@ -407,13 +418,8 @@ def build_level(
                 )
             grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).flip(-1).unsqueeze(0)
             sampled = torch.nn.functional.grid_sample(
-                image, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+                span, grid, mode="bilinear", padding_mode="zeros", align_corners=True
             )
-            if mask is not None:
-                mask_sampled = torch.nn.functional.grid_sample(
-                    mask, grid, mode="bilinear", padding_mode="zeros", align_corners=True
-                )
-                sampled = torch.cat([sampled, mask_sampled], dim=1)
             to_array(level[(slice(None), *(slice(a, b) for a, b in zip(starts, stops, strict=True)))], sampled[0])
     return ArraySource(level, source.device, owned)
 
@@ -430,17 +436,11 @@ def blur_level(
     around, zero outside the image), the mask channel left as it is: what the rigid stage does to its moving level a
     second time (``_smooth_image_not_mask``). Written to a file of its own in ``directory``, deleted with the source
     returned."""
-    from fireants.losses.cc import separable_filtering
-
     tails = [(int(kernel.numel()) - 1) // 2 for kernel in gaussians]
     with _level_array((source.channels, *source.shape), None, directory, False) as (level, owned):
         for start, stop in tiles(source.shape, block):
             low, high, own = box_region((start, stop), tails, source.shape)
-            span = source.read(low, high)
-            image, mask = (span[:, :-1], span[:, -1:]) if mask_channel else (span, None)
-            image = separable_filtering(image, list(gaussians))
-            if mask is not None:
-                image = torch.cat([image, mask], dim=1)
+            image = _smoothed(source.read(low, high), gaussians, mask_channel)
             to_array(
                 level[(slice(None), *(slice(s, e) for s, e in zip(start, stop, strict=True)))],
                 image[0][(slice(None), *own)],

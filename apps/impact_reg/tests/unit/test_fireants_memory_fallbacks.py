@@ -146,8 +146,8 @@ def test_a_static_extraction_in_patches_is_the_one_pass_s_for_both_images(tmp_pa
     loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
     generator = torch.Generator().manual_seed(0)
     fixed, moving = torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
-    whole = loss.extract(fixed, moving, 0, 0.25)
-    patched = loss.extract(fixed, moving, 16, 0.25)
+    whole = loss.extract(fixed, moving, 0)
+    patched = loss.extract(fixed, moving, 16)
     for reference, found in zip(whole, patched, strict=True):
         assert found.shape == reference.shape
         torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
@@ -159,7 +159,7 @@ def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> Non
     torch.manual_seed(0)
     loss = _static_loss(tmp_path)
     loss.cores[0].pca = 1
-    volumes = loss.extract(torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8), 0, 0.25)
+    volumes = loss.extract(torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8), 0)
     assert [volume.shape[1] for volume in volumes] == [2, 2] and loss._channels == [[1, 1]]
 
 

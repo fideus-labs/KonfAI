@@ -158,22 +158,7 @@ def write_twin(
     extents = [int(extent) for extent in shape[1:]]
     axis_map = axis_map or AxisMap.identity_of(len(extents))
     geometry = axis_map.geometry(*(attributes.get_np_array(key) for key in ("Spacing", "Origin", "Direction")), extents)
-    view = axis_map.extents(extents)
-    with contextlib.ExitStack() as stack:
-        if target.suffix == ".h5":
-            file = stack.enter_context(h5py.File(target, "w"))
-            for key, value in _hdf5_header(geometry, view, dtype, voxel).items():
-                file[key] = value
-            file["ITKImage/0/Dimension"] = np.array(view[::-1], dtype=np.uint64)
-            file.create_group("ITKImage/0/MetaData")
-            voxels = file.create_dataset(
-                "ITKImage/0/VoxelData", shape=view, dtype=dtype, chunks=tuple(min(chunk, extent) for extent in view)
-            )
-        else:
-            start = _new_metaimage(
-                target, _one_voxel(geometry, len(view), dtype, voxel), view, np.dtype(dtype).itemsize
-            )
-            voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(view))
+    with _new_twin(target, geometry, axis_map.extents(extents), dtype, chunk, voxel) as voxels:
         for depth, rows in _slabs(extents, 4, band or chunk):  # read as float32
             slices = (slice(0, 1), depth, rows, *(slice(None) for _ in extents[2:]))
             values = np.asarray(dataset.read_data_slice(group, name, slices)[0][0], dtype=np.float32)
@@ -187,9 +172,28 @@ def write_twin(
                 (depth.start, rows.start, *[0] * len(extents[2:])), (depth.stop, rows.stop, *extents[2:]), extents
             )
             voxels[box] = axis_map.view(values)
-        if isinstance(voxels, np.memmap):
-            voxels.flush()
     return target
+
+
+@contextlib.contextmanager
+def _new_twin(target: Path, geometry, shape: list[int], dtype: str, chunk: int = CHUNK, voxel: float = 1.0):
+    """The voxels of a new twin of ``shape`` (z, y, x) at ``target``, its ``geometry`` measured in ``voxel``: an HDF5
+    image in ITK's layout, chunked ``chunk``^3, where it ends in ``.h5``, an uncompressed MetaImage memory mapped for
+    writing otherwise; closed, or flushed, once written."""
+    if target.suffix == ".h5":
+        with h5py.File(target, "w") as file:
+            for key, value in _hdf5_header(geometry, shape, dtype, voxel).items():
+                file[key] = value
+            file["ITKImage/0/Dimension"] = np.array(shape[::-1], dtype=np.uint64)
+            file.create_group("ITKImage/0/MetaData")
+            yield file.create_dataset(
+                "ITKImage/0/VoxelData", shape=shape, dtype=dtype, chunks=tuple(min(chunk, extent) for extent in shape)
+            )
+        return
+    start = _new_metaimage(target, _one_voxel(geometry, len(shape), dtype, voxel), shape, np.dtype(dtype).itemsize)
+    voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(shape))
+    yield voxels
+    voxels.flush()
 
 
 def _one_voxel(geometry, dim: int, dtype: str, voxel: float = 1.0):
@@ -494,27 +498,12 @@ def write_plane(twin: Path, axis: int, target: Path, scale: float = 1.0, rows: i
         np.asarray(plane.GetDirection()),
     )
     shape = [extent for index, extent in enumerate(source.array.shape) if index != axis]
-    dtype = np.dtype(source.array.dtype).name
-    with contextlib.ExitStack() as stack:
-        if target.suffix == ".h5":
-            file = stack.enter_context(h5py.File(target, "w"))
-            for key, value in _hdf5_header(geometry, shape, dtype).items():
-                file[key] = value
-            file["ITKImage/0/Dimension"] = np.array(shape[::-1], dtype=np.uint64)
-            file.create_group("ITKImage/0/MetaData")
-            voxels = file.create_dataset(
-                "ITKImage/0/VoxelData", shape=shape, dtype=dtype, chunks=tuple(min(CHUNK, extent) for extent in shape)
-            )
-        else:
-            start = _new_metaimage(target, _one_voxel(geometry, 2, dtype), shape, np.dtype(dtype).itemsize)
-            voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(shape))
+    with _new_twin(target, geometry, shape, np.dtype(source.array.dtype).name) as voxels:
         index: list = [slice(None)] * 3
         index[axis] = 0
         for begin in range(0, shape[0], rows):
             index[1 if axis == 0 else 0] = slice(begin, begin + rows)
             voxels[begin : begin + rows] = source.array[tuple(index)]
-        if isinstance(voxels, np.memmap):
-            voxels.flush()
     return target
 
 

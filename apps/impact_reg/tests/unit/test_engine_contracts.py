@@ -438,15 +438,10 @@ def test_fireants_impact_settings_reach_the_engine() -> None:
     # field, computed with settings the caller did not ask for.
     from impact_reg_konfai.models.fireants import RegistrationNet
 
-    engine = RegistrationNet(mode="Static", feature_overlap=0.5, normalize=False, lncc_kernel=7, mixed_precision=True)[
+    engine = RegistrationNet(mode="Static", normalize=False, lncc_kernel=7, mixed_precision=True)[
         "Registration"
     ]._engine
-    assert (engine._feature_overlap, engine._normalize, engine._lncc_kernel, engine._mixed_precision) == (
-        0.5,
-        False,
-        7,
-        True,
-    )
+    assert (engine._normalize, engine._lncc_kernel, engine._mixed_precision) == (False, 7, True)
 
 
 def test_fireants_refuses_what_its_loss_cannot_honour(tmp_path: Path) -> None:

@@ -35,7 +35,7 @@ The names below are those of the shipped presets; `show NAME` gives each preset'
 | Optimisation | `max_iterations` | `affine_iterations`, `deformable_iterations`, `affine_lr`, `deformable_lr` | `iterations`, `learning_rate` |
 | Multi-resolution | the parameter map's resolutions, or `levels` (IMPACT presets: per level, the iterations and the models) | `scales` (downsampling per level), `levels` (the models per scale) | `grid_spacing`, `displacement_half_width` (coarse search), `grid_shrink`, `levels` (the models of the coarse and fine stages) |
 | Metric | intensity: the parameter map; IMPACT: the `models` of each level | `affine_metric`, `deformable_metric`, `cc_kernel`, `deformable_masked` | the distance of `models`, `balance_coarse_layers` (each coarse-search layer divided by its spread over the candidate displacements, times `layers_weight`), `deformable_masked` |
-| Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk`, `feature_overlap` (Static extraction) | the IMPACT loss (below) |
+| Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk` (Static extraction) | the IMPACT loss (below) |
 | Regularisation | `final_grid_spacing` | `smooth_warp_sigma`, `smooth_grad_sigma` | `regularization_weight`, `control_grid_smoothing` |
 | Initialisation | the rigid map, `moments_init` (cof, com) | `moments_init` (cof, com, none) | `moments_init` (cof, com, none: the default, the pair as it comes) |
 | Transform written | `transform_type` (native: the affine or rigid then B-spline the maps found; field) | `transform_type` (native: an affine with `deformable_method: none`, else a field; field) | a field |

@@ -77,10 +77,10 @@ def test_static_extracts_on_the_model_grid_and_brings_the_features_back(tmp_path
     )
     fixed, moving = torch.rand(1, 1, 8, 16, 16), torch.rand(1, 1, 10, 16, 16)
     extents = ([16.0, 16.0, 8.0], [16.0, 16.0, 10.0])
-    volumes = loss.extract(fixed, moving, 0, 0.0, extents)
+    volumes = loss.extract(fixed, moving, 0, extents)
     assert volumes[0].shape[2:] == fixed.shape[2:] and volumes[1].shape[2:] == moving.shape[2:]
     loss.cores[0].model.voxel_size = None
-    on_model = loss.extract(resampled(fixed, (4, 8, 8)), resampled(moving, (5, 8, 8)), 0, 0.0)
+    on_model = loss.extract(resampled(fixed, (4, 8, 8)), resampled(moving, (5, 8, 8)), 0)
     for volume, reference, image in zip(volumes, on_model, (fixed, moving), strict=True):
         assert torch.allclose(volume, resampled(reference, tuple(image.shape[2:]), padding="border"), atol=1e-5)
 

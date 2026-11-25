@@ -31,7 +31,6 @@ fireants = pytest.importorskip("fireants")
 
 from impact_reg_konfai.models.fireants_sampled import (  # noqa: E402
     _box_to_global,
-    _Largest,
     _local_frame,
     sampled_affine_class,
     sampled_deformable_class,
@@ -110,16 +109,6 @@ def test_box_frames_are_inverse_of_each_other():
     point = torch.tensor([0.0, 0.0, -1.0 + 2 * k / (b - 1), 1.0], dtype=torch.float64)  # z is the last normalized axis
     mapped = forward @ point
     assert mapped[2].item() == pytest.approx(-1.0 + 2 * (i0 + k) / (n - 1))
-
-
-@pytest.mark.parametrize("n", [1, 7, 64])
-def test_the_largest_of_values_changed_one_at_a_time(n):
-    generator = np.random.default_rng(n)
-    values, largest = [0.0] * n, _Largest(n)
-    for _ in range(20 * n):
-        index, value = int(generator.integers(n)), float(generator.random())
-        values[index] = largest[index] = value
-        assert largest.max() == max(values)
 
 
 def test_a_box_s_region_holds_the_patch_its_points_read():
@@ -554,7 +543,7 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers
     loss.cores[0].model.fov, loss.cores[0].model.multiple = [3, 4], multiple
     crop = tuple(slice(0, extent) for extent in shape)
     fixed, moving = texture()[crop], texture((1.5, -1.0, 0.5))[crop]
-    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0)
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
@@ -590,9 +579,7 @@ def test_static_features_at_a_voxel_size_by_blocks_are_the_whole_image_s(tmp_pat
     loss.cores[0].model.fov, loss.cores[0].model.multiple = [3, 4], 2
     fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:20, :24, :26]
     extents = ([27.0, 25.0, 21.0], [26.0, 24.0, 20.0])  # mm along L, P, S: one voxel a mm
-    whole = loss.extract(
-        *(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25, extents
-    )
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, extents)
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
@@ -667,7 +654,7 @@ def test_static_blocks_read_the_whole_receptive_field_around_them(tmp_path):
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
     loss.cores[0].model.fov = [13]
     fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:21, :25, :27]
-    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0)
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
@@ -715,7 +702,7 @@ def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path, di
         core.model.model, core.model.dim, core.dimension = torch.jit.script(_Convolved(2)), 2, 2
     core.model.fov, core.model.planes = [3], True
     fixed, moving = texture(size=PLANE)[:21, :25], texture((1.5, -1.0, 0.5), PLANE)[:21, :25]
-    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0)
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
@@ -746,9 +733,7 @@ def test_static_features_of_a_volume_swept_by_a_2d_network_are_the_whole_volume_
     core.model.model, core.model.dim, core.dimension, core.model.fov = torch.jit.script(_Convolved(2)), 2, 2, [3]
     fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:21, :25, :27]
     extents = ([27.0, 25.0, 21.0], [27.0, 25.0, 21.0])  # mm along L, P, S: one voxel a mm
-    whole = loss.extract(
-        *(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25, extents
-    )
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, extents)
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),

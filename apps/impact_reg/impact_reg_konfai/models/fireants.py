@@ -66,6 +66,7 @@ import functools
 import gc
 import math
 import os
+import shutil
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -102,7 +103,7 @@ from konfai.utils.dataset import Attribute, image_to_data
 from konfai.utils.errors import MeasureError
 from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
-from ..ooc import free_bytes
+from ..ooc import free_bytes, resized
 from .impact_loss import (
     FeatureMapUpdateInterval,
     LevelSpec,
@@ -289,6 +290,14 @@ def _patch_distances(
         else:
             values.append(distance(name, moved_features, fixed_features, layer_mask, kernel, 0))
     return torch.stack(values)
+
+
+def _level_ncc(total: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """The NCC of a layer's level sums and its derivative with respect to them."""
+    total.requires_grad_()
+    value = ncc_of_sums(total)
+    (derivative,) = torch.autograd.grad(value, total)
+    return derivative, float(value.detach())
 
 
 class _Intensities:
@@ -703,7 +712,6 @@ class ImpactFeatureLoss(torch.nn.Module):
         fixed: torch.Tensor,
         moving: torch.Tensor,
         patch: int,
-        overlap: float,
         extents: tuple[list[float] | None, list[float] | None] = (None, None),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Static mode: the fixed and moving volumes of every model's kept layers, concatenated along the channels.
@@ -731,7 +739,7 @@ class ImpactFeatureLoss(torch.nn.Module):
             return self._by_blocks(fixed, moving, max(tiles), extents)
         for core, images, tile in zip(self.cores, resampled_images, tiles, strict=True):
             fixed_layers, moving_layers = (
-                core.model.volume(images[side], core.normalization, tile, overlap) for side in ("fixed", "moving")
+                core.model.volume(images[side], core.normalization, tile, 0.0) for side in ("fixed", "moving")
             )
             if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
                 for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
@@ -848,6 +856,17 @@ class ImpactFeatureLoss(torch.nn.Module):
         before each), for a model that reads the level on its own grid (``_ImpactCore._prepared``)."""
         self._place = (tuple(low), tuple(high), tuple(grid))
 
+    def _split(
+        self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """The two images and the voxels they are compared over, ``region`` (all when None). Masked, the images lose
+        their mask channel and a voxel counts where the fixed mask and the warped moving mask both hold it, as in
+        FireANTs' own masked metrics."""
+        if not self._masked:
+            return moved, fixed, region
+        weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * (1.0 if region is None else region)
+        return moved[:, :-1], fixed[:, :-1], weight
+
     def pool(
         self,
         pieces: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | Callable[[], Iterable[tuple]],
@@ -868,11 +887,8 @@ class ImpactFeatureLoss(torch.nn.Module):
             return
         totals: dict[int, torch.Tensor] = {}
         with torch.no_grad():
-            for moved, fixed, region in read():
-                mask = region
-                if self._masked:
-                    mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
-                    moved, fixed = moved[:, :-1], fixed[:, :-1]
+            for pieces in read():
+                moved, fixed, mask = self._split(*pieces)
                 for layer, (name, moved_layer, fixed_layer) in enumerate(
                     self._static_layers(level, moved, fixed, self._draw)
                 ):
@@ -880,10 +896,8 @@ class ImpactFeatureLoss(torch.nn.Module):
                         piece = ncc_sums(moved_layer, fixed_layer, mask).cpu()
                         totals[layer] = piece if layer not in totals else totals[layer] + piece
         for layer, total in totals.items():
-            total.requires_grad_()
-            value = ncc_of_sums(total)
-            (derivative,) = torch.autograd.grad(value, total)
-            self._pooled[layer] = (derivative, float(total[0, 0]), float(value))
+            derivative, value = _level_ncc(total)
+            self._pooled[layer] = (derivative, float(total[0, 0]), value)
 
     def _pool_intensities(self, read: Callable[[], Iterable[tuple]], level: list[int]) -> None:
         """Jacobian mode: the intensity statistics of the warped images as each network reads them, over the voxels
@@ -896,10 +910,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._level_weight = 0.0
         with torch.no_grad():
             for moved, fixed, region in read():
-                weight = region
-                if self._masked:
-                    weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
-                    moved, fixed = moved[:, :-1], fixed[:, :-1]
+                moved, fixed, weight = self._split(moved, fixed, region)
                 self._level_weight += float(weight.sum())  # as the stage weighs a piece: its voxels, or its support
                 intensities[None][0].add(moved, region)
                 intensities[None][1].add(fixed, region)
@@ -930,11 +941,8 @@ class ImpactFeatureLoss(torch.nn.Module):
         if not models or any(index not in self._statistics for index in models):
             return
         totals: dict[tuple[int, int], torch.Tensor] = {}
-        for moved, fixed, region in read():
-            weight = region
-            if self._masked:
-                weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
-                moved, fixed = moved[:, :-1], fixed[:, :-1]
+        for pieces in read():
+            moved, fixed, weight = self._split(*pieces)
             for index in models:
                 seed = self._draw + 1000 * index
                 for layer, piece in (
@@ -944,22 +952,14 @@ class ImpactFeatureLoss(torch.nn.Module):
                 ):
                     totals[(index, layer)] = piece if (index, layer) not in totals else totals[(index, layer)] + piece
         for (index, layer), total in totals.items():
-            total.requires_grad_()
-            value = ncc_of_sums(total)
-            (derivative,) = torch.autograd.grad(value, total)
-            self._layer_sums.setdefault(index, {})[layer] = (derivative, float(value.detach()))
+            self._layer_sums.setdefault(index, {})[layer] = _level_ncc(total)
 
     def _values(
         self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
     ) -> tuple[list[float], list[torch.Tensor]]:
         """Each kept layer's weight and its distance between the two images, at the current level, over the voxels
         ``region`` holds (``[1, 1, *spatial]``, all when None)."""
-        mask = region
-        if self._masked:
-            # A voxel counts where the fixed mask and the warped moving mask both hold it, as in FireANTs' own
-            # masked metrics.
-            mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * (1.0 if region is None else region)
-            moved, fixed = moved[:, :-1], fixed[:, :-1]
+        moved, fixed, mask = self._split(moved, fixed, region)
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         # One draw per evaluation, the same channels in every patch and in the checkpoints' second pass.
         seed = self._draw if self._draw is not None else int(torch.randint(2**31 - 1, (1,), generator=self._generator))
@@ -1117,10 +1117,7 @@ def _inverse_on(shape: tuple[int, ...]) -> Callable:
         warp = compositive_warp_inverse(image, ref_disp, **kwargs)
         if tuple(warp.shape[1:-1]) == shape:
             return warp
-        mode = "bilinear" if len(shape) == 2 else "trilinear"
-        return torch.nn.functional.interpolate(warp.movedim(-1, 1), size=shape, mode=mode, align_corners=True).movedim(
-            1, -1
-        )
+        return resized(warp.movedim(-1, 1), shape).movedim(1, -1)
 
     return inverse
 
@@ -1154,7 +1151,6 @@ class FireANTsEngine:
         mode: str = "Static",
         feature_patch: int = 0,
         feature_chunk: int = 0,
-        feature_overlap: float = 0.25,
         deformable_masked: bool = True,
         normalize: bool = True,
         feature_map_update_interval: int = -1,
@@ -1209,7 +1205,6 @@ class FireANTsEngine:
         self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
-        self._feature_overlap = float(feature_overlap)
         self._normalize = bool(normalize)
         self._lncc_kernel = int(lncc_kernel)
         self._mixed_precision = bool(mixed_precision)
@@ -1321,7 +1316,6 @@ class FireANTsEngine:
                 pair[0].array[:, :1],
                 pair[1].array[:, :1],
                 self._feature_patch,
-                self._feature_overlap,
                 (_extent(fixed), _extent(warped)),
             )
             for stage_image, features in zip(pair, volumes, strict=True):
@@ -1579,7 +1573,6 @@ class FireANTsEngine:
                         fixed_img.array[:, :1],
                         moving_img.array[:, :1],
                         self._feature_patch,
-                        self._feature_overlap,
                         tuple(_extent(image) for image in (fixed, moving)),
                     )
                     for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
@@ -1829,10 +1822,7 @@ class FireANTsEngine:
             custom_loss.reset()
             for core in custom_loss.cores:  # a 2-D pair: planes, which a 3-D network lifts to volumes one voxel thick
                 core.model.planes = mapped["fixed"].array.ndim == 2
-            extent = [
-                size * step
-                for size, step in zip(readers["fixed"].GetSize(), readers["fixed"].GetSpacing(), strict=True)
-            ]
+            extent = _extent(readers["fixed"])
             for core in custom_loss.cores:
                 core.extent = extent
             loss_type = "custom"
@@ -1895,9 +1885,6 @@ class FireANTsEngine:
                 registration.close()
             return registration, written
 
-        def extent_of(reader) -> list[float]:
-            return [size * step for size, step in zip(reader.GetSize(), reader.GetSpacing(), strict=True)]
-
         def static_pair(moving_source: RegionSource, moving_mask: RegionSource, moving_reader) -> list:
             """Static: the feature volumes extracted by blocks into files, with the mask channel beside them so that
             masked still means what it says."""
@@ -1907,7 +1894,7 @@ class FireANTsEngine:
                 moving_source,
                 scratch,
                 block=max(box, 64),
-                extents=(extent_of(readers["fixed"]), extent_of(moving_reader)),
+                extents=(_extent(readers["fixed"]), _extent(moving_reader)),
             )
             custom_loss.release()
             if not deformable_masked:
@@ -1932,6 +1919,14 @@ class FireANTsEngine:
             fixed_geometry, extents = mapped["fixed"].geometry, mapped["fixed"].array.shape
             total: np.memmap | None = None
             held_files: list[Path] = []  # what the field so far rests on, gone once the next one stands
+
+            def read_moved(image, field_so_far: np.ndarray, path: Path, nearest: bool = False) -> ArraySource:
+                """``image`` read through the field so far onto the fixed grid, into a float32 file at ``path``."""
+                out = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float32, shape=(1, *extents))
+                source = ArraySource(image.array[None], device)
+                read_through(source, image.geometry, field_so_far, fixed_geometry, out, block=box, nearest=nearest)
+                return ArraySource(out, device)
+
             for number, (level, scale, count) in enumerate(runs):
                 moving_source, moving_mask, moving_reader, init = (
                     sources("impact", False)[1],
@@ -1940,22 +1935,12 @@ class FireANTsEngine:
                     affine_matrix,
                 )
                 if total is not None:
-                    warped = np.lib.format.open_memmap(
-                        str(scratch / f"moved_{number}.npy"), mode="w+", dtype=np.float32, shape=(1, *extents)
-                    )
-                    moving_array = ArraySource(mapped["moving"].array[None], device)
-                    read_through(moving_array, mapped["moving"].geometry, total, fixed_geometry, warped, block=box)
-                    moving_source, moving_reader, init = ArraySource(warped, device), readers["fixed"], None
+                    moving_source = read_moved(mapped["moving"], total, scratch / f"moved_{number}.npy")
+                    moving_reader, init = readers["fixed"], None
                     moving_mask = OnesSource(extents, device)
                     if masks["moving"] is not None:
-                        held = np.lib.format.open_memmap(
-                            str(scratch / f"moved_mask_{number}.npy"), mode="w+", dtype=np.float32, shape=(1, *extents)
-                        )
-                        mask_array = ArraySource(masks["moving"].array[None], device)
-                        read_through(
-                            mask_array, masks["moving"].geometry, total, fixed_geometry, held, block=box, nearest=True
-                        )
-                        moving_mask = ArraySource(held, device)
+                        path = scratch / f"moved_mask_{number}.npy"
+                        moving_mask = read_moved(masks["moving"], total, path, nearest=True)
                 custom_loss.start_at(level)
                 pair = static_pair(moving_source, moving_mask, moving_reader)
                 # Each run draws boxes of its own, as one stage's iterations draw anew.
@@ -1976,14 +1961,10 @@ class FireANTsEngine:
                     path.unlink(missing_ok=True)
                 total, held_files = composed, [scratch / f"total_{number}.mha"]
             assert total is not None
-            output = field_map(field, mapped["fixed"])
-            for start, stop in tiles(extents, box):
-                region = tuple(slice(a, b) for a, b in zip(start, stop, strict=True))
-                output[region] = total[region]
-            output.flush()
             del total
-            for path in held_files:
-                path.unlink(missing_ok=True)
+            # The last field, a field_map of the fixed grid as ``field`` is: its file is the result.
+            (last,) = held_files
+            shutil.move(last, field)
         measured["deformable_seconds"] = time.perf_counter() - deformable_started
         measured["bytes_read"] = measured.get("bytes_read", 0) + sum(source.bytes_read for source in pair)
         measured["loss"] = [registration.losses[0], registration.losses[-1]] if registration.losses else []
@@ -2104,8 +2085,7 @@ class RegistrationNet(network.Network):
         feature_patch: Annotated[
             int,
             "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
-            "at once, or on a GPU the widest tile its free memory holds when the whole image does not fit. "
-            "Tiles share the 'feature_overlap' share of their width and are blended by a cosine window.",
+            "at once, or on a GPU the widest tile its free memory holds when the whole image does not fit.",
             Range(0, 1024),
         ] = 0,
         feature_chunk: Annotated[
@@ -2116,13 +2096,6 @@ class RegistrationNet(network.Network):
             "that runs out of memory is retried with half as many channels.",
             Range(0, 64),
         ] = 0,
-        feature_overlap: Annotated[
-            float,
-            "Static only: the share of its width two neighbouring extraction tiles have in common. More "
-            "overlap costs time and blends the seams further; it is ignored when the whole image goes "
-            "through in one pass.",
-            Range(0.0, 0.9),
-        ] = 0.25,
         deformable_masked: Annotated[
             bool,
             "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
@@ -2177,7 +2150,6 @@ class RegistrationNet(network.Network):
             mode,
             feature_patch,
             feature_chunk,
-            feature_overlap,
             deformable_masked,
             normalize,
             feature_map_update_interval,

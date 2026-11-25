@@ -52,7 +52,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from konfai.utils.vram import max_voxels
+from konfai.utils.vram import max_voxels, peak_bytes
 
 from ..ooc import (
     ArraySource,
@@ -69,9 +69,11 @@ from ..ooc import (
     free_bytes,
     held,
     on_device,
+    resized,
     tiles,
     to_array,
     to_device,
+    voxel_frame,
 )
 
 
@@ -208,6 +210,21 @@ def _information(loss, joint: torch.Tensor) -> torch.Tensor:
     return -(joint * torch.log(ratio + loss.smooth_dr)).sum()
 
 
+def _tracked(loss, tracked: torch.Tensor | None, joint, points: float, share: float):
+    """The level's joint histogram ``tracked`` moved by a draw's ``joint`` counts over its ``points``, the draw
+    holding ``share`` of the level (every box drawn: the draw's own histogram), and the information read off it
+    with its derivative there; None for the information before any draw held a point."""
+    if points > 0:  # a draw the masks miss holds no point: the level's histogram stays as it was
+        histogram = (joint / points).float()
+        tracked = histogram if tracked is None or share >= 1 else tracked.lerp(histogram, share)
+    if tracked is None:
+        return None, None
+    histogram = tracked.clone().requires_grad_()
+    value = _information(loss, histogram)
+    (weight,) = torch.autograd.grad(value, histogram)
+    return tracked, _Information(weight, points, float(value.detach()))
+
+
 class SampledLinearMixin:
     """``optimize`` over boxes for a FireANTs rigid or affine registration built on :class:`HeaderImages`.
 
@@ -243,8 +260,7 @@ class SampledLinearMixin:
     def _matrix(self) -> torch.Tensor:
         raise NotImplementedError
 
-    def _extra_moving_blur(self) -> bool:
-        return False
+    _extra_moving_blur = False
 
     def _level_sources(self, scale: int) -> tuple[RegionSource, RegionSource]:
         fixed, moving = self._sources
@@ -259,7 +275,7 @@ class SampledLinearMixin:
                 return self._levels[scale]
             gaussians = fireants_gaussians(fixed.shape, fixed_size, fixed.device)  # FireANTs smooths both with these
             moving_level = build_level(moving, moving_size, gaussians, **settings)
-            if self._extra_moving_blur():
+            if self._extra_moving_blur:
                 moving_level = blur_level(moving_level, gaussians, **settings)
             fixed_level = build_level(fixed, fixed_size, gaussians, **settings)
             self._levels[scale] = (on_device(fixed_level), on_device(moving_level))
@@ -295,21 +311,16 @@ class SampledLinearMixin:
                 joint = counts.detach().double() if joint is None else joint + counts.detach().double()
                 points += counted
                 kept += [counts] if self._keeps_draw else []
-        if points > 0:  # a draw the masks miss holds no point: the level's histogram stays as it was
-            histogram = (joint / points).float()
-            self._histogram = histogram if self._histogram is None else self._histogram.lerp(histogram, share)
-        if self._histogram is None:
+        self._histogram, information = _tracked(self.loss_fn, self._histogram, joint, points, share)
+        if information is None:
             return 0.0
-        histogram = self._histogram.clone().requires_grad_()
-        value = _information(self.loss_fn, histogram)
         if points == 0:
-            return float(value.detach())
-        (weight,) = torch.autograd.grad(value, histogram)
+            return information.value
         for counts in kept or (_joint_counts(self.loss_fn, moved, fixed)[0] for moved, fixed, _ in packets()):
-            piece = (counts * weight).sum() / points
+            piece = (counts * information.weight).sum() / points
             if piece.requires_grad:  # not when the boxes fall outside the moving image
                 piece.backward()
-        return float(value)
+        return information.value
 
     def optimize(self) -> None:
         from fireants.losses.mi import GlobalMutualInformationLoss
@@ -400,8 +411,7 @@ def sampled_rigid_class():
         def _matrix(self) -> torch.Tensor:
             return self.get_rigid_matrix()
 
-        def _extra_moving_blur(self) -> bool:
-            return True  # rigid.py smooths its moving image a second time at every level above the finest
+        _extra_moving_blur = True  # rigid.py smooths its moving image a second time at every level above the finest
 
     return SampledRigidRegistration
 
@@ -524,8 +534,7 @@ class _Warp:
             for kind in self.KINDS:
                 array = self.arrays[kind]
                 if self.resident and resident:
-                    mode = "trilinear" if len(grid) == 3 else "bilinear"  # a plane's warp
-                    self.arrays[kind] = F.interpolate(array[None], size=tuple(grid), mode=mode, align_corners=True)[0]
+                    self.arrays[kind] = resized(array[None], grid)[0]
                     continue
                 source = TensorSource(array) if self.resident else ArraySource(array, self.device)
                 if resident or host:
@@ -587,24 +596,6 @@ class _Warp:
         for path in self.paths.values():
             path.unlink(missing_ok=True)
         self.paths.clear()
-
-
-class _Largest:
-    """The largest of ``n`` values (0 at first) that change one at a time: a max tree over them, ``log n`` a change,
-    where a scan after each change of a one-box draw would cost every box at every iteration."""
-
-    def __init__(self, n: int) -> None:
-        self._n, self._tree = n, [0.0] * (2 * n)
-
-    def __setitem__(self, index: int, value: float) -> None:
-        index += self._n
-        self._tree[index] = value
-        while index > 1:
-            index //= 2
-            self._tree[index] = max(self._tree[2 * index], self._tree[2 * index + 1])
-
-    def max(self) -> float:
-        return self._tree[1]
 
 
 def _nodes_from(index: int, extent: int, nodes: int) -> int:
@@ -678,14 +669,6 @@ def _smooth(field: torch.Tensor, gaussians) -> torch.Tensor:
     return separable_filtering(field.movedim(-1, 1), gaussians).movedim(1, -1)
 
 
-def _voxel_frame(geometry) -> tuple[np.ndarray, np.ndarray]:
-    """The affine map of a grid's voxel indices ((x, y, z) order) to physical points, ``p = A i + b``, from the
-    SimpleITK image ``geometry`` that carries it."""
-    dims = geometry.GetDimension()
-    direction = np.reshape(np.asarray(geometry.GetDirection(), dtype=np.float64), (dims, dims))
-    return direction * np.asarray(geometry.GetSpacing(), dtype=np.float64), np.asarray(geometry.GetOrigin())
-
-
 def read_through(
     source: RegionSource,
     source_geometry,
@@ -703,8 +686,8 @@ def read_through(
     source's last reads that voxel, as ITK's interpolators read the buffer's edge. The field is never held whole."""
     grid = field.shape[:-1]
     dims = len(grid)
-    to_world, origin = _voxel_frame(geometry)
-    source_matrix, source_origin = _voxel_frame(source_geometry)
+    to_world, origin = voxel_frame(geometry)
+    source_matrix, source_origin = voxel_frame(source_geometry)
     to_source = np.linalg.inv(source_matrix)
     extents = np.asarray(list(reversed(source.shape)), dtype=np.float64)  # (x, y, z)
     for start, stop in tiles(grid, block):
@@ -753,7 +736,7 @@ def static_feature_sources(
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
-    from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
+    from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch
 
     def statistics_of(source: RegionSource) -> Attribute:
         """The image's ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` (unbiased), by one pass over its blocks."""
@@ -784,11 +767,6 @@ def static_feature_sources(
         plane = math.prod(shape[1:])
         thick = max(SWEEP_BATCH, blocks[0] ** len(shape) // plane // SWEEP_BATCH * SWEEP_BATCH)
         return [((z, *[0] * len(shape[1:])), (min(z + thick, shape[0]), *shape[1:])) for z in range(0, shape[0], thick)]
-
-    def blocks_of(source: RegionSource, boxes, blocks: list[int], halo: int, stride: int, slabs: bool):
-        """Each block of ``boxes`` read (``read_block``), and the slices of its own voxels in it."""
-        for tile in boxes:
-            yield read_block(source, tile, blocks, halo, stride, slabs)
 
     def owned_layers(
         core, box: torch.Tensor, own, statistics: Attribute, norms
@@ -841,7 +819,9 @@ def static_feature_sources(
         boxes = boxes_of(core, source.shape, blocks)
         slabs = core.dimension < len(source.shape)  # a 2-D network swept over a volume's slices
         # The network's normalisations by the whole image's statistics, one pass over the blocks each.
-        norms = core.model.norms(functools.partial(blocks_of, source, boxes, blocks, halo, stride, slabs), stats)
+        norms = core.model.norms(
+            lambda: (read_block(source, tile, blocks, halo, stride, slabs) for tile in boxes), stats
+        )
         cells: list[np.ndarray] = []  # each layer on its own grid, as a prediction's output is assembled
         ends: list[list[int]] = []  # how far along each axis its blocks reached: the whole image's layer
         for start, stop in boxes:
@@ -876,39 +856,29 @@ def static_feature_sources(
             bases = [basis for _, basis in fitted] if side == "fixed" else bases
         arrays: list[np.ndarray] = []
         for layer, array in enumerate(cells):
-            grid = tuple(array.shape[1:])
-            if grid == tuple(source.shape) and core.pca == 0:  # on the image's grid already
+            if tuple(array.shape[1:]) == tuple(source.shape) and core.pca == 0:  # on the image's grid already
                 arrays.append(array)
                 continue
-            placed = np.lib.format.open_memmap(
-                str(directory / f"{side}_{index}_{layer}.npy"),
-                mode="w+",
-                dtype=np.float32,
-                shape=(bases[layer].shape[1] if core.pca > 0 else array.shape[0], *source.shape),
-            )
-            for start, stop in boxes:
-                box = list(zip(start, stop, strict=True))
-                window = layer_window(box, grid, source.shape)
-                features = to_device(array[(slice(None), *(slice(a, b) for a, b in window))], str(fixed.device))[None]
-                if core.pca > 0:
-                    centred = features - means[layer].to(features.device).view(1, -1, *[1] * len(grid))
-                    features = torch.einsum("bc...,ck->bk...", centred, bases[layer].to(features.device))
-                to_array(
-                    placed[(slice(None), *(slice(a, b) for a, b in box))],
-                    onto_image_grid(features, tuple(source.shape), box, grid)[0],
-                )
-            arrays.append(placed)
+            projection = (means[layer], bases[layer]) if core.pca > 0 else None
+            path = directory / f"{side}_{index}_{layer}.npy"
+            arrays.append(onto_image(array, source.shape, path, boxes, projection))
         return arrays, bases
 
-    def back_on_image(array: np.ndarray, shape: Sequence[int], path: Path) -> np.ndarray:
-        """Features on a model's grid brought onto the image's voxels, block by block, as a run on the whole pair
-        brings them (``resampled`` with the border past the last feature, which ``onto_image_grid`` is)."""
-        placed = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float32, shape=(array.shape[0], *shape))
+    def onto_image(array: np.ndarray, shape: Sequence[int], path: Path, boxes, projection=None) -> np.ndarray:
+        """Features on a model's grid brought onto the image's voxels over ``boxes``, as a run on the whole pair
+        brings them (``resampled`` with the border past the last feature, which ``onto_image_grid`` is), each
+        centred by the ``projection``'s mean and projected on its basis when given."""
+        channels = array.shape[0] if projection is None else projection[1].shape[1]
+        placed = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float32, shape=(channels, *shape))
         grid = tuple(array.shape[1:])
-        for start, stop in tiles(shape, block):
+        for start, stop in boxes:
             box = list(zip(start, stop, strict=True))
             window = layer_window(box, grid, shape)
             features = to_device(array[(slice(None), *(slice(a, b) for a, b in window))], str(fixed.device))[None]
+            if projection is not None:
+                mean, basis = projection
+                centred = features - mean.to(features.device).view(1, -1, *[1] * len(grid))
+                features = torch.einsum("bc...,ck->bk...", centred, basis.to(features.device))
             to_array(
                 placed[(slice(None), *(slice(a, b) for a, b in box))],
                 onto_image_grid(features, tuple(shape), box, grid)[0],
@@ -931,7 +901,7 @@ def static_feature_sources(
         for index, core in enumerate(loss.cores):
             # A model with a voxel_size reads each image on a grid at it over the image's extent, as a run on the
             # whole pair resamples it (``resampled``), normalised by that image's statistics; its features come back
-            # onto the image's voxels as the whole run brings them (``back_on_image``).
+            # onto the image's voxels as the whole run brings them (``onto_image``).
             read, read_statistics = sources, statistics
             if core.model.voxel_size is not None:
                 read = {
@@ -976,8 +946,11 @@ def static_feature_sources(
                         cuda,
                     )
                     if source is not sources[side]:
+                        shape = sources[side].shape
                         arrays = [
-                            back_on_image(array, sources[side].shape, directory / f"{side}_{index}_{layer}_image.npy")
+                            onto_image(
+                                array, shape, directory / f"{side}_{index}_{layer}_image.npy", tiles(shape, block)
+                            )
                             for layer, array in enumerate(arrays)
                         ]
                     widths = [int(array.shape[0]) for array in arrays]
@@ -1171,10 +1144,7 @@ def sampled_deformable_class():
         def _region(self, tile, grid, halo: int, aligned: bool = True):
             """A box with ``halo`` around, at least the patch a sampled Jacobian loss runs its network on; ``aligned``,
             ending as far from the level's end as a whole number of the loss's stride (``block_region``)."""
-            low, high, core = box_region(tile, halo, grid, self._least)
-            if aligned and self._stride > 1:
-                high = [end + (extent - end) % self._stride for end, extent in zip(high, grid, strict=True)]
-            return low, high, core
+            return box_region(tile, halo, grid, self._least, self._stride if aligned else 1)
 
         def _warped(self, low, high, identity, levels, warps) -> tuple[torch.Tensor, torch.Tensor]:
             """The two images the loss compares over a box of coordinates ``identity``: the moving one through the
@@ -1226,18 +1196,12 @@ def sampled_deformable_class():
                     counts, counted = _joint_counts(self.loss_fn, moved, target, region)
                     joint = counts.double() if joint is None else joint + counts.double()
                     points += counted
-            if points > 0:  # a draw the masks miss holds no point: the level's histogram stays as it was
-                histogram = (joint / points).float()
-                tracked = self._histogram is None or share >= 1
-                self._histogram = histogram if tracked else self._histogram.lerp(histogram, share)
-            if self._histogram is None:
+            self._histogram, information = _tracked(self.loss_fn, self._histogram, joint, points, share)
+            if information is None:
                 return _Information(torch.zeros(()), 1.0, 0.0)
-            histogram = self._histogram.clone().requires_grad_()
-            value = _information(self.loss_fn, histogram)
-            (weight,) = torch.autograd.grad(value, histogram)
             if points == 0:  # a draw that holds no point of the loss moves nothing
-                return _Information(torch.zeros_like(weight), 1.0, float(value))
-            return _Information(weight, points, float(value))
+                return _Information(torch.zeros_like(information.weight), 1.0, information.value)
+            return information
 
         def _level_totals(self, boxes, grid, levels) -> tuple[float, float]:
             """A masked loss over the voxels of ``boxes`` (each counted once, in its own box): its support, and its
@@ -1337,11 +1301,8 @@ def sampled_deformable_class():
                 return self._box
             tile = ([0] * len(grid), [min(32, extent) for extent in grid])
             low, high, _ = self._region(tile, grid, self._halo)
-            torch.cuda.synchronize(device)
-            torch.cuda.reset_peak_memory_stats(device)
-            held = torch.cuda.memory_allocated(device)
-            self._loss_gradients(tile, grid, levels)
-            taken = torch.cuda.max_memory_allocated(device) - held
+            # The gradients are let go before the free memory is read.
+            taken = peak_bytes(lambda: self._loss_gradients(tile, grid, levels), device)[1]
             a_voxel = max(taken / math.prod(b - a for a, b in zip(low, high, strict=True)), 1.0)
             side = int((free_bytes(self.device) / 2 / a_voxel) ** (1 / len(grid))) - 2 * self._halo
             return max(self._box, min(side - side % 8, max(grid)))
@@ -1412,7 +1373,7 @@ def sampled_deformable_class():
                 self._histogram = None  # the level's joint histogram, as the draws of a mutual information tell it
                 # The steps each box has taken at this scale, laid out as the boxes are (tiles' order is C order).
                 steps = np.zeros([math.ceil(extent / side) for extent in grid], dtype=np.int64)
-                peaks = {name: _Largest(len(boxes)) for name in self._warps}  # each box's largest direction, last seen
+                peaks = {name: np.zeros(len(boxes)) for name in self._warps}  # each box's largest direction, last seen
                 for _ in range(math.ceil(epochs * len(boxes) / count)):
                     # Every box, or a draw of ``count`` that costs ``count``, not the boxes.
                     drawn = (
@@ -1439,7 +1400,7 @@ def sampled_deformable_class():
                         total += loss
                         for name, peak in seen.items():
                             peaks[name][index] = peak
-                    largest = {name: values.max() for name, values in peaks.items()}
+                    largest = {name: float(values.max()) for name, values in peaks.items()}
                     # Every drawn box steps from the warps of the iteration into the warp it steps to, which then
                     # takes their place: whole when every box is drawn, box by box otherwise.
                     for index in drawn:
@@ -1467,10 +1428,7 @@ def sampled_deformable_class():
         def _scaled(self, warp: _Warp, size: Sequence[int]) -> RegionSource:
             """``warp`` resampled to ``size`` by linear interpolation (``align_corners``), as ``F.interpolate`` does."""
             if warp.resident:
-                mode = "trilinear" if len(size) == 3 else "bilinear"
-                return TensorSource(
-                    F.interpolate(warp.arrays["warp"][None], tuple(size), mode=mode, align_corners=True)[0]
-                )
+                return TensorSource(resized(warp.arrays["warp"][None], size)[0])
             return build_level(warp.source(), size, None, directory=self._scratch, memory=warp.host)
 
         def _consistency(self, tile, grid, reference: RegionSource, halo, margins) -> tuple[float, torch.Tensor]:
