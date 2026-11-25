@@ -672,7 +672,8 @@ class Network(ModuleArgsDict, ABC):
             )
             for name, child in module._modules.items():
                 if child is not None:
-                    if not isinstance(child, Network):
+                    # As state_dict: a network a network holds loads under its own key, one a plain module holds here.
+                    if not (isinstance(child, Network) and isinstance(module, Network)):
                         weight_key = prefix + name + ".weight"
                         if (
                             isinstance(child, (torch.nn.modules.conv._ConvNd, torch.nn.Linear))
@@ -1176,6 +1177,7 @@ class Network(ModuleArgsDict, ABC):
         self._compute_channels_trace(self, self.in_channels, gradient_checkpoints, gpu_checkpoints)
 
     def init_outputs_group(self):
+        self.outputsGroup = []  # built afresh: a model kept across predictions is bound again
         for network in self.get_networks().values():
             if not network.measure:
                 continue

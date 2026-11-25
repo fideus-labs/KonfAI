@@ -138,6 +138,63 @@ By default the engine sees the whole image. With a `Patch` in `Prediction.yml`, 
 time and blends the results, so only a patch has to fit in memory: fit for a tool whose result at a voxel depends on
 its neighbourhood, not for one that needs the whole image or its place in space.
 
+### A tool that segments from prompts
+
+A promptable tool (clicks, a box, its last mask) runs the same way through `konfai.network.prompted`. **A prompt is a
+set of points of the case**, as the interactive tools take it and as 3D Slicer writes it: a fiducial file (`.fcsv`) in
+physical space, each point labelled with its kind, `positive` or `negative` for a click and `box` for each of a box's
+two opposite corners, in the order the user gave them. The last mask is an image, empty at first. Both are groups of
+the case. The points need no chain: a physical point is the same point whatever grid the image is put on, and the
+engine gets them as voxels of the image it is handed.
+
+```python
+# model.py, next to Prediction.yml
+import numpy as np
+import SimpleITK as sitk
+from konfai.network.prompted import PromptedNet, Prompts, kept
+
+
+def load(device: int):  # the tool and its weights
+    ...
+
+
+def engine(image: sitk.Image, prompts: Prompts, device: int) -> np.ndarray:
+    tool = kept(("mytool", device), lambda: load(device))  # loaded once for the life of the process
+    for voxel, positive in prompts.clicks:  # (z, y, x), in the order they were given
+        ...
+    ...  # prompts.box: two corners [low, high), or None; prompts.previous: the last mask, or None
+    return mask[None]  # (1, z, y, x)
+
+
+class Net(PromptedNet):
+    def __init__(self) -> None:
+        super().__init__(engine)  # branches: the image, the points, the last mask; output: Segmentation
+```
+
+```yaml
+Predictor:
+  Model:
+    classpath: model:Net
+  Dataset:
+    dataset_filenames: [./Dataset:a:mha]  # the .fcsv beside the images is read as its own format
+    groups_src:
+      IMAGE: {groups_dest: {IMAGE: {transforms: None, is_input: true}}}
+      PROMPT: {groups_dest: {PROMPT: {transforms: None, is_input: true}}}
+      PREVIOUS: {groups_dest: {PREVIOUS: {transforms: None, is_input: true}}}
+    Patch: {patch_size: [0, 0, 0]}
+  outputs_dataset:
+    Segmentation:  # the one output of a PromptedNet
+      OutputDataset: {dataset_filename: Dataset:mha, group: PRED, same_as_group: IMAGE:IMAGE}
+```
+
+A correction is one more point in the file and one more prediction, run with `--overwrite` (`overwrite=True`): a
+case whose output is already written is skipped otherwise. The workflow is built again each time, and `kept`
+holds what must outlive a prediction (the tool's weights, the image it has encoded, a session): an app's own modules
+do not, konfai-apps dropping them after each run. Several objects are
+several cases that share the image. `write_landmarks(points, path, labels)` writes the file a caller hands over. The
+image is handed whole (`patch_size: [0, 0, 0]`): a patch carries its case's geometry and not its own place in it, so
+a case cut in several patches is refused.
+
 ## MONAI Bundles, both ways
 
 A [MONAI Bundle](https://docs.monai.io/en/stable/mb_specification.html) (the
