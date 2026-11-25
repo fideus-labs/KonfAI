@@ -453,6 +453,28 @@ def test_a_compact_transform_never_outlives_its_field(
     assert not compact.exists() and (out / "P000" / "DVF.mha").exists() and own.exists()
 
 
+@pytest.mark.parametrize("allowed", [0, 2])
+def test_tta_on_the_sampled_route_is_capped_as_konfai_apps_caps_it(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: int
+) -> None:
+    """--tta runs the copies the app allows (app.json 'tta', 0 for every shipped preset): none, said, as konfai-apps
+    says it on the other routes; an app that allows some is refused, the sampled route registering a pair once."""
+
+    class Reached(Exception):
+        pass
+
+    def sampled(*args, **kwargs):
+        raise Reached
+
+    manifest = reg._manifest
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {**manifest(preset), "tta": allowed})
+    fixed, moving = _pair(tmp_path)
+    app = reg.ImpactRegKonfAIApp()
+    app._register_sampled = sampled  # type: ignore[method-assign]
+    with pytest.raises(KonfAIError if allowed else Reached):
+        app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", tta=2)
+
+
 @pytest.mark.parametrize(
     ("kind", "published"),
     [("itktransform", (".h5", "itktransform")), ("mha.gz", (".mha", "mha.gz")), ("zarr", (".ome.zarr", "omezarr"))],

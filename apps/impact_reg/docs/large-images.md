@@ -65,7 +65,8 @@ inputs are first read once, by bands, and
 written as uncompressed twins the engines map or read by boxes, measured in the fixed image's finest voxel as a run on
 the whole pair is (a preset's lengths are voxels); the fields and transforms come back in millimetres. A mask lying
 on another grid than its image goes onto it first, streamed. The strategy registers 3-D pairs, once, in this
-process: `--host` and `--tta` are refused. `--seed` seeds its draws, as it seeds the engine's on every route, and
+process: `--host` is refused. `--tta` runs the copies the app allows (`app.json`'s `tta`, none for the shipped
+presets), as on the other routes. `--seed` seeds its draws, as it seeds the engine's on every route, and
 `--output-format` is the form its field is written in.
 
 ### ConvexAdam

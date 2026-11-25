@@ -1410,15 +1410,27 @@ class ImpactRegKonfAIApp:
             }
             sampled_presets = [preset for preset, route in routes.items() if route.sampled]
             sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
-            for refused, what, drop in (
-                (self._remote is not None, "runs the preset's engine in this process, not on a server.", "--host"),
-                (tta, "registers the pair once, with no test-time augmentation.", "--tta"),
-            ):
-                if sampled_presets and refused:
+            if sampled_presets and self._remote is not None:
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"{', '.join(sampled_presets)}: the sampled route runs the preset's engine in this process, not on"
+                    " a server.",
+                    "Drop --host, or choose --out-of-core whole or tiled.",
+                )
+            for preset in sampled_presets if tta else []:
+                # --tta as konfai-apps takes it on the other routes: up to the copies the app allows (app.json 'tta').
+                allowed = int(_manifest(preset).get("tta") or 0)
+                if tta > allowed:
+                    print(
+                        f"[ImpactReg] {preset}: {tta} test-time augmentation(s) asked, but it allows {allowed}"
+                        f" (app.json 'tta'): running {allowed}.",
+                        flush=True,
+                    )
+                if min(tta, allowed):
                     raise KonfAIError(
                         "ImpactReg",
-                        f"{', '.join(sampled_presets)}: the sampled route {what}",
-                        f"Drop {drop}, or choose --out-of-core whole or tiled.",
+                        f"{preset}: the sampled route registers a pair once, with no test-time augmentation.",
+                        "Drop --tta, or choose --out-of-core whole or tiled.",
                     )
             _check_space(work, headers, presets, bool(sampled_presets))
             on_grid = None
