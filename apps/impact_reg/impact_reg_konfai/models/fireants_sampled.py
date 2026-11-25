@@ -945,8 +945,10 @@ def sampled_deformable_class():
             if loss_halo is None:
                 loss_halo = 2 * ((cc_kernel_size - 1) // 2) if loss_type.endswith("cc") else 0
             # What the two halves of a step read around a voxel: the loss and the smoothing of its gradient; then the
-            # smoothing of the warp, and one voxel for the composition.
-            self._halo, self._step_halo = int(loss_halo) + grad_tail, warp_tail + 1
+            # smoothing of the warp, and for the composition how far a step moves a voxel, half the rate in voxels at
+            # most (``_step``).
+            self._halo = int(loss_halo) + grad_tail
+            self._step_halo = warp_tail + max(1, math.ceil(float(optimizer_lr) / 2))
             affine = (
                 torch.eye(self.dims + 1, device=device) if init_affine is None else init_affine.reshape(-1, 4, 4)[0]
             )
