@@ -1358,6 +1358,7 @@ def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
         "a link at a statistic's finish graph",
         "a program named as a graph",
         "an extension named as a graph",
+        "a link at the second model's graph",
     ],
 )
 def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
@@ -1394,6 +1395,9 @@ def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
         extension.write_bytes(b"\0asm")
     elif planted == "a program named as a graph":
         pass  # no extension: the program alone
+    elif planted == "a link at the second model's graph":
+        (out / "model_0.onnx").write_bytes(b"the previous graph")
+        (out / "model_1.onnx").symlink_to(tmp_path / "elsewhere.json")
     else:
         extension = tmp_path / "missing.wasm"
 
@@ -1413,8 +1417,11 @@ def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
         elif planted == "a link at a statistic's finish graph":
             export_case_statistic(Mean(), out / "model.onnx", out / "finish.onnx", rank=3)
         else:
-            compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", program, extension=extension)
+            folds = [tmp_path / "fold_0.pt"] * (2 if planted == "a link at the second model's graph" else 1)
+            compile_prediction(config, folds, tmp_path / "Predictions", program, extension=extension)
     assert (out / "model.onnx").read_bytes() == b"the previous graph"
+    if planted == "a link at the second model's graph":
+        assert (out / "model_0.onnx").read_bytes() == b"the previous graph"
     assert (tmp_path / "elsewhere.json").read_text() == "not the program's"
 
 
@@ -2727,6 +2734,7 @@ def test_a_class_of_the_app_s_past_a_vote_is_run_again_in_the_labels_the_vote_ke
 ) -> None:
     # A vote of the copies' labels keeps them int64: a class taking labels only, after it, is run again in them.
     (tmp_path / "VotedPhases.py").write_text(
+        "import torch\n"
         "from konfai.data.transform import LocalityKind, Transform\n\n"
         "class Odd(Transform):\n"
         "    locality = LocalityKind.WHOLE_VOLUME\n\n"
@@ -2735,6 +2743,8 @@ def test_a_class_of_the_app_s_past_a_vote_is_run_again_in_the_labels_the_vote_ke
         "class Whole(Transform):\n"
         "    locality = LocalityKind.WHOLE_VOLUME\n\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int64:\n"
+        "            raise TypeError(f'labels, not {tensor.dtype}')\n"
         "        return tensor\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))

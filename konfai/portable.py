@@ -3671,15 +3671,20 @@ def _compile_heads(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """One program per output sink of ``heads``: each names the head it reads, its own models and its own
     destination. Returns every model exported and every output as its program and its write target."""
+    from konfai.utils.utils import owned_destination
+
     exported: list[dict[str, Any]] = []
     written: list[dict[str, Any]] = []
+    named = {
+        head: [f"{prefix}model"] if len(checkpoints) == 1 else [f"{prefix}model_{at}" for at in range(len(checkpoints))]
+        for head in heads
+        for prefix in ["" if len(heads) == 1 else f"{_file_stem(head)}_"]
+    }
+    # Every model's graph is checked before the first is written over the one a previous compile left.
+    for model_id in (model_id for ids in named.values() for model_id in ids):
+        owned_destination(out_dir / f"{model_id}.onnx")
     for head, sink in heads.items():
-        prefix = "" if len(heads) == 1 else f"{_file_stem(head)}_"
-        ids = (
-            [f"{prefix}model"]
-            if len(checkpoints) == 1
-            else [f"{prefix}model_{index}" for index in range(len(checkpoints))]
-        )
+        ids = named[head]
         models, _files, program = compile_output(
             config, root, checkpoints, out_dir, ids, passes=passes, aux=aux, head=head, output=head, extension=extension
         )
