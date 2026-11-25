@@ -115,6 +115,7 @@ def _bare_loss(mode: str, core: torch.nn.Module, spec: "fireants.ModelSpec") -> 
     loss._channels, loss._level, loss._factors = [[2]], -1, None
     loss._generator = torch.Generator().manual_seed(0)
     loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
+    loss._statistics, loss._cells, loss._layer_sums, loss._level_weight, loss._place = {}, {}, {}, 0.0, None
     return loss
 
 
@@ -129,7 +130,7 @@ def test_the_custom_losses_leave_out_what_the_moving_mask_leaves_out() -> None:
             super().__init__()
             self.kept = [0]
 
-        def distances(self, moved, fixed, mask, terms, seed, kernel):
+        def distances(self, moved, fixed, mask, terms, seed, kernel, *pooled):
             self.mask = mask
             return [moved.sum() * 0.0]
 
