@@ -3549,7 +3549,7 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
     for group in ("REF", "BODY"):
         companions.write(group, "probe", np.ones((1, 6, 7, 8), np.float32), Attribute(_probe_attribute(3)))
     for params in _DTYPE_VARIANTS.get(stage, [_LEAST.get(stage, {})]):
-        step, ran, refused = _CHAIN_OPS[stage](dict(params)), [], []
+        step, ran, refused, rows = _CHAIN_OPS[stage](dict(params)), [], [], []
         for dtype in _DTYPES:
             volume = (torch.arange(6 * 7 * 8).reshape(1, 6, 7, 8) % 2).to(getattr(torch, dtype))
             try:
@@ -3563,14 +3563,16 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
                     built.set_datasets([companions])
                     returned = _probed(built, volume, _probe_attribute(3))
             except (RuntimeError, TypeError, ValueError, KonfAIError):  # a dtype the stage does not take
-                _tabled(step, dtype, None)
+                rows.append((step, dtype, None))
                 refused.append(dtype)
                 continue
             ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
-            _tabled(step, dtype, ran[-1][2])
+            rows.append((step, dtype, ran[-1][2]))
         assert ran, f"{stage} {params} takes none of {_DTYPES}"
         assert tuple(refused) == _REFUSED.get(stage, ()), (stage, params, refused)  # no other failure
         assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
+        for row in rows:  # tabled once every check of the stage holds
+            _tabled(*row)
 
 
 @pytest.mark.parametrize(
@@ -3597,6 +3599,7 @@ def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op:
 
     module, name = fold.split(":")
     cls = getattr({"reduction": reduction, "ensemble": ensemble}.get(module, ensemble), name, None)
+    rows: list[tuple[dict[str, Any], str, str | None]] = []
     for dtype in _DTYPES:
         values = (torch.arange(3 * 6 * 7).reshape(3, 1, 6, 7) % 3).to(getattr(torch, dtype))
         if module == "reduction":
@@ -3605,8 +3608,10 @@ def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op:
             returned = ensemble.InferenceStack(mode=name)._reduce(values)
         else:
             returned = cls()("probe", values[:, 0], Attribute())
-        _tabled({"op": op}, dtype, str(returned.dtype).removeprefix("torch."))
         assert _result_dtype({"op": op}, dtype) == str(returned.dtype).removeprefix("torch."), (op, dtype)
+        rows.append(({"op": op}, dtype, str(returned.dtype).removeprefix("torch.")))
+    for row in rows:  # tabled once every dtype's check holds
+        _tabled(*row)
 
 
 def test_a_resample_past_a_gradient_of_labels_is_linear_as_konfai_s() -> None:
