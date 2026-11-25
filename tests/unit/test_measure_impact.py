@@ -148,7 +148,10 @@ class _Faint(torch.nn.Module):
         return [x * 0.001 + x * x * 0.0005]
 
 
-def test_a_half_network_gives_the_input_the_float32_gradient(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("reduce", [lambda layer: layer.pow(2).mean(), torch.sum], ids=["mean", "sum"])
+def test_a_half_network_gives_the_input_the_float32_gradient(tmp_path: Path, monkeypatch, reduce) -> None:
+    # A mean over many features hands each a gradient float16 rounds to zero; a sum one that, scaled by their count,
+    # overflows it: the gradient is scaled by its own magnitude instead.
     path = tmp_path / "faint.pt"
     torch.jit.script(_Faint()).save(str(path))
     model = ImpactFeatureModel(str(path), 1, [1.0], None, 3)
@@ -159,9 +162,10 @@ def test_a_half_network_gives_the_input_the_float32_gradient(tmp_path: Path, mon
         monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
         moved = image.clone().requires_grad_()
         (layer,) = model.network(moved.device)(*model.inputs(moved, stats))
-        (gradient,) = torch.autograd.grad(layer.float().pow(2).mean(), moved)
+        (gradient,) = torch.autograd.grad(reduce(layer.float()), moved)
         gradients.append(gradient)
-    assert gradients[1].dtype == torch.float32 and (gradients[1] == 0).float().mean() < 0.05
+    assert gradients[1].dtype == torch.float32 and torch.isfinite(gradients[1]).all()
+    assert (gradients[1] == 0).float().mean() < 0.05
     whole, half = (gradient.flatten().double() / gradient.abs().max() for gradient in gradients)  # above cosine's eps
     assert torch.nn.functional.cosine_similarity(whole, half, dim=0) > 0.999
 

@@ -568,37 +568,52 @@ class _SliceSweep(torch.nn.Module):
         return [layer.reshape(batch, depth, *layer.shape[1:]).movedim(1, 2) for layer in layers]
 
 
-class _GradientScale(torch.autograd.Function):
-    """The identity, its gradient multiplied by ``factor[0]`` on the way back (divided with ``inverse``), read then:
-    the forward that sets it runs after the input is scaled."""
+class _ScaledLayers(torch.autograd.Function):
+    """The identity on a network's layers; on the way back their gradients are multiplied by one power of two that
+    brings the largest to 1, kept in ``factor`` for ``_UnscaledImage``: float16 holds a gradient that large, and a
+    loss's per-element one, a mean's, far under its range, is lifted back into it."""
 
     @staticmethod
-    def forward(ctx, tensor: torch.Tensor, factor: list[float], inverse: bool) -> torch.Tensor:
-        ctx.factor, ctx.inverse = factor, inverse
-        return tensor.view_as(tensor)
+    def forward(ctx, factor: list[float], *layers: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        ctx.factor = factor
+        return tuple(layer.view_as(layer) for layer in layers)
+
+    @staticmethod
+    def backward(ctx, *grads: torch.Tensor | None):
+        largest = max((float(grad.abs().max()) for grad in grads if grad is not None), default=0.0)
+        ctx.factor[0] = 2.0 ** -math.floor(math.log2(largest)) if 0 < largest < math.inf else 1.0
+        return (None, *(None if grad is None else grad * ctx.factor[0] for grad in grads))
+
+
+class _UnscaledImage(torch.autograd.Function):
+    """The identity on a network's image; on the way back its gradient is divided by the factor ``_ScaledLayers``
+    multiplied the layers' by, in float32."""
+
+    @staticmethod
+    def forward(ctx, image: torch.Tensor, factor: list[float]) -> torch.Tensor:
+        ctx.factor = factor
+        return image.view_as(image)
 
     @staticmethod
     def backward(ctx, grad: torch.Tensor):
-        return (grad / ctx.factor[0] if ctx.inverse else grad * ctx.factor[0]), None, None
+        return grad / ctx.factor[0], None
 
 
 class _HalfNetwork(torch.nn.Module):
-    """A network run in float16 on a float32 image. Differentiated, its layers come back in float32 with their gradient
-    multiplied by the element count of the largest weighted one, and the image's divided by it in float32: a mean
-    over that many elements hands each one a gradient float16 rounds to zero."""
+    """A network run in float16 on a float32 image. Differentiated, its layers come back in float32, their gradient
+    scaled into float16's range for the backward through the network and the image's scaled back in float32
+    (``_ScaledLayers``): a mean loss hands each element a gradient float16 rounds to zero, a sum one it overflows."""
 
-    def __init__(self, network: torch.nn.Module, weights: Sequence[float]) -> None:
+    def __init__(self, network: torch.nn.Module) -> None:
         super().__init__()
-        self.network, self.weights = network, list(weights)
+        self.network = network
 
     def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
         if not (torch.is_grad_enabled() and image.requires_grad):
             return self.network(image.half(), *rest)
-        factor = [1.0]  # one per call
-        outputs = self.network(_GradientScale.apply(image.float(), factor, True).half(), *rest)
-        weighted = [output for output, weight in zip(outputs, self.weights, strict=False) if weight] or outputs
-        factor[0] = float(max(output.numel() for output in weighted))
-        return [_GradientScale.apply(output.float(), factor, False) for output in outputs]
+        factor = [1.0]  # one per call, set on the way back
+        outputs = self.network(_UnscaledImage.apply(image.float(), factor).half(), *rest)
+        return list(_ScaledLayers.apply(factor, *(output.float() for output in outputs)))
 
 
 class _PlaneLift(torch.nn.Module):
@@ -1164,7 +1179,7 @@ class ImpactFeatureModel:
             network = _SliceSweep(network)
         elif self.dim == 3 and self.planes:
             network = _PlaneLift(network)
-        return _HalfNetwork(network, self.weights) if self._half(device) else network
+        return _HalfNetwork(network) if self._half(device) else network
 
     def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
         """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat
