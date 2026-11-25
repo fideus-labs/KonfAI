@@ -1638,9 +1638,10 @@ def test_requirements_are_named_requirements_txt(tmp_path):
         _cli(root, support_file=["Requirements.txt=listed.txt"], support_root=str(root))
 
 
-def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path):
-    # The app's code the check runs writes a file the bundle keeps below its top level, in place, and the update is
-    # refused: the bundle's file is as it was, the update holding a copy of every file but the weights.
+@pytest.mark.parametrize("kept", ["docs/notes.txt", "cache/lookup.pt"])
+def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path, kept):
+    # The app's code the check runs writes a file the bundle keeps, in place, and the update is refused: the bundle's
+    # file is as it was, the update holding a copy of every file but the checkpoints app.json declares.
     from test_extension import DOUBLE, OWN
 
     wasmtime = pytest.importorskip("wasmtime")
@@ -1649,14 +1650,25 @@ def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path
     (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
     (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
     bundle = _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
-    (bundle / "docs").mkdir()
-    (bundle / "docs" / "notes.txt").write_text("the bundle's")
-    written = 'with open("docs/notes.txt", "r+") as notes:\n    notes.write("in place")\n'
+    (bundle / kept).parent.mkdir()
+    (bundle / kept).write_text("the bundle's")
+    written = f'with open("{kept}", "r+") as notes:\n    notes.write("in place")\n'
     (root / "Model.py").write_text(written + OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
 
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
         _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
-    assert (bundle / "docs" / "notes.txt").read_text() == "the bundle's"
+    assert (bundle / kept).read_text() == "the bundle's"
+
+
+def test_a_config_spelled_as_a_kept_one_in_another_case_is_refused(tmp_path):
+    # Prediction.yml kept, prediction.yml brought: one file on a file system telling no case apart, and the one
+    # konfai reads by its name is the old one on the others.
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (root / "prediction.yml").write_text("Predictor: {}\n")
+    with pytest.raises(AppMetadataError, match="one file on a file system telling no case apart"):
+        _cli(root, config=[str(root / "prediction.yml")])
+    assert sorted(path.name for path in bundle.glob("*.yml")) == ["Prediction.yml"]
 
 
 @pytest.mark.parametrize(
@@ -1673,10 +1685,11 @@ def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_p
     # in any case: refused before anything is written, a graph's name with or without an export.
     root = _support_workspace(tmp_path)
     (root / "Model.py").write_text("import einops\n")
-    (root / name).write_bytes(b"\0asm")
+    (root / "built").mkdir()  # apart from the workspace's app.json, which a file system telling no case apart holds
+    (root / "built" / name).write_bytes(b"\0asm")
 
     with pytest.raises(AppMetadataError, match=re.escape(refusal)):
-        _cli(root, model_py=str(root / "Model.py"), extension=str(root / name), onnx=name == "Manifest.json")
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "built" / name), onnx=name == "Manifest.json")
     assert not (tmp_path / "out" / "Seg").exists()
 
 

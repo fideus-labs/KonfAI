@@ -31,7 +31,7 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 from collections.abc import Callable, Collection
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from konfai.portable import aux_mask_groups, compile_output, config_environment, tta_passes, warn_unportable_keys
@@ -329,7 +329,14 @@ def assemble_bundle(
         # The update is finished on the bundle it makes, which then takes the bundle's place: the bundle as it was,
         # every file the export reads beside the staged ones, none of those the update drops.
         if bundle.exists():
-            shutil.copytree(bundle, update, symlinks=True, copy_function=lambda src, dst: _carried(bundle, src, dst))
+            try:
+                held = json.loads((bundle / "app.json").read_text(encoding="utf-8")).get("models", [])
+            except (OSError, ValueError):
+                held = []
+            linked = {Path(str(name)).as_posix() for name in held}
+            shutil.copytree(
+                bundle, update, symlinks=True, copy_function=lambda src, dst: _carried(bundle, linked, src, dst)
+            )
             # A link into the bundle, by its absolute path or out of it and back, reads the update's file there, as the
             # bundle published will.
             for link in [path for path in update.rglob("*") if path.is_symlink()]:
@@ -451,13 +458,11 @@ def _run_by_konfai_edge(config: Path) -> bool:
     return isinstance(loaded, dict) and ("Predictor" in loaded or "Evaluator" in loaded)
 
 
-def _carried(bundle: Path, source: str, target: str) -> None:
-    """A file of ``bundle`` into the update an export finishes: a link for a checkpoint, which the export and the
-    check only read, a copy for any other file, which the app's code they run may write in place, or a copy where
-    the system makes no link."""
-    from konfai_apps.app_repository import WEIGHTS
-
-    if Path(source).name.endswith(WEIGHTS):
+def _carried(bundle: Path, checkpoints: Collection[str], source: str, target: str) -> None:
+    """A file of ``bundle`` into the update an export finishes: a link for a checkpoint its app.json declares
+    (``checkpoints``), which the export and the check only read, a copy for any other file, which the app's code they
+    run may write in place, or a copy where the system makes no link."""
+    if Path(source).relative_to(bundle).as_posix() in checkpoints:
         try:
             os.link(source, target)
             return
@@ -496,6 +501,20 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
         if target.is_file():
             obsolete.setdefault(target.resolve(), target)
     removable = set(obsolete)
+    # A name telling apart from a kept one by case alone is one file on a file system telling no case apart, and the
+    # kept one is the one konfai reads by its name on the others.
+    kept = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.resolve() not in removable}
+    folded = {name.lower(): name for name in kept}
+    for staged in staged_files:
+        brought = PurePosixPath(staged.relative_to(staging).as_posix())
+        for piece in [brought, *list(brought.parents)[:-1]]:
+            other = folded.get(piece.as_posix().lower())
+            if other is not None and other != piece.as_posix():
+                raise AppMetadataError(
+                    f"Bundle paths collide: {other!r} kept and {piece.as_posix()!r} brought are one file on a file"
+                    " system telling no case apart.",
+                    "Spell it as the bundle does, or remove the kept one.",
+                )
     # Preflight the entire update: never write through a destination's symlink or replace a user's
     # file or directory. A managed file this export no longer declares may become a directory.
     for staged in staged_files:
