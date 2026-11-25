@@ -586,3 +586,36 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
     by_regions = np.moveaxis(sitk.GetArrayFromImage(sitk.ReadImage(str(result.field))), -1, 0)
     assert result.iterations == 0 and result.control_grid.exists()
     assert np.allclose(by_regions, engine.register(fixed, moving, -1), atol=1e-3)
+
+
+@pytest.mark.slow  # itk-impact runs both fine stages by regions on the CPU
+def test_every_fine_stage_runs_by_regions_as_it_runs_whole(tmp_path: Path) -> None:
+    # A chain of two fine stages refines twice by regions, the second from the first's grid, as it does whole.
+    import itk
+    from impact_reg_konfai import impact_reg as reg
+    from impact_reg_konfai.native import write_twin
+    from konfai.utils.dataset import Dataset
+
+    if not hasattr(itk, "ImpactFineRegistration") or not hasattr(
+        convexadam._fine_registration_type().New(), "SetRegionSize"
+    ):
+        pytest.skip("itk-impact 0.2 is not installed")
+    fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
+    models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
+    engine = _net(tmp_path, models=models, iterations=4, stages=["fine", "fine"])["Registration"]._engine
+    for stage_models in engine._feature_models.values():
+        for model in stage_models:
+            model.fov = [1]  # voxel by voxel: no halo around a box
+    twins = []
+    for name, image in (("Fixed", fixed), ("Moving", moving)):
+        sitk.WriteImage(image, str(tmp_path / f"{name}.mha"))
+        root, _, backend = reg._stage_group(tmp_path / "stage", name, {"P000": tmp_path / f"{name}.mha"}).rpartition(
+            ":"
+        )
+        twins.append(write_twin(Dataset(root, backend), name, "P000", tmp_path / f"{name}.h5", dtype="float32"))
+
+    result = engine.refine_by_regions(*twins, None, None, -1, 16, 3, tmp_path / "DVF.mha")
+
+    by_regions = np.moveaxis(sitk.GetArrayFromImage(sitk.ReadImage(str(result.field))), -1, 0)
+    assert result.iterations == 2 * 3
+    assert np.allclose(by_regions, engine.register(fixed, moving, -1), atol=1e-3)

@@ -689,34 +689,40 @@ class ConvexAdamEngine:
                     resident=False,
                     coarse=coarse_stats,
                 )
-        fine = self._new_fine(fixed_image, moving_image, fixed_mask_image, moving_mask_image, device)
-        if coarse_grid is not None:
-            fine.SetInitialDisplacementField(coarse_grid)  # read as its dense field, whatever its grid
         geometry = region_geometry([int(v) for v in itk.size(fixed_image)], self._grid_shrink, region_size)
-        fine.SetRegionSize(int(region_size))
-        fine.SetScratchDirectory(str(field.parent))
-        fine.SetRegionHalo(halo_of("fine"))
         drawn = geometry["regions"]
         if samples is not None:
             # An iteration steps the boxes it draws, anew at each one, as elastix steps on the points it draws; a box
             # steps as often on average as the engine's own run iterates.
             drawn = min(drawn, max(1, samples // region_size**DIM))
-        fine.SetRegionsPerIteration(0 if drawn == geometry["regions"] else drawn)
-        fine.SetNumberOfIterations(math.ceil(int(epochs) * geometry["regions"] / drawn))
         if device_index >= 0:
             torch.cuda.init()  # the peak is read off the allocator, which exists once CUDA is initialised
             torch.cuda.reset_peak_memory_stats(device_index)
         started = time.monotonic()
-        control = fine.GetControlGridTransform()  # solves, allocating no dense field
-        control_grid = finish(fine.GetOutput(), control.GetDisplacementField())
+        grid, values, bytes_read = coarse_grid, [], 0
+        for number in range(self._stages.count("fine")):  # each refines the field the one before left
+            scratch = field.parent / f"fine_{number}" if number else field.parent  # apart from the grid it starts from
+            scratch.mkdir(exist_ok=True)
+            fine = self._new_fine(fixed_image, moving_image, fixed_mask_image, moving_mask_image, device)
+            readers.append(fine)  # its grid, which the next stage reads, may lie in its files
+            if grid is not None:
+                fine.SetInitialDisplacementField(grid)  # read as its dense field, whatever its grid
+            fine.SetRegionSize(int(region_size))
+            fine.SetScratchDirectory(str(scratch))
+            fine.SetRegionHalo(halo_of("fine"))
+            fine.SetRegionsPerIteration(0 if drawn == geometry["regions"] else drawn)
+            fine.SetNumberOfIterations(math.ceil(int(epochs) * geometry["regions"] / drawn))
+            grid = fine.GetControlGridTransform().GetDisplacementField()  # solves, allocating no dense field
+            values += list(fine.GetMetricValuesPerIteration())
+            bytes_read += int(fine.GetBytesRead())
+        control_grid = finish(fine.GetOutput(), grid)
         if device_index >= 0:
             torch.cuda.synchronize(device_index)
-        values = list(fine.GetMetricValuesPerIteration())
         return RegionRefinement(
             control_grid,
             field,
             values,
-            int(fine.GetBytesRead()),
+            bytes_read,
             (bool(fine.GetFixedImageStreamed()), bool(fine.GetMovingImageStreamed())),
             geometry["regions"],
             len(values),
