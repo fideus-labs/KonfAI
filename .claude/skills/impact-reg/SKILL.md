@@ -84,9 +84,9 @@ Never answer "too large" by downsampling the pair. `register` handles it: when a
 registers whole in the free memory (its `app.json` cost per voxel), it runs the whole preset once on a coarse copy
 (from the OME-Zarr pyramid when there is one), pre-warps the moving image onto the native grid, refines with the
 preset's deformable stage on native tiles, and composes the fields. Presets without a local stage stop at the global
-pass. Levers: `--max-voxels` (whole/tiled threshold), `--patch-size` (tile), `--tmp-dir` (intermediates: ~60 bytes a
-voxel at the peak, on disk), streamable formats (`.mha`, `.nii`, OME-Zarr). Pin `--max-voxels` and `--patch-size` for
-reproducibility: the automatic plan follows the free memory. Keep `TMPDIR` short (PyTorch socket path limit).
+pass. Levers: `IMPACT_REG_MAX_VOXELS` (environment variable: the whole/tiled threshold), `--patch-size` (tile),
+`--tmp-dir` (intermediates: ~60 bytes a voxel at the peak, on disk), streamable formats (`.mha`, `.nii`, OME-Zarr).
+Pin `IMPACT_REG_MAX_VOXELS` and `--patch-size` for reproducibility: the automatic plan follows the free memory. Keep `TMPDIR` short (PyTorch socket path limit).
 
 ## Tuning order
 

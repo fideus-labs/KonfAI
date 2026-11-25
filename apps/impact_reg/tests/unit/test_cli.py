@@ -297,13 +297,29 @@ def test_uncertainty_needs_no_preset(monkeypatch: pytest.MonkeyPatch, capsys: py
 
 @pytest.mark.parametrize(
     "option",
-    [["--max-voxels", "0"], ["--cpu", "0"], ["--tta", "-1"], ["--gpu", "-1"], ["--cpu", "x"]],
+    [["--cpu", "0"], ["--tta", "-1"], ["--gpu", "-1"], ["--cpu", "x"]],
 )
 def test_a_bad_count_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, option: list[str]) -> None:
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
     assert _run(monkeypatch, ["register", "FireANTs", "-f", "a.mha", "-m", "b.mha", *option]) == 2
     assert not calls
+
+
+@pytest.mark.parametrize(("value", "budget"), [(None, None), ("20000000", 20_000_000)])
+def test_the_voxels_registered_whole_are_pinned_by_the_environment(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, budget: int | None
+) -> None:
+    # IMPACT_REG_MAX_VOXELS pins what the device registers whole; unset, the plan follows its free memory.
+    calls: dict[str, dict] = {}
+    monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
+    if value is None:
+        monkeypatch.delenv("IMPACT_REG_MAX_VOXELS", raising=False)
+    else:
+        monkeypatch.setenv("IMPACT_REG_MAX_VOXELS", value)
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "register", "FireANTs", "-f", "a.mha", "-m", "b.mha"])
+    cli.main()
+    assert calls["register"]["max_voxels"] == budget
 
 
 def test_a_remote_uri_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:

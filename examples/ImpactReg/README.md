@@ -69,11 +69,12 @@ Add patch overrides and KonfAI registers overlapping patches, then reassembles t
 displacement field with a `Cosinus` partition-of-unity window, which leaves no seam in the field:
 
 ```bash
-impact-reg-konfai register FireANTs#syn -f fixed.mha -m moving.mha -o Output --gpu 0 --max-voxels 20000000
+IMPACT_REG_MAX_VOXELS=20000000 impact-reg-konfai register FireANTs#syn -f fixed.mha -m moving.mha -o Output --gpu 0
 ```
 
 A pair larger than what the preset registers whole is registered at native resolution in tiles, after one
-global pass on a coarse copy; `--max-voxels` sets that size and `--patch-size` the tile.
+global pass on a coarse copy. That size follows the device's free memory; `IMPACT_REG_MAX_VOXELS` pins it, and
+`--patch-size` sets the tile.
 
 ## What to adapt first
 
