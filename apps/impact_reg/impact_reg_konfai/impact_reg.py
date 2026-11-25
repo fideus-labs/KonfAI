@@ -79,6 +79,7 @@ from konfai_apps.app_repository import (
     apply_overrides,
     check_overrides,
     did_you_mean,
+    model_config,
     pass_cost,
 )
 from konfai_apps.cli import app_file, app_id, app_names
@@ -1097,10 +1098,7 @@ def _config_engine(config: dict) -> str | None:
 def _sampled_engine(preset: str, overrides: Sequence[str] = ()) -> str | None:
     """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``: the classpath of its config, or the
     one a --set of ``overrides`` gives it; None for any other class."""
-    config = _preset_config(preset, "Prediction.yml")
-    classpaths = [entry for entry in overrides if entry.partition("=")[0].strip().endswith("classpath")]
-    apply_overrides(config, classpaths, lambda: None)
-    return _config_engine(config)
+    return _config_engine(model_config(_preset_config(preset, "Prediction.yml"), list(overrides)))
 
 
 @dataclass
@@ -1938,7 +1936,7 @@ class ImpactRegKonfAIApp:
                 f"--out-of-core sampled runs the preset's engine in this process, which needs {error.name}.",
                 "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
             ) from error
-        apply_overrides(config, config_overrides["global"], lambda: network)
+        apply_overrides(config, config_overrides["global"], lambda config: network)
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.

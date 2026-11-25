@@ -1197,7 +1197,7 @@ def test_with_a_host_a_set_of_the_output_group_brings_the_field_back_under_it(
 
     def sampled(self, preset, inputs, headers, cases, work, gpu, cpu, quiet, overrides, *args):
         config = reg._preset_config(preset, "Prediction.yml")
-        reg.apply_overrides(config, overrides["global"], lambda *config: None)
+        reg.apply_overrides(config, overrides["global"], lambda config: None)
         group, fields = reg._config_output_group(config), {}
         for case in cases:
             fields[case] = Path(work) / case / f"{group}.mha"

@@ -40,7 +40,9 @@ def test_a_number_weighs_every_kept_layer_as_a_one_value_list_does() -> None:
     assert _coerce_config_value(0.8, annotation.__origin__, "layers_weight") == 0.8
     block = {"models": {"0": {"ref": "a.pt", "layers_weight": [1.0]}}}
     config = {"Predictor": {"Model": {"classpath": "m:RegistrationNet", "RegistrationNet": block}}}
-    apply_overrides(config, ["Predictor.Model.RegistrationNet.models.0.layers_weight=0.8"], lambda: RegistrationNet)
+    apply_overrides(
+        config, ["Predictor.Model.RegistrationNet.models.0.layers_weight=0.8"], lambda config: RegistrationNet
+    )
     assert block["models"]["0"]["layers_weight"] == 0.8
 
 

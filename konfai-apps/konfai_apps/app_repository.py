@@ -454,17 +454,16 @@ def check_overrides(data: Any, overrides: list[str]) -> None:
     """Refuse, before the config ``data`` runs elsewhere, the ``--set`` overrides its run would refuse: they are applied
     to a copy, the model class imported from the installed module its ``classpath`` names (not importable: only the
     config's own keys are known)."""
-    checked = copy.deepcopy(data)
 
-    def model_class() -> type | None:
-        root = (checked or {}).get("Predictor") or (checked or {}).get("Trainer") or {}
+    def model_class(config: Any) -> type | None:
+        root = (config or {}).get("Predictor") or (config or {}).get("Trainer") or {}
         module, _, name = str((root.get("Model") or {}).get("classpath", "")).partition(":")
         try:
             return getattr(importlib.import_module(module), name)
         except Exception:
             return None
 
-    apply_overrides(checked, overrides, model_class)
+    apply_overrides(copy.deepcopy(data), overrides, model_class)
 
 
 def _parse_parameters(parameters: Any) -> dict[str, str]:
@@ -506,7 +505,7 @@ def _declared_parameter(
 def apply_overrides(
     data: Any,
     overrides: list[str],
-    model_class: Callable[[], type | None],
+    model_class: Callable[[Any], type | None],
     parameters: dict[str, str] | None = None,
     stage_class: Callable[[str], type | None] = lambda key: None,
 ) -> None:
@@ -516,20 +515,48 @@ def apply_overrides(
     A bare ``NAME`` is the dotted path into ``<Root>.Model.<ClassName>``. Inside that block a path the model declares
     (``_declared``) may name a key the config leaves out: an argument of the model, a field of a ``models`` entry
     (``models.0.feature_normalization``), a new entry (``models.2={ref: ..}``); its value is checked against the
-    declared type (``_check_value``). Any other key must exist. ``model_class`` returns the class the ``classpath``
-    names, or None when it names none or does not import (then only the config's own keys are known); it is called
-    once, and only when a path enters the model block, after any ``--set`` of the classpath, which apply first. A name
-    of ``parameters`` (app.json's) sets the key at its path, its value checked against the type the stage holding the
-    key declares (``stage_class`` resolves its class).
+    declared type (``_check_value``). Any other key must exist. ``model_class`` returns the class the ``classpath`` of
+    the config it is handed names, or None when it names none or does not import (then only the config's own keys are
+    known); it is called once, and only when a path enters the model block, on the config as the overrides that can
+    set the classpath leave it (``model_config``): the class the run builds, whatever their order. The overrides apply
+    in their order. A name of ``parameters`` (app.json's) sets the key at its path, its value checked against the type
+    the stage holding the key declares (``stage_class`` resolves its class).
     ``check_overrides`` applies them to a copy, to refuse before a run what the run would refuse.
     """
+    final = model_config(data, overrides)
+    _apply_overrides(data, overrides, functools.cache(lambda: model_class(final)), parameters or {}, stage_class)
+
+
+def model_config(data: Any, overrides: list[str]) -> Any:
+    """``data`` as those of the ``--set`` ``overrides`` that can set its model's ``classpath`` leave it
+    (``<Root>.Model=...``, ``<Root>.Model.classpath=...``), applied in their order to a copy; ``data`` itself when
+    none can."""
+    classpath = ["Predictor" if (data or {}).get("Predictor") else "Trainer", "Model", "classpath"]
+    writes = [entry for entry in overrides if 0 < len(keys := _dotted_keys(entry)) and keys == classpath[: len(keys)]]
+    if not writes:
+        return data
+    final = copy.deepcopy(data)
+    _apply_overrides(final, writes, lambda: None, {}, lambda key: None)
+    return final
+
+
+def _dotted_keys(override: str) -> list[str]:
+    """The keys of an override's dotted path from the config root; none for a bare name."""
+    path = override.partition("=")[0].strip()
+    return [key for key in path.split(".") if key] if "." in path else []
+
+
+def _apply_overrides(
+    data: Any,
+    overrides: list[str],
+    resolved: Callable[[], type | None],
+    parameters: dict[str, str],
+    stage_class: Callable[[str], type | None],
+) -> None:
+    """``apply_overrides``' writes, in their order, the model's keys checked against ``resolved()``."""
     value_parser = YAML(typ="safe")
-    # A --set of the classpath first: the class it names is the one the model's other --set are checked against.
-    overrides = sorted(overrides, key=lambda entry: not entry.partition("=")[0].strip().endswith("classpath"))
     class_name, model_params = LocalAppRepository._model_param_block(data)
     model_path = ["Predictor" if (data or {}).get("Predictor") else "Trainer", "Model", class_name or ""]
-    resolved = functools.cache(model_class)
-    parameters = parameters or {}
     for override in overrides:
         key_path, sep, raw_value = override.partition("=")
         if not sep:
@@ -1140,7 +1167,7 @@ class LocalAppRepository(AppRepositoryInfo):
         apply_overrides(
             data,
             overrides,
-            (lambda: self._model_class(data)) if read_model else (lambda: None),
+            self._model_class if read_model else (lambda config: None),
             self._parameters,
             self._stage_class if read_model else (lambda key: None),
         )
@@ -1206,7 +1233,7 @@ class LocalAppRepository(AppRepositoryInfo):
             apply_overrides(
                 data,
                 list(overrides),
-                lambda: self._model_class(data, filenames),
+                lambda config: self._model_class(config, filenames),
                 self._parameters,
                 functools.partial(self._stage_class, filenames=filenames),
             )
@@ -1261,7 +1288,7 @@ class LocalAppRepository(AppRepositoryInfo):
             apply_overrides(
                 data,
                 list(self._preset.overrides),
-                lambda: self._model_class(data, filenames),
+                lambda config: self._model_class(config, filenames),
                 self._parameters,
                 stage_class,
             )
