@@ -153,6 +153,33 @@ def test_a_static_extraction_in_patches_is_the_one_pass_s_for_both_images(tmp_pa
         torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
 
 
+def test_a_static_extraction_the_device_cannot_hold_whole_goes_by_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One pass that runs out of the card's memory is predicted by blocks, which halve until one fits: the one pass's
+    # features all the same.
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    model = loss.cores[0].model
+    model.fov = [3, 3]  # each layer's field, which the blocks read around them
+    whole = loss.extract(fixed, moving, 0)
+    volume = model.volume
+
+    def out_of_memory_above_20_cubed(image, *args, **kwargs):
+        if image[0, 0].numel() > 20**3:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.10 GiB.")
+        return volume(image, *args, **kwargs)
+
+    monkeypatch.setattr(model, "volume", out_of_memory_above_20_cubed)
+    for reference, found in zip(whole, loss.extract(fixed, moving, 0), strict=True):
+        assert found.shape == reference.shape
+        torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
+
+
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:
     # Each kept layer is projected on its own, onto principal components fitted on the fixed image, as the other
     # engines fit their PCA per layer on the reference side.

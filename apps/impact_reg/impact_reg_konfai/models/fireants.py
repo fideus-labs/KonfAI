@@ -719,7 +719,6 @@ class ImpactFeatureLoss(torch.nn.Module):
         A model with a ``voxel_size`` extracts on the image resampled at that resolution (``extents``: each image's
         size in mm along L, P, S) and its features are brought back onto the image's grid, as elastix interpolates
         its feature maps at its points: FireANTs registers them at the image's resolution."""
-        fixed_sides, moving_sides, self._channels = [], [], []
         resampled_images = []
         for core in self.cores:
             images = {"fixed": fixed, "moving": moving}
@@ -731,15 +730,30 @@ class ImpactFeatureLoss(torch.nn.Module):
             resampled_images.append(images)
         # One pass over each image, or, where a model does not fit one (or the preset gives a patch), every model by
         # blocks as a segmentation is predicted, which gives the one pass's features whatever each image's extent.
-        tiles = [
-            patch or _fitting_tile(core, images) for core, images in zip(self.cores, resampled_images, strict=True)
-        ]
-        if any(tiles):
-            print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
-            return self._by_blocks(fixed, moving, max(tiles), extents)
-        for core, images, tile in zip(self.cores, resampled_images, tiles, strict=True):
+        try:
+            with out_of_memory_as_torch(fixed.is_cuda):
+                tiles = [
+                    patch or _fitting_tile(core, images)
+                    for core, images in zip(self.cores, resampled_images, strict=True)
+                ]
+                if not any(tiles):
+                    return self._one_pass(fixed, moving, resampled_images)
+        except torch.cuda.OutOfMemoryError:
+            tiles = [64]  # the probe's side: the blocks halve from it while one does not fit
+        # Out of the handler, the tensors its traceback held are released.
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
+        return self._by_blocks(fixed, moving, max(tiles), extents)
+
+    def _one_pass(
+        self, fixed: torch.Tensor, moving: torch.Tensor, resampled_images: list[dict[str, torch.Tensor]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``extract`` in one pass of every model over each image (``resampled_images``: as each model reads them)."""
+        fixed_sides, moving_sides, self._channels = [], [], []
+        for core, images in zip(self.cores, resampled_images, strict=True):
             fixed_layers, moving_layers = (
-                core.model.volume(images[side], core.normalization, tile, 0.0) for side in ("fixed", "moving")
+                core.model.volume(images[side], core.normalization, 0, 0.0) for side in ("fixed", "moving")
             )
             if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
                 for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
@@ -750,7 +764,6 @@ class ImpactFeatureLoss(torch.nn.Module):
             if core.model.voxel_size is not None:
                 fixed_layers = [resampled(layer, tuple(fixed.shape[2:]), padding="border") for layer in fixed_layers]
                 moving_layers = [resampled(layer, tuple(moving.shape[2:]), padding="border") for layer in moving_layers]
-            del images
             self._channels.append([layer.shape[1] for layer in fixed_layers])
             fixed_sides += fixed_layers
             moving_sides += moving_layers
