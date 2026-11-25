@@ -14,12 +14,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Slicer fiducial CSV reader past the coordinate systems test_dataset covers: a blank line holds no point."""
+"""The Slicer fiducial CSV reader past the coordinate systems test_dataset covers: a blank line holds no point, a record
+of fewer than three coordinates is refused."""
 
 from pathlib import Path
 
 import numpy as np
+import pytest
 from konfai.utils.dataset import read_landmarks
+from konfai.utils.errors import DatasetManagerError
 
 _POINTS = np.array([[1.5, -2.0, 3.0], [-10.0, 20.0, -30.25]])
 
@@ -36,3 +39,12 @@ def _fcsv(path: Path, system: str | None, points: np.ndarray, trailer: str = "")
 
 def test_blank_lines_are_skipped(tmp_path: Path) -> None:
     np.testing.assert_array_equal(read_landmarks(_fcsv(tmp_path / "p.fcsv", "LPS", _POINTS, "\n\n"))[0], _POINTS)
+
+
+def test_a_record_of_fewer_than_three_coordinates_is_refused(tmp_path: Path) -> None:
+    # numpy would broadcast the one coordinate of `id,x` over the three.
+    for row in ("n1,5\n", "n1,5,6\n", "n1\n"):
+        path = tmp_path / "p.fcsv"
+        path.write_text(row)
+        with pytest.raises(DatasetManagerError, match="column"):
+            read_landmarks(path)

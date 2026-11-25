@@ -46,6 +46,7 @@ from konfai.data.transform.base import (
     TransformInverse,
     sitk,
 )
+from konfai.data.transform.prompts import centre, interactions, offset_of, on_grid, read_prompts
 from konfai.data.transform.resample import _resample_with_sitk
 from konfai.utils.config import Range
 from konfai.utils.dataset import Attribute, Dataset
@@ -266,7 +267,12 @@ class Crop(TransformInverse):
     (an axis at 0 or below kept whole), read off the header: its centre where it is larger, the first ``(n - c) // 2``
     dropped, and padded with ``fill`` (its edge without) where it is smaller, ``(c - n) // 2`` before. A margin of
     the box below zero is such a pad: the crop then streams as a REGRID, as ``Padding`` does, and the inverse takes
-    the pad back as it puts the dropped voxels back.
+    the pad back as it puts the dropped voxels back. With ``points`` too, the window is centred on the last
+    interaction of the case's prompts in that group instead (``konfai.data.transform.prompts``: a click's voxel, the
+    box's centre), ``[c - n // 2, c - n // 2 + n)`` per axis, padded with ``fill`` where it leaves the volume.
+
+    With ``onto``, the inverse pastes what it is handed onto the case's group ``onto`` as stored, on the volume's grid:
+    the voxels the window covers come from what it is handed, the others from ``onto``, in place of ``fill``.
     """
 
     working_multiple = 0.0
@@ -292,8 +298,15 @@ class Crop(TransformInverse):
             "The volume's centre, cropped and padded to exactly this many voxels per axis in array order (an axis at 0"
             " kept whole); None crops to a foreground instead.",
         ] = None,
+        points: str | None = None,
+        onto: str | None = None,
     ) -> None:
         super().__init__(inverse)
+        if points is not None and shape is None:
+            raise TransformError(
+                f"'Crop' was given points: '{points}' and no shape.",
+                "The window around the prompts is shape voxels per axis: give its shape.",
+            )
         if shape is not None and (source is not None or labels is not None or nonzero or handed or margin_mm):
             raise TransformError(
                 f"'Crop' was given shape: {shape} and a foreground to find its box in.",
@@ -323,6 +336,8 @@ class Crop(TransformInverse):
         self.handed = bool(handed)
         self.empty = empty
         self.shape = None if shape is None else [int(extent) for extent in shape]
+        self.points = points
+        self.onto = onto
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # ``transform_shape`` puts the box on the case, but a group carries only what its writer stored.
@@ -399,7 +414,7 @@ class Crop(TransformInverse):
         box: np.ndarray | None
         if self.shape is not None:
             # Margins, not a box: a margin below zero is a pad.
-            margins = self._centre(shape)
+            margins = self._centre(shape) if self.points is None else self._around(name, shape, cache_attribute)
             cache_attribute["box"] = margins
             return [int(s - a - b) for (a, b), s in zip(margins, shape, strict=True)]
         if self.handed:
@@ -450,6 +465,30 @@ class Crop(TransformInverse):
             wanted = extent if wanted <= 0 else wanted
             before = (extent - wanted) // 2 if extent >= wanted else -((wanted - extent) // 2)
             rows.append([before, extent - wanted - before])
+        return np.asarray(rows, dtype=np.int64)
+
+    def _around(self, name: str, shape: list[int], cache_attribute: Attribute) -> np.ndarray:
+        """The margins per axis of the window of ``self.shape`` centred on the last interaction of the case's prompts,
+        on the grid in hand: ``c - n // 2`` before, the rest after, below zero where the window leaves the volume; an
+        axis at 0 or below kept whole."""
+        if not Grid.readable(cache_attribute):
+            raise TransformError(
+                f"'Crop' cuts a window around the prompts of case '{name}' out of a volume with no geometry, which the"
+                " stages after it could not place on the case.",
+                "Store the case with its geometry.",
+            )
+        points, kinds = read_prompts(self, cast("str", self.points), name)
+        last = interactions(on_grid(points, cache_attribute, len(shape)), kinds, shape)[-1]
+        rows = []
+        for at, extent, wanted in zip(centre(*last), shape, cast("list[int]", self.shape), strict=True):
+            start = int(at) - wanted // 2 if wanted > 0 else 0
+            if wanted > 0 and (start >= extent or start + wanted <= 0):
+                raise TransformError(
+                    f"The window of {self.shape} around the last prompt of case '{name}', at {centre(*last).tolist()},"
+                    f" holds no voxel of the volume of {shape}.",
+                    "Give the prompts on the image.",
+                )
+            rows.append([start, extent - (start + wanted) if wanted > 0 else 0])
         return np.asarray(rows, dtype=np.int64)
 
     def _handed_box(self, holder: Dataset, group_src: str, name: str, shape: list[int]) -> np.ndarray | None:
@@ -672,12 +711,41 @@ class Crop(TransformInverse):
             return tensor
         box, empty = self._pop_box(cache_attribute)
         mode, value = self._border()
-        restored = _margined(tensor, -box, (mode, value))
+        if self.onto is not None:
+            restored = self._pasted(name, tensor, box, cache_attribute)
+        else:
+            restored = _margined(tensor, -box, (mode, value))
         return restored.fill_(value) if empty else restored
+
+    def _pasted(self, name: str, window: torch.Tensor, box: np.ndarray, cache_attribute: Attribute) -> torch.Tensor:
+        """The case's ``onto`` as stored, in ``window``'s dtype and on its device, with the voxels the window ``box``
+        covers taken from ``window``: ``onto`` must lie on the grid the inverse restores (its extent, its spacing and
+        direction, and its origin within a thousandth of a voxel, where both carry one: ``offset_of``), since the window
+        is pasted index for index."""
+        group = cast("str", self.onto)
+        holder = self.dataset_holding(group, name)
+        if holder is None:
+            raise TransformError(f"No dataset holds the group '{group}' 'Crop' pastes onto for case '{name}'.")
+        data, stored = holder.read_data(group, name)
+        onto = torch.as_tensor(np.asarray(data)).to(window.device, window.dtype)
+        shape = [int(n + near + far) for n, (near, far) in zip(window.shape[1:], box, strict=True)]
+        offset = offset_of(stored, list(onto.shape[1:]), cache_attribute, shape, f"'{group}/{name}'")
+        if list(onto.shape) != [window.shape[0], *shape] or np.any(offset):
+            raise TransformError(
+                f"'Crop' pastes a volume of {[window.shape[0], *shape]} onto '{group}/{name}', of"
+                f" {list(onto.shape)}, on another grid than the volume's.",
+                f"Store '{group}' on the volume's grid, with the channels the output has.",
+            )
+        # Where the box dropped voxels, the window covers onto's; where it padded, onto covers the window's: both crops.
+        border = self._border()
+        _margined(onto, np.maximum(box, 0), border).copy_(_margined(window, np.maximum(-box, 0), border))
+        return onto
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Padding the box back is Padding's forward: a REGRID pulling the rows of the box a region covers and
         # filling the rest. With no box the inverse hands its input back.
+        if self.onto is not None:
+            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=f"the window is pasted onto '{self.onto}', whole")
         return PatchLocality(LocalityKind.REGRID if "box" in cache_attribute else LocalityKind.POINTWISE)
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:

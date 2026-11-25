@@ -276,7 +276,40 @@ def _op_crop(p: dict[str, Any]) -> dict[str, Any]:
         step["empty"] = "fill"
     if clean(p.get("nonzero")):
         step["nonzero"] = True
+    if (points := clean(p.get("points"))) is not None:
+        step["points_group"] = _literal_group(str(points), TransformError)
+    if (onto := clean(p.get("onto"))) is not None:
+        step["onto_group"] = _literal_group(str(onto), TransformError)
     return step
+
+
+def _op_points_on_grid(p: dict[str, Any]) -> dict[str, Any]:
+    """konfai's ``PointsOnGrid``: the points of the group in hand on the voxels of the group ``reference``."""
+    from konfai.data.transform import PointsOnGrid
+
+    stage = PointsOnGrid(**{key: clean(value) for key, value in p.items() if clean(value) is not None})
+    return {
+        "op": "points_on_grid",
+        "reference_group": _literal_group(stage.reference, TransformError),
+        "rounding": stage.rounding,
+    }
+
+
+def _op_draw_prompts(p: dict[str, Any]) -> dict[str, Any]:
+    """konfai's ``DrawPrompts``, as konfai binds it: the prompts of ``points_group`` drawn after the volume's channels,
+    the last mask ``previous_group`` first when it names one. The ball's values are the runtime's to compute from its
+    radius (``prompts.distance_ball``): square roots of whole numbers over the largest, the same bits there."""
+    from konfai.data.transform import DrawPrompts
+
+    stage = DrawPrompts(**{key: clean(value) for key, value in p.items() if clean(value) is not None})
+    return {
+        "op": "draw_prompts",
+        "points_group": _literal_group(stage.points, TransformError),
+        **({"previous_group": _literal_group(stage.previous, TransformError)} if stage.previous is not None else {}),
+        "kinds": stage.channels,
+        "radius": stage.radius,
+        **({"growth": True} if stage.growth else {}),
+    }
 
 
 def _op_standardize(p: dict[str, Any]) -> dict[str, Any]:
@@ -530,6 +563,9 @@ _OPS: dict[str, Callable[..., dict[str, Any]]] = {
     "ThresholdLabels": _op_threshold_labels,
     "OneHot": lambda p: {"op": "one_hot", "num_classes": int(p["num_classes"])},
     "Crop": _op_crop,
+    # The prompts of a fiducial group, on a volume's voxels or drawn as its channels.
+    "PointsOnGrid": _op_points_on_grid,
+    "DrawPrompts": _op_draw_prompts,
     # konfai's Gradient: the first difference along each spatial axis, per axis or folded into the norm
     # of their sigmoids.
     "Gradient": lambda p: {"op": "gradient", "per_dim": bool(clean(p.get("per_dim", False)))},
@@ -605,6 +641,37 @@ def _floating(dtype: str) -> bool:
     return bool(getattr(torch, dtype).is_floating_point)
 
 
+def settles_its_grid(step: dict[str, Any]) -> bool:
+    """Whether a step leaves a grid that only the case's values settle: a crop to the box it measures, or an app's own
+    class handed the whole volume, which may write another grid than the one it states."""
+    return (step["op"] == "crop" and "shape" not in step) or (step["op"] == "extension" and bool(step.get("whole")))
+
+
+def refuse_a_prompt_after_a_measured_crop(
+    name: str, measured: str | None, error: type[KonfAIError], params: Any, invertible: bool = False
+) -> None:
+    """A stage that puts the case's prompts on the grid it is handed (a ``DrawPrompts``, a ``Crop`` around ``points``),
+    or is pasted back onto a group that lies on that grid (a ``Crop`` with ``onto`` the predictor undoes, in an
+    ``invertible`` chain), after ``measured``, the first stage of its chain whose grid the case's values settle
+    (:func:`settles_its_grid`): the portable runtime plans a chain from the headers, which hold the grid such a stage
+    starts from, where the run takes the one it leaves."""
+    if measured is None:
+        return
+    stage, stated = base_name(name), _mapping(params)
+    prompted = stage == "DrawPrompts" or (stage == "Crop" and clean(stated.get("points")) is not None)
+    onto = clean(stated.get("onto")) if stage == "Crop" else None
+    if not prompted and not (invertible and onto is not None and declares_inverse(name, params)):
+        return
+    does = (
+        "puts the prompts on the grid it leaves" if prompted else f"is pasted back onto '{onto}' on the grid it leaves"
+    )
+    raise error(
+        f"'{name}' follows '{measured}' and {does}, which '{measured}' settles on the"
+        " case's values, where the portable runtime plans a chain before it reads the case.",
+        _or_konfai(f"Put '{name}' before '{measured}', or run '{measured}' as a chain of its own", _PREDICT),
+    )
+
+
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
@@ -620,7 +687,9 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
         return "int64"
     if op == "threshold_labels":
         return "uint8"
-    if op in ("one_hot", "brightness", "norm", "magnitude", "case_statistic", "std", *_MEMBER_FOLD_OPS):
+    if op == "points_on_grid":
+        return "float64"
+    if op in ("one_hot", "brightness", "norm", "magnitude", "case_statistic", "std", "draw_prompts", *_MEMBER_FOLD_OPS):
         return "float32"
     if op == "standardize":
         return "float32" if step.get("nonzero") or dtype not in (None, "float64") else dtype
@@ -1313,6 +1382,7 @@ def compile_chain(
         )
     steps: list[dict[str, Any]] = []
     moved = None  # the first stage that may move the grid or the values
+    measured = None  # the first stage whose grid the case's values settle
     for name, params in _planned(head, 3):
         stage = base_name(name)
         if is_save(name):
@@ -1331,8 +1401,10 @@ def compile_chain(
                 f"Portable stages are: {', '.join(sorted(_CHAIN_OPS))}.",
             )
         refuse_a_late_crop(name, moved, TransformError, params=params)
+        refuse_a_prompt_after_a_measured_crop(name, measured, TransformError, params)
         step = _CHAIN_OPS[stage](params, datasets, datasets) if stage == "Resample" else _CHAIN_OPS[stage](params)
         moved = moved or (name if moves_the_volume(step) else None)
+        measured = measured or (name if settles_its_grid(step) else None)
         steps.append(step)
     resolve_interpolation(steps, None)
     return steps, _write_target(last_name, last_params, group_dest)
@@ -1874,6 +1946,7 @@ def compile_pipeline(
     folds: list[Callable[[Any], Any]] = []
     inverted: list[str] = []
     moved: str | None = None
+    measured: str | None = None
     pending: list[Callable[[Any], Any]] = []
 
     def flush() -> None:
@@ -1939,6 +2012,7 @@ def compile_pipeline(
         if base in OP_MAP or own:
             flush()
             refuse_a_late_crop(name, moved, ConfigError, params=params)
+            refuse_a_prompt_after_a_measured_crop(name, measured, ConfigError, params, invertible)
             if folds:
                 raise ConfigError(
                     f"transform '{name}' is a runtime op but follows a folded transform; move folded "
@@ -1951,6 +2025,7 @@ def compile_pipeline(
                 step = _admitted(OP_MAP[base](params, roots=roots) if base == "Resample" else OP_MAP[base](params))
             # A Crop past the app's own transform finds its box in the values it changed.
             moved = moved or (name if own or moves_the_volume(step) else None)
+            measured = measured or (name if settles_its_grid(step) else None)
             if invertible and declares_inverse(name, params):
                 step["id"] = name
                 inverted.append(name)
@@ -2245,6 +2320,16 @@ def _post_chain(
         groups=True,
         dtype=held,
     )
+    # A group the chain reads beside the case is handed to the input group's chains alone; after the forward the
+    # program hands a stage a mask or a class's groups only, from the final_transforms' end (`_split_group_tail`).
+    beside = ("points_group", "previous_group", "onto_group", "reference_group", "source_group", "field_group")
+    if reader := next((step for step in [*before, *after, *final] if step.keys() & beside), None):
+        group = next(reader[key] for key in beside if key in reader)
+        raise ConfigError(
+            f"the '{reader['op']}' after the forward reads the case's group '{group}' beside it, which the program hands"
+            " the input group's chains alone.",
+            _or_konfai("Move the stage to the input group's transforms", _PREDICT),
+        )
     nested = aux_mask_groups(config, root)
     if group := next((step["mask_group"] for step in final if step.get("mask_group") in nested), None):
         raise ConfigError(
@@ -2314,8 +2399,9 @@ def _post_chain(
 def _named_beside(steps: Iterable[dict[str, Any]]) -> Iterator[tuple[str, str]]:
     """Each group a stage of ``steps`` reads beside the case, under the key that names it, in the order they name
     them."""
+    keys = ("mask_group", "reference_group", "source_group", "points_group", "previous_group", "onto_group")
     for step in steps:
-        for key in ("mask_group", "reference_group", "source_group", "field_group"):
+        for key in (*keys, "field_group"):
             if group := step.get(key):
                 yield key, group
 
@@ -2337,8 +2423,10 @@ def _reads_of(
 ) -> list[dict[str, Any]]:
     """Every group the model reads past the first, with the chain that prepares it, in the order konfai hands
     them to the network; then the groups the stages of those chains and the first one's read beside the case (a
-    masked bound or statistic, a histogram reference, a crop's box, a displacement field), which konfai hands them
-    as stored, so the program runs nothing on them."""
+    masked bound or statistic, a histogram reference, a crop's box and the group it pastes onto, a displacement
+    field, a prompt's points and its last mask), which konfai hands them as stored, so the program runs nothing on
+    them: the first group too, where another's chain reads it. A group of both lists is read by the model through
+    its chain and by the stages as stored."""
     reads = [
         _group_chain(group_src, group, channels, case_statistic, extension, _spatial_rank(config, root))
         for (group_src, group), channels in zip(
@@ -2440,6 +2528,14 @@ def hoist_ensemble_tail(
             tail.append({k: step[k] for k in ("op", "dtype", "round") if k in step})
             continue
         if op == "inverse" and replayed:
+            # A program's own inverse is handed no group of the case: the model that read one pastes onto it.
+            if onto := undone.get(step.get("of"), {}).get("onto_group"):
+                raise ConfigError(
+                    f"assemble_program: the inverse of '{step['of']}' pastes its crop back onto the case's group"
+                    f" '{onto}', which the model that read the group replays, and past the reduction a program is"
+                    " handed no group of the case.",
+                    _or_konfai("Undo that Crop in each model (no ensemble)", _PREDICT),
+                )
             tail.append({key: value for key, value in step.items() if key == "op" or key in CHAIN_OPS["inverse"][0]})
             continue
         if op == "inverse":
@@ -3207,7 +3303,7 @@ def _channels_after(
     ``rank`` the chain runs on, a folded graph its own, a nested model what its own chain leaves of its head, for each
     channel where it runs on each, a class of the app's own what it returns of ``held`` in ``dtype`` (the first stored
     dtype it takes where only the run knows it), a spread of a stack of ``members`` one member's (each channel one
-    where ``None``), a disagreement of them one."""
+    where ``None``), a disagreement of them one, ``draw_prompts`` one more per kind it draws and for the last mask."""
     if "manifest" in step:
         made, blended = _blended(step["manifest"])
         posts = step["manifest"].get("postprocessing", [])
@@ -3222,6 +3318,8 @@ def _channels_after(
         return held * rank
     if step["op"] == "keep_largest_component" and "mask" in step:
         return held - 1
+    if step["op"] == "draw_prompts":
+        return held + ("previous_group" in step) + len(step["kinds"])
     if step["op"] == "extension":
         extents = _probe_extents(rank) if "halo" in step or "whole" in step else (1,) * rank
         return int(_probed_in(step["class"], step["params"], (held, *extents), dtype)[0][0].shape[0])
