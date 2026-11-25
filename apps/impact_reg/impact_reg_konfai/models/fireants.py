@@ -1045,6 +1045,24 @@ def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
     )
 
 
+def _inverse_on(shape: tuple[int, ...]) -> Callable:
+    """FireANTs' ``compositive_warp_inverse`` with its result brought onto ``shape`` by linear interpolation: SyN's
+    ``get_warp_parameters``, handed an inverse of another size (an axis under 32 voxels, which FireANTs computes at
+    32), interpolates the reverse warp itself in its place, not its inverse."""
+    from fireants.utils.warputils import compositive_warp_inverse
+
+    def inverse(image, ref_disp: torch.Tensor, **kwargs) -> torch.Tensor:
+        warp = compositive_warp_inverse(image, ref_disp, **kwargs)
+        if tuple(warp.shape[1:-1]) == shape:
+            return warp
+        mode = "bilinear" if len(shape) == 2 else "trilinear"
+        return torch.nn.functional.interpolate(warp.movedim(-1, 1), size=shape, mode=mode, align_corners=True).movedim(
+            1, -1
+        )
+
+    return inverse
+
+
 class FireANTsEngine:
     """Register a fixed/moving pair with FireANTs (Rigid -> Affine -> [SyN | Greedy | none]); return
     the displacement field on the fixed grid.
@@ -1285,8 +1303,11 @@ class FireANTsEngine:
 
         FireANTs serialises the total field (ANTs convention, fixed grid) only to a file, so it is
         round-tripped through a temporary NIfTI: its public API, no internals reimplemented."""
+        from fireants.registration import syn
+
         reg.optimize()
-        with tempfile.TemporaryDirectory() as tmp:
+        inverse = _inverse_on(tuple(reg.fixed_images.shape[2:]))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(syn, "compositive_warp_inverse", inverse):
             # Uncompressed: the file is read back at once.
             warp_path = os.path.join(tmp, "total_warp.nii")
             if reg.dims == 2:

@@ -871,13 +871,30 @@ def warp_gap(sampled, whole_warps, size=SIZE) -> float:
 def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, loss, size):
     whole, whole_warps, sampled = deformable_pair(tmp_path, symmetric, loss, size=size)
     assert warp_gap(sampled, whole_warps, size) < 1e-3
-    if not symmetric:  # the field FireANTs writes; SyN's goes through its own inverse of the reverse warp
+    # The field FireANTs writes: SyN's reads the forward warp through FireANTs' own inverse of the reverse one, which
+    # the boxes compute as it does.
+
+    def written(name: str) -> np.ndarray:
         with mock.patch.object(sitk, "GetImageFromArray", functools.partial(sitk.GetImageFromArray, isVector=True)):
-            whole.save_as_ants_transforms(str(tmp_path / "whole.nii"))  # a plane's (H, W, 2) read as vectors
-        expected = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "whole.nii")))
-        field = np.zeros((*size, len(size)), dtype=np.float32)
-        sampled.write_field(field, block=20)
-        assert np.abs(field - expected).max() < 1e-3
+            whole.save_as_ants_transforms(str(tmp_path / name))  # a plane's (H, W, 2) read as vectors
+        return sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / name)))
+
+    tolerance = 1e-3
+    if symmetric:
+        # FireANTs' field of the boxes' own warps, the inverse being an optimisation that moves by thousandths of a
+        # voxel when its input moves by 1e-7 of it: the boxes are held to twice that.
+        for name, warp in (("fwd", whole.fwd_warp), ("rev", whole.rev_warp)):
+            warp.warp.data.copy_(torch.from_numpy(np.asarray(sampled._warps[name].arrays["warp"])).movedim(0, -1)[None])
+        reverse = whole.rev_warp.warp.data
+        noise = torch.randn(reverse.shape, generator=torch.Generator().manual_seed(0)) * 1e-7 * reverse.abs().max()
+        reverse += noise
+        moved = written("moved.nii")
+        reverse -= noise
+        tolerance = max(tolerance, 2 * float(np.abs(moved - written("whole.nii")).max()))
+    expected = written("whole.nii")
+    field = np.zeros((*size, len(size)), dtype=np.float32)
+    sampled.write_field(field, block=20)
+    assert np.abs(field - expected).max() < tolerance
     sampled.close()
     assert not list(tmp_path.glob("*.npy"))
 
@@ -929,18 +946,6 @@ def test_an_iteration_steps_the_boxes_it_draws(tmp_path):
     sampled.close()
 
 
-def test_syn_field_inverts_the_reverse_warp(tmp_path):
-    """SyN's field reads the forward warp through the inverse of the reverse one: with the two warps equal, the
-    forward one read through its own inverse leaves the affine alone."""
-    _, _, sampled = deformable_pair(tmp_path, True, "cc")
-    sampled._warps["rev"].arrays["warp"][:] = sampled._warps["fwd"].arrays["warp"]
-    field = np.zeros((*SIZE, 3), dtype=np.float32)
-    sampled.write_field(field, block=20)
-    inner = field[6:-6, 6:-6, 6:-6]  # away from the faces, where a warp reads past the image
-    assert np.abs(inner - AFFINE[0, :3, 3].numpy()).max() < 1e-2
-    sampled.close()
-
-
 def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypatch):
     """The homes of the warps and their moments give the same stage: files, host memory, the device, and the device
     at the coarser scale then files at the finest, which the device does not hold."""
@@ -981,12 +986,15 @@ def test_warps_held_on_the_device_step_as_warps_held_in_files(tmp_path, monkeypa
         sampled.optimize()
         stored = sampled._warps["fwd"].arrays["warp"]
         assert type(stored) is kind
+        stage = np.stack([np.asarray(sampled._warps[name].arrays["warp"]) for name in ("fwd", "rev")])
         field = np.zeros((*SIZE, 3), dtype=np.float32)
         sampled.write_field(field, block=20)
-        warps.append(field)
+        warps.append((stage, field))
         sampled.close()
     assert (True, False) in homes and not sampled.resident  # the mixed run went from the device to files
-    assert all(np.abs(warps[0] - other).max() < 1e-4 for other in warps[1:])
+    assert all(np.abs(warps[0][0] - stage).max() < 1e-4 for stage, _ in warps[1:])
+    # FireANTs' inverse, an optimisation, takes the rounding of the homes' resizes to thousandths of a voxel.
+    assert all(np.abs(warps[0][1] - field).max() < 5e-3 for _, field in warps[1:])
 
 
 @SHAPES
@@ -1272,3 +1280,16 @@ def test_a_jacobian_model_at_a_voxel_size_by_boxes_has_the_level_s_gradient(tmp_
         own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
         gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
     assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)
+
+
+def test_the_whole_syn_field_takes_the_inverse_onto_the_fixed_grid(monkeypatch):
+    """On an axis under 32 voxels FireANTs computes SyN's inverse at 32. The whole route brings that inverse onto the
+    fixed grid, as the boxes do, where SyN's get_warp_parameters would put the reverse warp itself in its place."""
+    from fireants.utils import warputils
+    from impact_reg_konfai.models.fireants import _inverse_on
+
+    inverse = torch.rand(1, 32, 44, 2, generator=torch.Generator().manual_seed(0))
+    monkeypatch.setattr(warputils, "compositive_warp_inverse", lambda *args, **kwargs: inverse)
+    found = _inverse_on((20, 44))(None, None)
+    expected = torch.nn.functional.interpolate(inverse.movedim(-1, 1), (20, 44), mode="bilinear", align_corners=True)
+    assert torch.equal(found, expected.movedim(1, -1))

@@ -604,6 +604,14 @@ class _Largest:
         return self._tree[1]
 
 
+def _nodes_from(index: int, extent: int, nodes: int) -> int:
+    """The first node of a ``nodes``-node grid at or past node ``index`` of an ``extent``-node grid over the same
+    span (``align_corners``), ``nodes`` past the end."""
+    if index >= extent:
+        return nodes
+    return min(nodes, -((-index * (nodes - 1)) // max(extent - 1, 1)))
+
+
 def _local_frame(low: Sequence[int], high: Sequence[int], shape: Sequence[int], device, dtype):
     """The scale and offset, (x, y, z) order, taking the normalized coordinates of a ``shape`` grid to those of its
     box ``[low, high)``: ``local = global * scale + offset``."""
@@ -1133,14 +1141,17 @@ def sampled_deformable_class():
             levels = self._levels[scale]
             return (levels[0], moving) if len(levels) == 1 else levels
 
+        def _placement(self, grid: Sequence[int], count: int) -> tuple[bool, bool]:
+            """Where ``count`` warps on ``grid`` live: on the device while they fit three quarters of it (a coarser
+            scale than one the device cannot hold may fit it), off it in host memory while this rank's budget holds
+            them, in files beyond, where every step's writes go to the disk."""
+            voxels, a_voxel = math.prod(grid), 4 * len(grid) * 4 * count  # 4 arrays of a float32 channel an axis
+            resident = self.resident or (self._forced is None and voxels * a_voxel <= free_bytes(self.device) * 3 / 4)
+            return resident, not resident and voxels <= (max_voxels(None, a_voxel, None) or 0)
+
         def _set_grid(self, grid: Sequence[int]) -> None:
             names = ("fwd", "rev") if self._symmetric else ("fwd",)
-            # A coarser scale than one the device cannot hold may fit it: its warps stay there while they do.
-            voxels, a_voxel = math.prod(grid), 4 * len(grid) * 4 * len(names)  # 4 arrays of a float32 channel an axis
-            resident = self.resident or (self._forced is None and voxels * a_voxel <= free_bytes(self.device) * 3 / 4)
-            # Off the device, host memory while this rank's budget holds them: in files, every step's writes go to
-            # the disk.
-            host = not resident and voxels <= (max_voxels(None, a_voxel, None) or 0)
+            resident, host = self._placement(grid, len(names))
             for name in names:
                 if name in self._warps:
                     self._warps[name].resize(grid, resident, host)
@@ -1296,6 +1307,11 @@ def sampled_deformable_class():
             warp folded into the warp's moments over the box. Returns the loss and each warp's largest Adam
             direction over the box."""
             loss, gradients = self._loss_gradients(tile, grid, levels, totals)
+            return loss, self._moments(tile, gradients, steps)
+
+        def _moments(self, tile, gradients: list[torch.Tensor], steps: int) -> dict[str, float]:
+            """Each warp's gradient over a box folded into the warp's moments, its ``steps``-th: each warp's largest
+            Adam direction over the box."""
             beta1, beta2 = self._betas
             peaks = {}
             for (name, store), gradient in zip(self._warps.items(), gradients, strict=True):
@@ -1304,7 +1320,7 @@ def sampled_deformable_class():
                 store.write("mean", tile[0], mean)
                 store.write("square", tile[0], square)
                 peaks[name] = float(self._direction(mean, square, steps).norm(p=2, dim=-1).max())
-            return loss, peaks
+            return peaks
 
         def _fitting_box(self, grid, levels) -> int:
             """The side of the boxes of a scale: ``box`` at least, and as large as half the device's free memory
@@ -1440,45 +1456,139 @@ def sampled_deformable_class():
 
         # ------------------------------------------------------------------ the transform
 
-        def _reach(self, name: str, grid) -> list[int]:
-            """How far, in voxels along each axis, the warp ``name`` displaces a voxel at most."""
-            warp = self._warps[name]
-            # Channel (dims - 1 - axis) moves along tensor axis ``axis``.
-            return [
-                math.ceil(warp.peak(len(grid) - 1 - axis) * 0.5 * (extent - 1)) + 1 for axis, extent in enumerate(grid)
+        def _scaled(self, warp: _Warp, size: Sequence[int]) -> RegionSource:
+            """``warp`` resampled to ``size`` by linear interpolation (``align_corners``), as ``F.interpolate`` does."""
+            if warp.resident:
+                mode = "trilinear" if len(size) == 3 else "bilinear"
+                return TensorSource(
+                    F.interpolate(warp.arrays["warp"][None], tuple(size), mode=mode, align_corners=True)[0]
+                )
+            return build_level(warp.source(), size, None, directory=self._scratch, memory=warp.host)
+
+        def _consistency(self, tile, grid, reference: RegionSource, halo, margins) -> tuple[float, torch.Tensor]:
+            """One box's share of the loss ``compositive_warp_inverse`` minimises, ``InverseConsistencyOperator``'s: the
+            mean over the reference's grid of u(y + r(y)) + r(y) squared, plus the mean over u's grid of r(x + u(x)) +
+            u(x) squared. Every term of the box's window counts, ``halo`` covering how far r sends a term and
+            ``margins`` (normalized, an axis) how far u does: the gradient over the box's own voxels is the whole
+            grid's. Returns the terms the box owns and that gradient."""
+            low, high, core = box_region(tile, halo, grid)
+            inverse = self._warps["inv"].read("warp", low, high).requires_grad_()
+            shape, dims = reference.shape, len(grid)
+            x = _box_coordinates(low, high, grid, self.device, self.dtype)
+            # r read where u sends the window's voxels, from the reference's nodes around them.
+            span = [(r - 1) / max(g - 1, 1) for g, r in zip(grid, shape, strict=True)]
+            qlow = [
+                max(0, math.floor(a * k - m * 0.5 * (r - 1)) - 1)
+                for a, k, m, r in zip(low, span, margins, shape, strict=True)
             ]
+            qhigh = [
+                min(r, math.ceil((b - 1) * k + m * 0.5 * (r - 1)) + 2)
+                for b, k, m, r in zip(high, span, margins, shape, strict=True)
+            ]
+            second = _interpolate(reference.read(qlow, qhigh), qlow, qhigh, shape, x + inverse).movedim(1, -1) + inverse
+            total = (second**2).sum() / (dims * math.prod(grid))
+            # u read where r sends the reference's nodes in the window, which each box owns from its first voxel on.
+            nodes = [
+                (_nodes_from(a, g, r), _nodes_from(b, g, r)) for a, b, g, r in zip(low, high, grid, shape, strict=True)
+            ]
+            owned = [
+                slice(_nodes_from(a, g, r) - n, _nodes_from(b, g, r) - n)
+                for a, b, g, r, (n, _) in zip(*tile, grid, shape, nodes, strict=True)
+            ]
+            first = None
+            if all(b > a for a, b in nodes):
+                rlow, rhigh = [a for a, _ in nodes], [b for _, b in nodes]
+                r = reference.read(rlow, rhigh).movedim(1, -1)
+                y = _box_coordinates(rlow, rhigh, shape, self.device, self.dtype)
+                first = _interpolate(inverse.movedim(-1, 1), low, high, grid, y + r).movedim(1, -1) + r
+                total = total + (first**2).sum() / (dims * math.prod(shape))
+            (gradient,) = torch.autograd.grad(total, inverse)
+            with torch.no_grad():
+                own = (second[(slice(None), *core)] ** 2).sum() / (dims * math.prod(grid))
+                if first is not None:
+                    own = own + (first[(slice(None), *owned)] ** 2).sum() / (dims * math.prod(shape))
+            return float(own), gradient[(slice(None), *core)]
+
+        def _inverse(self, block: int) -> _Warp:
+            """The reverse warp's inverse as FireANTs computes it (``compositive_warp_inverse``), through which its SyN
+            field reads the forward warp: a greedy registration of a warp alone from minus the reverse one, at the
+            stage's scales and iterations, Adam at a rate of 0.5 with nothing smoothed and no image compared, its loss
+            the two warps' inverse consistency. Both of its means are sums over voxels, which each box adds its own to
+            (``_consistency``): an iteration over every box is the whole grid's."""
+            fixed, _ = self._sources
+            full, dims = list(fixed.shape), len(fixed.shape)
+            reverse = self._warps["rev"]  # on the fixed grid: write_field sets it
+            inverse = _Warp(self._scratch, "inv", full, self.device, *self._placement(full, 1))
+            for start, stop in tiles(full, block):
+                inverse.write("warp", start, -reverse.read("warp", start, stop))
+            peaks = [reverse.peak(channel) for channel in range(dims)]  # r at a scale, interpolated, is no larger
+            saved = (self._warps, self._lr, self._warp_gaussians, self._step_halo)
+            self._warps, self._lr, self._warp_gaussians, self._step_halo = {"inv": inverse}, 0.5, None, 1
+            try:
+                for scale, iterations in zip(self.scales, self.iterations, strict=True):
+                    self.convergence_monitor.reset()
+                    grid = fireants_level_sizes(full, scale)
+                    inverse.resize(grid, *self._placement(grid, 1))
+                    # The reference as the operator reads it: scaled down by the largest ratio of the image to u's grid.
+                    ratio = max(n / g for n, g in zip(full, grid, strict=True))
+                    reference = (
+                        self._scaled(reverse, [math.floor(float(n) * (1.0 / ratio)) for n in full])
+                        if ratio > 1
+                        else reverse.source()
+                    )
+                    halo = [
+                        math.ceil(peaks[dims - 1 - axis] * 0.5 * (extent - 1)) + 2 for axis, extent in enumerate(grid)
+                    ]
+                    boxes = tiles(grid, block)
+                    for iteration in range(iterations):
+                        margins = [inverse.peak(dims - 1 - axis) for axis in range(dims)]
+                        loss, largest = 0.0, 0.0
+                        for tile in boxes:
+                            own, gradient = self._consistency(tile, grid, reference, halo, margins)
+                            loss += own
+                            largest = max(largest, self._moments(tile, [gradient], iteration + 1)["inv"])
+                        steps = np.full([math.ceil(extent / block) for extent in grid], iteration + 1)
+                        for tile in boxes:
+                            self._step(tile, grid, {"inv": largest}, steps, block)
+                        inverse.swap()
+                        if self.convergence_monitor.converged(loss):
+                            break
+                    if ratio > 1 and isinstance(reference, ArraySource):
+                        reference.close()
+            finally:
+                self._warps, self._lr, self._warp_gaussians, self._step_halo = saved
+            inverse.resize(full, *self._placement(full, 1))  # a last scale coarser than the image
+            return inverse
 
         @torch.no_grad()
         def write_field(self, field: np.ndarray, block: int = 96) -> None:
             """The registration's displacement field, physical, on the fixed grid, written block by block to
             ``field`` (``[*grid, 3]``, (x, y, z) components): the affine and the warp for greedy; for SyN the
-            forward warp read through the inverse of the reverse one, which is computed on each block as the fixed
-            point of ``u = -rev(x + u)``. The inverse is added to the affine as it is, as FireANTs' own
-            ``SyNRegistration.get_warp_parameters`` composes them: the field of the whole-image run."""
+            forward warp read through FireANTs' inverse of the reverse one (``_inverse``), added to the affine as
+            it is, as FireANTs' own ``SyNRegistration.get_warp_parameters`` composes them: the field of the
+            whole-image run."""
             fixed, _ = self._sources
             grid = list(fixed.shape)
             self._set_grid(grid)
             fixed_t2p = self.fixed_images.get_torch2phy().to(self.dtype)[0]
             moving_t2p = self.moving_images.get_torch2phy().to(self.dtype)[0]
             linear = moving_t2p @ self._matrix() - fixed_t2p
-            reach = self._reach("rev", grid) if self._symmetric else [0] * self.dims
-            for start, stop in tiles(grid, block):
-                identity = _box_coordinates(start, stop, grid, self.device, self.dtype)
-                low, high, _ = box_region((start, stop), reach, grid)
-                forward = self._warps["fwd"].source()
-                if self._symmetric:
-                    reverse = self._warps["rev"].read("warp", low, high).movedim(-1, 1)
-                    inverse = -_interpolate(reverse, low, high, grid, identity).movedim(1, -1)
-                    for _ in range(100):  # a fixed point a few iterations reach
-                        previous = inverse
-                        inverse = -_interpolate(reverse, low, high, grid, identity + inverse).movedim(1, -1)
-                        if float((inverse - previous).abs().max()) * 0.5 * (max(grid) - 1) < 1e-4:
-                            break
-                    composed = inverse + _sample_region(forward, identity + inverse).movedim(1, -1)
-                else:
-                    composed = forward.read(start, stop).movedim(1, -1)
-                displacement = composed @ moving_t2p[:-1, :-1].T + identity @ linear[:-1, :-1].T + linear[:-1, -1]
-                to_array(field[tuple(slice(a, b) for a, b in zip(start, stop, strict=True))], displacement[0])
+            with torch.enable_grad():
+                inverse = self._inverse(block) if self._symmetric else None
+            forward = self._warps["fwd"].source()
+            try:
+                for start, stop in tiles(grid, block):
+                    identity = _box_coordinates(start, stop, grid, self.device, self.dtype)
+                    if inverse is not None:
+                        inverted = inverse.read("warp", start, stop)
+                        composed = inverted + _sample_region(forward, identity + inverted).movedim(1, -1)
+                    else:
+                        composed = forward.read(start, stop).movedim(1, -1)
+                    displacement = composed @ moving_t2p[:-1, :-1].T + identity @ linear[:-1, :-1].T + linear[:-1, -1]
+                    to_array(field[tuple(slice(a, b) for a, b in zip(start, stop, strict=True))], displacement[0])
+            finally:
+                if inverse is not None:
+                    inverse.close()
 
         def close(self) -> None:
             for warp in self._warps.values():
