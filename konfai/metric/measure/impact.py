@@ -247,6 +247,23 @@ def _lncc(moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, k
     return total
 
 
+def ncc_sums(moved: torch.Tensor, fixed: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """What an NCC over the pieces of a level adds up, each channel's weighed sums ``[w, w m, w f, w m^2, w f^2,
+    w m f]`` (``[6, C]``) over a piece's voxels, in double: ``ncc_of_sums`` reads ``distance('NCC')`` off them."""
+    axes = [0, *range(2, moved.dim())]
+    m, f, w = moved.double(), fixed.double(), weight.double()
+    return torch.stack([(w * torch.ones_like(m)).sum(axes), *((w * t).sum(axes) for t in (m, f, m * m, f * f, m * f))])
+
+
+def ncc_of_sums(sums: torch.Tensor) -> torch.Tensor:
+    """``distance('NCC')`` of the voxels whose ``ncc_sums`` are ``sums``: 1 - each channel's correlation, averaged."""
+    count, moved, fixed, moved_moved, fixed_fixed, moved_fixed = sums
+    count = count.clamp_min(1.0)
+    covariance = moved_fixed - moved * fixed / count
+    variances = ((moved_moved - moved * moved / count) * (fixed_fixed - fixed * fixed / count)).clamp_min(0.0)
+    return 1.0 - (covariance / (variances.sqrt() + _EPS)).mean()
+
+
 def distance(
     name: str,
     moved: torch.Tensor,

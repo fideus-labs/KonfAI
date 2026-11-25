@@ -419,15 +419,17 @@ class _Pointwise(torch.nn.Module):
         return [x]
 
 
+@pytest.mark.parametrize("distance", ["LNCC", "NCC"])
 @pytest.mark.parametrize("masked", [False, True])
-def test_a_level_s_normalisation_is_its_mean_however_its_boxes_cut_it(tmp_path, masked):
+def test_a_level_s_normalisation_is_its_mean_however_its_boxes_cut_it(tmp_path, masked, distance):
     """The deformable stage latches a layer's normalisation on every box of the level, each read with the window's
-    halo: the halos are read, never counted, and a masked loss weighs each box by the voxels both masks keep."""
+    halo: the halos are read, never counted, and a masked loss weighs each box by the voxels both masks keep. An NCC,
+    no mean of its voxels' values, is the level's from the sums the boxes add up (``pool``)."""
     from impact_reg_konfai.models import fireants as engine
 
     path = tmp_path / "features.pt"
     torch.jit.script(_Pointwise()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), distance="LNCC")
+    spec = engine.ModelSpec(ref=str(path), distance=distance)
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False, masked=masked)
     loss._channels, loss._level = [[2]], 0
     generator = torch.Generator().manual_seed(0)
@@ -445,10 +447,61 @@ def test_a_level_s_normalisation_is_its_mean_however_its_boxes_cut_it(tmp_path, 
             region[(slice(None), slice(None), *core)] = 1
             crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
             pieces.append((moved[crop], fixed[crop], region))
+        if loss.pools:
+            loss.pool(pieces)
         loss.latch(pieces)
         return loss._factors
 
     assert np.allclose(factors(64), factors(7), rtol=1e-5)
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_an_ncc_layer_by_boxes_has_the_level_s_gradient(tmp_path, masked):
+    """Evaluated box by box, each box weighed as the deformable stage weighs it (its voxels over the level's), an NCC
+    layer has the level's gradient wherever a box holds its voxels: the boxes' sums (``pool``) give each the level's
+    value and derivative."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "features.pt"
+    torch.jit.script(_Pointwise()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), distance="NCC")
+    loss = engine.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False, masked=masked)
+    loss._channels, loss._level = [[2]], 0
+    generator = torch.Generator().manual_seed(1)
+    shape = (20, 24, 28)
+    moved, fixed = (torch.rand((1, 3, *shape), generator=generator) for _ in range(2))
+    for volume, cut in ((moved, 9), (fixed, 13)):
+        volume[:, -1] = 0.0
+        volume[:, -1, :, :cut] = 1.0
+    if not masked:
+        moved, fixed = moved[:, :2], fixed[:, :2]
+    whole = moved.clone().requires_grad_()
+    (expected,) = torch.autograd.grad(loss(whole, fixed), whole)
+    boxes = []
+    for tile in tiles(shape, 9):
+        low, high, core = box_region(tile, 2, shape)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        boxes.append((low, core, crop, region))
+    loss.pool([(moved[crop], fixed[crop], region) for _, _, crop, region in boxes])
+    support = sum(
+        float(((moved[crop][:, -1:] * fixed[crop][:, -1:] >= 0.5) * region).sum()) for *_, crop, region in boxes
+    )
+    gathered = torch.zeros_like(moved)
+    for low, core, crop, _ in boxes:
+        box = moved[crop].clone().requires_grad_()
+        value = loss(box, fixed[crop])
+        if masked:  # the stage's masked weight: the box's support over the level's
+            weight = (box[:, -1:] * fixed[crop][:, -1:] >= 0.5).sum()
+            share = value * weight / support
+        else:
+            share = value * math.prod(box.shape[2:]) / math.prod(shape)
+        (gradient,) = torch.autograd.grad(share, box)
+        own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
+        gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
+    channels = slice(None, 2)  # the features: a mask channel holds no gradient of the distance
+    assert torch.allclose(gathered[:, channels], expected[:, channels], atol=1e-6)
 
 
 class _Strided(torch.nn.Module):
@@ -744,7 +797,7 @@ def warp_gap(sampled, whole_warps, size=SIZE) -> float:
     )
 
 
-@pytest.mark.parametrize("symmetric,loss", [(False, "mse"), (False, "cc"), (True, "cc")])
+@pytest.mark.parametrize("symmetric,loss", [(False, "mse"), (False, "cc"), (True, "cc"), (False, "mi"), (True, "mi")])
 @SHAPES
 def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, loss, size):
     whole, whole_warps, sampled = deformable_pair(tmp_path, symmetric, loss, size=size)
@@ -760,12 +813,14 @@ def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, lo
     assert not list(tmp_path.glob("*.npy"))
 
 
-def test_every_box_reproduces_the_whole_image_masked_deformable(tmp_path):
+@pytest.mark.parametrize("loss", ["cc", "mi"])
+def test_every_box_reproduces_the_whole_image_masked_deformable(tmp_path, loss):
     """With a mask that keeps some boxes more than others, every box at every iteration is still FireANTs' masked
-    iteration: each box weighed against the level's support, not its own."""
+    iteration: each box weighed against the level's support, not its own, or its voxels counted in the level's
+    joint histogram."""
     z, y, x = np.meshgrid(*(np.arange(n) for n in SIZE), indexing="ij")
     mask = (((x - 30) ** 2 + (y - 14) ** 2 + (z - 10) ** 2) < 15**2).astype(np.float32)  # off-centre: uneven boxes
-    _, whole_warps, sampled = deformable_pair(tmp_path, False, "cc", mask=mask)
+    _, whole_warps, sampled = deformable_pair(tmp_path, False, loss, mask=mask)
     assert sampled.boxes_per_scale[-1] > 1
     assert warp_gap(sampled, whole_warps) < 1e-3
     sampled.close()

@@ -47,6 +47,7 @@ import random
 from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -164,9 +165,12 @@ def _moved_and_fixed(tiles, halo: int, fixed_level: RegionSource, moving_level: 
             yield moved.reshape(moved.shape[1], len(chunk), *size).transpose(0, 1), fixed.float(), cores
 
 
-def _joint_counts(loss, moved: torch.Tensor, fixed: torch.Tensor) -> tuple[torch.Tensor, float]:
+def _joint_counts(
+    loss, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
+) -> tuple[torch.Tensor, float]:
     """The joint histogram ``[bins, bins]`` of a packet of boxes ``[K, C, *size]`` as FireANTs' mutual information
-    builds it, before its division by the points it counts, and how many they are."""
+    builds it, before its division by the points it counts, and how many they are; over the voxels ``region``
+    (``[K, 1, *size]``) holds, when given (a box's own, its halo being another box's)."""
     moved, fixed = moved.flatten(2), fixed.flatten(2)
     mask = None
     if loss.masked:
@@ -174,6 +178,9 @@ def _joint_counts(loss, moved: torch.Tensor, fixed: torch.Tensor) -> tuple[torch
 
         moved, fixed, mask = get_tensors_and_mask(moved, fixed, loss.mask_mode)
         mask = (mask.flatten(1) >= 0.5).to(moved.dtype)
+    if region is not None:
+        held = (region.flatten(1) >= 0.5).to(moved.dtype)
+        mask = held if mask is None else mask * held
     largest = max(moved.max(), fixed.max())
     if largest > 1:
         moved, fixed = moved / largest, fixed / largest
@@ -182,6 +189,15 @@ def _joint_counts(loss, moved: torch.Tensor, fixed: torch.Tensor) -> tuple[torch
     if mask is not None:
         moved_weight, counted = moved_weight * mask[:, :, None], float(mask.sum())
     return torch.bmm(moved_weight.permute(0, 2, 1), fixed_weight.to(moved_weight)).sum(0), counted
+
+
+class _Information(NamedTuple):
+    """A mutual information over the level, as an iteration of the deformable stage reads it: the derivative of the
+    information at the level's joint histogram, the points the histogram counts, and the information."""
+
+    weight: torch.Tensor
+    points: float
+    value: float
 
 
 def _information(loss, joint: torch.Tensor) -> torch.Tensor:
@@ -1072,6 +1088,30 @@ def sampled_deformable_class():
                 return get_tensors_and_mask(moved, target, self.loss_fn.mask_mode)[2]
             return (moved[:, -1:] * target[:, -1:] >= 0.5).to(moved.dtype)
 
+        def _information_weight(self, boxes, grid, levels, share: float) -> _Information:
+            """Mutual information over the voxels of ``boxes`` (each counted once, in its own box), a draw holding
+            ``share`` of the level: the level's joint histogram is tracked from draw to draw, each moving it by its
+            share (every box drawn: the level's own), and the information and its derivative are read off it, as the
+            linear stages read theirs (``SampledLinearMixin._information_step``)."""
+            joint, points = None, 0.0
+            with torch.no_grad():
+                for moved, target, region in self._boxes(boxes, grid, levels):
+                    counts, counted = _joint_counts(self.loss_fn, moved, target, region)
+                    joint = counts.double() if joint is None else joint + counts.double()
+                    points += counted
+            if points > 0:  # a draw the masks miss holds no point: the level's histogram stays as it was
+                histogram = (joint / points).float()
+                tracked = self._histogram is None or share >= 1
+                self._histogram = histogram if tracked else self._histogram.lerp(histogram, share)
+            if self._histogram is None:
+                return _Information(torch.zeros(()), 1.0, 0.0)
+            histogram = self._histogram.clone().requires_grad_()
+            value = _information(self.loss_fn, histogram)
+            (weight,) = torch.autograd.grad(value, histogram)
+            if points == 0:  # a draw that holds no point of the loss moves nothing
+                return _Information(torch.zeros_like(weight), 1.0, float(value))
+            return _Information(weight, points, float(value))
+
         def _level_totals(self, boxes, grid, levels) -> tuple[float, float]:
             """A masked loss over the voxels of ``boxes`` (each counted once, in its own box): its support, and its
             mean where the loss gives its value at each voxel (FireANTs' metrics), 0 otherwise."""
@@ -1095,11 +1135,22 @@ def sampled_deformable_class():
             warps = [warp.read("warp", low, high).requires_grad_() for warp in self._warps.values()]
             identity = _box_coordinates(low, high, grid, self.device, self.dtype)
             moved, target = self._warped(low, high, identity, levels, dict(zip(self._warps, warps, strict=True)))
-            value = self.loss_fn(moved, target)
             # The loss reported counts the box's own voxels alone, its halo being another box's: summed over the
             # boxes, the grid's.
             owned = (slice(None), slice(None), *core)
-            if totals is None:
+            if isinstance(totals, _Information):
+                # Mutual information is a function of the level's joint histogram: a voxel's counts weighed by the
+                # information's derivative there have its gradient, every voxel of the box, its halo included (which
+                # the gradient's smoothing reads); the box reports its own voxels' share of the information.
+                counts, _ = _joint_counts(self.loss_fn, moved, target)
+                loss = (counts * totals.weight).sum() / totals.points
+                region = torch.zeros_like(moved[:, :1])
+                region[owned] = 1
+                with torch.no_grad():
+                    counted = _joint_counts(self.loss_fn, moved, target, region)[1]
+                reported = torch.tensor(totals.value * counted / totals.points)
+            elif totals is None:
+                value = self.loss_fn(moved, target)
                 # The loss is a mean over the box: weighed as the box's share of the grid, its gradient is the whole
                 # grid's wherever the box holds what the loss reads.
                 loss = value * (math.prod(moved.shape[2:]) / math.prod(grid))
@@ -1108,6 +1159,7 @@ def sampled_deformable_class():
                 # A masked mean over the box is its sum over the box's support S_b. Against the level's support S
                 # and mean c, the box adds S_b (d_b - c) / S, whose gradient is the level's masked mean's wherever the
                 # box holds what the loss reads, the support moving with the warp as it does on the whole grid.
+                value = self.loss_fn(moved, target)
                 support, mean = totals
                 mask = self._support(moved, target)
                 # A draw the masks miss (its boxes outside them) holds no voxel of the loss: no gradient.
@@ -1181,6 +1233,8 @@ def sampled_deformable_class():
                 store.write("next", tile[0], _smooth(update + composed, self._warp_gaussians)[(slice(None), *core)])
 
         def optimize(self) -> None:
+            from fireants.losses.mi import GlobalMutualInformationLoss
+
             fixed, _ = self._sources
             for scale, epochs in zip(self.scales, self.iterations, strict=True):
                 if hasattr(self.loss_fn, "set_current_scale_and_iterations"):
@@ -1195,6 +1249,8 @@ def sampled_deformable_class():
                     # scale, one at a time: what the whole grid would give it.
                     if draw is not None:
                         draw()
+                    if getattr(self.loss_fn, "pools", False):  # the level's sums first: an NCC layer's start
+                        self.loss_fn.pool(self._boxes(tiles(grid, self._box), grid, levels))
                     self.loss_fn.latch(self._boxes(tiles(grid, self._box), grid, levels))
                 if self._samples is None:
                     # Not told how many samples an iteration draws, it takes what the device holds: every box, as
@@ -1207,10 +1263,19 @@ def sampled_deformable_class():
                     boxes = tiles(grid, side)
                     count = min(len(boxes), max(1, self._samples // side ** len(grid)))
                 self.boxes_per_scale.append(len(boxes))
-                # A masked mean over several boxes is weighed against the level's: one pass more an iteration.
-                masked = len(boxes) > 1 and bool(
-                    getattr(self.loss_fn, "masked", getattr(self.loss_fn, "_masked", False))
+                # Over several boxes, a mutual information is the level's histogram's and a masked mean is weighed
+                # against the level's: one pass more an iteration.
+                information = len(boxes) > 1 and type(self.loss_fn) is GlobalMutualInformationLoss
+                pools = bool(getattr(self.loss_fn, "pools", False))  # an IMPACT loss's NCC layers
+                if pools and len(boxes) == 1:  # the box is the level: its own NCC is the level's, no sums to read
+                    self.loss_fn.pool([])
+                    pools = False
+                masked = (
+                    not information
+                    and len(boxes) > 1
+                    and bool(getattr(self.loss_fn, "masked", getattr(self.loss_fn, "_masked", False)))
                 )
+                self._histogram = None  # the level's joint histogram, as the draws of a mutual information tell it
                 # The steps each box has taken at this scale, laid out as the boxes are (tiles' order is C order).
                 steps = np.zeros([math.ceil(extent / side) for extent in grid], dtype=np.int64)
                 peaks = {name: _Largest(len(boxes)) for name in self._warps}  # each box's largest direction, last seen
@@ -1221,8 +1286,14 @@ def sampled_deformable_class():
                     )
                     if draw is not None:
                         draw()
-                    totals = None
-                    if masked:  # a draw's support stands for the level's in proportion to the boxes it holds
+                    if pools:  # the level's NCC sums over the boxes drawn, under this iteration's draw
+                        self.loss_fn.pool(self._boxes([boxes[index] for index in drawn], grid, levels))
+                    totals: _Information | tuple[float, float] | None = None
+                    if information:
+                        totals = self._information_weight(
+                            [boxes[index] for index in drawn], grid, levels, count / len(boxes)
+                        )
+                    elif masked:  # a draw's support stands for the level's in proportion to the boxes it holds
                         support, mean = self._level_totals([boxes[index] for index in drawn], grid, levels)
                         totals = (support * len(boxes) / count, mean)
                     total = 0.0
@@ -1245,8 +1316,11 @@ def sampled_deformable_class():
                                 warp.keep(*boxes[index])
                     # The level's loss: a masked metric's mean over the level where the pass gave it, the boxes'
                     # shares otherwise.
-                    exact = totals is not None and hasattr(self.loss_fn, "forward_util")
-                    level = totals[1] if exact else total * len(boxes) / count
+                    exact = isinstance(totals, tuple) and hasattr(self.loss_fn, "forward_util")
+                    if isinstance(totals, _Information):
+                        level = totals.value
+                    else:
+                        level = totals[1] if exact else total * len(boxes) / count
                     self.losses.append(level)
                     # FireANTs leaves a scale once its loss stops falling, which a draw's loss is too noisy to tell.
                     if count == len(boxes) and self.convergence_monitor.converged(level):

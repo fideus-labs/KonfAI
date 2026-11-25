@@ -87,6 +87,8 @@ from konfai.metric.measure.impact import (
     distance,
     draw_centres,
     grid_size,
+    ncc_of_sums,
+    ncc_sums,
     no_texpr_fuser,
     normalized_features,
     onto_image_grid,
@@ -463,6 +465,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._level = -1  # the FireANTs scale running, advanced by set_current_scale_and_iterations
         self._factors: list[float] | None = None  # each layer's normalization at this level
         self._draw: int | None = None  # the draw every piece of an iteration takes (``draw``)
+        self._pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None  # NCC layers' level sums (``pool``)
 
     @property
     def cores(self) -> list[_ImpactCore]:
@@ -471,7 +474,7 @@ class ImpactFeatureLoss(torch.nn.Module):
     def reset(self) -> None:
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
-        self._level, self._factors, self._draw = -1, None, None
+        self._level, self._factors, self._draw, self._pooled = -1, None, None, None
         self._generator.manual_seed(self._seed)
 
     def draw(self) -> None:
@@ -481,7 +484,7 @@ class ImpactFeatureLoss(torch.nn.Module):
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
-        self._level, self._factors = self._level + 1, None
+        self._level, self._factors, self._pooled = self._level + 1, None, None
 
     def start_at(self, level: int) -> None:
         """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
@@ -572,11 +575,9 @@ class ImpactFeatureLoss(torch.nn.Module):
         spec = self._specs[index]
         return [(spec.distance, int(spec.subset_features))] * len(self.cores[index].kept)
 
-    def _static_distances(
-        self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
-    ) -> list[torch.Tensor]:
-        """Each kept layer's distance between the warped feature volumes, read off their channels."""
-        values = []
+    def _static_layers(self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, seed: int):
+        """Each kept layer of the warped feature volumes, read off their channels: its distance's name and its moved
+        and fixed maps."""
         for index in level:
             start = sum(sum(layers) for layers in self._channels[:index])
             for layer, (channels, (name, subset)) in enumerate(
@@ -588,9 +589,66 @@ class ImpactFeatureLoss(torch.nn.Module):
                     subset,
                     seed + 1000 * index + layer,
                 )
-                values.append(distance(name, moved_layer, fixed_layer, mask, self._kernel, self._chunk))
+                yield name, moved_layer, fixed_layer
                 start += channels
+
+    def _static_distances(
+        self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
+    ) -> list[torch.Tensor]:
+        """Each kept layer's distance between the warped feature volumes, read off their channels; an NCC layer whose
+        level sums ``pool`` gave, the level's (see ``pool``)."""
+        values = []
+        pooled = self._pooled or {}
+        for layer, (name, moved_layer, fixed_layer) in enumerate(self._static_layers(level, moved, fixed, seed)):
+            if layer in pooled:
+                # The level's NCC, and through this piece's sums the level's gradient at its voxels, weighed against
+                # the stage's weight of a piece (its voxels over the level's) so that the two cancel.
+                derivative, counted, value = pooled[layer]
+                weight = mask if mask is not None else torch.ones_like(moved_layer[:, :1])
+                piece = ncc_sums(moved_layer, fixed_layer, weight)
+                surrogate = (derivative.to(piece.device) * piece).sum()
+                scale = counted / max(float(piece[0, 0]), 1e-8)
+                values.append((value + (surrogate - surrogate.detach()) * scale).float())
+            else:
+                values.append(distance(name, moved_layer, fixed_layer, mask, self._kernel, self._chunk))
         return values
+
+    @property
+    def pools(self) -> bool:
+        """Static mode at a level with an NCC layer, the whole volumes compared: an NCC is no mean of its voxels'
+        values, and evaluated by pieces of the level it needs the level's sums first (``pool``)."""
+        if self._mode != "Static" or self._sampling < 1 or not self._levels:
+            return False
+        level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
+        return any(name == "NCC" for index in level for name, _ in self._terms(index))
+
+    def pool(self, pieces: "Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]") -> None:
+        """Each NCC layer's sums over the voxels the pieces own (each a moved and a fixed tensor read with its halo,
+        and ones on its own voxels), under this iteration's draw: the level's NCC, the voxels it counts and its
+        derivative with respect to the sums, which give every piece's evaluation the level's value and gradient."""
+        if self._draw is None:
+            self.draw()
+        assert self._draw is not None
+        level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
+        totals: dict[int, torch.Tensor] = {}
+        with torch.no_grad():
+            for moved, fixed, region in pieces:
+                mask = region
+                if self._masked:
+                    mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
+                    moved, fixed = moved[:, :-1], fixed[:, :-1]
+                for layer, (name, moved_layer, fixed_layer) in enumerate(
+                    self._static_layers(level, moved, fixed, self._draw)
+                ):
+                    if name == "NCC":
+                        piece = ncc_sums(moved_layer, fixed_layer, mask).cpu()
+                        totals[layer] = piece if layer not in totals else totals[layer] + piece
+        self._pooled = {}
+        for layer, total in totals.items():
+            total.requires_grad_()
+            value = ncc_of_sums(total)
+            (derivative,) = torch.autograd.grad(value, total)
+            self._pooled[layer] = (derivative, float(total[0, 0]), float(value))
 
     def _values(
         self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
@@ -1282,11 +1340,6 @@ class FireANTsEngine:
             raise NotImplementedError(
                 "feature_map_update_interval restarts FireANTs' deformable stage on the moving image resampled whole"
                 " at every refresh: by boxes the Static features are extracted once."
-            )
-        if self._deformable_metric == "mi":
-            raise NotImplementedError(
-                "mutual information is one histogram over the whole image, which the deformable stage's boxes do not"
-                " pool: by boxes it registers with cc, mse or impact."
             )
         if self._deformable_metric == "impact" and any(
             spec.voxel_size is not None for specs in self._impact_levels for spec in specs

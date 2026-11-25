@@ -114,7 +114,7 @@ def _bare_loss(mode: str, core: torch.nn.Module, spec: "fireants.ModelSpec") -> 
     loss._specs, loss._levels, loss._cores = [spec], [[0]], torch.nn.ModuleList([core])
     loss._channels, loss._level, loss._factors = [[2]], -1, None
     loss._generator = torch.Generator().manual_seed(0)
-    loss._sampling, loss._patch, loss._draw = 1.0, [], None
+    loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
     return loss
 
 
