@@ -199,7 +199,9 @@ convention): resampling the moving image through it gives Moved.""",
         dest="out_of_core",
         choices=ROUTES,
         default="auto",
-        help="How a pair registers. auto (default): whole where it fits the device, sampled where it does not. "
+        help="How a pair registers. auto (default): whole where it fits the device, sampled where it does not (a "
+        "preset of another engine than elastix, ConvexAdam and FireANTs: tiled where it declares a tile pass, else "
+        "whole on a pair KonfAI resamples to fit). "
         "whole: in one piece on its native grid, refused if it does not fit. tiled: the preset on the pair resampled "
         "to fit, then its deformable stage on native tiles (presets that declare a tile pass). sampled: the preset "
         "in one pass on the native pair, never resampled and never held whole in host memory: the images are read "

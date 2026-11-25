@@ -16,6 +16,8 @@
 
 """The sampled out-of-core mode: which presets it takes, how it lays its boxes, and what it hands the engine."""
 
+import importlib
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -483,18 +485,37 @@ def test_an_asked_form_is_the_file_its_writer_publishes(kind, published) -> None
     assert reg._asked_form(kind) == published
 
 
-@pytest.mark.parametrize(("seeds", "share"), [((7, 8), ["seed=3"]), ((None, None), [])])
-def test_seed_seeds_each_pass_whose_engine_draws_with_one(monkeypatch: pytest.MonkeyPatch, seeds, share) -> None:
-    """The global and the tile pass each take --seed where their engine has a seed, whatever its default there."""
+@pytest.mark.parametrize(
+    ("seeds", "classpath", "share"),
+    [
+        ((7, 8), "custom:RegistrationNet", ["seed=3"]),
+        ((None, None), "custom:RegistrationNet", []),
+        ((None, None), "impact_reg_konfai.models.convexadam:RegistrationNet", ["seed=3"]),
+    ],
+    ids=["set", "none", "engine-default"],
+)
+def test_seed_seeds_each_pass_whose_engine_draws_with_one(
+    monkeypatch: pytest.MonkeyPatch, seeds, classpath, share
+) -> None:
+    """The global and the tile pass each take --seed where their engine has a seed, whatever its default there: the
+    config's own, or the one every engine of ImpactReg takes when the config leaves it out."""
 
     def config(preset, name):
         seed = seeds[name == "Prediction_tile.yml"]
-        return {"Predictor": {"Model": {"RegistrationNet": {} if seed is None else {"seed": seed}}}}
+        network = {} if seed is None else {"seed": seed}
+        return {"Predictor": {"Model": {"classpath": classpath, "RegistrationNet": network}}}
 
     monkeypatch.setattr(reg, "_preset_config", config)
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"tiling": {"tile": "Prediction_tile.yml"}})
     shares = reg._preset_overrides(["P"], [], quiet=True, seed=3)
     assert shares["P"]["global"] == share and shares["P"]["tile"] == share
+
+
+@pytest.mark.parametrize("engine", reg._SAMPLED_ENGINES)
+def test_every_engine_of_impact_reg_takes_a_seed(engine: str) -> None:
+    # --seed seeds an engine of this package whose config leaves its seed out (_draws_with_seed).
+    network = importlib.import_module(f"impact_reg_konfai.models.{engine}").RegistrationNet
+    assert "seed" in inspect.signature(network).parameters
 
 
 @pytest.mark.parametrize("ensemble", [["Elx"], ["Elx", "Elx2"]], ids=["preset", "ensemble"])
@@ -503,7 +524,7 @@ def test_sampled_mode_registers_a_plane_on_its_own_grid(
 ) -> None:
     """A 2-D pair is registered sampled as a volume is, on its own grid, never lifted to a plane thick volume (which
     reads it whole): the elastix route hands the engine 2-D twins along LPS and writes a 2-D field on the fixed grid,
-    an ensemble with its members' stack under --uncertainty."""
+    compressed when asked, an ensemble with its members' stack under --uncertainty."""
     from impact_reg_konfai.models import intensity
 
     paths = []
@@ -543,6 +564,7 @@ def test_sampled_mode_registers_a_plane_on_its_own_grid(
         out_of_core="sampled",
         fields_only=True,
         uncertainty=len(ensemble) > 1,
+        output_format=["mha.gz"],
     )
     assert (
         seen["size"] == (70, 60) and np.allclose(seen["direction"], np.eye(2).ravel()) and seen["spacing"] == (1.0, 2.0)
@@ -552,6 +574,7 @@ def test_sampled_mode_registers_a_plane_on_its_own_grid(
         field.GetDimension() == 2 and field.GetSize() == (70, 60) and np.allclose(field.GetDirection(), (-1, 0, 0, 1))
     )
     assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0))
+    assert b"CompressedData = True" in (tmp_path / "out" / "P000" / "DVF.mha").read_bytes()[:1024]
     if len(ensemble) > 1:
         stack = sitk.ReadImage(str(tmp_path / "out" / "P000" / "InferenceStack.mha"))  # members x components
         assert stack.GetSize() == (70, 60) and stack.GetNumberOfComponentsPerPixel() == 4

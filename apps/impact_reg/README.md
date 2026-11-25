@@ -185,7 +185,7 @@ impact-reg-konfai uncertainty -i ./Output/P000/InferenceStack.mha --gt-fixed-fid
 | `--tta` | Test-time-augmentation draws per preset | `0` |
 | `--uncertainty` | Keep the ensemble's stack, every preset's field, as `<case>/InferenceStack.mha` (`.ome.zarr` beside a store) for `uncertainty` | `False` |
 | `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
-| `--out-of-core ROUTE` | `auto`: whole where the pair fits the device, sampled where it does not; `whole`, `tiled` or `sampled` for every pair (see *Large images*) | `auto` |
+| `--out-of-core ROUTE` | `auto`: whole where the pair fits the device, sampled where it does not (tiled or resampled for a preset of another engine); `whole`, `tiled` or `sampled` for every pair (see *Large images*) | `auto` |
 | `--set [PRESET:]NAME=VALUE` | Tune a preset parameter (repeatable); `PRESET:` limits it to one preset of an ensemble; checked before anything runs | *unset* |
 | `--tmp-dir` | Where the volume-sized intermediates are staged, the engines' temporary files included | hidden beside the output |
 | `--gpu` / `--cpu` | GPU id(s) / CPU worker processes | CPU if unset |
@@ -244,7 +244,8 @@ in one pass on the native pair, never resampled and never held whole, an iterati
 on boxes of its control grid, the pooled feature maps on the GPU where they fit and in files otherwise. FireANTs: its
 rigid, affine and deformable stages on boxes, the warps on the GPU when they fit, else in host memory while the memory
 budget holds them, in files beyond. elastix: its own samples, with its images mapped from files and paged by the
-kernel.
+kernel. A preset of another engine goes in two passes where it declares them, else whole on a pair KonfAI resamples
+to fit.
 
 `--out-of-core` chooses the route for every pair instead: `whole`, `sampled`, or `tiled`, two passes:
 

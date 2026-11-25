@@ -256,9 +256,10 @@ def _preset_config(preset: str, filename: str) -> dict:
 
 
 def _draws_with_seed(config: dict) -> bool:
-    """Whether the engine of a preset's ``config`` draws with a seed of its own (its ``seed`` parameter)."""
+    """Whether the engine of a preset's ``config`` draws with a seed of its own: a ``seed`` the config sets, or the
+    one every engine of this package takes, left to its default."""
     network = ((config.get("Predictor") or {}).get("Model") or {}).get("RegistrationNet")
-    return isinstance(network, dict) and "seed" in network
+    return isinstance(network, dict) and ("seed" in network or _config_engine(config) is not None)
 
 
 def _app_preset_sets(preset: str) -> list[str]:
@@ -1050,12 +1051,15 @@ def _run_transform(
 _SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
 
 
-def _sampled_engine(preset: str) -> str | None:
-    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``, from its config's classpath;
-    None for any other class."""
-    config = _preset_config(preset, "Prediction.yml")
+def _config_engine(config: dict) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` a preset's ``config`` names by its classpath; None for any other class."""
     classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
     return next((m for m in _SAMPLED_ENGINES if classpath == f"{__package__}.models.{m}:RegistrationNet"), None)
+
+
+def _sampled_engine(preset: str) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``; None for any other class."""
+    return _config_engine(_preset_config(preset, "Prediction.yml"))
 
 
 @dataclass
@@ -1587,7 +1591,8 @@ class ImpactRegKonfAIApp:
                 # A sampled field (a MetaImage) is written here in the form asked for it; a preset wrote its own.
                 asked = (self._forms.get(group) or self._forms.get(None)) if case in sampled_cases else None
                 form, token = asked or (_form(members[0]), member_token(members[0]))
-                if sources == members and len(presets) == 1 and _form(members[0]) == form:
+                same = _form(members[0]) == form and member_token(members[0]) == token  # mha.gz is .mha, compressed
+                if sources == members and len(presets) == 1 and same:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
                     # An ensemble is konfai-apps' (konfai_apps/ensemble.py): every member reduced into the field,
@@ -1872,6 +1877,13 @@ class ImpactRegKonfAIApp:
                 "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
             ) from error
         apply_overrides(config, config_overrides["global"], lambda: network)
+        if _config_engine(config) != module:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{preset}: --set changed the classpath of its engine, which --out-of-core sampled runs as the preset"
+                " names it.",
+                "Register a preset of that engine, or choose --out-of-core whole or tiled.",
+            )
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.
@@ -2004,6 +2016,8 @@ class ImpactRegKonfAIApp:
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
         engine.check_gradients()
         require_regions()  # before any twin is written
+        for stage in engine._stages:  # a model that sees whole images only is refused before any twin, too
+            engine.region_halo(stage)
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
         visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
         # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.

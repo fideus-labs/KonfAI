@@ -27,7 +27,7 @@ Every published preset declares its cost, so every run is sized. A preset that d
 
 | Route | What it does |
 |---|---|
-| `auto` (default) | whole where the pair fits the device, sampled where it does not |
+| `auto` (default) | whole where the pair fits the device, sampled where it does not; a preset of another engine than elastix, ConvexAdam and FireANTs goes tiled where it declares a tile pass, else whole on a pair KonfAI resamples to fit |
 | `whole` | the preset in one piece on the native pair, whatever the plan; refused if KonfAI had to resample it to fit |
 | `tiled` | two passes (below), for the presets that declare a tile pass |
 | `sampled` | at native resolution, by boxes (below), even a pair that fits |

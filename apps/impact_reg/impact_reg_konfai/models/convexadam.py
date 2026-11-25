@@ -564,6 +564,13 @@ class ConvexAdamEngine:
             dvf += shift.astype(np.float32).reshape(-1, *[1] * (dvf.ndim - 1))
         return dvf
 
+    def region_halo(self, stage: str) -> int:
+        """The voxels a region of ``stage`` is read with around it: one radius of its models' receptive field, which
+        a feature reads around it, and one more for the fine stage in Jacobian mode, whose gradient goes back through
+        the network. A model that sees whole images only has no receptive field, and is refused here."""
+        radius = max([(model.receptive_field - 1) // 2 for model in self._feature_models[stage]], default=0)
+        return 2 * radius if stage == "fine" and self._mode == "Jacobian" else radius
+
     def refine_by_regions(
         self,
         fixed: Path,
@@ -595,13 +602,6 @@ class ConvexAdamEngine:
         self.check_gradients()
         if not self._deformable_masked:  # no stage reads them
             fixed_mask = moving_mask = None
-
-        def halo_of(stage: str) -> int:
-            # A feature reads one radius of its field around it; its gradient through the network (the fine stage in
-            # Jacobian mode) reads one more.
-            radius = max([(model.receptive_field - 1) // 2 for model in self._feature_models[stage]], default=0)
-            return 2 * radius if stage == "fine" and self._mode == "Jacobian" else radius
-
         require_regions()
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
         itk.MultiThreaderBase.SetGlobalDefaultNumberOfThreads(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
@@ -671,7 +671,7 @@ class ConvexAdamEngine:
             started = time.monotonic()
             coarse = self._new_coarse(fixed_image, moving_image, fixed_mask_image, moving_mask_image, device)
             coarse.SetRegionSize(int(region_size))
-            coarse.SetRegionHalo(halo_of("coarse"))
+            coarse.SetRegionHalo(self.region_halo("coarse"))
             coarse.SetScratchDirectory(str(field.parent))
             coarse_grid = coarse.GetCoarseGridTransform().GetDisplacementField()  # solves, allocating no dense field
             coarse_stats = (time.monotonic() - started, int(coarse.GetBytesRead()))
@@ -712,7 +712,7 @@ class ConvexAdamEngine:
                 fine.SetInitialDisplacementField(grid)  # read as its dense field, whatever its grid
             fine.SetRegionSize(int(region_size))
             fine.SetScratchDirectory(str(scratch))
-            fine.SetRegionHalo(halo_of("fine"))
+            fine.SetRegionHalo(self.region_halo("fine"))
             fine.SetRegionsPerIteration(0 if drawn == geometry["regions"] else drawn)
             fine.SetNumberOfIterations(math.ceil(int(epochs) * geometry["regions"] / drawn))
             grid = fine.GetControlGridTransform().GetDisplacementField()  # solves, allocating no dense field
