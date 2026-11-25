@@ -793,7 +793,8 @@ def static_feature_sources(
                     "Static mode by blocks takes 3D feature models at the image's own resolution: a 2D network and a"
                     " voxel_size both lay their features out over the whole image."
                 )
-            stride = max(1, int(core.model.multiple))
+            # Blocks and halos on the input multiple and on the stride of the normalisations gathered over them.
+            stride = max(1, int(core.model.multiple), core.model.norm_stride(fixed.device))
             blocks = [math.ceil(block / stride) * stride]
             try:
                 halo = min((core.model.receptive_field - 1) // 2, blocks[0] // 2)

@@ -873,6 +873,7 @@ class ImpactFeatureModel:
         self.batch = 0
         self.model: torch.nn.Module | None = None
         self._mapped: torch.device | None = None  # where _on mapped the file; None for a network handed in
+        self._norm_stride: int | None = None  # measured once (norm_stride)
 
     @classmethod
     def download(
@@ -918,11 +919,33 @@ class ImpactFeatureModel:
             raise MeasureError(f"'{self.model_path}' weighs its layer {deepest + 1}, past the {len(self.fov)} it has.")
         return int(self.fov[deepest])
 
-    def _halo(self) -> int:
+    def _halo(self, step: int = 1) -> int:
         """The voxels a block needs around it for its own to read as in the whole image: half the receptive field,
-        rounded up to the input multiple."""
-        step = max(self.multiple, 1)
+        rounded up to the input multiple and to ``step``."""
+        step = max(self.multiple, step, 1)
         return -(-(self.receptive_field // 2) // step) * step
+
+    def norm_stride(self, device: torch.device | str) -> int:
+        """The coarsest stride of the normalisations ``norms`` gathers (1 for a network with none): blocks whose
+        origins and halos are whole multiples of it meet their cells where the whole image does. Measured once, on a
+        probe of 64 voxels a side, each normalisation fed the probe's own statistics of the ones before it."""
+        if self._norm_stride is None:
+            side = max(64, self.multiple)
+            probe = torch.rand((1, self.in_channels, *[side] * self.dim), device=device)  # a spread to normalise
+            network = self.network(probe.device)
+            norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
+            norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
+            strides, gathered = [1], cast(list[torch.Tensor], [])
+            if norm_count is not None:
+                tensor, _, stats, *direction = self.inputs(probe, _statistics(probe)[0])
+                for _ in range(int(norm_count(len(self.weights)))):
+                    layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
+                    strides.append(2 ** round(math.log2(side / min(layer.shape[2:]))))
+                    axes = (0, *range(2, layer.dim()))
+                    mean = layer.double().mean(axes)
+                    gathered.append(torch.stack([mean, layer.double().var(axes, unbiased=False)]).float())
+            self._norm_stride = max(strides)
+        return self._norm_stride
 
     def _half(self, device: torch.device) -> bool:
         # float16 has no 3-D pooling on the CPU.
@@ -1020,7 +1043,10 @@ class ImpactFeatureModel:
         statistics = statistics if statistics is not None else _statistics(image)[0]
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
         if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
-            norms = self.norms(lambda: _blocks(image, patch, self._halo()), statistics)
+            # Blocks and halos on the normalisations' stride, so that each meets their cells as the whole image does.
+            stride = self.norm_stride(image.device)
+            block = -(-patch // stride) * stride
+            norms = self.norms(lambda: _blocks(image, block, self._halo(stride)), statistics)
         accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
             outputs = network(*self.inputs(tile, statistics, norms or ()))

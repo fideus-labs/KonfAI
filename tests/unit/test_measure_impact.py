@@ -351,6 +351,35 @@ class _InstanceNormed(torch.nn.Module):
         return [(x - mean.view(1, -1, 1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1, 1) + 1e-5)]
 
 
+class _PooledNormed(_InstanceNormed):
+    """``_InstanceNormed`` on a layer of half the resolution: its normalisation's cells two voxels a side."""
+
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        return torch.nn.functional.avg_pool3d(self.conv(tile), 2)
+
+    def forward(self, tile, nb_layers, stats, direction=None, norms=None) -> list[torch.Tensor]:
+        x = torch.nn.functional.avg_pool3d(self.conv(tile), 2)
+        if not norms:
+            return [torch.nn.functional.instance_norm(x)]
+        mean, var = norms[0]
+        return [(x - mean.view(1, -1, 1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1, 1) + 1e-5)]
+
+
+def test_the_normalisations_of_a_tiled_volume_are_gathered_on_their_stride(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Blocks of 9 would start the second one on an odd voxel, its cells of 2 then not the whole image's: the pass
+    # that gathers the normalisations takes its blocks and halos on their stride.
+    model = _stub_model(_PooledNormed(), [1.0])
+    model.fov = [6]
+    assert model.norm_stride("cpu") == 2
+    seen: list[tuple[int, int]] = []
+    blocks = impact._blocks
+    monkeypatch.setattr(
+        impact, "_blocks", lambda image, block, halo: (seen.append((block, halo)), blocks(image, block, halo))[1]
+    )
+    model.volume(torch.rand(1, 1, 20, 18, 22), patch=9)
+    assert seen and all(block % 2 == 0 and halo % 2 == 0 for block, halo in seen)
+
+
 def test_blocks_normalised_by_the_gathered_statistics_give_the_whole_images_features() -> None:
     # An instance normalisation of a block reads that block's statistics; with the whole image's, gathered by a pass
     # over the blocks, each block's own voxels get the whole image's features.
@@ -384,13 +413,15 @@ class _NormedOnSixteen(_InstanceNormed):
 
 def test_the_normalisations_are_gathered_on_blocks_padded_to_the_models_multiple() -> None:
     # A network whose input must be a multiple of 16 is handed its blocks as a tile is: padded up to it, the padding
-    # left out of the statistics, which are then the whole image's.
+    # left out of the statistics, which are then the whole image's (to float32's rounding of a convolution summed
+    # over another extent).
+    torch.manual_seed(0)
     model, image = _stub_model(_NormedOnSixteen(), [1.0]), torch.rand(1, 1, 20, 32, 40)
     model.multiple = 16
     (mean, var), *_ = model.norms(lambda: impact._blocks(image, 16, 16), impact._statistics(image)[0])
     features = model.model.conv(image).double()
-    assert torch.allclose(mean.double(), features.mean((0, 2, 3, 4)), atol=1e-6)
-    assert torch.allclose(var.double(), features.var((0, 2, 3, 4), unbiased=False), atol=1e-6)
+    assert torch.allclose(mean.double(), features.mean((0, 2, 3, 4)), atol=1e-5)
+    assert torch.allclose(var.double(), features.var((0, 2, 3, 4), unbiased=False), atol=1e-5)
 
 
 class _NeedsSixteen(torch.nn.Module):
