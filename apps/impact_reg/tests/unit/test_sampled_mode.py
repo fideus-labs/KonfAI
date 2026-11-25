@@ -78,6 +78,8 @@ def test_region_geometry_counts_cells_and_boxes_as_itk_impact_does() -> None:
     assert geometry["cells"] == [57, 78, 64]
     # A box of 48 voxels is 24 cells a side, the last one along an axis taking what is left: 3 x 4 x 3 boxes.
     assert geometry["regions"] == 36
+    # A box of 29 voxels is 15 cells a side, rounded half up: 3 boxes along each axis of 45 cells.
+    assert convexadam.region_geometry([90, 90, 90], 2, 29)["regions"] == 27
 
 
 def test_the_engine_of_a_config_carries_the_fine_stage_parameters(

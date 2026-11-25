@@ -918,11 +918,11 @@ class RegionRefinement:
 
 def region_geometry(size_xyz: list[int], grid_shrink: int, region_size: int) -> dict:
     """The control grid and the boxes the fine stage lays on a fixed grid, as itk-impact counts them, in voxels
-    along every axis: cells ``size // shrink``; a box ``round(region / shrink)`` cells a side, the last one along an
-    axis taking what is left."""
+    along every axis: cells ``size // shrink``; a box ``region / shrink`` cells a side, rounded half up as its
+    ``llround`` does, the last one along an axis taking what is left."""
     shrink = max(1, grid_shrink)
     cells = [max(1, extent // shrink) for extent in size_xyz]
-    per_box = max(1, round(region_size / shrink))
+    per_box = max(1, (2 * region_size + shrink) // (2 * shrink))
     return {"cells": cells, "regions": math.prod(math.ceil(count / per_box) for count in cells)}
 
 
