@@ -1355,6 +1355,8 @@ def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
         "a missing extension",
         "a link where the extension lands",
         "a link at a statistic's finish graph",
+        "a program named as a graph",
+        "an extension named as a graph",
     ],
 )
 def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
@@ -1386,6 +1388,11 @@ def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
         extension = tmp_path / "engine.wasm"
         extension.write_bytes(b"\0asm")
         (out / "engine.wasm").symlink_to(tmp_path / "elsewhere.json")
+    elif planted == "an extension named as a graph":  # from another folder, which the graph's would be copied over
+        extension = tmp_path / "model.onnx"
+        extension.write_bytes(b"\0asm")
+    elif planted == "a program named as a graph":
+        pass  # no extension: the program alone
     else:
         extension = tmp_path / "missing.wasm"
 
@@ -1398,15 +1405,14 @@ def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
         def finish(self, total):
             return total[0] / total[1]
 
-    with pytest.raises(ConfigError, match=r"is a link|is no file"):
+    program = out / ("model.onnx" if planted == "a program named as a graph" else "prediction.json")
+    with pytest.raises(ConfigError, match=r"is a link|is no file|named as a graph"):
         if planted == "a link at the manifest":
             export_to_onnx(TinySegNet(), out, torch.randn(1, 1, 16, 16))
         elif planted == "a link at a statistic's finish graph":
             export_case_statistic(Mean(), out / "model.onnx", out / "finish.onnx", rank=3)
         else:
-            compile_prediction(
-                config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", out / "prediction.json", extension=extension
-            )
+            compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", program, extension=extension)
     assert (out / "model.onnx").read_bytes() == b"the previous graph"
     assert (tmp_path / "elsewhere.json").read_text() == "not the program's"
 
@@ -1428,26 +1434,34 @@ def test_a_class_of_the_app_s_run_again_takes_a_dtype_it_takes(tmp_path: Path, m
         "    def __call__(self, name, tensor, cache_attribute):\n"
         "        if tensor.shape[0] != 2:\n"
         "            raise ValueError(f'two channels, not {list(tensor.shape)}')\n"
-        "        return tensor\n"
+        "        return tensor\n\n"
+        "class First(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[:1]\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     manifest, _folds, _per_copy = transform_manifest(
-        _two_groups({"StoredInt:Pairs": {}, "StoredInt:Two": {}}), "Predictor", extension=True
+        _two_groups({"StoredInt:Pairs": {}, "StoredInt:Two": {}, "StoredInt:First": {}}), "Predictor", extension=True
     )
-    assert [step["class"] for step in manifest["reads"][0]["preprocessing"]] == ["StoredInt:Pairs", "StoredInt:Two"]
+    assert [step["class"] for step in manifest["reads"][0]["preprocessing"]] == [
+        "StoredInt:Pairs",
+        "StoredInt:Two",
+        "StoredInt:First",
+    ]
 
 
 @pytest.mark.parametrize(
     ("trim", "copies", "refused"),
-    [(1, 1, True), (0, 1, False), (0, 2, False)],
+    [(1, 1, "off the grid"), (0, 1, None), (0, 2, "hands the model 2 channels of the 1")],
     ids=["trims", "keeps-the-grid", "keeps-the-grid-in-two-channels"],
 )
 def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trim: int, copies: int, refused: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trim: int, copies: int, refused: str | None
 ) -> None:
     # konfai patches every group of a case on the first one's grid: a whole-volume class of the app's own that trims
-    # the second is refused as konfai's own regridding stages are, and one that keeps the grid compiles, whatever
-    # channels it hands on.
+    # the second is refused as konfai's own regridding stages are, one that keeps the grid compiles, and one that hands
+    # on other channels than the group holds is refused, the model's graph taking the group as it holds them.
     (tmp_path / "SecondGrid.py").write_text(
         "from konfai.data.transform import LocalityKind, Transform\n\n"
         "class Trim(Transform):\n"
@@ -1464,7 +1478,7 @@ def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
     monkeypatch.syspath_prepend(str(tmp_path))
     config = _two_groups({"SecondGrid:Trim": {"by": trim, "copies": copies}})
     if refused:
-        with pytest.raises(ConfigError, match="off the grid"):
+        with pytest.raises(ConfigError, match=refused):
             transform_manifest(config, "Predictor", extension=True)
     else:
         assert transform_manifest(config, "Predictor", extension=True)[0]["reads"][0]["preprocessing"][0]["op"] == (

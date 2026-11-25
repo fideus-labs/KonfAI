@@ -2023,6 +2023,12 @@ def _group_chain(
             " model's first input lands on, and konfai patches every group of a case on one grid.",
             _or_konfai("Drop the stage, put the same one on the first input group", _PREDICT),
         )
+    if (handed := _probe_after(rank, lambda: channels)(steps, None)[0]) != channels:
+        raise ConfigError(
+            f"the chain of group '{group_src}' hands the model {handed} channels of the {channels} the group holds,"
+            " and the model's graph takes the group as it holds them.",
+            _or_konfai("Keep the group's channels in its chain", _PREDICT),
+        )
     if clean(group.get("patch_transforms")):
         raise ConfigError(
             f"the group '{group_src}' carries patch_transforms, which the portable runtime runs on the"
@@ -3563,22 +3569,27 @@ def compile_prediction(
 
 def compile_destinations(output: str | Path, extension: str | Path | None) -> tuple[Path, Path | None]:
     """The program a compile writes and the extension it carries, absolute, refused before a graph is written: the
-    program onto nothing or a file of its own (its folder resolved, a link at it refused, not followed), the
-    extension a file named apart from the graphs the export writes beside the program (a file system may tell no
-    case apart)."""
+    program onto nothing or a file of its own (its folder resolved, a link at it refused, not followed), named apart
+    from the graphs the export writes beside it, the extension a file named apart from both (a file system may tell
+    no case apart; by name, a graph's names being known once exported)."""
     from konfai.utils.utils import owned_destination
 
     output = owned_destination(Path(output).absolute().parent.resolve() / Path(output).name)
+    if output.name.lower().endswith(".onnx"):
+        raise ConfigError(
+            f"The program '{output.name}' is named as a graph the export writes beside it.",
+            "Name the program apart from the graphs (prediction.json).",
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     if extension is None:
         return output, None
     extension = Path(extension).resolve()
     if not extension.is_file():
         raise ConfigError(f"The extension '{extension}' is no file.", "Pass the file the app's extension is built to.")
-    if extension.parent == output.parent and extension.name.lower().endswith(".onnx"):
+    if extension.name.lower().endswith(".onnx") or extension.name.lower() == output.name.lower():
         raise ConfigError(
-            f"The extension '{extension.name}' sits beside the program, named as a graph the export writes there.",
-            "Name the extension apart from the graphs, or keep it in another folder.",
+            f"The extension '{extension.name}' is named as a graph or as the program the export writes beside it.",
+            "Name the extension apart from the program and the graphs.",
         )
     if extension.parent != output.parent:  # where it is copied
         owned_destination(output.parent / extension.name)
