@@ -1342,7 +1342,7 @@ def sampled_deformable_class():
                     if draw is not None:
                         draw()
                     if getattr(self.loss_fn, "pools", False):  # the level's sums first: an NCC layer's start
-                        self.loss_fn.pool(self._boxes(tiles(grid, self._box), grid, levels))
+                        self.loss_fn.pool(functools.partial(self._boxes, tiles(grid, self._box), grid, levels))
                     self.loss_fn.latch(self._boxes(tiles(grid, self._box), grid, levels))
                 if self._samples is None:
                     # Not told how many samples an iteration draws, it takes what the device holds: every box, as
@@ -1378,7 +1378,9 @@ def sampled_deformable_class():
                     if draw is not None:
                         draw()
                     if pools:  # the level's sums over the boxes drawn, under this iteration's draw
-                        self.loss_fn.pool(self._boxes([boxes[index] for index in drawn], grid, levels))
+                        self.loss_fn.pool(
+                            functools.partial(self._boxes, [boxes[index] for index in drawn], grid, levels)
+                        )
                     totals: _Information | tuple[float, float] | None = None
                     if information:
                         totals = self._information_weight(

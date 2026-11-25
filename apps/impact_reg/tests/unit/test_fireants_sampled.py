@@ -1131,3 +1131,72 @@ def test_jacobian_boxes_normalise_by_the_level_s_intensities(tmp_path):
         gathered[(slice(None), slice(None), *placed)] = gradient[own]
     assert math.isclose(value, float(expected_value), rel_tol=1e-5)
     assert torch.allclose(gathered, expected, atol=1e-7)
+
+
+class _Averaged(torch.nn.Module):
+    """Two channels with a receptive field of 3 voxels: the input averaged over 3^3 voxels, and its square."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layers: torch.Tensor,
+        stats: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+        direction: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+    ) -> list[torch.Tensor]:
+        y = x[:, :1]
+        return [torch.cat([torch.nn.functional.avg_pool3d(y, 3, 1, 1), y * y], 1)]
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_a_jacobian_ncc_layer_by_boxes_has_the_level_s_value_and_gradient(tmp_path, masked):
+    """Evaluated box by box, each box read with the receptive field's halo and weighed as the stage weighs it, a
+    Jacobian NCC layer has the level's value and gradient: the boxes' sums (``pool``, a second pass over them once the
+    level's intensities are known) give each box the level's NCC and its derivative."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), distance="NCC")
+    loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False, masked=masked)
+    loss._level = 0
+    generator = torch.Generator().manual_seed(3)
+    shape = (20, 24, 28)
+    moved, fixed = (torch.rand((1, 2, *shape), generator=generator) for _ in range(2))
+    for volume, cut in ((moved, 9), (fixed, 13)):
+        volume[:, -1] = 0.0
+        volume[:, -1, :, :cut] = 1.0
+    if not masked:
+        moved, fixed = moved[:, :1], fixed[:, :1]
+    loss.draw()
+    whole = moved.clone().requires_grad_()
+    expected_value = loss(whole, fixed)
+    (expected,) = torch.autograd.grad(expected_value, whole)
+    boxes = []
+    for tile in tiles(shape, 9):
+        low, high, core = box_region(tile, 2, shape)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        boxes.append((low, core, crop, region))
+    loss.pool(lambda: [(moved[crop], fixed[crop], region) for _, _, crop, region in boxes])
+    support = sum(
+        float(((moved[crop][:, -1:] * fixed[crop][:, -1:] >= 0.5) * region).sum()) for *_, crop, region in boxes
+    )
+    gathered = torch.zeros_like(moved)
+    for low, core, crop, _ in boxes:
+        box = moved[crop].clone().requires_grad_()
+        value = loss(box, fixed[crop])
+        # The stage's weight of the box: its support over the level's (masked), its voxels over the level's.
+        weight = (
+            (box[:, -1:] * fixed[crop][:, -1:] >= 0.5).sum() / support
+            if masked
+            else box[0, 0].numel() / whole[0, 0].numel()
+        )
+        if weight == 0:  # a box the masks miss scores nothing, which the stage weighs by 0
+            continue
+        assert math.isclose(float(value), float(expected_value), rel_tol=1e-5)
+        share = value * weight
+        (gradient,) = torch.autograd.grad(share, box)
+        own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
+        gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
+    assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)
