@@ -319,7 +319,8 @@ def test_a_compact_transform_never_outlives_its_field(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The compact transform beside a case's field is that field's: a run whose field fails to publish leaves none of
-    its own beside the earlier field, and a run that publishes another field leaves no earlier transform beside it."""
+    its own beside the earlier field, and a run that publishes another field leaves no earlier transform beside it.
+    A file the runs did not write stays, whatever its name."""
     from impact_reg_konfai.models import intensity
 
     fixed, moving = _pair(tmp_path)
@@ -348,6 +349,8 @@ def test_a_compact_transform_never_outlives_its_field(
 
     run(reg.ImpactRegKonfAIApp(), out_of_core="sampled", max_voxels=100)
     assert compact.exists()
+    own = out / "P000" / "manual_Transform.h5"
+    sitk.WriteTransform(sitk.TranslationTransform(3), str(own))
     publish = reg._copy_output
 
     def fails(*args, **kwargs):
@@ -369,7 +372,7 @@ def test_a_compact_transform_never_outlives_its_field(
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = whole  # type: ignore[method-assign]
     run(app)
-    assert not compact.exists() and (out / "P000" / "DVF.mha").exists()
+    assert not compact.exists() and (out / "P000" / "DVF.mha").exists() and own.exists()
 
 
 @pytest.mark.parametrize("option", [{"seed": 3}, {"output_format": ["mha"]}])

@@ -870,6 +870,15 @@ def _version(package: str) -> str | None:
         return None
 
 
+def _recorded_compacts(output: Path) -> dict[str, list[str]]:
+    """The compact transforms the last ``register`` into ``output`` published beside each case's field, by name, as its
+    ``register.json`` records them; none without a record."""
+    try:
+        return json.loads((output / "register.json").read_text(encoding="utf-8")).get("compacts", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def _record(
     output: Path,
     run: dict,
@@ -956,8 +965,6 @@ def _run_transform(
 #: The engines whose presets run by the sampled strategy, as the module of ``impact_reg_konfai.models`` a preset's
 #: classpath names: the sampled route drives those engines themselves, so a class of another package is refused.
 _SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
-#: The compact transforms the sampled routes keep beside the dense field, ``<preset>_<name>`` in a case's output.
-_COMPACT_NAMES = ("Transform.h5", "ControlGrid.mha")
 
 
 @dataclass
@@ -1442,16 +1449,18 @@ class ImpactRegKonfAIApp:
                     "the moved image is derived per case and needs the two to line up."
                 )
 
+            # The compact transforms the sampled routes keep beside the dense field (``<preset>_<name>``), by case.
+            stale, compacts = _recorded_compacts(output), {}
             for case in cases:
                 # konfai-apps already named the cases; reusing its names keeps the two layers' notion of
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
-                # A compact transform stands beside the field it was found with: an earlier run's goes before the field
-                # is replaced, this run's once it stands, so that no failure leaves a field beside another's transform.
-                for name in _COMPACT_NAMES:
-                    for stale in case_out.glob(f"*_{name}"):
-                        stale.unlink()
+                # A compact transform stands beside the field it was found with: those an earlier run recorded go
+                # before the field is replaced, this run's once it stands, so that no failure leaves a field beside
+                # another's transform.
+                for name in stale.get(case, ()):
+                    (case_out / Path(name).name).unlink(missing_ok=True)
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
@@ -1470,7 +1479,8 @@ class ImpactRegKonfAIApp:
                 _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
                 for preset in presets:
                     for compact in self._compact.get(preset, {}).get(case, ()):
-                        _publish_output(compact, case_out / f"{_workspace(preset)}_{compact.name}", move=True)
+                        dest = _publish_output(compact, case_out / f"{_workspace(preset)}_{compact.name}", move=True)
+                        compacts.setdefault(case, []).append(dest.name)
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1521,6 +1531,7 @@ class ImpactRegKonfAIApp:
             "applied": self._applied,
             "plans": self._plans,
             "ran": self._ran,
+            "compacts": compacts,
             "tta": tta,
             "out_of_core": out_of_core,
             "device": f"cuda:{','.join(map(str, gpu))}" if gpu else f"cpu ({cpu or 1} worker(s))",
