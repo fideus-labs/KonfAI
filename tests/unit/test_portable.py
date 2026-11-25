@@ -480,10 +480,26 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
     [
         ({"reference": {"entry": "c", "datasets": [{"root": "./References", "format": "mha", "group": "REF"}]}}, True),
         ({"spacing": [1.5, 1.5], "field_group": "FIELD"}, True),
+        (
+            {
+                "spacing": [1.5, 1.5],
+                "transforms": {
+                    "groups": [{"group": "AFFINE", "invert": False}],
+                    "datasets": [{"root": "./Transforms", "format": "h5"}],
+                },
+            },
+            True,
+        ),
         ({"spacing": [1.5, 1.5]}, False),
         ({"shape": [6, 6]}, False),
     ],
-    ids=["by-a-reference", "by-a-map", "by-a-spacing-on-the-extent", "by-a-shape-on-the-extent"],
+    ids=[
+        "by-a-reference",
+        "by-a-map",
+        "by-stored-transforms",
+        "by-a-spacing-on-the-extent",
+        "by-a-shape-on-the-extent",
+    ],
 )
 def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict, filled: bool) -> None:
     # konfai's inverse fills what it reads outside what it holds with the fill its stage states (its inverse_fill):
@@ -2867,6 +2883,8 @@ def test_a_class_casting_floats_to_integers_is_no_fold_of_a_graph(
     # Past their range backends cast floats to integers apart (one wraps, one saturates, one refuses), where the
     # program's own steps run torch's rule: such a class runs from the app's extension; a cast between integers, or to
     # a float, still folds.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
     from konfai.portable import compile_pipeline
 
     (tmp_path / f"{module}.py").write_text(

@@ -2454,7 +2454,7 @@ def hoist_ensemble_tail(
                     _or_konfai("Undo that Resample in each model (no ensemble), or use grid: konfai", _PREDICT),
                 )
             placed = {key: forward[key] for key in ("align", "spacing") if "align" in forward and key in forward}
-            off_extent = {"align", "field_group", "stored_transforms"}  # what places the grid elsewhere
+            off_extent = {"align", "field_group", "transforms"}  # what places the grid elsewhere
             on_extent = bool({"spacing", "shape"} & forward.keys()) and not off_extent & forward.keys()
             if "fill" in step and not on_extent:
                 placed["fill"] = step["fill"]
