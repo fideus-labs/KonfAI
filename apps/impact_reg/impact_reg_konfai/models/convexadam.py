@@ -598,11 +598,7 @@ class ConvexAdamEngine:
         def halo_of(stage: str) -> int:
             return max([model.receptive_field for model in self._feature_models[stage]], default=0)
 
-        if not hasattr(_fine_registration_type(DIM).New(), "SetRegionSize"):
-            raise MeasureError(
-                "The fine stage by regions needs itk-impact 0.2 or later.",
-                'Install it beside the torch its wheels are built against: pip install "itk-impact>=0.2"',
-            )
+        require_regions()
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
         itk.MultiThreaderBase.SetGlobalDefaultNumberOfThreads(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
         readers = []  # ITK images hold their producer weakly: the readers live as long as the filter reads them
@@ -920,6 +916,15 @@ class RegionRefinement:
     resident: bool
     #: The coarse stage's seconds and bytes read, when the engine has one (it runs by regions before the fine one).
     coarse: tuple[float, int] | None = None
+
+
+def require_regions() -> None:
+    """Refuse an itk-impact whose fine stage cannot run by regions (``SetRegionSize``, 0.2 and later)."""
+    if not hasattr(_fine_registration_type(DIM).New(), "SetRegionSize"):
+        raise MeasureError(
+            "The fine stage by regions needs itk-impact 0.2 or later.",
+            'Install it beside the torch its wheels are built against: pip install "itk-impact>=0.2"',
+        )
 
 
 def region_geometry(size_xyz: list[int], grid_shrink: int, region_size: int) -> dict:

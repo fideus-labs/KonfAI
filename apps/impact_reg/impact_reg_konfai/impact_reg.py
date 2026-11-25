@@ -302,7 +302,7 @@ def _scopes(override: str, presets: list[str]) -> tuple[str | None, str | None, 
 
 
 def _preset_overrides(
-    presets: list[str], overrides: list[str] | None, quiet: bool = False
+    presets: list[str], overrides: list[str] | None, quiet: bool = False, sampled: bool = False
 ) -> dict[str, dict[str, list[str]]]:
     """Each preset's share of the ``--set`` overrides, per pass, checked against the configs they run before anything
     runs.
@@ -323,7 +323,8 @@ def _preset_overrides(
 
     Each pass's share is applied to a copy of its config by konfai-apps' own resolver, so a name, a value or a range
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
-    nothing cached) leaves its share to that resolver, in the preset's own process.
+    nothing cached) leaves its share to that resolver, in the preset's own process. With ``sampled``, the global share
+    is checked against ``Prediction.yml``, which every case of a sampled run reads.
     """
     shares: dict[str, list[tuple[str | None, str]]] = {
         preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
@@ -337,7 +338,8 @@ def _preset_overrides(
         if not share:
             continue
         tiling = _manifest(preset).get("tiling") or {}
-        files = {"global": tiling.get("global") or "Prediction.yml", "tile": tiling.get("tile")}
+        files = {"global": "Prediction.yml" if sampled else tiling.get("global") or "Prediction.yml"}
+        files["tile"] = tiling.get("tile")
         configs = {}
         for stage, filename in files.items():
             try:
@@ -745,17 +747,22 @@ def _work_dir(tmp_dir: Path | None, output: Path, prefix: str) -> Path:
         return Path(tempfile.mkdtemp(prefix=f".{prefix}", dir=output))
 
 
-def _check_space(work: Path, headers: list[dict[str, _Header]], presets: int, sampled: bool) -> None:
+def _check_space(work: Path, headers: list[dict[str, _Header]], presets: list[str], sampled: bool) -> None:
     """Warn when the disk under ``work`` holds less than the run may stage there: 24 bytes a fixed voxel for each
     preset's field and for their mean, and 40 more for the moved image and a tiled pass, whose composition holds the
     tiles' field, the global field on the native grid and their sum at once. With ``sampled``, the twins too
     (``_native_twins``): a byte a voxel of every case's masks, on their image's grid, and four a voxel of the
-    largest case's images."""
-    need = sum(math.prod(case["Fixed"][0][-3:]) for case in headers) * (24 * (presets + (presets > 1)) + 40)
+    largest case's images; and for FireANTs the warps of its deformable stage, where they live in files: forward and
+    reverse, each with its next step and its two Adam moments (96 bytes a fixed voxel), and an eighth more while a
+    scale's generation stands beside the next one's."""
+    count = len(presets)
+    need = sum(math.prod(case["Fixed"][0][-3:]) for case in headers) * (24 * (count + (count > 1)) + 40)
     if sampled:
         sizes = [{group: math.prod(case[group.removesuffix("Mask")][0][-3:]) for group in case} for case in headers]
         need += sum(size for case in sizes for group, size in case.items() if group.endswith("Mask"))
         need += max(4 * (case["Fixed"] + case["Moving"]) for case in sizes)
+        if any(split_preset(preset)[0] == "FireANTs" for preset in presets):
+            need += max(108 * case["Fixed"] for case in sizes)
     free = shutil.disk_usage(work).free
     if free < need:
         print(
@@ -1276,7 +1283,7 @@ class ImpactRegKonfAIApp:
         _check_presets(presets)
         if out_of_core not in ("auto", "sampled"):
             raise KonfAIError("ImpactReg", f"--out-of-core {out_of_core} is not a mode.", "Use auto or sampled.")
-        overrides = _preset_overrides(presets, config_overrides, quiet)
+        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core == "sampled")
         self._run_args = ["--seed", str(seed)] if seed is not None else []
         self._moved_format = None
         for spec in output_format or []:
@@ -1340,7 +1347,7 @@ class ImpactRegKonfAIApp:
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
-            _check_space(work, headers, len(presets), out_of_core == "sampled")
+            _check_space(work, headers, presets, out_of_core == "sampled")
             on_grid = None
             fields_by_preset = {}
             for index, preset in enumerate(presets, 1):
@@ -1457,16 +1464,18 @@ class ImpactRegKonfAIApp:
                     "the moved image is derived per case and needs the two to line up."
                 )
 
-            # The compact transforms the sampled routes keep beside the dense field (``<preset>_<name>``), by case.
-            stale, compacts = _recorded_compacts(output), {}
+            # The compact transforms the sampled routes keep beside the dense field (``<preset>_<name>``), by case:
+            # the record of a case this run leaves alone stands.
+            stale = _recorded_compacts(output)
+            compacts = {case: names for case, names in stale.items() if case not in cases}
             for case in cases:
                 # konfai-apps already named the cases; reusing its names keeps the two layers' notion of
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
                 # A compact transform stands beside the field it was found with: those an earlier run recorded go
-                # before the field is replaced, this run's once it stands, so that no failure leaves a field beside
-                # another's transform.
+                # before the field is replaced, this run's once every output stands (below), so that no failure leaves
+                # a field beside another's transform, nor a compact the record does not hold.
                 for name in stale.get(case, ()):
                     (case_out / Path(name).name).unlink(missing_ok=True)
                 members = [fields_by_preset[preset][case] for preset in presets]
@@ -1485,10 +1494,6 @@ class ImpactRegKonfAIApp:
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                 # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
                 _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
-                for preset in presets:
-                    for compact in self._compact.get(preset, {}).get(case, ()):
-                        dest = _publish_output(compact, case_out / f"{_workspace(preset)}_{compact.name}", move=True)
-                        compacts.setdefault(case, []).append(dest.name)
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1527,6 +1532,11 @@ class ImpactRegKonfAIApp:
                         file=sys.stderr,
                         flush=True,
                     )
+            for case in cases:
+                for preset in presets:
+                    for compact in self._compact.get(preset, {}).get(case, ()):
+                        dest = output / case / f"{_workspace(preset)}_{compact.name}"
+                        compacts.setdefault(case, []).append(_publish_output(compact, dest, move=True).name)
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1787,14 +1797,15 @@ class ImpactRegKonfAIApp:
         return run.output_group, fields
 
     def _native_twins(
-        self, run: "_SampledRun", *, chunked: bool, clipped: bool
+        self, run: "_SampledRun", *, chunked: bool, clipped: bool, positive: bool = False
     ) -> Iterator[tuple[int, str, dict[str, Path], list[Path | None], int]]:
         """The native pair of each case as twins under ``<work>/<preset>_native/<case>``, from one read of each input
         by bands (``native.write_twin``): an uncompressed MetaImage per image and mask, which an engine memory-maps,
         or with ``chunked`` an HDF5 image in ITK's layout with chunks, which ITK's readers stream by boxes. Their
         geometry is measured in the fixed image's finest voxel, as ``EngineRegistration`` measures a pair registered
         whole. ``clipped`` winsorises the MetaImage twins (KonfAI's quantiles, by bounded passes). A mask goes onto
-        its image's grid first (KonfAI TRANSFORM, streamed), and is written binary.
+        its image's grid first (KonfAI TRANSFORM, streamed), and is written binary: its non-zero voxels, or with
+        ``positive`` its positive ones, as the engine reads a mask on the whole pair.
 
         The masks of every case come first, so that an empty one is refused before any image is written
         (``_partial_masks``); then one case at a time, its images: each case is handed over as its index, its ID, its
@@ -1845,6 +1856,7 @@ class ImpactRegKonfAIApp:
                 dtype="uint8" if mask else "float32",
                 clip=clip,
                 voxel=min(run.headers[index]["Fixed"][1]),
+                positive=positive,
             )
 
         masks = {}
@@ -1866,13 +1878,14 @@ class ImpactRegKonfAIApp:
         they do not they live in files of the workspace and every iteration steps every cell, by bricks the
         device holds: the same iterations. The dense field on the fixed grid is written by regions; the field on
         the control grid is kept beside it."""
-        from .models.convexadam import LevelSpec, RegistrationNet, refuse_linear_keys, region_geometry
+        from .models.convexadam import LevelSpec, RegistrationNet, refuse_linear_keys, region_geometry, require_regions
         from .models.intensity import engine_of
 
         refuse_linear_keys(LocalAppRepository._model_param_block(run.config)[1] or {})
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
         _require_lps(run)  # ConvexAdam reads features (MIND, IMPACT's models), which a run on the whole pair reorients
         engine.check_gradients()
+        require_regions()  # before any twin is written
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
         visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
         # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.
@@ -1986,11 +1999,13 @@ class ImpactRegKonfAIApp:
         from .models.intensity import engine_of
         from .native import mapped_centre, mmap_image, shift_origin, write_field
 
-        # The engine looks its parameter maps up beside the config a KonfAI prediction stages; here they are the
-        # preset's own files.
         block = LocalAppRepository._model_param_block(run.config)[1]
+        # The engine looks its parameter maps up beside the config a KonfAI prediction stages; here they are the
+        # preset's own files, or a map of one's own given by an absolute path, as the engine honours it.
         block["parameter_maps"] = [
-            str(app_file(IMPACT_REG_KONFAI_REPO, split_preset(run.preset)[0], Path(name).name))
+            name
+            if Path(name).is_absolute() and Path(name).is_file()
+            else str(app_file(IMPACT_REG_KONFAI_REPO, split_preset(run.preset)[0], Path(name).name))
             for name in block["parameter_maps"]
         ]
         if run.samples is not None:  # the points every map draws, whatever the image holds
@@ -2073,7 +2088,8 @@ class ImpactRegKonfAIApp:
         for index in range(len(run.cases)):
             engine.check_sampled(*(run.headers[index][group][0][-3:] for group in ("Fixed", "Moving")))
         fields: dict[str, Path] = {}
-        for index, case, raw, masks, _ in self._native_twins(run, chunked=False, clipped=False):
+        # FireANTs keeps a mask's positive voxels (``fireants.py``), the other engines its non-zero ones.
+        for index, case, raw, masks, _ in self._native_twins(run, chunked=False, clipped=False, positive=True):
             out = run.work / _workspace(f"{run.preset}_fields") / case
             out.mkdir(parents=True, exist_ok=True)
             fields[case] = out / f"{run.output_group}.mha"

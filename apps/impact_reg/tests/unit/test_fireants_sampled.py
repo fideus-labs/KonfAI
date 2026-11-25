@@ -485,10 +485,11 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
         tmp_path,
         block=8,
     )
-    for reference, source in zip(whole, sources, strict=True):
-        blocks = torch.from_numpy(np.asarray(source.array))[None]
-        signs = torch.sign((reference * blocks).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)  # a component's sign is free
-        assert torch.allclose(blocks * signs, reference, atol=1e-5)
+    blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
+    # A component's sign is free, and the same for both images: the fixed one's basis projects them.
+    signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)
+    for reference, found in zip(whole, blocks, strict=True):
+        assert torch.allclose(found * signs, reference, atol=1e-5)
 
 
 def test_a_rescaled_source_and_a_mask_of_ones_read_by_boxes():

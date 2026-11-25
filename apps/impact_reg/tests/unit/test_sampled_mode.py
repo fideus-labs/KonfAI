@@ -326,6 +326,25 @@ def test_sampled_convexadam_probes_its_jacobian_networks_before_the_twins(
         app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", max_voxels=100)
 
 
+def test_a_mask_twin_keeps_what_its_engine_reads_of_the_mask(tmp_path: Path) -> None:
+    """FireANTs reads a mask's positive voxels, the other engines its non-zero ones: so does each one's twin."""
+    from impact_reg_konfai.native import write_twin
+
+    mask = np.zeros((4, 5, 6), np.float32)
+    mask[1], mask[2] = -1.0, 1.0
+    sitk.WriteImage(sitk.GetImageFromArray(mask), str(tmp_path / "Mask.mha"))
+    root, _, backend = reg._stage_group(tmp_path / "stage", "FixedMask", {"P000": tmp_path / "Mask.mha"}).rpartition(
+        ":"
+    )
+
+    def twin(positive: bool) -> np.ndarray:
+        target = tmp_path / f"{positive}.mha"
+        write_twin(Dataset(root, backend), "FixedMask", "P000", target, dtype="uint8", positive=positive)
+        return sitk.GetArrayFromImage(sitk.ReadImage(str(target)))
+
+    assert np.array_equal(twin(False), mask != 0) and np.array_equal(twin(True), mask > 0)
+
+
 def test_a_compact_transform_never_outlives_its_field(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

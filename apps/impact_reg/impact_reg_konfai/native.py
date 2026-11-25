@@ -70,12 +70,13 @@ def write_twin(
     chunk: int = CHUNK,
     band: int | None = None,
     voxel: float = 1.0,
+    positive: bool = False,
 ) -> Path:
     """The entry ``(group, name)`` written to ``target``: an HDF5 image in ITK's layout, its voxels chunked
     ``chunk``^3, where it ends in ``.h5``, an uncompressed MetaImage otherwise; from one read of the entry by bands
     through the dataset's region reads (``band`` planes at most, rows of one plane where a plane alone is larger than
     a band). ``clip`` winsorises it, as the whole-image run winsorises the images of the engine that reads it;
-    ``dtype`` "uint8" makes a mask (any non-zero voxel on). The geometry is measured in ``voxel`` (the fixed image's
+    ``dtype`` "uint8" makes a mask (any non-zero voxel on, or with ``positive`` the positive ones). The geometry is measured in ``voxel`` (the fixed image's
     finest, as the engines measure a pair). The headers are ITK's own, written by it for a one-voxel image of the same
     geometry and voxel type."""
     shape, attributes = dataset.get_infos(group, name)
@@ -100,7 +101,10 @@ def write_twin(
         for depth, rows in _slabs(extents, 4, band or chunk):  # read as float32
             slices = (slice(0, 1), depth, rows, *(slice(None) for _ in extents[2:]))
             values = np.asarray(dataset.read_data_slice(group, name, slices)[0][0], dtype=np.float32)
-            values = (values != 0).astype(np.uint8) if dtype == "uint8" else values.astype(dtype, copy=False)
+            if dtype == "uint8":
+                values = ((values > 0) if positive else (values != 0)).astype(np.uint8)
+            else:
+                values = values.astype(dtype, copy=False)
             if clip is not None:
                 values = np.clip(values, clip[0], clip[1])
             if pixels is None:
