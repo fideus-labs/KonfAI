@@ -1163,6 +1163,7 @@ def sampled_deformable_class():
             over it, and ones on the box's own voxels."""
             for tile in boxes:
                 low, high, core = self._region(tile, grid, self._halo)
+                self._place(low, high, grid)
                 warps = {name: warp.read("warp", low, high) for name, warp in self._warps.items()}
                 identity = _box_coordinates(low, high, grid, self.device, self.dtype)
                 with torch.no_grad():
@@ -1170,6 +1171,12 @@ def sampled_deformable_class():
                 region = torch.zeros((1, 1, *moved.shape[2:]), device=moved.device, dtype=moved.dtype)
                 region[(slice(None), slice(None), *core)] = 1
                 yield moved, target, region
+
+        def _place(self, low, high, grid) -> None:
+            """Tell a loss that reads a level on its own grid (an IMPACT model with a voxel_size) where the next box lies."""
+            place = getattr(self.loss_fn, "place", None)
+            if place is not None:
+                place(low, high, grid)
 
         def _support(self, moved: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
             """The voxels a masked loss averages over, weighed as it weighs them: FireANTs' metrics take the product
@@ -1224,6 +1231,7 @@ def sampled_deformable_class():
             """The loss of one box and its smoothed gradient with respect to each warp, over the box. ``totals``: a
             masked loss's support and mean over the level (``_level_totals``)."""
             low, high, core = self._region(tile, grid, self._halo)
+            self._place(low, high, grid)
             warps = [warp.read("warp", low, high).requires_grad_() for warp in self._warps.values()]
             identity = _box_coordinates(low, high, grid, self.device, self.dtype)
             moved, target = self._warped(low, high, identity, levels, dict(zip(self._warps, warps, strict=True)))

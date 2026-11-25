@@ -1200,3 +1200,63 @@ def test_a_jacobian_ncc_layer_by_boxes_has_the_level_s_value_and_gradient(tmp_pa
         own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
         gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
     assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)
+
+
+@pytest.mark.parametrize("distance", ["L2", "NCC"])
+@pytest.mark.parametrize("masked", [False, True])
+def test_a_jacobian_model_at_a_voxel_size_by_boxes_has_the_level_s_gradient(tmp_path, masked, distance):
+    """A Jacobian model with a voxel_size reads the level on its own grid: a box takes the cells of that grid it
+    holds (``place``), normalised by the level's intensities there, its mean weighed by its cells' share of the
+    level's, and the boxes' gradients are the whole level's."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), distance=distance, voxel_size=[1.4, 1.3, 1.7])
+    loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False, masked=masked)
+    loss._level, loss.cores[0].extent = 0, [28.0, 24.0, 20.0]  # one voxel a mm along L, P, S
+    generator = torch.Generator().manual_seed(4)
+    shape = (20, 24, 28)
+    moved, fixed = (torch.rand((1, 2, *shape), generator=generator) for _ in range(2))
+    for volume, cut in ((moved, 9), (fixed, 13)):
+        volume[:, -1] = 0.0
+        volume[:, -1, :, :cut] = 1.0
+    if not masked:
+        moved, fixed = moved[:, :1], fixed[:, :1]
+    loss.draw()
+    whole = moved.clone().requires_grad_()
+    (expected,) = torch.autograd.grad(loss(whole, fixed), whole)
+    boxes = []
+    for tile in tiles(shape, 9):
+        low, high, core = box_region(tile, 5, shape)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        boxes.append((low, high, core, crop, region))
+
+    def pieces():
+        for low, high, _, crop, region in boxes:
+            loss.place(low, high, shape)
+            yield moved[crop], fixed[crop], region
+
+    loss.pool(pieces)
+    support = sum(
+        float(((moved[crop][:, -1:] * fixed[crop][:, -1:] >= 0.5) * region).sum()) for *_, crop, region in boxes
+    )
+    gathered = torch.zeros_like(moved)
+    for low, high, core, crop, _ in boxes:
+        loss.place(low, high, shape)
+        box = moved[crop].clone().requires_grad_()
+        value = loss(box, fixed[crop])
+        # The stage's weight of the box: its support over the level's (masked), its voxels over the level's.
+        weight = (
+            (box[:, -1:] * fixed[crop][:, -1:] >= 0.5).sum() / support
+            if masked
+            else box[0, 0].numel() / whole[0, 0].numel()
+        )
+        if weight == 0:
+            continue
+        (gradient,) = torch.autograd.grad(value * weight, box)
+        own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
+        gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
+    assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)

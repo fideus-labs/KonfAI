@@ -68,7 +68,7 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from functools import reduce
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -180,6 +180,41 @@ def _on_model_grid(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """The pair resampled on a model's grid (``resampled``), its mask by nearest neighbour."""
     return resampled(moved, size), resampled(fixed, size), None if mask is None else resampled(mask, size, "nearest")
+
+
+def _model_cells(low: int, high: int, voxels: int, cells: int) -> tuple[int, int]:
+    """The cells ``[first, last)`` of a model grid of ``cells`` over a level axis of ``voxels`` whose positions
+    (``resampled``: cell j at the level's continuous index j * voxels / cells) a box ``[low, high)`` holds with both
+    voxels it interpolates between; at the level's end, every cell left, which reads zeros past it as the whole does."""
+    first = -(-low * cells // voxels)
+    last = cells if high == voxels else ((high - 1) * cells) // voxels + 1
+    return first, max(first, last)
+
+
+def _box_on_model_grid(
+    moved: torch.Tensor,
+    fixed: torch.Tensor,
+    mask: torch.Tensor | None,
+    place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+    size: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """A box of the pair (``place``: its ``low`` and ``high`` in a level of ``grid`` voxels) on the cells of the
+    level's model grid of ``size`` it holds (``_model_cells``), interpolated as ``resampled`` interpolates the whole
+    level: linearly, its mask at the nearest voxel, zero past the level's end."""
+    low, high, grid = place
+    axes = []
+    for a, b, voxels, cells in zip(low, high, grid, size, strict=True):
+        first, last = _model_cells(a, b, voxels, cells)
+        position = torch.arange(first, last, dtype=torch.float64) * voxels / cells - a
+        axes.append(2 * position / max(b - a - 1, 1) - 1)
+    coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij")[::-1], dim=-1)[None]
+
+    def sample(tensor: torch.Tensor, mode: str) -> torch.Tensor:
+        source = tensor if tensor.is_floating_point() else tensor.float()
+        grid_ = coordinates.to(source.device, source.dtype).expand(source.shape[0], *coordinates.shape[1:])
+        return torch.nn.functional.grid_sample(source, grid_, mode=mode, padding_mode="zeros", align_corners=True)
+
+    return sample(moved, "bilinear"), sample(fixed, "bilinear"), None if mask is None else sample(mask, "nearest")
 
 
 def _require_fireants() -> None:
@@ -347,17 +382,19 @@ class _ImpactCore(torch.nn.Module):
         kernel: int,
         statistics: tuple[Attribute, Attribute] | None = None,
         pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
     ) -> torch.Tensor:
         """Each kept layer's distance over the whole image, or over tiles once the whole image has run out of memory.
         ``statistics`` are the moved and fixed images' intensity statistics when the two tensors are pieces of them
-        (``ImpactFeatureLoss.pool``), their own otherwise; ``pooled``, the NCC layers whose level sums it gave.
+        (``ImpactFeatureLoss.pool``), their own otherwise; ``pooled``, the NCC layers whose level sums it gave;
+        ``place``, where a piece lies in its level (``_prepared``).
 
         A level that runs out is scored again in tiles half as wide, and in tiles half as wide again if it
         still does not fit; the tile is kept for that level, so the retry happens once per registration.
         This keeps the registration one global registration, where cutting the volume would estimate its
         rigid and affine stages patch by patch.
         """
-        moved, fixed, mask = self._prepared(moved, fixed, mask, seed)
+        moved, fixed, mask = self._prepared(moved, fixed, mask, seed, place)
         shape = self._last_shape = tuple(moved.shape[2:])
         statistics = statistics or (_statistics(moved)[0], _statistics(fixed)[0])
 
@@ -380,10 +417,11 @@ class _ImpactCore(torch.nn.Module):
         statistics: tuple[Attribute, Attribute],
         terms: list[tuple[str, int]],
         seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
     ) -> dict[int, torch.Tensor]:
         """Each NCC layer's ``ncc_sums`` over one piece, the voxels ``weight`` keeps on its grid: what the level's sums
         add up from it (``ImpactFeatureLoss.pool``). The network runs on the whole piece, as ``distances`` does."""
-        moved, fixed, weight = self._prepared(moved, fixed, weight, seed)
+        moved, fixed, weight = self._prepared(moved, fixed, weight, seed, place)
         network = self.model.network(moved.device)
         moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
         with torch.no_grad(), no_texpr_fuser():
@@ -401,27 +439,43 @@ class _ImpactCore(torch.nn.Module):
             sums[index] = ncc_sums(moved_features, fixed_features, layer_weight).cpu()
         return sums
 
+    def model_size(self, level: tuple[int, ...], seed: int) -> tuple[int, ...] | None:
+        """The grid a model with a voxel_size reads a level of ``level`` voxels on (None without one): the level's
+        extent at its voxel_size, a network of one dimension fewer keeping the level's voxels along the axis it sweeps."""
+        voxel_size = self.model.voxel_size
+        if voxel_size is None:
+            return None
+        if self.dimension == DIM:
+            return grid_size(self.extent, voxel_size, level)
+        order = swept_order(seed)
+        # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
+        sides = list(reversed(self.extent)) if self.extent is not None else [float(n) for n in level]
+        size = [0, 0, 0]
+        size[order[2] - 2] = level[order[2] - 2]
+        for axis, step in zip(order[3:], voxel_size, strict=True):
+            size[axis - 2] = max(1, int(sides[axis - 2] / step + 0.5))
+        return tuple(size)
+
     def _prepared(
-        self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        mask: torch.Tensor | None,
+        seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """The two images and the mask as the network reads them: on its grid at its voxel_size, and for a network
-        of one dimension fewer, with the axis it sweeps (drawn at each evaluation, ``swept_order``) first."""
-        voxel_size = self.model.voxel_size
-        if voxel_size is not None and self.dimension == DIM:
-            moved, fixed, mask = _on_model_grid(
-                moved, fixed, mask, grid_size(self.extent, voxel_size, tuple(moved.shape[2:]))
-            )
+        of one dimension fewer, with the axis it sweeps (drawn at each evaluation, ``swept_order``) first. ``place``
+        (a box's ``low`` and ``high`` in a level of ``grid`` voxels) has a box take the cells of the level's model grid
+        that fall in it, as the whole level's resampling places them."""
+        size = self.model_size(place[2] if place is not None else tuple(moved.shape[2:]), seed)
+        if size is not None:
+            if place is None:
+                moved, fixed, mask = _on_model_grid(moved, fixed, mask, size)
+            else:
+                moved, fixed, mask = _box_on_model_grid(moved, fixed, mask, place, size)
         if self.dimension < DIM:
-            # Swept along an axis drawn at each evaluation (``swept_order``).
             order = swept_order(seed)
-            if voxel_size is not None:
-                # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
-                sides = list(reversed(self.extent)) if self.extent is not None else [float(n) for n in moved.shape[2:]]
-                size = [0, 0, 0]
-                size[order[2] - 2] = moved.shape[order[2]]
-                for axis, step in zip(order[3:], voxel_size, strict=True):
-                    size[axis - 2] = max(1, int(sides[axis - 2] / step + 0.5))
-                moved, fixed, mask = _on_model_grid(moved, fixed, mask, tuple(size))
             moved, fixed, mask = (
                 moved.permute(order),
                 fixed.permute(order),
@@ -547,7 +601,10 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._factors: list[float] | None = None  # each layer's normalization at this level
         self._draw: int | None = None  # the draw every piece of an iteration takes (``draw``)
         self._pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None  # NCC layers' level sums (``pool``)
-        self._statistics: tuple[Attribute, Attribute] | None = None  # Jacobian: the level's intensities (``pool``)
+        # Jacobian: each model's intensities over the level, the cells it weighs, and where a piece lies (``pool``)
+        self._statistics: dict[int, tuple[Attribute, Attribute]] = {}
+        self._cells: dict[int, float] = {}
+        self._place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
         # Jacobian: each model's NCC layers' derivative and value from the level's sums, and the level's weight
         self._layer_sums: dict[int, dict[int, tuple[torch.Tensor, float]]] = {}
         self._level_weight = 0.0
@@ -559,8 +616,8 @@ class ImpactFeatureLoss(torch.nn.Module):
     def reset(self) -> None:
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
-        self._level, self._factors, self._draw, self._pooled, self._statistics = -1, None, None, None, None
-        self._layer_sums = {}
+        self._level, self._factors, self._draw, self._pooled, self._place = -1, None, None, None, None
+        self._statistics, self._cells, self._layer_sums = {}, {}, {}
         self._generator.manual_seed(self._seed)
 
     def draw(self) -> None:
@@ -570,8 +627,8 @@ class ImpactFeatureLoss(torch.nn.Module):
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
-        self._level, self._factors, self._pooled, self._statistics = self._level + 1, None, None, None
-        self._layer_sums = {}
+        self._level, self._factors, self._pooled = self._level + 1, None, None
+        self._statistics, self._cells, self._layer_sums = {}, {}, {}
 
     def start_at(self, level: int) -> None:
         """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
@@ -712,55 +769,86 @@ class ImpactFeatureLoss(torch.nn.Module):
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         return any(name == "NCC" for index in level for name, _ in self._terms(index))
 
+    def place(self, low: Sequence[int], high: Sequence[int], grid: Sequence[int]) -> None:
+        """Where the next piece lies: ``[low, high)`` of a level of ``grid`` voxels (a registration by boxes says so
+        before each), for a model that reads the level on its own grid (``_ImpactCore._prepared``)."""
+        self._place = (tuple(low), tuple(high), tuple(grid))
+
     def pool(
         self,
-        pieces: "Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | Callable[[], Iterable[tuple]]",
+        pieces: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | Callable[[], Iterable[tuple]],
     ) -> None:
-        """Each NCC layer's sums over the voxels the pieces own (each a moved and a fixed tensor read with its halo,
-        and ones on its own voxels), under this iteration's draw: the level's NCC, the voxels it counts and its
-        derivative with respect to the sums, which give every piece's evaluation the level's value and gradient."""
+        """The level's sums over the voxels the pieces own (each a moved and a fixed tensor read with its halo, and
+        ones on its own voxels), under this iteration's draw. Static mode: each NCC layer's, its NCC, the voxels it
+        counts and its derivative with respect to the sums, which give every piece's evaluation the level's value and
+        gradient. Jacobian mode: the intensity statistics each network normalises by, then its NCC layers'."""
         if self._draw is None:
             self.draw()
         assert self._draw is not None
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         read = pieces if callable(pieces) else (lambda: pieces)  # a callable reads them again for a second pass
+        self._pooled = {}
+        if self._mode == "Jacobian":
+            self._pool_intensities(read, level)
+            self._pool_layers(read, level)
+            return
         totals: dict[int, torch.Tensor] = {}
-        intensities = {"moved": _Intensities(), "fixed": _Intensities()}
         with torch.no_grad():
             for moved, fixed, region in read():
                 mask = region
                 if self._masked:
                     mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
                     moved, fixed = moved[:, :-1], fixed[:, :-1]
-                if self._mode == "Jacobian":
-                    intensities["moved"].add(moved, region)
-                    intensities["fixed"].add(fixed, region)
-                    continue
                 for layer, (name, moved_layer, fixed_layer) in enumerate(
                     self._static_layers(level, moved, fixed, self._draw)
                 ):
                     if name == "NCC":
                         piece = ncc_sums(moved_layer, fixed_layer, mask).cpu()
                         totals[layer] = piece if layer not in totals else totals[layer] + piece
-        counted = intensities["moved"].count > 0
-        self._statistics = (intensities["moved"].attribute(), intensities["fixed"].attribute()) if counted else None
-        if self._mode == "Jacobian":
-            self._pool_layers(read, level)
-        self._pooled = {}
         for layer, total in totals.items():
             total.requires_grad_()
             value = ncc_of_sums(total)
             (derivative,) = torch.autograd.grad(value, total)
             self._pooled[layer] = (derivative, float(total[0, 0]), float(value))
 
+    def _pool_intensities(self, read: Callable[[], Iterable[tuple]], level: list[int]) -> None:
+        """Jacobian mode: the intensity statistics of the warped images as each network reads them, over the voxels
+        the pieces own (on its grid, for a model with a voxel_size), and the cells of that grid the level weighs
+        (those both masks keep, when masked): what the whole level's evaluation computes on the whole images."""
+        assert self._draw is not None
+        sized = [index for index in level if self.cores[index].model.voxel_size is not None]
+        intensities = {index: (_Intensities(), _Intensities()) for index in [None, *sized]}
+        self._cells, self._level_weight = dict.fromkeys(sized, 0.0), 0.0
+        with torch.no_grad():
+            for moved, fixed, region in read():
+                weight = region
+                if self._masked:
+                    weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
+                    moved, fixed = moved[:, :-1], fixed[:, :-1]
+                self._level_weight += float(weight.sum())  # as the stage weighs a piece: its voxels, or its support
+                intensities[None][0].add(moved, region)
+                intensities[None][1].add(fixed, region)
+                for index in sized:
+                    seed = self._draw + 1000 * index
+                    core = self.cores[index]
+                    on_grid, fixed_on_grid, own = core._prepared(moved, fixed, region, seed, self._place)
+                    intensities[index][0].add(on_grid, own)
+                    intensities[index][1].add(fixed_on_grid, own)
+                    self._cells[index] += float(core._prepared(weight, weight, weight, seed, self._place)[2].sum())
+        self._statistics = {}
+        for index in level:
+            moved_side, fixed_side = intensities[index if index in sized else None]
+            if moved_side.count > 0:
+                self._statistics[index] = (moved_side.attribute(), fixed_side.attribute())
+
     def _pool_layers(self, read: "Callable[[], Iterable[tuple]]", level: list[int]) -> None:
         """Jacobian mode: each NCC layer's sums over the voxels the pieces own, their networks run on the level's
         intensities (a second pass, once those are known), and the level's weight as the stage weighs a piece (its
         voxels, or those both masks keep)."""
-        self._layer_sums, self._level_weight = {}, 0.0
+        self._layer_sums = {}
         assert self._draw is not None
         models = [index for index in level if any(name == "NCC" for name, _ in self._terms(index))]
-        if self._statistics is None or not models:
+        if not models or any(index not in self._statistics for index in models):
             return
         totals: dict[tuple[int, int], torch.Tensor] = {}
         for moved, fixed, region in read():
@@ -768,11 +856,12 @@ class ImpactFeatureLoss(torch.nn.Module):
             if self._masked:
                 weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * region
                 moved, fixed = moved[:, :-1], fixed[:, :-1]
-            self._level_weight += float(weight.sum())
             for index in models:
                 seed = self._draw + 1000 * index
                 for layer, piece in (
-                    self.cores[index].ncc_sums(moved, fixed, weight, self._statistics, self._terms(index), seed).items()
+                    self.cores[index]
+                    .ncc_sums(moved, fixed, weight, self._statistics[index], self._terms(index), seed, self._place)
+                    .items()
                 ):
                     totals[(index, layer)] = piece if (index, layer) not in totals else totals[(index, layer)] + piece
         for (index, layer), total in totals.items():
@@ -821,20 +910,30 @@ class ImpactFeatureLoss(torch.nn.Module):
             # surrogate's gradient is the level's.
             piece = float(mask.sum()) if mask is not None else float(math.prod(moved.shape[2:]))
             scale = self._level_weight / max(piece, 1e-8)
-            values = [
-                value
-                for index in level
-                for value in self.cores[index].distances(
+            values = []
+            for index in level:
+                core, pooled = self.cores[index], self._layer_sums.get(index, {})
+                distances = core.distances(
                     moved,
                     fixed,
                     mask,
                     self._terms(index),
                     seed + 1000 * index,
                     self._kernel,
-                    self._statistics,
-                    {layer: (d, v, scale) for layer, (d, v) in self._layer_sums.get(index, {}).items()} or None,
+                    self._statistics.get(index),
+                    {layer: (d, v, scale) for layer, (d, v) in pooled.items()} or None,
+                    self._place,
                 )
-            ]
+                if index in self._cells and self._place is not None:
+                    # A mean over the piece's cells of the model's grid, weighed as the stage weighs the piece (its
+                    # voxels of the level): brought to its cells' share of the level's, which the whole level averages.
+                    cells = mask if mask is not None else torch.ones_like(moved[:, :1])
+                    own = float(core._prepared(cells, cells, cells, seed + 1000 * index, self._place)[2].sum())
+                    share = own / max(self._cells[index], 1e-8) * scale
+                    distances = torch.stack(
+                        [value if layer in pooled else value * share for layer, value in enumerate(distances)]
+                    )
+                values += list(distances)
         else:
             if self._sampling < 1:
                 # The same voxels for every layer, compared as [1, C, N]: the mask is already in the draw.
@@ -1478,15 +1577,6 @@ class FireANTsEngine:
             )
         if self._deformable_method == "none":
             return
-        if (
-            self._deformable_metric == "impact"
-            and self._mode == "Jacobian"
-            and any(spec.voxel_size is not None for specs in self._impact_levels for spec in specs)
-        ):
-            raise NotImplementedError(
-                "a model's voxel_size is read against the whole image, where the Jacobian loss runs the network on"
-                " each box: by boxes, a model with a voxel_size registers in Static mode."
-            )
         if min(fixed_shape) < MIN_IMG_SIZE:
             raise NotImplementedError(
                 f"FireANTs resamples an axis under {MIN_IMG_SIZE} voxels to that many at every scale, where the"
