@@ -934,11 +934,6 @@ def static_feature_sources(
             # onto the image's voxels as the whole run brings them (``back_on_image``).
             read, read_statistics = sources, statistics
             if core.model.voxel_size is not None:
-                if core.dimension < len(fixed.shape):
-                    raise NotImplementedError(
-                        "a 2D network with a voxel_size sweeps the slices of the volume resampled at it, which blocks"
-                        " of the volume do not cut: register with a 3D model or with the image's own resolution."
-                    )
                 read = {
                     side: ResampledSource(source, grid_size(extent, core.model.voxel_size, source.shape))
                     for (side, source), extent in zip(sources.items(), extents, strict=True)

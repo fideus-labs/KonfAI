@@ -684,8 +684,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         tiles = [
             patch or _fitting_tile(core, images) for core, images in zip(self.cores, resampled_images, strict=True)
         ]
-        swept = any(core.dimension < DIM and core.model.voxel_size is not None for core in self.cores)
-        if any(tiles) and not swept:
+        if any(tiles):
             print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
             return self._by_blocks(fixed, moving, max(tiles), extents)
         for core, images, tile in zip(self.cores, resampled_images, tiles, strict=True):

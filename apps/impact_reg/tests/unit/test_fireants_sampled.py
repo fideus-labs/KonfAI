@@ -729,26 +729,33 @@ def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path, di
         assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
 
 
-def test_static_features_of_a_volume_swept_by_a_2d_network_are_the_whole_volume_s(tmp_path):
+@pytest.mark.parametrize("voxel_size", [None, [1.4, 0.7, 1.9]], ids=["native", "voxel_size"])
+def test_static_features_of_a_volume_swept_by_a_2d_network_are_the_whole_volume_s(tmp_path, voxel_size):
     """A 2-D network on a volume reads each slice alone, as the whole run sweeps them: predicted by slabs of whole
-    slices, it gives the whole volume's features."""
+    slices, of the volume resampled at its voxel_size when it has one, it gives the whole volume's features."""
     from impact_reg_konfai.models import fireants as engine
     from impact_reg_konfai.models.fireants_sampled import static_feature_sources
 
     path = tmp_path / "convolved.pt"
     torch.jit.script(_Convolved()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), layers_mask="1", pca=2, distance="LNCC", feature_normalization="l2")
+    spec = engine.ModelSpec(
+        ref=str(path), layers_mask="1", pca=2, distance="LNCC", feature_normalization="l2", voxel_size=voxel_size
+    )
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
     core = loss.cores[0]  # a local file is a 3-D model to the registry: the 2-D network handed in
     core.model.model, core.model.dim, core.dimension, core.model.fov = torch.jit.script(_Convolved(2)), 2, 2, [3]
     fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:21, :25, :27]
-    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    extents = ([27.0, 25.0, 21.0], [27.0, 25.0, 21.0])  # mm along L, P, S: one voxel a mm
+    whole = loss.extract(
+        *(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25, extents
+    )
     sources = static_feature_sources(
         loss,
         ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
         ArraySource(np.ascontiguousarray(moving)[None], "cpu"),
         tmp_path,
         block=8,
+        extents=extents,
     )
     blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
     signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)
