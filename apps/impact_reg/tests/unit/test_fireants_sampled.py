@@ -946,6 +946,44 @@ def test_every_box_reproduces_the_whole_image_masked_deformable(tmp_path, loss):
     sampled.close()
 
 
+@pytest.mark.parametrize("loss", ["mse", "cc", "masked_cc"])
+def test_a_level_s_loss_by_boxes_is_its_loss_in_one_box(tmp_path, loss):
+    """The level loss the deformable stage reports, which tells it when a scale has converged, is the whole grid's
+    however many boxes cut the level: a box's halo is read, never counted."""
+    fixed, moving = texture(), texture((0.6, -0.4, 0.3))
+    pair = [ArraySource(fixed[None], "cpu"), ArraySource(moving[None], "cpu")]
+    channels = 1
+    if loss.startswith("masked"):
+        z, y, x = np.meshgrid(*(np.arange(n) for n in SIZE), indexing="ij")
+        mask = (((x - 30) ** 2 + (y - 14) ** 2 + (z - 10) ** 2) < 15**2).astype(np.float32)
+        pair = [
+            StackedSource([pair[0], ArraySource(mask[None], "cpu")]),
+            StackedSource([pair[1], OnesSource(SIZE, "cpu")]),
+        ]
+        channels = 2
+
+    def first_loss(box: int) -> tuple[int, float]:
+        sampled = sampled_deformable_class()(
+            [1],
+            [1],
+            HeaderImages(image_of(fixed), channels, "cpu"),
+            HeaderImages(image_of(moving), channels, "cpu"),
+            *pair,
+            scratch=tmp_path,
+            symmetric=False,
+            loss_type=loss,
+            cc_kernel_size=5,
+            box=box,
+        )
+        sampled.optimize()
+        sampled.close()
+        return sampled.boxes_per_scale[0], sampled.losses[0]
+
+    (boxes, by_boxes), (one, whole) = first_loss(16), first_loss(64)
+    assert boxes > 1 and one == 1
+    assert math.isclose(by_boxes, whole, rel_tol=1e-5)
+
+
 def test_a_draw_the_mask_misses_keeps_the_warps_finite(tmp_path):
     """With a mask in one corner, most draws of one box miss it: they hold no voxel of the loss, and the warps stay
     finite."""

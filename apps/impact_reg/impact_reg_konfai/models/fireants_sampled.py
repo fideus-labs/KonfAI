@@ -1032,6 +1032,10 @@ def sampled_deformable_class():
                 progress_bar=False,
             )
             self._scratch, self._symmetric = Path(scratch), symmetric
+            # An unmasked FireANTs metric at each voxel: a box's share of the level's mean is its own voxels' sum.
+            self._voxelwise = loss_type in ("mse", "cc")
+            if self._voxelwise:
+                self.loss_fn.reduction = "none"
             # Three quarters of the device's free memory hold what every box reads: the warps, their moments and
             # directions at the finest scale first, which a step also writes, then the two sources; the rest is the
             # boxes' work (``_fitting_box``). What does not fit stays in files, where each step moves it through the
@@ -1242,6 +1246,11 @@ def sampled_deformable_class():
                 with torch.no_grad():
                     counted = _joint_counts(self.loss_fn, moved, target, region)[1]
                 reported = torch.tensor(totals.value * counted / totals.points)
+            elif totals is None and self._voxelwise:
+                # The box's halo holds the terms its voxels' gradient reads; its own voxels are its share.
+                voxels = self.loss_fn(moved, target)
+                count = voxels.shape[1] * math.prod(grid)
+                loss, reported = voxels.sum() / count, voxels[owned].sum() / count
             elif totals is None:
                 value = self.loss_fn(moved, target)
                 # The loss is a mean over the box: weighed as the box's share of the grid, its gradient is the whole
