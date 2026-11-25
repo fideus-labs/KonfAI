@@ -212,6 +212,27 @@ def test_models_mismatch_raises(tmp_path):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
 
 
+@pytest.mark.parametrize(
+    ("names", "refused"),
+    [
+        (["Helpers/a.py", "helpers/b.py"], True),
+        (["Helpers/a.py", "Helpers/b.py"], False),
+        (["app.json", "APP.JSON"], True),
+        (["model", "model/weights.bin"], True),
+        (["Model/a.py", "model"], True),
+    ],
+)
+def test_a_bundle_s_plan_holds_no_two_paths_one_file_system_holds_as_one(names, refused):
+    # Every path of the plan and every folder on the way, in any case: a file system may tell no case apart.
+    from konfai_apps.bundle import _check_file_layout
+
+    if refused:
+        with pytest.raises(AppMetadataError, match="collide"):
+            _check_file_layout(dict.fromkeys(names))
+    else:
+        _check_file_layout(dict.fromkeys(names))
+
+
 def test_derive_requirements_keeps_only_extra(tmp_path):
     from konfai_apps.bundle import derive_requirements
 
@@ -1532,6 +1553,7 @@ def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_p
         "a support file's Model.py",
         "a module the update drops",
         "an empty folder of the module's name",
+        "a folder of examples of the module's name",
         "a bundle left aside",
     ],
 )
@@ -1562,10 +1584,13 @@ def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_p
             root, model_py=str(root / "Model.py"), support_file=["einops.py=einops.py"], support_root=str(root)
         )
         assert not (bundle / "requirements.txt").exists()  # einops is the bundle's own module
-    elif made == "an empty folder of the module's name":
+    elif made in ("an empty folder of the module's name", "a folder of examples of the module's name"):
         bundle = _cli(root, model_py=str(root / "Model.py"))
         (bundle / "requirements.txt").unlink()
-        (bundle / "einops").mkdir()  # no module: what is imported is the package
+        # No package (no __init__.py) of the name: what the import resolves to is the installed one.
+        (bundle / "einops" / "examples").mkdir(parents=True)
+        if made == "a folder of examples of the module's name":
+            (bundle / "einops" / "examples" / "example.py").write_text("")
     else:
         bundle = _cli(root, model_py=str(root / "Model.py"))
         (bundle / "requirements.txt").unlink()

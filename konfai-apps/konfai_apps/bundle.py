@@ -151,17 +151,20 @@ def resolve_support_files(
 
 
 def _check_file_layout(files: dict[str, Any]) -> None:
-    """Refuse two bundle files that one file system would hold as one: a file that is another's folder, or two
-    names telling apart by case alone (a file system may tell no case apart)."""
-    folded: dict[str, str] = {}
+    """Refuse two bundle paths that one file system would hold as one: a file that is another's folder, or two
+    paths, a file's or a folder on the way to one, telling apart by case alone (a file system may tell no case
+    apart)."""
+    spelled: dict[str, str] = {}
     for name in files:
-        if folded.setdefault(name.lower(), name) != name:
-            raise AppMetadataError(
-                f"Bundle paths collide: {folded[name.lower()]!r} and {name!r} are one file on a file system telling"
-                " no case apart."
-            )
+        for path in [PurePosixPath(name), *list(PurePosixPath(name).parents)[:-1]]:
+            if (held := spelled.setdefault(path.as_posix().lower(), path.as_posix())) != path.as_posix():
+                raise AppMetadataError(
+                    f"Bundle paths collide: {held!r} and {path.as_posix()!r} are one file on a file system telling"
+                    " no case apart."
+                )
+    folded = {name.lower() for name in files}
     for name in files:
-        for parent in Path(name).parents:
+        for parent in PurePosixPath(name).parents:
             if parent.as_posix().lower() in folded:
                 raise AppMetadataError(f"Bundle paths collide: {parent.as_posix()!r} is both a file and a directory.")
 
@@ -742,8 +745,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
 
     def draft(update: Path) -> None:
         if (update / "Model.py").is_file() and not os.path.lexists(update / "requirements.txt"):
+            # What an import resolves to in the bundle: a module file, or a package (its __init__.py) of the name.
             local = {path.stem for path in update.glob("*.py")} | {
-                path.name for path in update.iterdir() if path.is_dir() and any(path.rglob("*.py"))
+                path.parent.name for path in update.glob("*/__init__.py")
             }
             drafted[:] = derive_requirements([update / "Model.py"], local)
         if drafted:

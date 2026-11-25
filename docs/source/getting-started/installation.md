@@ -32,9 +32,9 @@ python -m pip install ".[imaging]"
 KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
 drivers and CUDA version. If your PyTorch already matches your machine, there is
 nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
-first, then KonfAI. The `export` extra, and `all` which holds it, needs PyTorch
-2.7 or later but not 2.9: install such a build for your machine first. For
-containers, see [Docker](#docker) below.
+first, then KonfAI. The `export` extra, `all` which holds it, and `dev` need
+PyTorch 2.7 or later but not 2.9: install such a build for your machine first.
+For containers, see [Docker](#docker) below.
 
 ## Platforms
 
