@@ -1074,3 +1074,15 @@ def test_with_a_host_the_server_registers_the_sampled_cases_and_their_fields_com
         assert sorted(path.name for path in there.iterdir()) == sorted(path.name for path in local.iterdir())
         for name in ("DVF.mha", "Elx_Transform.h5"):
             assert (there / name).read_bytes() == (local / name).read_bytes()
+
+
+def test_a_sampled_field_is_published_in_the_preset_s_own_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SlicerImpactReg loads <output>/P000/Transform.h5: a field the sampled route writes goes out in the form the
+    # preset's config gives its output (Transform:itktransform, an .h5), as the whole run publishes it.
+    config = {
+        "Predictor": {"outputs_dataset": {"Field": {"OutputDataset": {"dataset_filename": "Transform:itktransform"}}}}
+    }
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    assert reg._config_output_form("Elastix#rigid") == (".h5", "itktransform")
+    config["Predictor"]["outputs_dataset"]["Field"]["OutputDataset"]["dataset_filename"] = "Transform.mha"
+    assert reg._config_output_form("Elastix#rigid") is None

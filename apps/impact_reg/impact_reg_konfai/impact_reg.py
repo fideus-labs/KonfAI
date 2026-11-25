@@ -1134,6 +1134,17 @@ def _viewed(header: _Header, axis_map: "AxisMap") -> _Header:
     return ([shape[0], *axis_map.extents(shape[1:])], *geometry)
 
 
+def _config_output_form(preset: str) -> tuple[str, str] | None:
+    """The form a preset writes its output in (its OutputDataset's ``dataset_filename``, ``Transform:itktransform``
+    an ``.h5``), as ``_asked_form`` gives it; None where the config names a file without a backend token."""
+    for sink in _preset_config(preset, "Prediction.yml")["Predictor"].get("outputs_dataset", {}).values():
+        block = sink.get("OutputDataset", sink) if isinstance(sink, dict) else {}
+        name, _, token = str(block.get("dataset_filename", "")).rpartition(":")
+        if name and token:
+            return _asked_form(token)
+    return None
+
+
 def _config_output_group(config: dict) -> str:
     """The output group a preset's config names (``Predictor.outputs_dataset.*.OutputDataset.group``)."""
     for sink in config["Predictor"].get("outputs_dataset", {}).values():
@@ -1606,8 +1617,13 @@ class ImpactRegKonfAIApp:
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
                 stack = None
-                # A sampled field (a MetaImage) is written here in the form asked for it; a preset wrote its own.
-                asked = (self._forms.get(group) or self._forms.get(None)) if case in sampled_cases else None
+                # A sampled field (a MetaImage) is written here in the form asked for it, else the preset's own, as the
+                # whole run writes it (Transform:itktransform, an .h5); a preset run whole wrote its own.
+                asked = (
+                    self._forms.get(group) or self._forms.get(None) or _config_output_form(presets[0])
+                    if case in sampled_cases
+                    else None
+                )
                 form, token = asked or (_form(members[0]), member_token(members[0]))
                 same = _form(members[0]) == form and member_token(members[0]) == token  # mha.gz is .mha, compressed
                 if sources == members and len(presets) == 1 and same:
