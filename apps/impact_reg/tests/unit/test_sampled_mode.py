@@ -82,6 +82,15 @@ def test_region_geometry_counts_cells_and_boxes_as_itk_impact_does() -> None:
     assert convexadam.region_geometry([90, 90, 90], 2, 29)["regions"] == 27
 
 
+def test_two_grids_are_one_where_their_voxels_are_a_thousandth_of_a_voxel_apart() -> None:
+    """A header rounded to float32 is the image's grid; a spacing 1e-4 mm off on a 0.04 mm grid of 1000 voxels, its
+    last voxel 2.5 voxels away, is not."""
+    grid = ([1, 1000, 1000, 1000], [0.04] * 3, [-12.3, 4.56, 7.89], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+    rounded = (grid[0], *([float(np.float32(value)) for value in values] for values in grid[1:]))
+    off = (grid[0], [0.0401, 0.04, 0.04], *grid[2:])
+    assert reg._same_grid(grid, rounded) and not reg._same_grid(grid, off)
+
+
 def test_the_engine_of_a_config_carries_the_fine_stage_parameters(
     presets: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -32,6 +32,7 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 - ``uncertainty`` : from the per-preset displacement fields, compute the voxel-wise spread map.
 """
 
+import itertools
 import json
 import math
 import os
@@ -682,10 +683,17 @@ def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None
 
 
 def _same_grid(first: _Header, second: _Header) -> bool:
-    """Whether two images lie on one voxel grid: the same extent, spacing, origin and direction."""
-    return first[0][-3:] == second[0][-3:] and all(
-        np.allclose(one, other, rtol=0.0, atol=1e-4) for one, other in zip(first[1:], second[1:], strict=True)
-    )
+    """Whether two images lie on one voxel grid: the same extent, and every voxel of one within a thousandth of a
+    voxel of the other's, which leaves the rounding a format stores a header with; read value by value, a spacing
+    1e-4 mm off moves the 1000th voxel of a 0.04 mm grid by 2.5 voxels. The two grids are farthest apart at a
+    corner."""
+
+    def corners(header: _Header) -> np.ndarray:
+        shape, spacing, origin, direction = header
+        index = np.array(list(itertools.product(*[(0, extent - 1) for extent in shape[:0:-1]])), dtype=float)
+        return np.asarray(origin) + (index * spacing) @ np.reshape(direction, (len(spacing), len(spacing))).T
+
+    return first[0][-3:] == second[0][-3:] and np.abs(corners(first) - corners(second)).max() <= 1e-3 * min(first[1])
 
 
 def _neutral_fixed_masks(work: Path, fixed: list[Path]) -> list[Path]:
