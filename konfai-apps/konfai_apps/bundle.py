@@ -741,7 +741,9 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
 
     def draft(update: Path) -> None:
         # konfai-apps installs requirements.txt by that name, a file: one of another case, brought or kept, is none.
-        if odd := [path.name for path in update.iterdir() if path.name.lower() == "requirements.txt" != path.name]:
+        if odd := [
+            p.name for p in update.iterdir() if p.name != "requirements.txt" and p.name.lower() == "requirements.txt"
+        ]:
             raise AppMetadataError(
                 f"{odd[0]} is named apart from requirements.txt, the name konfai-apps installs.",
                 "Name it requirements.txt, or pass it with --requirements.",
