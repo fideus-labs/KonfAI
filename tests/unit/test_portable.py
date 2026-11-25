@@ -755,6 +755,7 @@ def test_a_crop_finds_its_box_at_run_time_after_stages_that_move_nothing() -> No
         {"Clip": {"min_value": 0.0, "max_value": 400.0}},
         {"TensorCast": {"dtype": "int16"}},
         {"TensorCast": {"dtype": "float32", "round": True}},  # 0.4 rounds to 0, out of a nonzero box
+        {"TensorCast": {"dtype": "float16"}},  # rounds to half, across a percentile the stored values are not
         {"Mask": {"path": "MASK"}},
         {"Flip": {"dims": "0"}},
         {"Resample": {"spacing": [1.5, 1.5, 1.5], "interpolation": "linear"}},

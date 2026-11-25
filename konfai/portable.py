@@ -554,10 +554,10 @@ _CHAIN_OPS = {
 
 
 def moves_the_volume(step: dict[str, Any]) -> bool:
-    """Whether a step can move the grid or the values the foreground box is found in. A cast to a float
-    cannot: the runtime holds every value as float32 either way, and konfai's box is the same in any float. One
-    that rounds first can (0.4 rounds to 0)."""
-    return not (step["op"] == "cast" and str(step.get("dtype", "")).startswith("float") and not step.get("round"))
+    """Whether a step can move the grid or the values the foreground box is found in. A cast to float32 or float64
+    cannot: the runtime holds every value as float32 either way, and konfai's box is the same in either. One to half
+    rounds them, as one that rounds first does (0.4 rounds to 0)."""
+    return not (step["op"] == "cast" and step.get("dtype") in ("float32", "float64") and not step.get("round"))
 
 
 def refuse_a_late_crop(
