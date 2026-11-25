@@ -1553,14 +1553,16 @@ class FireANTsEngine:
         """Refuse what ``register_sampled`` cannot register, from the pair's voxel shapes ((z, y, x)) alone, before
         anything is read."""
         _require_fireants()
-        if 1 in (*fixed_shape, *moving_shape):
+        # A volume one voxel thick along one axis registers as its plane (``register_sampled``), as on the whole pair.
+        plane = len(fixed_shape) == 3 and list(fixed_shape).count(1) == 1
+        if 1 in (*fixed_shape, *moving_shape) and not plane:
             raise NotImplementedError(
                 "an image with an axis of one voxel has no extent along it for FireANTs' normalized coordinates:"
-                " by boxes the pair is registered as volumes."
+                " by boxes, a volume one voxel thick along one axis registers as its plane, and nothing thinner."
             )
         if self._deformable_method == "none":
             return
-        self._check_thin(fixed_shape)
+        self._check_thin([extent for extent in fixed_shape if extent != 1] if plane else fixed_shape)
 
     def _check_thin(self, size) -> None:
         """FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a fixed
@@ -1592,6 +1594,7 @@ class FireANTsEngine:
         box: int,
         samples: int | None = None,
         epochs: int | None = None,
+        plane: int | None = None,
     ) -> dict:
         """Register the uncompressed MetaImage ``moving`` onto ``fixed`` (float32, their masks binary, on their
         image's grid) without ever holding an image or a warp whole: the images are memory mapped and read by boxes,
@@ -1605,8 +1608,22 @@ class FireANTsEngine:
         stage steps the boxes it draws, each box as often on average as the preset gives a scale iterations
         (``epochs`` for every scale, when given). A level the samples hold whole is registered as FireANTs registers
         it. The displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what
-        the run measured."""
-        from ..native import field_map, mapped_centre, mapped_window, mmap_image, read_information, write_field
+        the run measured.
+
+        A fixed volume one voxel thick along an axis is registered as its plane (``plane``, that numpy axis), the
+        moving one's first slice along it, as ``EngineRegistration`` registers it on the whole pair: the plane's field
+        comes back one voxel thick, along the dropped axis the shift from one plane to the other."""
+        from ..native import (
+            PlaneHeader,
+            field_map,
+            lift_plane_field,
+            mapped_centre,
+            mapped_window,
+            mmap_image,
+            plane_of,
+            read_information,
+            write_field,
+        )
         from ..ooc import ArraySource, HeaderImages, OnesSource, RegionSource, RescaledSource, StackedSource, tiles
         from .fireants_sampled import (
             _TOGETHER,
@@ -1616,7 +1633,16 @@ class FireANTsEngine:
             static_feature_sources,
         )
 
-        self.check_sampled(mmap_image(fixed).array.shape, mmap_image(moving).array.shape)
+        shape = mmap_image(fixed).array.shape
+        self.check_sampled(shape, mmap_image(moving).array.shape)
+        if plane is None and len(shape) == 3 and shape.count(1) == 1:
+            flat = scratch / "plane_field.mha"
+            scratch.mkdir(parents=True, exist_ok=True)
+            arguments = (fixed, moving, fixed_mask, moving_mask, device_index, scratch, flat, box, samples, epochs)
+            measured = self.register_sampled(*arguments, plane=shape.index(1))
+            lift_plane_field(flat, field, mmap_image(fixed), mmap_image(moving), shape.index(1))
+            flat.unlink()
+            return measured
         torch.manual_seed(self._seed)
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
         mapped = {"fixed": mmap_image(fixed), "moving": mmap_image(moving)}
@@ -1626,6 +1652,10 @@ class FireANTsEngine:
         }
         masked = any(mask is not None for mask in masks.values())
         readers = {"fixed": read_information(fixed), "moving": read_information(moving)}
+        if plane is not None:
+            mapped = {side: plane_of(image, plane) for side, image in mapped.items()}
+            masks = {side: None if mask is None else plane_of(mask, plane) for side, mask in masks.items()}
+            readers = {side: PlaneHeader(reader, plane) for side, reader in readers.items()}
 
         def mask_source(side: str):
             """A side's mask, read by boxes: all ones where it has none (masked mode wants one beside both images)."""

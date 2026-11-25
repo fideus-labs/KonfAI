@@ -446,6 +446,61 @@ def to_millimetres(path: Path, voxel: float) -> None:
     os.replace(target, path)
 
 
+class PlaneHeader:
+    """A twin's header without its voxel axis ``axis`` (numpy's, of a (z, y, x) volume): what a reader of the plane
+    reads, its size, spacing, origin and direction those of the other two axes."""
+
+    def __init__(self, header, axis: int) -> None:
+        self._header, self._keep = header, [a for a in range(3) if a != 2 - axis]
+
+    def GetDimension(self) -> int:
+        return 2
+
+    def GetSize(self) -> tuple:
+        return tuple(self._header.GetSize()[a] for a in self._keep)
+
+    def GetSpacing(self) -> tuple:
+        return tuple(self._header.GetSpacing()[a] for a in self._keep)
+
+    def GetOrigin(self) -> tuple:
+        return tuple(self._header.GetOrigin()[a] for a in self._keep)
+
+    def GetDirection(self) -> tuple:
+        direction = np.reshape(self._header.GetDirection(), (3, 3))
+        return tuple(direction[np.ix_(self._keep, self._keep)].ravel())
+
+    def GetPixelID(self) -> int:
+        return self._header.GetPixelID()
+
+    def GetNumberOfComponents(self) -> int:
+        header = self._header
+        return (getattr(header, "GetNumberOfComponents", None) or header.GetNumberOfComponentsPerPixel)()
+
+
+def plane_of(mapped: Mapped, axis: int) -> Mapped:
+    """A twin one voxel thick along numpy axis ``axis`` as its plane: a view of its first slice along it, with the
+    plane's geometry (``PlaneHeader``)."""
+    return Mapped(mapped.array[(slice(None),) * axis + (0,)], geometry_of(PlaneHeader(mapped.geometry, axis)))
+
+
+def lift_plane_field(plane: Path, path: Path, fixed: Mapped, moving: Mapped, axis: int, rows: int = 256) -> Path:
+    """The field of a plane (``plane``, ``[y, x, 2]``) as the field of the volume one voxel thick it was taken from,
+    at ``path`` on the fixed twin's grid: its two components on the plane's axes and, along the dropped one, the shift
+    from the fixed plane to the moving one, as ``EngineRegistration`` brings back a plane it registered. Row by row."""
+    _, dtype, shape, offset = _pixels(plane)
+    source = np.memmap(plane, dtype=dtype, mode="r", offset=offset, shape=shape)
+    dropped = 2 - axis  # the (x, y, z) component along the dropped voxel axis
+    keep = [a for a in range(3) if a != dropped]
+    shift = moving.geometry.GetOrigin()[dropped] - fixed.geometry.GetOrigin()[dropped]
+    target = field_map(path, fixed)
+    lifted = target[(slice(None),) * axis + (0,)]
+    for start in range(0, shape[0], rows):
+        lifted[start : start + rows, ..., keep] = source[start : start + rows]
+        lifted[start : start + rows, ..., dropped] = shift
+    target.flush()
+    return path
+
+
 def field_map(path: Path, fixed: Mapped) -> np.memmap:
     """A displacement field on the grid of the fixed twin as an uncompressed MetaImage at ``path``, its voxels
     (``[*grid, 3]`` float32, (x, y, z) components) memory mapped for writing: the field is written by regions."""

@@ -164,3 +164,31 @@ def test_without_samples_the_linear_stages_take_every_box(tmp_path: Path, monkey
     )
     engine.register_sampled(*paths, None, None, -1, tmp_path / "scratch", tmp_path / "field.mha", box=16)
     assert asked["boxes"] >= len(tiles((32, 32, 32), asked["box"]))
+
+
+def test_a_volume_one_voxel_thick_registers_as_its_plane(tmp_path: Path) -> None:
+    # As EngineRegistration registers it on the whole pair: the plane, its field brought back one voxel thick with,
+    # along the dropped axis, the shift from the fixed plane to the moving one.
+    pytest.importorskip("fireants")
+    y, x = np.mgrid[:40, :44].astype(np.float32)
+    planes = [np.exp(-((x - 20 - shift) ** 2 + (y - 18) ** 2) / 60.0).astype(np.float32) for shift in (0.0, 1.5)]
+    paths: dict[str, list[Path]] = {"volume": [], "plane": []}
+    for name, plane, z in (("fixed", planes[0], 0.0), ("moving", planes[1], 2.0)):
+        volume = sitk.GetImageFromArray(plane[None])
+        volume.SetOrigin((0.0, 0.0, z))
+        for form, image in (("volume", volume), ("plane", sitk.GetImageFromArray(plane))):
+            paths[form].append(tmp_path / f"{name}_{form}.mha")
+            sitk.WriteImage(image, str(paths[form][-1]))
+    fields = {}
+    for form in ("volume", "plane"):
+        engine = fireants.FireANTsEngine(
+            [2, 1], [1, 1], [3, 2], 3, "mse", 0.01, "none", "none", "syn", "cc", 0.1, 0.5, 1.0, 0, []
+        )
+        (tmp_path / form).mkdir()
+        field = tmp_path / f"{form}_field.mha"
+        engine.register_sampled(*paths[form], None, None, -1, tmp_path / form, field, box=16)
+        fields[form] = sitk.GetArrayFromImage(sitk.ReadImage(str(field)))
+    assert fields["volume"].shape == (1, 40, 44, 3) and np.abs(fields["plane"]).max() > 0.05  # the plane moved
+    assert np.allclose(fields["volume"][0, ..., :2], fields["plane"], atol=1e-6)
+    assert np.allclose(fields["volume"][0, ..., 2], 2.0)
+    assert not (tmp_path / "volume" / "plane_field.mha").exists()
