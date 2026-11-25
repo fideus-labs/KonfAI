@@ -1126,9 +1126,10 @@ class _SampledRun:
 
 
 def _partial_masks(twins: dict[str, Path], case: str) -> tuple[list[Path | None], int]:
-    """The fixed and moving mask twins of ``case`` (``twins``, by group) that restrict their image (some voxels in,
-    some out): None for a side that has no mask, or one that restricts nothing; and the voxels the fixed one keeps (0
-    when it is None). An empty mask is refused, on either side: it leaves that side no voxel to compare."""
+    """The fixed and moving mask twins of ``case`` (``twins``, by group) that restrict their image, as the engines
+    read a mask on the whole pair: None for a side that has no mask, or one that restricts nothing (all in, or for
+    the moving side all out); and the voxels the fixed one keeps (0 when it is None). An empty fixed mask is kept, at
+    0 voxels: it leaves nothing to register."""
     from .native import nonzero, open_twin
 
     masks: list[Path | None] = []
@@ -1137,15 +1138,9 @@ def _partial_masks(twins: dict[str, Path], case: str) -> tuple[list[Path | None]
         path = twins.get(group)
         mapped = open_twin(path) if path is not None else None
         inside = nonzero(mapped) if mapped is not None else 0
-        if mapped is not None and inside == 0:
-            raise KonfAIError(
-                "ImpactReg",
-                f"{case}: the {group.removesuffix('Mask').lower()} mask holds no voxel, which leaves nothing to"
-                " register.",
-                "Pass the mask of the region to register, or none.",
-            )
-        masks.append(path if mapped is not None and inside < math.prod(mapped.array.shape) else None)
-        if group == "FixedMask" and masks[0] is not None:
+        restricts = mapped is not None and inside < math.prod(mapped.array.shape) and (inside or group == "FixedMask")
+        masks.append(path if restricts else None)
+        if group == "FixedMask" and restricts:
             kept = inside
     return masks, kept
 
@@ -2033,7 +2028,7 @@ class ImpactRegKonfAIApp:
         return group, fields
 
     def _native_twins(
-        self, run: "_SampledRun", *, chunked: bool, clipped: bool, positive: bool = False
+        self, run: "_SampledRun", fields: dict[str, Path], *, chunked: bool, clipped: bool, positive: bool = False
     ) -> Iterator[tuple[int, str, dict[str, Path], list[Path | None], int]]:
         """The native pair of each case as twins under ``<work>/<preset>_native/<case>``, from one read of each input
         by bands (``native.write_twin``): an uncompressed MetaImage per image and mask, which an engine memory-maps,
@@ -2043,13 +2038,14 @@ class ImpactRegKonfAIApp:
         its image's grid first (KonfAI TRANSFORM, streamed), and is written binary: its non-zero voxels, or with
         ``positive`` its positive ones, as the engine reads a mask on the whole pair.
 
-        The masks of every case come first, so that an empty one is refused before any image is written
-        (``_partial_masks``); then one case at a time, its images: each case is handed over as its index, its ID, its
-        twins by group, its partial masks and the voxels its fixed mask keeps, and its twins go once the next case
-        is asked for. The disk holds the masks and the twins of one case."""
+        The masks of every case come first (``_partial_masks``); then one case at a time, its images: each case is
+        handed over as its index, its ID, its twins by group, its partial masks and the voxels its fixed mask keeps,
+        and its twins go once the next case is asked for. A case whose fixed mask is empty is not handed over: it
+        leaves nothing to register, and its zero field goes into ``fields``, as the engines answer it on the whole
+        pair. The disk holds the masks and the twins of one case."""
         from konfai.data.transform import Resample, TensorCast, Write
 
-        from .native import write_twin
+        from .native import open_twin, write_field, write_twin
 
         native_root = run.work / _workspace(f"{run.preset}_native")
 
@@ -2102,8 +2098,14 @@ class ImpactRegKonfAIApp:
             masks[case] = (twins, *_partial_masks(twins, case))
         for index, case in enumerate(run.cases):
             twins, partial, kept = masks.pop(case)
-            twins.update((group, twin(index, case, group)) for group in ("Fixed", "Moving"))
-            yield index, case, twins, partial, kept
+            if partial[0] is not None and not kept:
+                field = run.work / _workspace(f"{run.preset}_fields") / case / f"{run.output_group}.mha"
+                field.parent.mkdir(parents=True, exist_ok=True)
+                grid = open_twin(partial[0])  # the fixed mask twin, on the fixed twin's grid
+                fields[case] = write_field(field, grid, sitk.AffineTransform(grid.array.ndim))
+            else:
+                twins.update((group, twin(index, case, group)) for group in ("Fixed", "Moving"))
+                yield index, case, twins, partial, kept
             shutil.rmtree(native_root / case, ignore_errors=True)
 
     @staticmethod
@@ -2166,6 +2168,9 @@ class ImpactRegKonfAIApp:
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
         engine.check_gradients()
         require_regions()  # before any twin is written
+        if not engine._deformable_masked:  # no stage reads the masks, which ConvexAdam drops on the whole pair too
+            inputs = {group: units for group, units in run.inputs.items() if not group.endswith("Mask")}
+            run = dataclasses.replace(run, inputs=inputs)
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
         visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
         # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.
@@ -2174,7 +2179,7 @@ class ImpactRegKonfAIApp:
         fields: dict[str, Path] = {}
         compact: dict[str, list[Path]] = {}
         # The stages read the images as they are, as ConvexAdam does.
-        for index, case, native, masks, _ in self._native_twins(run, chunked=True, clipped=False):
+        for index, case, native, masks, _ in self._native_twins(run, fields, chunked=True, clipped=False):
             size = [int(extent) for extent in run.headers[index]["Fixed"][0][1:]][::-1]
             volume, plane = native, self._plane_twins(native, masks)
             if plane is not None:
@@ -2311,7 +2316,7 @@ class ImpactRegKonfAIApp:
         fields: dict[str, Path] = {}
         compact: dict[str, list[Path]] = {}
         # Grey values alone are winsorised, as the engine does; IMPACT's models read the intensities they know.
-        for index, case, raw, masks, inside in self._native_twins(run, chunked=False, clipped=not impact):
+        for index, case, raw, masks, inside in self._native_twins(run, fields, chunked=False, clipped=not impact):
             volume, plane = raw, self._plane_twins(raw, masks)
             if plane is not None:
                 _, _, raw, masks = plane
@@ -2383,7 +2388,7 @@ class ImpactRegKonfAIApp:
             engine.check_sampled(*(run.headers[index][group][0][1:] for group in ("Fixed", "Moving")))
         fields: dict[str, Path] = {}
         # FireANTs keeps a mask's positive voxels (``fireants.py``), the other engines its non-zero ones.
-        for index, case, raw, masks, _ in self._native_twins(run, chunked=False, clipped=False, positive=True):
+        for index, case, raw, masks, _ in self._native_twins(run, fields, chunked=False, clipped=False, positive=True):
             out = run.work / _workspace(f"{run.preset}_fields") / case
             out.mkdir(parents=True, exist_ok=True)
             fields[case] = out / f"{run.output_group}.mha"

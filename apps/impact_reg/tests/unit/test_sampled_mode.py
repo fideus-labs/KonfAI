@@ -294,7 +294,7 @@ def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
     seen = {}
 
     class Engine:
-        _iterations, _grid_shrink, _stages, _moments_init = 3, 2, ("fine",), "none"
+        _iterations, _grid_shrink, _stages, _moments_init, _deformable_masked = 3, 2, ("fine",), "none", True
 
         def check_gradients(self) -> None:
             pass
@@ -327,23 +327,32 @@ def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
     assert not list((tmp_path / "out" / "P000").glob("*ControlGrid*"))  # a plane's transform is its field
 
 
-@pytest.mark.parametrize("side", ["fixed", "moving"])
-def test_sampled_mode_refuses_an_empty_mask_of_any_case_before_an_image_is_written(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str
-) -> None:
-    from impact_reg_konfai import native
-    from impact_reg_konfai.models import intensity
-
+def _masked_cohort(tmp_path: Path, empty: str) -> dict[str, list[Path]]:
+    """Two cases: masks of ones on both sides for the first, the ``empty`` side's mask empty for the second."""
     paths: dict[str, list[Path]] = {"fixed": [], "moving": [], "fixed_mask": [], "moving_mask": []}
     for case in range(2):
         for group in paths:
             path = tmp_path / f"{group}{case}.mha"
             if group.endswith("mask"):
-                array = np.full((8, 8, 8), int(case == 0 or not group.startswith(side)), dtype=np.uint8)
+                array = np.full((8, 8, 8), int(case == 0 or not group.startswith(empty)), dtype=np.uint8)
             else:
                 array = np.random.default_rng(case).random((8, 8, 8)).astype(np.float32)
             sitk.WriteImage(sitk.GetImageFromArray(array), str(path))
             paths[group].append(path)
+    return paths
+
+
+@pytest.mark.parametrize("side", ["fixed", "moving"])
+def test_sampled_mode_takes_an_empty_mask_as_the_engines_take_it_on_the_whole_pair(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str
+) -> None:
+    """An empty fixed mask leaves nothing to register: a zero field, its images never written. An empty moving mask
+    restricts nothing: the case registers as one without it."""
+    from impact_reg_konfai import native
+    from impact_reg_konfai.models import intensity
+
+    paths = _masked_cohort(tmp_path, side)
+    registered = []
 
     class Engine:
         _feature_models = ()
@@ -353,15 +362,19 @@ def test_sampled_mode_refuses_an_empty_mask_of_any_case_before_an_image_is_writt
         def supports_mapped_images(self) -> bool:
             return True
 
-        def register_mapped(self, *args) -> sitk.Transform:
-            pytest.fail("a case registered before every mask was read")
+        def register_mapped(self, fixed, moving, fixed_mask, moving_mask, *args) -> sitk.Transform:
+            registered.append((fixed_mask, moving_mask))
+            return sitk.TranslationTransform(3, (1.0, 0.0, 0.0))
 
     written = []
     write_twin = native.write_twin
     monkeypatch.setattr(
         native,
         "write_twin",
-        lambda dataset, group, *args, **kwargs: (written.append(group), write_twin(dataset, group, *args, **kwargs))[1],
+        lambda dataset, group, case, *args, **kwargs: (
+            written.append((group, case)),
+            write_twin(dataset, group, case, *args, **kwargs),
+        )[1],
     )
     monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
     monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
@@ -369,19 +382,71 @@ def test_sampled_mode_refuses_an_empty_mask_of_any_case_before_an_image_is_writt
     config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
     config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
     monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
-    with pytest.raises(KonfAIError, match=f"P001: the {side} mask holds no voxel"):
-        reg.ImpactRegKonfAIApp().register(
-            ["Elx"],
-            paths["fixed"],
-            paths["moving"],
-            paths["fixed_mask"],
-            paths["moving_mask"],
-            output=tmp_path / "out",
-            out_of_core="sampled",
-            max_voxels=100,
-            fields_only=True,
-        )
-    assert written and set(written) <= {"FixedMask", "MovingMask"}
+    reg.ImpactRegKonfAIApp().register(
+        ["Elx"],
+        paths["fixed"],
+        paths["moving"],
+        paths["fixed_mask"],
+        paths["moving_mask"],
+        output=tmp_path / "out",
+        out_of_core="sampled",
+        max_voxels=100,
+        fields_only=True,
+    )
+    field = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "P001" / "DVF.mha")))
+    if side == "fixed":
+        assert registered == [(None, None)] and not np.any(field)
+        assert ("Fixed", "P001") not in written and ("Moving", "P001") not in written
+    else:
+        assert registered == [(None, None), (None, None)] and np.allclose(field, (1.0, 0.0, 0.0))
+
+
+def test_sampled_convexadam_stages_no_mask_its_stages_do_not_read(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With deformable_masked off ConvexAdam drops the masks on the whole pair, an empty one included: by regions
+    too, the case registers as one without masks."""
+    from types import SimpleNamespace
+
+    from impact_reg_konfai.models import intensity
+    from impact_reg_konfai.native import field_map, open_twin
+
+    paths = _masked_cohort(tmp_path, "fixed")
+    registered = []
+
+    class Engine:
+        _iterations, _grid_shrink, _stages, _moments_init, _deformable_masked = 3, 2, ("fine",), "none", False
+
+        def check_gradients(self) -> None:
+            pass
+
+        def refine_by_regions(self, fixed, moving, fixed_mask, moving_mask, device, region_size, visits, field, **_):
+            registered.append((fixed_mask, moving_mask))
+            grid = field.with_name("grid.mha")
+            for path in (field, grid):
+                field_map(path, open_twin(fixed)).flush()
+            return SimpleNamespace(
+                control_grid=grid, resident=True, iterations=visits, regions=1, bytes_read=0, streamed=(True, True),
+                seconds=0.0, device_peak_bytes=0, metric_values=[], coarse=None,
+            )  # fmt: skip
+
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(convexadam, "require_regions", lambda: None)
+    config = json.loads((presets / "Convex" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ["Convex"],
+        paths["fixed"],
+        paths["moving"],
+        paths["fixed_mask"],
+        paths["moving_mask"],
+        output=tmp_path / "out",
+        out_of_core="sampled",
+        max_voxels=100,
+        fields_only=True,
+    )
+    assert registered == [(None, None), (None, None)]
 
 
 def test_sampled_elastix_starts_from_the_translation_between_the_centres_of_mass(
