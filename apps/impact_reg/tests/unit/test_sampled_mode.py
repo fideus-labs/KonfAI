@@ -167,6 +167,63 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
     assert np.allclose(transform.TransformPoint((0.0, 0.0, 0.0)), (2.0, -4.0, 1.0))
 
 
+@pytest.mark.parametrize("side", ["fixed", "moving"])
+def test_sampled_mode_refuses_an_empty_mask_of_any_case_before_an_image_is_written(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str
+) -> None:
+    from impact_reg_konfai import native
+    from impact_reg_konfai.models import intensity
+
+    paths: dict[str, list[Path]] = {"fixed": [], "moving": [], "fixed_mask": [], "moving_mask": []}
+    for case in range(2):
+        for group in paths:
+            path = tmp_path / f"{group}{case}.mha"
+            if group.endswith("mask"):
+                array = np.full((8, 8, 8), int(case == 0 or not group.startswith(side)), dtype=np.uint8)
+            else:
+                array = np.random.default_rng(case).random((8, 8, 8)).astype(np.float32)
+            sitk.WriteImage(sitk.GetImageFromArray(array), str(path))
+            paths[group].append(path)
+
+    class Engine:
+        _feature_models = ()
+        _elastix_bin = "elastix"
+        _moments_init = "cof"
+
+        def supports_mapped_images(self) -> bool:
+            return True
+
+        def register_mapped(self, *args) -> sitk.Transform:
+            pytest.fail("a case registered before every mask was read")
+
+    written = []
+    write_twin = native.write_twin
+    monkeypatch.setattr(
+        native,
+        "write_twin",
+        lambda dataset, group, *args, **kwargs: (written.append(group), write_twin(dataset, group, *args, **kwargs))[1],
+    )
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    with pytest.raises(KonfAIError, match=f"P001: the {side} mask holds no voxel"):
+        reg.ImpactRegKonfAIApp().register(
+            ["Elx"],
+            paths["fixed"],
+            paths["moving"],
+            paths["fixed_mask"],
+            paths["moving_mask"],
+            output=tmp_path / "out",
+            out_of_core="sampled",
+            max_voxels=100,
+            fields_only=True,
+        )
+    assert written and set(written) <= {"FixedMask", "MovingMask"}
+
+
 def test_sampled_elastix_starts_from_the_translation_between_the_centres_of_mass(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
