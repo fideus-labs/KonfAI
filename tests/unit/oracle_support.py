@@ -38,6 +38,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data import augmentation as augmentation_module
+from konfai.data import spline
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
@@ -46,6 +47,7 @@ from konfai.data.patching import DatasetManager, DatasetPatch, SweepSegment
 from konfai.data.transform import (
     Argmax,
     Canonical,
+    CaseStatistic,
     Clip,
     Crop,
     Dilate,
@@ -88,15 +90,9 @@ CASE_NAME = "CASE_000"
 PEAK = 450.0
 
 # Byte-identical is the norm: a streamable transform reads exactly the voxels the whole-volume pass
-# reads and does the same arithmetic on them. Two kinds legitimately round differently:
+# reads and does the same arithmetic on them, a seeded statistic included (the whole-volume route folds
+# the tensor in hand as the scan folds the store). Some kinds legitimately round differently:
 #
-# - the seeded statistic: streaming seeds Mean/Std from `read_data_statistics` (a numpy pass over the
-#   stored volume) while the whole-volume path recomputes them with torch over the loaded tensor: the
-#   same values summed in a different order, so a standardized (unit-scale) voxel may land a few
-#   float32 ulps away. Data-dependent: this fixture happens to agree exactly, a smooth field showed
-#   1.5e-8 (0.13 ulp), so the bound is stated rather than observed.
-STAT_ATOL = 8 * float(np.finfo(np.float32).eps)
-
 #: What two routes computing the same expression over different extents may differ by, relative to
 #: each value: a few float32 ulps.
 VECTORISED_RTOL = 8 * float(np.finfo(np.float32).eps)
@@ -145,6 +141,39 @@ def assert_same_as_scipy(got: np.ndarray, want: np.ndarray) -> None:
         np.testing.assert_array_equal(got, want)
         return
     np.testing.assert_allclose(got, want, rtol=0, atol=16 * np.finfo(want.dtype).eps * float(np.abs(want).max()))
+
+
+def zoom(array: np.ndarray, shape: tuple[int, ...], order: int, corners: bool = False) -> np.ndarray:
+    """``scipy.ndimage.zoom(array, ..., order=order, mode='nearest', grid_mode=not corners)`` onto ``shape``, in
+    float64: :func:`konfai.data.spline.zoom_window` on the whole volume."""
+    whole = tuple(slice(0, int(extent)) for extent in shape)
+    return spline.zoom_window(array, [0] * array.ndim, list(array.shape), shape, whole, order, corners)
+
+
+def resize(array: np.ndarray, shape: tuple[int, ...], order: int) -> np.ndarray:
+    """``skimage.transform.resize(array, shape, order, mode='edge', anti_aliasing=False)`` on a float64 array: the
+    extents aligned, then clipped to the input's range."""
+    out = zoom(array, shape, order)
+    if order > 0:
+        np.clip(out, *spline.value_range(array), out=out)
+    return out
+
+
+def resample_faces(data: np.ndarray, shape: tuple[int, ...], order: int, axis: int | None) -> np.ndarray:
+    """The faces grid's resampling of an image ``(C, *spatial)``, in float64: each channel through
+    :func:`konfai.data.spline.resample_region` on the whole region, clipped to its range; with ``axis``, every slice
+    across it resized alone, then that axis picked by nearest neighbour."""
+    whole = tuple(slice(0, int(extent)) for extent in shape)
+    channels = data.astype(np.float64)
+    origin, extents = [0] * (data.ndim - 1), list(data.shape[1:])
+    return np.stack(
+        [
+            spline.resample_region(
+                channel, origin, extents, shape, whole, order, axis=axis, bounds=spline.value_range(channel)
+            )
+            for channel in channels
+        ]
+    )
 
 
 @dataclass(frozen=True)
@@ -478,6 +507,34 @@ def build_case(root: Path, geometry: Geometry, dtype: np.dtype = np.dtype(np.flo
 # --------------------------------------------------------------------------------------
 
 
+class Roughness:
+    """A ``CaseStatistic`` class: the RMS of the 6-neighbour Laplacian residual over the volume."""
+
+    halo = 1
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        inner = [slice(None)] + [slice(1, -1)] * (block.dim() - 1)
+        centre = block[tuple(inner)]
+        residual = 2 * (block.dim() - 1) * centre
+        for axis in range(1, block.dim()):
+            for side in (slice(None, -2), slice(2, None)):
+                residual = residual - block[(*inner[:axis], side, *inner[axis + 1 :])]
+        return torch.stack([(residual**2).sum(), torch.ones_like(centre).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(total[0] / total[1])
+
+
+class ScaledRoughness(Roughness):
+    """``Roughness`` times ``scale``, a float that a float32 constant would move (0.95 is 0.949999988 there)."""
+
+    def __init__(self, scale: float = 0.95) -> None:
+        self.scale = scale
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return super().finish(total) * self.scale
+
+
 @dataclass(frozen=True)
 class StageCase:
     """One representative configuration of a transform, and the fixture group it consumes."""
@@ -513,6 +570,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         # grid the source volume does not have, so its source region is a permuted slice tuple rather
         # than the target's own. Both must stream, and a sagittal or coronal acquisition is the second.
         "Canonical": [StageCase(Canonical()), StageCase(Canonical(), group="Permuting")],
+        "CaseStatistic": [StageCase(CaseStatistic("oracle_support:Roughness"))],
         "Clip": [
             StageCase(Clip(-200.0, 300.0)),  # fixed bounds: POINTWISE (the default range does not clip)
             StageCase(Clip("min", "max")),  # data-dependent bounds: GLOBAL_STAT
@@ -611,7 +669,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "SelectLabel": [StageCase(SelectLabel(["(1,2)", "(3,1)"]), group="Labels")],
         "Softmax": [StageCase(Softmax(0), group="Ensemble")],
         "Squeeze": [StageCase(Squeeze(0))],
-        "Standardize": [StageCase(transform_module.Standardize(), atol=STAT_ATOL)],
+        "Standardize": [StageCase(transform_module.Standardize())],
         "StandardDeviation": [StageCase(StandardDeviation(), group="Ensemble")],
         "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
         # Landmarks pushed through a stored transform, not a volume: test_registration_evaluation.py proves it.

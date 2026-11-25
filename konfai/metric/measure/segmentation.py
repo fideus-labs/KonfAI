@@ -25,6 +25,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from konfai.data.transform.labels import _COMPARED_AS
 from konfai.metric.measure.base import (
     Criterion,
     CriterionOutput,
@@ -59,26 +60,24 @@ class Dice(Criterion):
     @staticmethod
     def _may_hold_a_negative(tensor: torch.Tensor) -> bool:
         """Whether a map's dtype can hold a label below zero: an unsigned map is read as it is."""
-        return tensor.dtype not in (torch.bool, torch.uint8, torch.uint16, torch.uint32, torch.uint64)
+        return tensor.dtype is not torch.uint8
 
     @staticmethod
-    def _bin_index(tensor: torch.Tensor) -> torch.Tensor:
-        """``tensor`` in a dtype ``bincount`` takes: a bool map as uint8, a float map (NaN voxels
-        to be masked by the caller) and the wide unsigned maps as int64. ``bincount`` has no kernel
-        for uint16/uint32/uint64 on the CPU, and uint16 is what a label map is often stored as. A
-        uint64 label past the int64 range has no bin: refused, not wrapped."""
-        if tensor.dtype is torch.bool:
-            return tensor.to(torch.uint8)
-        if tensor.is_floating_point() or tensor.dtype in (torch.uint16, torch.uint32):
-            return tensor.to(torch.int64)
-        if tensor.dtype is torch.uint64:
-            index = tensor.view(torch.int64)
-            if bool((index < 0).any()):
-                raise MeasureError(
-                    "A uint64 label map holds a label above 2^63-1, which no bin can count.",
-                    "Relabel the map (labels are small integers) or store it as uint32/int64.",
-                )
-            return index
+    def _typed(tensor: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        """A bool, uint16, uint32 or uint64 map in the type that holds its labels (``_COMPARED_AS``: uint8, int32,
+        int64, int64), any other as it is, with every voxel outside ``mask`` sent to the background when one is given.
+        torch has few kernels for those (no product on CUDA, no maximum, no index on the CPU in 2.5, no difference of
+        two bool maps), and uint16 is what a label map is often stored as. A uint64 label past the int64 range where
+        the mask keeps it is refused, not wrapped."""
+        wide = tensor.dtype is torch.uint64
+        tensor = tensor.view(torch.int64) if wide else tensor.to(_COMPARED_AS.get(tensor.dtype, tensor.dtype))
+        if mask is not None:
+            tensor = tensor * mask
+        if wide and bool((tensor < 0).any()):
+            raise MeasureError(
+                "A uint64 label map holds a label above 2^63-1, which no signed type holds.",
+                "Relabel the map (labels are small integers) or store it as uint32/int64.",
+            )
         return tensor
 
     @staticmethod
@@ -94,7 +93,8 @@ class Dice(Criterion):
         nan_masks = [torch.isnan(tensor).flatten() if tensor.is_floating_point() else None for tensor in maps]
         indices = []
         for tensor, nan_mask in zip(maps, nan_masks, strict=True):
-            index = Dice._bin_index(tensor).flatten()
+            # A dtype bincount takes: a float map (its NaN voxels masked below) as int64, another as _typed left it.
+            index = (tensor.to(torch.int64) if tensor.is_floating_point() else tensor).flatten()
             if nan_mask is not None:
                 index = index.masked_fill_(nan_mask, 0)  # a whole number, so the minimum below is a label's
             indices.append(index)
@@ -106,7 +106,7 @@ class Dice(Criterion):
         nan_bin = int(any(nan_mask is not None for nan_mask in nan_masks))
         offset = min(0, lowest, *(labels or [0])) - nan_bin
         if offset:
-            indices = [index - offset for index in indices]
+            indices = [index.to(torch.int64) - offset for index in indices]  # past what a uint8 map holds
         for index, nan_mask in zip(indices, nan_masks, strict=True):
             if nan_mask is not None:
                 index.masked_fill_(nan_mask, 0)
@@ -301,15 +301,13 @@ class Dice(Criterion):
 
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
-        """The pair with every voxel outside the mask sent to the background, when a mask is given.
-        The reference and the masks are put on the output's grid first (``on_grid``), or a mask on
-        either grid of a pair on two could not multiply both. The bool mask multiplies in each
-        tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel for the same product."""
+        """The pair, typed and masked (:meth:`_typed`): what every criterion of the pair reads. The reference and the
+        masks are put on the output's grid first (``on_grid``), or a mask on either grid of a pair on two could not
+        multiply both. The bool mask multiplies in each tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel for
+        the same product."""
         targets = tuple(Dice.on_grid(output, target) for target in targets)
         mask = MaskedLoss.get_mask(list(targets[1:]))
-        if mask is None:
-            return output, targets[0]
-        return output * mask, targets[0] * mask
+        return Dice._typed(output, mask), Dice._typed(targets[0], mask)
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         self._check_probabilities(output)

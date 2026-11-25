@@ -23,6 +23,7 @@ import contextlib
 import functools
 import glob
 import gzip
+import json
 import os
 import re
 import secrets
@@ -32,7 +33,7 @@ import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 
@@ -460,7 +461,8 @@ class SitkFile(AbstractFile):
             _require_sitk(path)
             data = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
         elif path.endswith(".fcsv"):
-            data = cast(np.ndarray, read_landmarks(Path(path)))
+            data, labels = read_landmarks(Path(path))
+            attributes["Labels"] = json.dumps(labels)
         elif path.endswith(".xml"):
             with open(path, "rb") as xml_file:
                 root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
@@ -514,6 +516,8 @@ class SitkFile(AbstractFile):
 
         if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
             data, attributes = self.file_to_data(group, name)
+            if path.endswith(".fcsv") and slices and "Labels" in attributes:  # a point's label follows its row
+                attributes["Labels"] = json.dumps(json.loads(attributes["Labels"])[slices[0]])
             return data[slices], attributes
 
         return self._file_to_image_slice(name, path, slices)
@@ -630,7 +634,8 @@ class SitkFile(AbstractFile):
                     stream.write_slice(tuple(slice(0, extent) for extent in data.shape), data)
         elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
             data = np.round(data, 4)
-            write_landmarks(data, Path(f"{self.filename}{name}.fcsv"))
+            labels = json.loads(attributes["Labels"]) if "Labels" in attributes else None
+            write_landmarks(data, Path(f"{self.filename}{name}.fcsv"), labels)  # a label per point, or refused
         elif "path" in attributes:
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:

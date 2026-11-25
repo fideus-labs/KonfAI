@@ -36,7 +36,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
 
 
 def test_repo_is_pinned() -> None:
-    assert cli.IMPACT_SEG_KONFAI_REPO == "VBoussot/ImpactSeg"
+    assert cli.IMPACT_SEG_KONFAI_REPO == "HCedric/IMPACTSeg"
     assert callable(cli.main)
 
 

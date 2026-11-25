@@ -2685,7 +2685,7 @@ class ImpactRegKonfAIApp:
                     )
                 if gt_fixed_fid:
                     fixed_count, moving_count = (
-                        len(read_landmarks(path)) for path in (gt_fixed_fid[index], gt_moving_fid[index])
+                        len(read_landmarks(path)[0]) for path in (gt_fixed_fid[index], gt_moving_fid[index])
                     )
                     if fixed_count != moving_count:
                         raise EvaluatorError(

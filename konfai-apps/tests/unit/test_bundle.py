@@ -19,6 +19,9 @@
 import codecs
 import json
 import locale
+import os
+import re
+import shutil
 import sys
 
 import pytest
@@ -209,6 +212,27 @@ def test_models_mismatch_raises(tmp_path):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
 
 
+@pytest.mark.parametrize(
+    ("names", "refused"),
+    [
+        (["Helpers/a.py", "helpers/b.py"], True),
+        (["Helpers/a.py", "Helpers/b.py"], False),
+        (["app.json", "APP.JSON"], True),
+        (["model", "model/weights.bin"], True),
+        (["Model/a.py", "model"], True),
+    ],
+)
+def test_a_bundle_s_plan_holds_no_two_paths_one_file_system_holds_as_one(names, refused):
+    # Every path of the plan and every folder on the way, in any case: a file system may tell no case apart.
+    from konfai_apps.bundle import _check_file_layout
+
+    if refused:
+        with pytest.raises(AppMetadataError, match="collide"):
+            _check_file_layout(dict.fromkeys(names))
+    else:
+        _check_file_layout(dict.fromkeys(names))
+
+
 def test_derive_requirements_keeps_only_extra(tmp_path):
     from konfai_apps.bundle import derive_requirements
 
@@ -223,6 +247,8 @@ def test_derive_requirements_keeps_only_extra(tmp_path):
     )
     # stdlib (os), konfai-provided (torch/numpy), and konfai itself are excluded.
     assert derive_requirements([model_py]) == ["scikit-image", "segmentation-models-pytorch"]
+    # A module of the bundle's own is none, by the name it is imported under.
+    assert derive_requirements([model_py], local={"skimage"}) == ["segmentation-models-pytorch"]
 
 
 def test_derive_onnx_params_from_config():
@@ -688,7 +714,6 @@ def _masked_config(dest: dict, section: str, chain) -> dict:
         # A list of two masks, and the mapping it lands on disk as once the core reads it.
         ("before_reduction_transforms", [{"Mask": {"path": "BODY"}}, {"Mask": {"path": "BONE"}}]),
         ("before_reduction_transforms", {"Mask": {"path": "BODY"}, "Mask#2": {"path": "BONE"}}),
-        ("final_transforms", {"Mask": {"path": "BODY", "value_outside": -1024}}),
         ("transforms", {"Dilate": {"dilate": 1}, "Dilate#2": {"dilate": 2}}),
     ],
 )
@@ -1162,6 +1187,850 @@ def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_require
                 "support_root": str(root),
             }
         )
+
+
+#: The least module KonfAI Edge opens: it starts and calls the interface KonfAI Edge calls.
+_MODULE = '(module (memory (export "memory") 1) (func (export "ext_abi") (result i32) (i32.const 2)))'
+
+
+def _cli(root, **more):
+    """``konfai-apps bundle`` of the support workspace's app into ``out/Seg``."""
+    from konfai_apps.bundle import run_bundle_cli
+
+    args = {
+        "name": "Seg",
+        "out": str(root.parent / "out"),
+        "app_json": str(root / "app.json"),
+        "config": [str(root / "Prediction.yml")],
+        "checkpoint": [str(root / "CV_0.safetensors")],
+    }
+    run_bundle_cli(args | more)
+    return root.parent / "out" / "Seg"
+
+
+def _exporting(tmp_path, transforms: dict | None = None) -> tuple:
+    """A workspace whose app the bundle command exports for real: the tests' two-class segmentation network, its
+    checkpoint, and the arguments that ship and export it."""
+    import importlib.util
+    from pathlib import Path
+
+    root = _support_workspace(tmp_path)
+    shutil.copy(Path(__file__).resolve().parents[3] / "tests" / "assets" / "Workflows" / "TinySeg.py", root)
+    # Under a name of its own: a TinySeg another test imported stays its.
+    spec = importlib.util.spec_from_file_location("_exported_tinyseg", root / "TinySeg.py")
+    assert spec is not None and spec.loader is not None
+    tinyseg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tinyseg)
+    torch.save({"Model": tinyseg.TinySegNet().network_states()}, root / "CV_0.pt")
+    group = {"transforms": transforms or "None", "patch_transforms": "None", "is_input": True}
+    config = {
+        "Predictor": {
+            "Model": {"classpath": "TinySeg:TinySegNet", "TinySegNet": {"outputs_criterions": "None"}},
+            "Dataset": {
+                "groups_src": {"MR": {"groups_dest": {"MR": group}}},
+                "augmentations": "None",
+                "Patch": {"patch_size": [1, 16, 16], "overlap": 0},
+            },
+            "outputs_dataset": {
+                "Head:Softmax": {
+                    "OutputDataset": {
+                        "final_transforms": {"Argmax": {"dim": 0}},
+                        "group": "SEG",
+                        "same_as_group": "MR:MR",
+                    }
+                }
+            },
+        }
+    }
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    exporting = {
+        "checkpoint": [str(root / "CV_0.pt")],
+        "support_file": ["TinySeg.py=TinySeg.py"],
+        "support_root": str(root),
+        "onnx": True,
+    }
+    return root, config, exporting
+
+
+def test_a_bundle_takes_an_update_only_once_its_export_and_its_extension_are_checked(tmp_path, capsys):
+    # The update is exported and checked on the bundle it makes, beside the bundle: an extension that does not load
+    # leaves the bundle the config and the program it ran before, the manifest the refused export wrote anew included.
+    # The program is told exported once the bundle holds it.
+    pytest.importorskip("onnxscript")
+    wasmtime = pytest.importorskip("wasmtime")
+    root, config, exporting = _exporting(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"), **exporting)
+    assert f"Portable model exported: {bundle / 'model.onnx'}" in capsys.readouterr().out
+    before = {path.name: path.read_bytes() for path in bundle.iterdir() if path.is_file()}
+    config["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["final_transforms"] = "None"
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    (root / "own.wasm").write_bytes(b"\0asm, and no module")
+
+    with pytest.raises(AppMetadataError, match="is no WebAssembly module"):
+        _cli(root, extension=str(root / "own.wasm"), **exporting)
+    assert "Portable model exported" not in capsys.readouterr().out
+    assert "manifest.json" in before and "model.onnx" in before
+    assert {path.name: path.read_bytes() for path in bundle.iterdir() if path.is_file()} == before
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_an_update_checks_the_program_of_the_prediction_config_the_bundle_keeps(tmp_path):
+    # The update names its Evaluation.yml alone: the export compiles the Prediction.yml the bundle keeps, whose
+    # class the replacement Model.py now scales by 3, which the extension does not: refused.
+    from test_extension import DOUBLE, OWN
+
+    pytest.importorskip("onnxscript")
+    wasmtime = pytest.importorskip("wasmtime")
+    root, _config, exporting = _exporting(tmp_path, {"Model:Scale": {}})
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"), **exporting)
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+    (root / "Evaluation.yml").write_text("Evaluator: {}\n")
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(
+            root,
+            config=[str(root / "Evaluation.yml")],
+            model_py=str(root / "Model.py"),
+            extension=str(root / "own.wasm"),
+            **exporting,
+        )
+
+
+def test_a_bundle_whose_update_fails_to_take_its_place_is_put_back(tmp_path, monkeypatch):
+    # The update checked, the bundle moved aside, and the update refused its place: the bundle is back where it was.
+    from pathlib import Path
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"))
+    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+    rename = Path.rename
+
+    def refused(self, target):
+        if self.name.startswith(".Seg.update-") and Path(target) == bundle:
+            raise OSError("refused")
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refused)
+    with pytest.raises(OSError, match="refused"):
+        _cli(root, extension=str(root / "own.wasm"))
+    assert {path.name: path.read_bytes() for path in bundle.iterdir()} == before
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_a_bundle_whose_previous_copy_stays_is_still_updated(tmp_path, monkeypatch):
+    # The update has taken the bundle's place: a copy of the old one that cannot be removed fails nothing, and the
+    # next update removes it.
+    import konfai_apps.bundle as bundle_module
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(_MODULE))
+    bundle = _cli(root, extension=str(root / "own.wasm"))
+    (root / "Prediction.yml").write_text("Predictor: {}\n# second\n")
+    remove = bundle_module.shutil.rmtree
+
+    def kept(path, *args, **kwargs):
+        if not str(path).endswith(".Seg.previous"):
+            return remove(path, *args, **kwargs)
+        if not kwargs.get("ignore_errors"):
+            raise OSError("kept")
+
+    monkeypatch.setattr(bundle_module.shutil, "rmtree", kept)
+    _cli(root, extension=str(root / "own.wasm"))
+    assert (bundle / "Prediction.yml").read_text().endswith("# second\n")
+    # The next update removes it first.
+    monkeypatch.setattr(bundle_module.shutil, "rmtree", remove)
+    assert (bundle.parent / ".Seg.previous").is_dir()
+    _cli(root, extension=str(root / "own.wasm"))
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_an_export_does_not_write_through_a_link_beside_the_configs(tmp_path):
+    # A manifest the bundle holds as a link elsewhere: the export would write the new one there, so it is refused.
+    # A link the export does not write (an icon) is the bundle's own, and the export runs beside it.
+    pytest.importorskip("onnxscript")
+    root, _config, exporting = _exporting(tmp_path)
+    bundle = _cli(root, **{key: value for key, value in exporting.items() if key != "onnx"})
+    (tmp_path / "elsewhere.json").write_text("not the bundle's")
+    (tmp_path / "icon.png").write_bytes(b"png")
+    (bundle / "icon.png").symlink_to(tmp_path / "icon.png")
+    assert (_cli(root, **exporting) / "model.onnx").is_file()
+    (bundle / "manifest.json").unlink()
+    (bundle / "manifest.json").symlink_to(tmp_path / "elsewhere.json")
+
+    with pytest.raises(AppMetadataError, match=r"manifest\.json"):
+        _cli(root, **exporting)
+    assert (tmp_path / "elsewhere.json").read_text() == "not the bundle's"
+
+
+def test_an_export_runs_whatever_code_page_its_output_is_in(tmp_path, monkeypatch):
+    # The export's interpreter writes to the output it is handed, which on Windows off a console is in the ANSI code
+    # page: a ✅ the app prints (torch.onnx printed one) is none of cp1252's characters, and the export died on it.
+    pytest.importorskip("onnxscript")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    root, _config, exporting = _exporting(tmp_path)
+    with open(root / "TinySeg.py", "a", encoding="utf-8") as module:
+        module.write('\nprint("\u2705")\n')
+    assert (_cli(root, **exporting) / "model.onnx").is_file()
+
+
+def test_an_update_whose_export_stops_short_is_refused(tmp_path):
+    # The model's module ends the interpreter cleanly before the export: no graph, so no update.
+    root, config, exporting = _exporting(tmp_path)
+    (root / "Exits.py").write_text("import sys\n\nsys.exit(0)\n")
+    config["Predictor"]["Model"]["classpath"] = "Exits:TinySegNet"
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    exporting["support_file"].append("Exits.py=Exits.py")
+
+    with pytest.raises(AppMetadataError, match="did not finish"):
+        _cli(root, **exporting)
+    assert not (tmp_path / "out" / "Seg").exists()
+
+
+def test_an_update_is_checked_with_a_module_found_on_a_relative_import_path(tmp_path, monkeypatch):
+    # The process finds a module through a path relative to where it runs: so does the check, which runs elsewhere.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (tmp_path / "deps").mkdir()
+    (tmp_path / "deps" / "relscales.py").write_text(OWN)
+    (root / "Model.py").write_text("from relscales import Scale\n")
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend("deps")
+    for module in ("Model", "relscales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+
+    assert (_cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm")) / "own.wasm").is_file()
+
+
+def test_bytecode_the_bundle_holds_is_none_the_check_reads(tmp_path):
+    # An unchecked bytecode of the old Model.py beside it in the bundle: the check reads the new source, which
+    # scales by 3, and refuses.
+    import py_compile
+
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    cache = bundle / "__pycache__" / f"Model.{sys.implementation.cache_tag}.pyc"
+    py_compile.compile(
+        str(bundle / "Model.py"), cfile=str(cache), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH
+    )
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "a directory at the manifest",
+        "a link at the requirements the bundle holds",
+        "a folder at the requirements",
+        "a graph kept in another case",
+    ],
+)
+def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_own(tmp_path, planted):
+    # What the update writes, beside the configs or once published, it writes whole: into no directory, through no
+    # link (konfai.utils.utils.owned_destination).
+    pytest.importorskip("onnxscript")
+    root, _config, exporting = _exporting(tmp_path)
+    bundle = _cli(root, **{key: value for key, value in exporting.items() if key != "onnx"})
+    (tmp_path / "elsewhere.txt").write_text("not the bundle's")
+    if planted == "a directory at the manifest":
+        (bundle / "manifest.json").mkdir()
+        with pytest.raises(AppMetadataError, match=r"manifest\.json' is a directory"):
+            _cli(root, **exporting)
+    elif planted == "a folder at the requirements":
+        (root / "Model.py").write_text("import einops\n")
+        (bundle / "requirements.txt").mkdir()
+        with pytest.raises(AppMetadataError, match=r"requirements\.txt is no file"):
+            _cli(root, model_py=str(root / "Model.py"))
+    elif planted == "a graph kept in another case":
+        (bundle / "MODEL.onnx").write_bytes(b"the bundle's")
+        with pytest.raises(AppMetadataError, match=r"model\.onnx' is named 'MODEL\.onnx' in another case"):
+            _cli(root, **exporting)
+        assert [path.name for path in bundle.iterdir() if path.suffix.lower() == ".onnx"] == ["MODEL.onnx"]
+        assert (bundle / "MODEL.onnx").read_bytes() == b"the bundle's"
+    else:
+        # The requirements the bundle holds are its author's: no draft is written over them, nor through them.
+        (root / "Model.py").write_text("import einops\n")
+        (bundle / "requirements.txt").symlink_to(tmp_path / "elsewhere.txt")
+        _cli(root, model_py=str(root / "Model.py"))
+        assert (bundle / "Model.py").is_file() and (bundle / "requirements.txt").is_symlink()
+    assert (tmp_path / "elsewhere.txt").read_text() == "not the bundle's"
+
+
+@pytest.mark.parametrize("group", ["aux/mask", "..", "", "C:mask", "aux\\mask"])
+def test_a_nested_app_s_group_is_one_name(tmp_path, group):
+    # Its graph lands beside the configs as <group>.onnx: a group that names a path is refused before anything is read.
+    from konfai_apps.bundle import export_nested_model
+
+    with pytest.raises(AppMetadataError, match="one name"):
+        export_nested_model(group, {"repo_id": "a", "model_name": "b"}, tmp_path)
+
+
+def test_the_import_path_of_a_bundle_s_check_is_the_update_s(tmp_path, monkeypatch):
+    # The empty entry is the caller's folder, an entry inside the bundle its counterpart in the update, every other
+    # entry absolute; the update comes first.
+    from konfai_apps.bundle import _import_path
+
+    bundle, update = tmp_path / "out" / "Seg", tmp_path / "out" / ".Seg.update-1"
+    (bundle / "lib").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(bundle / "lib")
+    monkeypatch.chdir(tmp_path)
+    entries = ["", "deps", str(tmp_path / "abs"), str(bundle), str(bundle / "lib"), str(tmp_path / "link")]
+    assert _import_path(entries, bundle, update) == [
+        str(update.absolute()),
+        str(tmp_path),
+        str(tmp_path / "deps"),
+        str(tmp_path / "abs"),
+        str(update.absolute()),
+        str(update.absolute() / "lib"),
+        str(update.absolute() / "lib"),
+    ]
+
+
+@pytest.mark.parametrize("naming", ["Prediction.yml", "Evaluation.yml", "Uncertainty.yml", "Evaluation.yaml"])
+def test_an_update_checks_its_extension_against_every_config_the_bundle_keeps(tmp_path, naming):
+    # The update brings a new Model.py, which scales by 3, and no --onnx: a config KonfAI Edge runs names that class,
+    # the Prediction.yml the bundle keeps or the Evaluator's config the update brings, and the extension, which
+    # doubles, is refused for it.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    scaled = "  Dataset:\n    transforms:\n      Model:Scale: {}\n"
+    (root / "Prediction.yml").write_text("Predictor:\n" + (scaled if naming == "Prediction.yml" else "  {}\n"))
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+    brought = "Evaluation.yml" if naming == "Prediction.yml" else naming
+    (root / brought).write_text("Evaluator:\n" + (scaled if brought == naming else "  {}\n"))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(root, config=[str(root / brought)], model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+
+
+@pytest.mark.parametrize(
+    "kept",
+    [
+        "Trainer:\n  Dataset:\n    transforms:\n      Model:Scale: {scale: 3.0}\n",
+        "Trainer:\n  Dataset:\n    transforms:\n      Model:Boxed: {}\n",
+        "- notes of the app's, no config\n",
+        "Predictor: [a file that does not parse\n",
+        b"Predictor: \xff\n",
+        None,
+    ],
+    ids=[
+        "a training class the extension does not stand for",
+        "a training class bound by no value",
+        "no config",
+        "no YAML",
+        "no text",
+        "a folder named as a config",
+    ],
+)
+def test_an_update_leaves_the_training_config_out_of_its_extension_s_check(tmp_path, kept):
+    # KonfAI Edge runs a Predictor's or an Evaluator's config, never a Trainer's: the training config, its classes
+    # bound by values only training gives, is the bundle's and no check's, as is a file KonfAI Edge could not read.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(
+        OWN + "\n\nclass Boxed(Scale):\n    def __init__(self, source: str) -> None:\n        super().__init__()\n"
+    )
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    held = kept if isinstance(kept, bytes) else (kept or "Trainer: {}\n").encode()
+    (root / "Config.yml").write_bytes(held)
+    if kept is None:  # a folder the bundle keeps
+        (_cli(root) / "notes.yaml").mkdir()
+
+    bundle = _cli(
+        root,
+        config=[str(root / "Prediction.yml"), str(root / "Config.yml")],
+        model_py=str(root / "Model.py"),
+        extension=str(root / "own.wasm"),
+    )
+    assert (bundle / "Config.yml").read_bytes() == held
+    assert (bundle / "own.wasm").exists()
+
+
+@pytest.mark.parametrize(
+    "made",
+    [
+        "a support file's requirements",
+        "requirements the bundle holds",
+        "a support file's Model.py",
+        "a module the update drops",
+        "an empty folder of the module's name",
+        "a folder of examples of the module's name",
+        "a folder named as the module's file",
+        "a bundle left aside",
+    ],
+)
+def test_the_requirements_drafted_are_those_of_the_bundle_the_update_makes(tmp_path, made):
+    # The draft reads the bundle the update makes, where it holds no requirements (a support file's, or the author's
+    # it kept): the Model.py a support file brings is read, an import of a module the update drops is a requirement,
+    # and a bundle an earlier update left aside is the one updated.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    (root / "einops.py").write_text("")
+    (root / "listed.txt").write_text("numpy-stl\n")
+    if made == "a support file's requirements":
+        support = {"support_file": ["requirements.txt=listed.txt"], "support_root": str(root)}
+        bundle = _cli(root, model_py=str(root / "Model.py"), **support)
+        assert (bundle / "requirements.txt").read_text() == "numpy-stl\n"
+        return
+    if made == "requirements the bundle holds":
+        bundle = _cli(root, model_py=str(root / "Model.py"), requirements=str(root / "listed.txt"))
+        _cli(root)
+        assert (bundle / "requirements.txt").read_text() == "numpy-stl\n"
+        return
+    if made == "a support file's Model.py":
+        bundle = _cli(root, support_file=["./Model.py=Model.py"], support_root=str(root))
+        assert (bundle / "requirements.txt").read_text() == "einops\n"
+        return
+    if made == "a module the update drops":
+        bundle = _cli(
+            root, model_py=str(root / "Model.py"), support_file=["einops.py=einops.py"], support_root=str(root)
+        )
+        assert not (bundle / "requirements.txt").exists()  # einops is the bundle's own module
+    elif made in ("an empty folder of the module's name", "a folder of examples of the module's name"):
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        # No package (no __init__.py) of the name: what the import resolves to is the installed one.
+        (bundle / "einops" / "examples").mkdir(parents=True)
+        if made == "a folder of examples of the module's name":
+            (bundle / "einops" / "examples" / "example.py").write_text("")
+    elif made == "a folder named as the module's file":
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        (bundle / "einops.py").mkdir()  # no module file
+    else:
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").unlink()
+        bundle.rename(bundle.with_name(".Seg.previous"))
+    _cli(root)
+    assert (bundle / "requirements.txt").read_text() == "einops\n"
+
+
+def test_a_bundle_reached_by_a_link_is_updated_where_the_link_leads(tmp_path):
+    # The update takes the place of the folder the link names, which the link then names still, as a direct update
+    # writes there.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "requirements.txt").unlink()
+    (tmp_path / "kept").mkdir()
+    bundle.rename(tmp_path / "kept" / "SegV")
+    bundle.symlink_to(tmp_path / "kept" / "SegV")
+    (root / "Model.py").write_text("import einops\nimport scipy\n")
+
+    _cli(root, model_py=str(root / "Model.py"))
+    assert bundle.is_symlink() and (bundle / "Model.py").read_text() == "import einops\nimport scipy\n"
+    assert sorted(path.name for path in bundle.parent.iterdir()) == ["Seg"]
+
+
+def test_a_bundle_s_name_is_none_of_the_command_s_scratch_folders(tmp_path):
+    # `.Seg.previous` is the folder an update leaves the bundle in: no bundle takes such a name.
+    root = _support_workspace(tmp_path)
+    with pytest.raises(AppMetadataError, match=r"starts with '\.'"):
+        _cli(root, name=".Seg.previous")
+
+
+@pytest.mark.parametrize(
+    ("system", "read", "named"),
+    [
+        ("nt", r"\\?\UNC\host\share\Seg\Bridge.py", r"\\host\share\Seg\Bridge.py"),
+        ("nt", r"\\?\Volume{0}\Seg\Bridge.py", r"\\?\Volume{0}\Seg\Bridge.py"),
+        ("posix", r"\\?\C:\out", r"\\?\C:\out"),  # a name like any other
+    ],
+)
+def test_a_link_windows_reads_back_in_its_extended_form_names_the_path_it_extends(monkeypatch, system, read, named):
+    # A share's extended form is \\?\UNC\host\share\..., read as \\host\share\...; a volume's by its GUID extends
+    # no such path; on POSIX the name is a name.
+    import ntpath
+    import types
+
+    import konfai_apps.bundle as bundle_module
+
+    monkeypatch.setattr(
+        bundle_module, "os", types.SimpleNamespace(name=system, readlink=lambda link: read, path=ntpath)
+    )
+    assert bundle_module._read_link("Alias.py") == named
+
+
+@pytest.mark.parametrize("read_back", ["as written", "as Windows reads it"])
+def test_a_link_the_update_re_points_keeps_the_link_it_names(tmp_path, monkeypatch, read_back):
+    # Alias.py names Bridge.py by its absolute path, which names Model.py: re-pointed into the update, it names
+    # Bridge.py still, and the update keeps the bundle's chain of links. Windows reads an absolute target back as
+    # \\?\C:\..., in which no path of the bundle is spelled.
+    if read_back == "as Windows reads it":
+        import types
+
+        import konfai_apps.bundle as bundle_module
+
+        def extended(link):
+            named = os.readlink(link)
+            return "\\\\?\\" + named if os.path.isabs(named) and not named.startswith("\\\\?\\") else named
+
+        monkeypatch.setattr(
+            bundle_module, "os", types.SimpleNamespace(**{**vars(os), "name": "nt", "readlink": extended})
+        )
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "requirements.txt").unlink()
+    (bundle / "Bridge.py").symlink_to("Model.py")
+    (bundle / "Alias.py").symlink_to((bundle / "Bridge.py").absolute())
+
+    _cli(root)
+    assert os.readlink(bundle / "Alias.py") == "Bridge.py"
+
+
+def test_the_check_of_a_bundle_holding_a_module_named_as_python_s_own_runs(tmp_path):
+    # A json.py of the bundle's is the app's module, imported once the check is loaded: the check's own json is
+    # Python's, as when the app runs.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "json.py").write_text("raise ImportError('the bundle json')\n")
+
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / "own.wasm").is_file()
+
+
+@pytest.mark.parametrize("held", ["a support file", "a file the bundle keeps"])
+def test_requirements_are_named_requirements_txt(tmp_path, held):
+    # konfai-apps installs requirements.txt by that name: a file of another case, brought or kept, would be no
+    # requirements on a file system telling case apart, and the same file as a draft on one that does not.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    (root / "listed.txt").write_text("numpy-stl\n")
+    given: dict = {"support_file": ["Requirements.txt=listed.txt"], "support_root": str(root)}
+    if held == "a file the bundle keeps":
+        bundle = _cli(root, model_py=str(root / "Model.py"))
+        (bundle / "requirements.txt").rename(bundle / "Requirements.txt")
+        given = {}
+    with pytest.raises(AppMetadataError, match=r"Requirements\.txt is named apart from requirements\.txt"):
+        _cli(root, model_py=str(root / "Model.py"), **given)
+
+
+@pytest.mark.parametrize("kept", ["docs/notes.txt", "cache/lookup.pt"])
+def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path, kept):
+    # The app's code the check runs writes a file the bundle keeps, in place, and the update is refused: the bundle's
+    # file is as it was, the update holding a copy of every file but the checkpoints app.json declares.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    (bundle / kept).parent.mkdir()
+    (bundle / kept).write_text("the bundle's")
+    written = f'with open("{kept}", "r+") as notes:\n    notes.write("in place")\n'
+    (root / "Model.py").write_text(written + OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / kept).read_text() == "the bundle's"
+
+
+def test_a_link_to_itself_the_bundle_keeps_is_no_name_the_update_reads(tmp_path):
+    # The names a repack compares are the bundle's entries as named, none followed: a link to itself is one.
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (bundle / "loop").symlink_to("loop")
+    _cli(root)
+    assert (bundle / "loop").is_symlink()
+
+
+def test_a_config_spelled_as_a_kept_one_in_another_case_is_refused(tmp_path):
+    # Prediction.yml kept, prediction.yml brought: one file on a file system telling no case apart, and the one
+    # konfai reads by its name is the old one on the others.
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (root / "prediction.yml").write_text("Predictor: {}\n")
+    with pytest.raises(AppMetadataError, match="one file on a file system telling no case apart"):
+        _cli(root, config=[str(root / "prediction.yml")])
+    assert sorted(path.name for path in bundle.glob("*.yml")) == ["Prediction.yml"]
+
+
+@pytest.mark.parametrize(
+    ("name", "refusal"),
+    [
+        ("Manifest.json", "Manifest.json takes the name of a file"),
+        ("model.onnx", "model.onnx takes the name of a file"),
+        ("Requirements.txt", "Requirements.txt takes the name of a file"),
+        ("APP.JSON", "'app.json' and 'APP.JSON' are one file"),
+    ],
+)
+def test_an_extension_named_as_a_file_the_bundle_command_writes_is_refused(tmp_path, name, refusal):
+    # The export would write its manifest over the extension, the draft its requirements, the command its app.json,
+    # in any case: refused before anything is written, a graph's name with or without an export.
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\n")
+    (root / "built").mkdir()  # apart from the workspace's app.json, which a file system telling no case apart holds
+    (root / "built" / name).write_bytes(b"\0asm")
+
+    with pytest.raises(AppMetadataError, match=re.escape(refusal)):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "built" / name), onnx=name == "Manifest.json")
+    assert not (tmp_path / "out" / "Seg").exists()
+
+
+@pytest.mark.parametrize("spelled", ["absolute", "relative"])
+def test_a_link_into_the_bundle_reads_the_update_s_file(tmp_path, spelled):
+    # Alias.py links to the bundle's Model.py, by its absolute path or out of the bundle and back: the check reads
+    # the Model.py the update brings, which scales by 3, as the published bundle will.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Alias:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"))
+    (bundle / "Alias.py").symlink_to((bundle / "Model.py").resolve() if spelled == "absolute" else "../Seg/Model.py")
+    (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", "scale: float = 3.0"))
+
+    with pytest.raises(AppMetadataError, match="'Alias:Scale' does not transform a volume"):
+        _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    # A link reaching out of the bundle through another link reads what it read.
+    (tmp_path / "out" / "shared" / "sub").mkdir(parents=True)
+    (tmp_path / "out" / "shared" / "icon.png").write_bytes(b"shared")
+    (bundle / "icon.png").write_bytes(b"the bundle's")
+    # It reads what it read, as the system reads '..': past the link on POSIX (shared), off the name on Windows (the
+    # bundle's). The targets are in the system's separators: Windows reads no '/' in a link's target.
+    (bundle / "pivot").symlink_to(os.path.join("..", "shared", "sub"))
+    (bundle / "Alias.png").symlink_to(os.path.join("pivot", "..", "icon.png"))
+    read = (bundle / "Alias.png").read_bytes()
+    (root / "Model.py").write_text(OWN)
+    _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    assert (bundle / "Alias.png").read_bytes() == read
+
+
+def test_a_copy_an_earlier_update_left_that_cannot_be_removed_is_named(tmp_path, monkeypatch):
+    # The bundle is in place and its old copy beside it cannot be removed: the packaging says which, and stops.
+    import konfai_apps.bundle as bundle_module
+
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (bundle.parent / ".Seg.previous").mkdir()
+    remove = bundle_module.shutil.rmtree
+
+    def locked(path, *args, **kwargs):
+        if str(path).endswith(".Seg.previous") and not kwargs.get("ignore_errors"):
+            raise PermissionError("locked")
+        return remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_module.shutil, "rmtree", locked)
+    with pytest.raises(AppMetadataError, match=r"\.Seg\.previous is left from an earlier update"):
+        _cli(root)
+
+
+def test_a_bundle_left_only_as_its_previous_copy_is_put_back_first(tmp_path):
+    # Both renames refused, the bundle stayed only as its copy beside it: the next packaging, in this process or
+    # another, puts it back, user files and all, before it clears its scratch folders.
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (bundle / "notes.txt").write_text("mine\n")
+    bundle.rename(bundle.with_name(".Seg.previous"))
+
+    _cli(root)
+    assert (bundle / "notes.txt").read_text() == "mine\n"
+    assert not list(bundle.parent.glob(".Seg.*"))
+
+
+def test_an_export_whose_model_needs_what_is_missing_fails_the_update(tmp_path, capfd):
+    # The extension's check alone stands down without wasmtime: an export whose model needs it fails, on that import.
+    root, config, exporting = _exporting(tmp_path)
+    (root / "Missing.py").write_text("raise ModuleNotFoundError(\"No module named 'wasmtime'\", name='wasmtime')\n")
+    config["Predictor"]["Model"]["classpath"] = "Missing:TinySegNet"
+    (root / "Prediction.yml").write_text(json.dumps(config))
+    (root / "own.wasm").write_bytes(b"\0asm")
+    exporting["support_file"].append("Missing.py=Missing.py")
+
+    with pytest.raises(AppMetadataError):
+        _cli(root, extension=str(root / "own.wasm"), **exporting)
+    assert "Missing.py" in capfd.readouterr().err
+    assert not (tmp_path / "out" / "Seg").exists()
+
+
+def test_an_update_is_checked_with_the_modules_the_bundle_keeps(tmp_path, monkeypatch, capsys):
+    # The Model.py a first packaging carried stays in the bundle when the next one names none: the classes the next
+    # config names from it are the app's, and the staged update reads them there.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    # It reads a file beside it, which the next packaging ships.
+    (root / "Model.py").write_text(
+        f"from pathlib import Path\n\nTWICE = Path(__file__).with_name('twice.txt').read_text()\n{OWN}"
+    )
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    monkeypatch.delitem(sys.modules, "Model", raising=False)
+    (root / "twice.txt").write_text("2")
+    support = {"support_file": ["twice.txt=twice.txt"], "support_root": str(root)}
+    bundle = _cli(root, model_py=str(root / "Model.py"), **support)
+    (root / "Model.py").unlink()
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+
+    capsys.readouterr()
+    assert (_cli(root, extension=str(root / "own.wasm"), **support) / "own.wasm").is_file()
+    assert "Extension checked against: Model:Scale" in capsys.readouterr().out
+    assert (bundle / "Model.py").read_text().endswith(OWN)
+
+
+@pytest.mark.parametrize("out", ["absolute", "relative"])
+def test_an_update_is_checked_without_the_support_files_it_drops(tmp_path, monkeypatch, out):
+    # The Model.py the bundle keeps imports a support module the update no longer declares, which the update removes:
+    # the staged check reads the bundle as the update leaves it, and the import fails there, whatever spells the
+    # output folder.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("from scales import Scale\n")
+    (root / "scales.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    for module in ("Model", "scales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    # Checked once with it, which imports it.
+    support = {"support_file": ["scales.py=scales.py"], "support_root": str(root)}
+    monkeypatch.chdir(tmp_path)
+    folder = {"out": "out"} if out == "relative" else {}
+    bundle = _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"), **support, **folder)
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"), **folder)
+    assert (bundle / "scales.py").read_text() == OWN
+
+
+def test_an_update_is_checked_without_a_module_the_process_imported_from_the_bundle(tmp_path, monkeypatch):
+    # The process imported the bundle's support module, which the update drops: the check does not take it from there.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("from dropped import Scale\n")
+    (root / "dropped.py").write_text(OWN)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    support = {"support_file": ["dropped.py=dropped.py"], "support_root": str(root)}
+    bundle = _cli(root, model_py=str(root / "Model.py"), **support)
+    for module in ("Model", "dropped"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+    sys.path.insert(0, str(bundle))
+    try:
+        import dropped  # noqa: F401
+    finally:
+        sys.path.remove(str(bundle))
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
+    # Nor from the bundle on the path the process imports from, which it keeps.
+    monkeypatch.delitem(sys.modules, "dropped")
+    monkeypatch.syspath_prepend(str(bundle))
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
+    assert sys.path[0] == str(bundle)
+
+
+def test_an_update_is_checked_without_a_folder_of_the_bundle_on_the_import_path(tmp_path, monkeypatch):
+    # The process imports from a folder inside the bundle, which the update drops: the check does not read it.
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "lib").mkdir()
+    (root / "lib" / "libscales.py").write_text(OWN)
+    (root / "Model.py").write_text("from libscales import Scale\n")
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    bundle = _cli(root, model_py=str(root / "Model.py"), support_file=["lib=lib"], support_root=str(root))
+    monkeypatch.syspath_prepend(str(bundle / "lib"))
+    for module in ("Model", "libscales"):
+        monkeypatch.delitem(sys.modules, module, raising=False)
+
+    with pytest.raises(AppMetadataError, match="'Model:Scale' does not import"):
+        _cli(root, extension=str(root / "own.wasm"))
+
+
+def test_a_second_packaging_in_one_process_checks_its_own_modules(tmp_path, monkeypatch, capsys):
+    # A Model imported before is not the first packaging's, and the first packaging's is not the second's, which
+    # scales by 3: each checks its own, the second is refused, and the Model imported before is the process's again.
+    from types import ModuleType
+
+    from test_extension import DOUBLE, OWN
+
+    wasmtime = pytest.importorskip("wasmtime")
+    root = _support_workspace(tmp_path)
+    (root / "own.wasm").write_bytes(wasmtime.wat2wasm(DOUBLE))
+    (root / "Prediction.yml").write_text("Predictor:\n  Dataset:\n    transforms:\n      Model:Scale: {}\n")
+    before = ModuleType("Model")
+    monkeypatch.setitem(sys.modules, "Model", before)
+    for scale in (2.0, 3.0):
+        (root / "Model.py").write_text(OWN.replace("scale: float = 2.0", f"scale: float = {scale}"))
+        if scale == 2.0:
+            _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+            assert "Extension checked against: Model:Scale" in capsys.readouterr().out
+            continue
+        with pytest.raises(
+            AppMetadataError, match="'Model:Scale' does not transform a volume as the Python class does"
+        ):
+            _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
+    # The process keeps the Model it held, and no check wrote bytecode into the bundle.
+    assert sys.modules["Model"] is before
+    assert not list((tmp_path / "out" / "Seg").rglob("__pycache__"))
+
+
+def test_an_extension_is_planned_with_the_bundle_s_other_files(tmp_path):
+    # Its name beside a support file of another source is refused before anything is written, a symlink in the
+    # bundle under its name is not written through, and an extension of its own name lands.
+    module = pytest.importorskip("wasmtime").wat2wasm(_MODULE)
+    root = _support_workspace(tmp_path)
+    (root / "engine.wasm").write_bytes(b"a support file")
+    (tmp_path / "built").mkdir()
+    (tmp_path / "built" / "engine.wasm").write_bytes(module)
+    support = {"support_file": ["engine.wasm=engine.wasm"], "support_root": str(root)}
+
+    with pytest.raises(AppMetadataError, match=r"Different bundle files would overwrite 'engine\.wasm'"):
+        _cli(root, extension=str(tmp_path / "built" / "engine.wasm"), **support)
+    assert not (tmp_path / "out").exists()
+    bundle = _cli(root)
+    (tmp_path / "elsewhere.wasm").write_bytes(b"not the bundle's")
+    (bundle / "engine.wasm").symlink_to(tmp_path / "elsewhere.wasm")
+    with pytest.raises(AppMetadataError, match="symlink"):
+        _cli(root, extension=str(tmp_path / "built" / "engine.wasm"))
+    assert (tmp_path / "elsewhere.wasm").read_bytes() == b"not the bundle's"
+    (bundle / "engine.wasm").unlink()
+    (tmp_path / "built" / "own.wasm").write_bytes(module)
+    assert (_cli(root, extension=str(tmp_path / "built" / "own.wasm"), **support) / "own.wasm").read_bytes() == module
 
 
 @pytest.mark.slow

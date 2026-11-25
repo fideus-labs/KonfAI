@@ -1027,3 +1027,18 @@ def test_a_2d_image_is_warped_through_a_2d_map_as_simpleitk_warps_it(oblique: bo
         got = stage(CASE, plane, _attribute(image)).squeeze(0).numpy()
         deviation = float(np.abs(want - got).max())
         assert deviation <= 1e-3 * float(np.abs(want).max()), f"{label}: {deviation:.4g}"
+
+
+@pytest.mark.parametrize("interpolation", ["linear", "nearest", "cubic"])
+@pytest.mark.parametrize(("spacing", "shape"), [([1.5, 1.5, 1.5], (13, 17, 11)), ([0.7, 2.3, 1.1], (9, 14, 20))])
+def test_an_inverse_onto_a_grid_placed_by_its_extent_reads_no_fill(interpolation, spacing, shape) -> None:
+    # The outer faces of the grid restored and of the one held coincide: no voxel restored reads past what is held,
+    # so an inverse_fill is never read there, and a program undoing the resample has no fill to carry.
+    stage = Resample(spacing=spacing, interpolation=interpolation, inverse_fill=-7.0)
+    attribute = Attribute()
+    attribute["Origin"], attribute["Spacing"] = np.array([3.0, -2.0, 7.0]), np.array([1.0, 1.1, 0.9])
+    attribute["Direction"] = np.eye(3).flatten()
+    volume = torch.from_numpy(np.random.default_rng(0).normal(size=(1, *shape)).astype(np.float32))
+    stage.transform_shape("CT", CASE, list(shape), attribute)
+    held = stage(CASE, volume.clone(), attribute)
+    assert not (stage.inverse(CASE, held, attribute) == -7.0).any()

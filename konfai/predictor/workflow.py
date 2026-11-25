@@ -17,6 +17,7 @@
 
 """The configured prediction workflow and its Python entrypoints."""
 
+import functools
 import hashlib
 import json
 import math
@@ -55,12 +56,32 @@ from konfai.utils.runtime import (
     State,
     checkpoint_source,
     configure_workflow_environment,
+    expandable_cuda_segments,
     run_distributed_app,
 )
-from konfai.utils.utils import concretize_patch_size, get_module, module_attribute
+from konfai.utils.utils import concretize_patch_size, env_flag, get_module, module_attribute
 
 #: The fewest voxels a case runs on in ``mode: resample``: an out-of-memory under it ends the run (exit 75).
 RESAMPLE_FLOOR_VOXELS = 32**3
+
+#: With ``KONFAI_KEEP_MODEL`` set, the last prediction's model, built and loaded, kept for the process: a session that
+#: predicts again with the same config, model code, checkpoints and devices (one correction after another) builds and
+#: loads it once. ``key`` names what it was built from; ``sources``, its checkpoints, their files and the devices it is on.
+_KEPT_MODEL: dict[str, Any] = {}
+
+
+def _kept_model_key(model: ModelLoader) -> str | None:
+    """What the prediction model is built from: the config and the model's code. None unless the process keeps its
+    model (``KONFAI_KEEP_MODEL``)."""
+    if not env_flag("KONFAI_KEEP_MODEL", False):
+        return None
+    # ponytail: the model's own file only; a module it imports may change unseen (not within a session)
+    source = model._yaml_path() or Path(str(get_module(model.classpath, "konfai.models.python")[0].__file__))
+    tree = _record_tree(config_file(), config_file().resolve().parent)[0]
+    hashed = hashlib.sha256(
+        json.dumps([konfai_root(), model.classpath, tree], sort_keys=True, default=str).encode() + source.read_bytes()
+    )
+    return hashed.hexdigest()
 
 
 @config()
@@ -131,7 +152,17 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.torch_compile = torch_compile
         self.checkpoint_cache_gib = checkpoint_cache_gib
         with startup_clock().phase("model"):
-            self.model = model.get_model(train=False)
+            self._kept_key = _kept_model_key(model)
+            self._kept = self._kept_key is not None and _KEPT_MODEL.get("key") == self._kept_key
+            if self._kept:
+                # Built again on no device and dropped: its config is bound and resolved as a build binds it.
+                try:
+                    with torch.device("meta"):
+                        model.get_model(train=False)
+                except (NotImplementedError, RuntimeError):  # a constructor that reads a tensor's values
+                    model.get_model(train=False)
+            self.model = _KEPT_MODEL["model"] if self._kept else model.get_model(train=False)
+        self._model_loader = model
         self.it = 0
         self.outputs_dataset_loader = outputs_dataset if outputs_dataset else {}
         self.outputs_dataset = {
@@ -172,9 +203,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         for augmentations in self.dataset.data_augmentations_list.values():
             augmentations.draw_seed = 0 if manual_seed is None else manual_seed
         self.dataset.prepare()
-        self.model.bind(
-            self.autocast, State.PREDICTION, self.dataset.get_groups_dest(), gpu_checkpoints=self.gpu_checkpoints
-        )
+        self._bind_model()
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
         self.output_modules = [name for name, _, _ in self.model.named_module_args_dict()]
@@ -259,21 +288,47 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         snapshot(config_file(), archived)
         weights.write_text(json.dumps(identity))
 
-        self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
-        if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
-            # A model WITH weights but no checkpoint would run with random weights: refuse it. A WEIGHTLESS
-            # model (0 parameters, a classical engine such as registration) runs once as constructed.
-            raise PredictorError(
-                "No model checkpoint available for prediction.",
-                "This model has trainable weights, so at least one '.pt' checkpoint must be provided (for "
-                "KonfAI Apps, declare it via the 'models' field in app.json).",
-                "Without a checkpoint its weights are random and prediction would silently produce garbage.",
+        # the devices are the run's here, set by the launcher after the predictor was built
+        sources = (identity, self._load(), cuda_visible_devices())
+        if self._kept and (_KEPT_MODEL.get("model") is not self.model or _KEPT_MODEL["sources"] != sources):
+            # Other checkpoints or devices: the kept model stays where the last run placed it, so it is built again.
+            _KEPT_MODEL.clear()
+            self._kept, self.model = False, self._model_loader.get_model(train=False)
+            self._bind_model()
+        if self._kept:
+            self.model_composite = _KEPT_MODEL["composite"]  # built and loaded by the last prediction
+        else:
+            self.model_composite = ModelComposite(
+                self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib
             )
-        with startup_clock().phase("checkpoint"):
-            self.model_composite.load(self._load())
+            if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
+                # A model WITH weights but no checkpoint would run with random weights: refuse it. A WEIGHTLESS
+                # model (0 parameters, a classical engine such as registration) runs once as constructed.
+                raise PredictorError(
+                    "No model checkpoint available for prediction.",
+                    "This model has trainable weights, so at least one '.pt' checkpoint must be provided (for "
+                    "KonfAI Apps, declare it via the 'models' field in app.json).",
+                    "Without a checkpoint its weights are random and prediction would silently produce garbage.",
+                )
+            with startup_clock().phase("checkpoint"):
+                self.model_composite.load(self._load())
+            if self._kept_key is not None:
+                _KEPT_MODEL.clear()  # one model kept: the last, its device memory held until another replaces it
+                _KEPT_MODEL.update(
+                    key=self._kept_key,
+                    sources=sources,
+                    model=self.model,
+                    composite=self.model_composite,
+                )
 
         self._drop_done_cases()
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
+
+    def _bind_model(self) -> None:
+        """Bind the model to the prediction: its measures, the destination groups and the GPU checkpoints."""
+        self.model.bind(
+            self.autocast, State.PREDICTION, self.dataset.get_groups_dest(), gpu_checkpoints=self.gpu_checkpoints
+        )
 
     def _drop_done_cases(self) -> None:
         """Drop the already-written cases' entries from the prepared patch mapping.
@@ -675,9 +730,15 @@ def checkpoint_sources(path_to_models: Sequence[Path | str]) -> list[Path | str]
 def weights_identity(source: Path | str) -> str:
     """What a checkpoint holds, read cheaply. A URL is its address. A torch checkpoint is a zip whose
     directory lists each tensor's CRC-32 and size, read without the weights; its top folder is named
-    after the file, so a copy under another name holds the same weights. Another file is its SHA-256."""
+    after the file, so a copy under another name holds the same weights. Another file is its SHA-256, computed
+    once in a process while the file keeps its device, inode, size and times."""
     if isinstance(source, str):
         return source
+    return _file_identity(os.path.realpath(source), ModelComposite._source_stamp(source))
+
+
+@functools.lru_cache(maxsize=64)
+def _file_identity(source: str, stamp: tuple[int, int, int, int, int] | None) -> str:
     try:
         with zipfile.ZipFile(source) as archive:
             members = sorted((info.filename.split("/", 1)[-1], info.CRC, info.file_size) for info in archive.infolist())
@@ -698,6 +759,8 @@ def build_predict(
     ``predictions_dir`` the directory the outputs are written to. The predictor comes back ready to be
     executed by the runtime wrapper.
     """
+    # A model that reads the whole case in one window fits the card's live memory, not its fragments.
+    expandable_cuda_segments()
     configure_workflow_environment(
         config_path=prediction_file,
         root="Predictor",

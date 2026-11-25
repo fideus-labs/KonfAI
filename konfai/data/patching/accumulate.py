@@ -23,7 +23,7 @@ from typing import cast
 
 import torch
 
-from konfai.data.patching.blend import GaussianFloat16, PathCombine, outer_product
+from konfai.data.patching.blend import Fold, GaussianFloat16, PathCombine, outer_product
 from konfai.utils.errors import PatchError
 from konfai.utils.utils import Placement
 
@@ -65,10 +65,17 @@ class Accumulator:
         self._done = [False] * self._count
         # Patches are blended into this running buffer as they arrive (add_layer), never kept.
         self._result: torch.Tensor | None = None
+        #: Where the running buffers are allocated, the first patch's device when None. A patch on another device is
+        #: copied into them as it is written, and moved there first when the blend weighs it.
+        self.device: torch.device | None = None
         self._weighted: torch.Tensor | None = None
         #: Under a ``float16_sums`` blend: ``_result`` is the float16 sum, this the float16 sum of the windows.
         self._float16_sums = getattr(patch_combine, "float16_sums", False)
         self._window_sums: torch.Tensor | None = None
+        #: A ``Fold``: ``_result`` holds what its ``fold`` returned, and ``leave`` of it is handed back.
+        self._fold = patch_combine if isinstance(patch_combine, Fold) else None
+        if self._fold is not None and batch:
+            raise PatchError("A Fold patch_combine folds one case, [S, ...]: the accumulator is given batch=False.")
         # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per axis.
         self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
@@ -92,14 +99,15 @@ class Accumulator:
     def _allocate(self, layer: torch.Tensor, spatial: list[int]) -> None:
         """The running buffers over ``spatial``."""
         dtype = torch.float16 if self._float16_sums else layer.dtype
-        self._result = torch.zeros(list(layer.shape[: self._n]) + spatial, dtype=dtype, device=layer.device)
+        device = self.device or layer.device
+        self._result = torch.zeros(list(layer.shape[: self._n]) + spatial, dtype=dtype, device=device)
         if self._float16_sums:
             if not layer.dtype.is_floating_point:
                 raise PatchError(
                     f"'{type(self.patch_combine).__name__}' blends floating-point outputs, and this one is {layer.dtype}.",
                     "Blend the logits the labels are taken from, or use 'patch_combine: Trim'.",
                 )
-            self._window_sums = torch.zeros(spatial, dtype=torch.float16, device=layer.device)
+            self._window_sums = torch.zeros(spatial, dtype=torch.float16, device=device)
 
     def _blend(self, layer: torch.Tensor, patch_slice: tuple[slice, ...], row_offset: int = 0) -> None:
         """Blend one patch at its in-volume destination, ``row_offset`` rows down on the first spatial
@@ -118,6 +126,8 @@ class Accumulator:
         dest[sweep] = slice(dest[sweep].start - row_offset, dest[sweep].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
         result = cast(torch.Tensor, self._result)
+        if self.patch_combine is not None and not self.patch_combine.selects:
+            data = data.to(result.device)
         lead = slices_dest[:n]
         if self.patch_combine is None:
             result[slices_dest] = data
@@ -126,6 +136,8 @@ class Accumulator:
             window = cast(GaussianFloat16, self.patch_combine).weights(extents).to(data.device)[tuple(crop)]
             result[slices_dest] += data * window
             cast(torch.Tensor, self._window_sums)[tuple(dest)] += window
+        elif self._fold is not None:
+            result[slices_dest] = self._fold.fold(result[slices_dest], data)
         elif self.patch_combine.selects:
             # The kept regions partition the volume: the box this patch owns is written, not summed.
             # Cut to the patch's in-volume part like the data above: the kept run of the last patch
@@ -300,6 +312,10 @@ class Accumulator:
             )
         return outer_product(own).clamp_min(floor) / total
 
+    def _finished(self, result: torch.Tensor) -> torch.Tensor:
+        """What is handed back of ``result``: a ``Fold``'s ``leave`` of it."""
+        return result if self._fold is None else self._fold.leave(result)
+
     def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:
         """Index a result tensor over ``span`` on the sweep axis and whole on every other."""
         spatial = [span if dim == self.sweep_axis else slice(None) for dim in range(len(self.shape))]
@@ -329,7 +345,7 @@ class Accumulator:
                 f"Expected up to {self._count} patch(es) via add_layer() before assembling.",
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
-        result = self._result
+        result = self._finished(self._result)
         if self._float16_sums:
             torch.div(result, cast(torch.Tensor, self._window_sums), out=result)
         # Nothing to normalise or crop: both happened at blend time.
@@ -430,7 +446,7 @@ class StreamingAccumulator(Accumulator):
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
         # Cloned: the window slides over these rows right after, so the slab handed out must not be a view.
-        slab = self._result[self._along_sweep(slice(0, length), n)].clone()
+        slab = self._finished(self._result[self._along_sweep(slice(0, length), n)]).clone()
         keep = self._window - length
         # .clone(): source and destination views overlap when length < window.
         self._result[self._along_sweep(slice(0, keep), n)] = self._result[
@@ -450,9 +466,10 @@ class StreamingAccumulator(Accumulator):
 class SlabRegionStream:
     """Slab in, slab out through one region stage, with bounded lookahead.
 
-    Finalized slabs arrive in order along the first spatial axis (the :class:`StreamingAccumulator`'s
-    order), and each output region is emitted as soon as the input region it pulls has arrived, so
-    only a sliding window of the input is resident. The stage is two callables:
+    Finalized slabs arrive in order along the input's spatial axis ``in_axis`` (the
+    :class:`StreamingAccumulator`'s sweep axis), and each output region is emitted as soon as the input
+    region it pulls has arrived, so only a sliding window of the input is resident. The stage is two
+    callables:
 
     - ``pull(target_slices) -> source_slices``: the clamped input region an output region is computed
       from.
@@ -469,11 +486,13 @@ class SlabRegionStream:
         produce: Callable[[torch.Tensor, tuple[slice, ...], list[slice]], torch.Tensor],
         in_spatial_shape: list[int],
         out_spatial_shape: list[int],
+        in_axis: int = 0,
     ) -> None:
         self._pull = pull
         self._produce = produce
         self._in_shape = [int(s) for s in in_spatial_shape]
         self._out_shape = [int(s) for s in out_spatial_shape]
+        self._in_axis = in_axis
         self._axis, self._ascending = self._probe_axis()
         self._slabs: list[tuple[int, torch.Tensor]] = []
         self._complete_to = 0
@@ -484,15 +503,15 @@ class SlabRegionStream:
         cannot corrupt the output (emission is gated on the pull of the real regions), it only
         buffers more; a map no probe can tell apart falls back to axis 0 ascending."""
         full = tuple(slice(0, n) for n in self._out_shape)
-        baseline = self._pull(full)[0]
+        baseline = self._pull(full)[self._in_axis]
         for axis, extent in enumerate(self._out_shape):
             probe = list(full)
             probe[axis] = slice(0, 1)
-            first = self._pull(tuple(probe))[0]
+            first = self._pull(tuple(probe))[self._in_axis]
             if (first.start, first.stop) == (baseline.start, baseline.stop):
                 continue
             probe[axis] = slice(extent - 1, extent)
-            last = self._pull(tuple(probe))[0]
+            last = self._pull(tuple(probe))[self._in_axis]
             return axis, first.start <= last.start
         return 0, True
 
@@ -503,6 +522,12 @@ class SlabRegionStream:
         slices = [slice(0, n) for n in self._out_shape]
         slices[self._axis] = rows
         return tuple(slices)
+
+    @property
+    def streams(self) -> bool:
+        """Whether the first output row comes before the last input row. Where its pull already reads the whole input
+        along the slab axis, the stream holds the input whole and emits the output in one block."""
+        return self._pull(self._prefix_slices(1))[self._in_axis].stop < self._in_shape[self._in_axis]
 
     def push(self, region: slice, slab: torch.Tensor) -> list[tuple[tuple[slice, ...], torch.Tensor]]:
         """Take the next finalized slab (rows ``region`` of the input) and emit what it completes."""
@@ -522,7 +547,7 @@ class SlabRegionStream:
         if self._emitted != self._out_shape[self._axis]:
             raise PatchError(
                 f"SlabRegionStream finalized with {self._emitted} of {self._out_shape[self._axis]} "
-                f"output rows emitted (input complete to {self._complete_to} of {self._in_shape[0]}).",
+                f"output rows emitted (input complete to {self._complete_to} of {self._in_shape[self._in_axis]}).",
                 "Push every slab of the input before finalizing.",
             )
         self._slabs.clear()
@@ -535,7 +560,7 @@ class SlabRegionStream:
         low, high = self._emitted, extent
         while low < high:
             middle = (low + high + 1) // 2
-            if self._pull(self._prefix_slices(middle))[0].stop <= self._complete_to:
+            if self._pull(self._prefix_slices(middle))[self._in_axis].stop <= self._complete_to:
                 low = middle
             else:
                 high = middle - 1
@@ -552,10 +577,9 @@ class SlabRegionStream:
         if m < extent:
             remaining = [slice(0, n) for n in self._out_shape]
             remaining[self._axis] = slice(m, extent) if self._ascending else slice(0, extent - m)
-            keep_from = self._pull(tuple(remaining))[0].start
-            self._slabs = [
-                (start, slab) for start, slab in self._slabs if start + slab.shape[-len(self._in_shape)] > keep_from
-            ]
+            keep_from = self._pull(tuple(remaining))[self._in_axis].start
+            dim = self._in_axis - len(self._in_shape)  # the slab axis, counted from the end
+            self._slabs = [(start, slab) for start, slab in self._slabs if start + slab.shape[dim] > keep_from]
         else:
             self._slabs.clear()
         return [(tuple(target), result)]
@@ -563,35 +587,37 @@ class SlabRegionStream:
     def _window(self, source: list[slice]) -> torch.Tensor:
         """The buffered input restricted to ``source``: rows gathered from the arrived slabs, the
         other axes sliced in place."""
-        axis0 = source[0]
-        n_lead = self._slabs[0][1].dim() - len(self._in_shape)
-        lead = (slice(None),) * n_lead
+        wanted = source[self._in_axis]
+        dim = self._slabs[0][1].dim() - len(self._in_shape) + self._in_axis
+        lead = (slice(None),) * dim
         pieces = []
         for start, slab in self._slabs:
-            stop = start + slab.shape[n_lead]
-            lo, hi = max(start, axis0.start), min(stop, axis0.stop)
+            stop = start + slab.shape[dim]
+            lo, hi = max(start, wanted.start), min(stop, wanted.stop)
             if lo < hi:
                 pieces.append(slab[(*lead, slice(lo - start, hi - start))])
-        window = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=n_lead)
-        if window.shape[n_lead] != axis0.stop - axis0.start:
+        window = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=dim)
+        if window.shape[dim] != wanted.stop - wanted.start:
             raise PatchError(
-                f"SlabRegionStream window rows [{axis0.start}, {axis0.stop}) are not fully buffered.",
+                f"SlabRegionStream window rows [{wanted.start}, {wanted.stop}) are not fully buffered.",
                 "The pull map must never reach below rows already pruned or above rows arrived.",
             )
-        return window[(*lead, slice(None), *source[1:])]
+        others = [slice(None) if axis == self._in_axis else part for axis, part in enumerate(source)]
+        return window[(*(slice(None),) * (dim - self._in_axis), *others)]
 
 
 class SlabAligner:
     """Merge several slab streams over the same axis into jointly finalized intervals.
 
-    Each stream emits finalized slabs in non-decreasing order along the shared first spatial axis;
+    Each stream emits finalized slabs in non-decreasing order along the shared spatial axis ``axis``;
     ``push`` takes one stream's new slabs and returns the intervals complete on every stream, each
     carrying every stream's rows. Only the inter-stream skew is buffered.
     """
 
-    def __init__(self, nb_streams: int, lead_dims: int = 1) -> None:
+    def __init__(self, nb_streams: int, lead_dims: int = 1, axis: int = 0) -> None:
         self._nb_streams = nb_streams
-        self._lead = lead_dims
+        # The tensor dimension the slabs are cut along: past the lead dimensions, the spatial axis.
+        self._dim = lead_dims + axis
         self._pending: dict[int, list[tuple[int, torch.Tensor]]] = {}
         self._frontiers: dict[int, int] = {}
         self._consumed = 0
@@ -617,27 +643,27 @@ class SlabAligner:
         joint = min(self._frontiers.values())
         if joint <= self._consumed:
             return []
-        lead = (slice(None),) * self._lead
+        lead = (slice(None),) * self._dim
         rows: dict[int, torch.Tensor] = {}
         for key in sorted(self._pending):
             pieces = [
                 slab[
                     (
                         *lead,
-                        slice(max(start, self._consumed) - start, min(start + slab.shape[self._lead], joint) - start),
+                        slice(max(start, self._consumed) - start, min(start + slab.shape[self._dim], joint) - start),
                     )
                 ]
                 for start, slab in self._pending[key]
-                if start < joint and start + slab.shape[self._lead] > self._consumed
+                if start < joint and start + slab.shape[self._dim] > self._consumed
             ]
             if not pieces:
                 raise PatchError(
                     f"SlabAligner stream {key} holds no rows for [{self._consumed}, {joint}).",
                     "Push the slabs exactly as the accumulators finalize them, without skipping a stream.",
                 )
-            rows[key] = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=self._lead)
+            rows[key] = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=self._dim)
             self._pending[key] = [
-                (start, slab) for start, slab in self._pending[key] if start + slab.shape[self._lead] > joint
+                (start, slab) for start, slab in self._pending[key] if start + slab.shape[self._dim] > joint
             ]
         interval = slice(self._consumed, joint)
         self._consumed = joint

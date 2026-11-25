@@ -19,36 +19,45 @@
 import asyncio
 import hmac
 import json
+import math
 import os
 import shutil
 import signal
 import subprocess  # nosec B404
+import sys
 import tempfile
 import time
 import uuid
 import zipfile
+from collections import deque
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Annotated, TypeVar
+from typing import Annotated, TextIO, TypeVar, cast
 
 import konfai
 import psutil
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
 from .app_repository import get_app_repository_info
 from .cli import REFUSAL_FILE_ENV
 from .errors import AppMetadataError, AppRepositoryError
+from .interactive import IMAGE_SUFFIXES, PREFIX, SESSION_PREDICT_SECONDS, _compressed
 from .presets import split_preset
 from .remote_options import parse_remote_options, remote_options_to_cli_args
 
 MAX_ACTIVE_JOBS = 32
+# Interactive sessions (``/apps/{app}/sessions``): each holds a worker with its model loaded, on one GPU.
+MAX_SESSIONS = int(os.environ.get("KONFAI_APPS_MAX_SESSIONS", "4"))
+SESSION_IDLE_SECONDS = float(os.environ.get("KONFAI_APPS_SESSION_IDLE_SECONDS", "900"))
+SESSION_READY_SECONDS = 3600.0  # the worker resolves the app first: a download
 
 _APPS_CONFIG: dict = {}
 if "KONFAI_APPS_CONFIG" in os.environ:
@@ -107,9 +116,13 @@ async def lifespan(_app: FastAPI):
     initialize_gpu_semaphores()
     reset_sse_state()
     SERVER_STATE.loop = asyncio.get_running_loop()
+    reaper = asyncio.create_task(_reap_idle_sessions())
     try:
         yield
     finally:
+        reaper.cancel()
+        for session_id in list(SERVER_STATE.sessions):
+            _stop_session(SERVER_STATE.sessions.pop(session_id))
         SERVER_STATE.loop = None
         SERVER_STATE.gpu_semaphores.clear()
         reset_sse_state()
@@ -481,6 +494,8 @@ class AppServerState:
     """In-memory state container for the KonfAI app server runtime."""
 
     jobs: dict[str, Job] = field(default_factory=dict)
+    sessions: dict[str, "Session"] = field(default_factory=dict)
+    opening_sessions: int = 0  # sessions counted against MAX_SESSIONS while they open
     gpu_semaphores: dict[int, asyncio.Semaphore] = field(default_factory=dict)
     active_sse_global: int = 0
     active_sse_jobs: set[str] = field(default_factory=set)
@@ -1531,6 +1546,246 @@ async def fine_tune(
     if lr is not None:
         cmd += ["--lr", str(lr)]
     return cmd
+
+
+@dataclass
+class Session:
+    """An interactive session: a worker (``python -m konfai_apps.interactive``) predicting with one app, its model
+    kept loaded, on the image uploaded when the session opened."""
+
+    session_id: str
+    run_dir: Path
+    proc: subprocess.Popen
+    gpu: int | None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one prediction at a time
+    last_used: float = field(default_factory=time.monotonic)
+    requests: int = 0
+    log: deque = field(default_factory=lambda: deque(maxlen=20))  # the worker's last lines, for an error
+
+
+def _read_answer(session: Session, request: str) -> tuple[str, str]:
+    """The worker's answer to ``request`` ("ready" for its start): ``(done | error | ready, detail)``."""
+    for line in session.proc.stdout or ():
+        line = line.rstrip("\n")
+        if not line.startswith(PREFIX):
+            session.log.append(line)
+            continue
+        word, _, rest = line[len(PREFIX) :].strip().partition(" ")
+        if word == "ready":
+            if request == "ready":
+                return word, ""
+            continue
+        answered, _, detail = rest.partition(" ")
+        if answered == request:
+            return word, detail
+    return "error", "the session's worker stopped: " + " | ".join(session.log)
+
+
+def _stop_session(session: Session) -> None:
+    """Kill the session's worker and everything it started, and remove its files."""
+    with suppress(ProcessLookupError, PermissionError):
+        if hasattr(os, "killpg"):
+            # The leader may have exited while a descendant still holds the device or the output pipe.
+            if session.proc.poll() is None or _process_group_exists(session.proc.pid):
+                os.killpg(session.proc.pid, signal.SIGKILL)
+        elif session.proc.poll() is None:
+            _kill_process_tree(session.proc)
+    with suppress(subprocess.TimeoutExpired):
+        session.proc.wait(10)
+    shutil.rmtree(session.run_dir, ignore_errors=True)
+
+
+async def _drop_session(session: Session) -> None:
+    SERVER_STATE.sessions.pop(session.session_id, None)
+    await asyncio.to_thread(_stop_session, session)
+
+
+async def _close_idle_sessions() -> None:
+    """Close the sessions nothing asked of for SESSION_IDLE_SECONDS: each holds a model on a device."""
+    now = time.monotonic()
+    for session in list(SERVER_STATE.sessions.values()):
+        if now - session.last_used > SESSION_IDLE_SECONDS and not session.lock.locked():
+            await _drop_session(session)
+
+
+async def _reap_idle_sessions() -> None:
+    while True:
+        await asyncio.sleep(60)
+        await _close_idle_sessions()
+
+
+def _held_image(upload: Path, target: Path) -> None:
+    """The session's image, uncompressed (each prediction reads it whole). Its header is read here, its pixels in a
+    process of their own: a small compressed file can declare a volume far larger than the server's memory."""
+    import SimpleITK as sitk
+
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(str(upload))
+    try:
+        reader.ReadImageInformation()
+    except RuntimeError as error:
+        raise HTTPException(422, f"The session's image cannot be read: {upload.name}") from error
+    components = reader.GetNumberOfComponents()
+    one = sitk.Image([1] * reader.GetDimension(), reader.GetPixelIDValue(), components)
+    decoded = one.GetSizeOfPixelComponent() * components * math.prod(reader.GetSize())
+    if decoded > MAX_FILE_BYTES:
+        raise HTTPException(413, f"The session's image is {decoded} bytes decoded: above the per-file upload limit.")
+    decode = "import SimpleITK as s, sys; s.WriteImage(s.ReadImage(sys.argv[1]), sys.argv[2])"
+    result = subprocess.run(  # nosec B603
+        [sys.executable, "-c", decode, str(upload), str(target)], capture_output=True, text=True, check=False
+    )
+    if result.returncode:
+        raise HTTPException(422, f"The session's image cannot be read: {upload.name}")
+
+
+def _worker_app(app_name: str) -> str:
+    """``app_name`` for the session's worker, which runs in the session's folder: a local app named by a path relative
+    to the server's, made absolute; any other name as it is."""
+    base, mark, preset = app_name.partition("#")
+    return f"{Path(base).resolve()}{mark}{preset}" if Path(base).exists() else app_name
+
+
+@protected.post("/apps/{app_name:path}/sessions")
+async def open_session(
+    app_name: str,
+    image: Annotated[UploadFile, File(...)],
+    gpu: Annotated[str, Form()] = "",  # one GPU id; empty: the first, or the CPU on a server without one
+):
+    """Open an interactive session on ``image``: a worker that keeps ``app_name``'s model loaded between the
+    predictions asked of it (``POST /sessions/{id}/predict``) until it is closed (``DELETE /sessions/{id}``) or left
+    idle for ``KONFAI_APPS_SESSION_IDLE_SECONDS``."""
+    _require_configured_app(app_name)
+    requested = [int(x) for x in gpu.split(",") if x.strip()]
+    unknown = sorted({g for g in requested if g not in SERVER_STATE.gpu_semaphores})
+    if unknown:
+        raise HTTPException(400, f"Unknown GPU id(s): {unknown}")
+    choices = requested or sorted(SERVER_STATE.gpu_semaphores)
+    device = choices[0] if choices else None
+    await _close_idle_sessions()
+    if len(SERVER_STATE.sessions) + SERVER_STATE.opening_sessions >= MAX_SESSIONS:
+        raise HTTPException(429, "Server busy: too many open sessions")
+    SERVER_STATE.opening_sessions += 1  # its place held before the first await: concurrent opens see it
+    try:
+        return await _open_session(app_name, image, device)
+    finally:
+        SERVER_STATE.opening_sessions -= 1
+
+
+async def _open_session(app_name: str, image: UploadFile, device: int | None) -> dict[str, str]:
+    session_id = uuid.uuid4().hex[:12]
+    run_dir = Path(tempfile.mkdtemp(prefix=f"konfai_session_{session_id}_")).resolve()
+    session = None
+    try:
+        saved = save_uploads([image], run_dir / "upload")
+        if not saved:
+            raise HTTPException(422, "The session needs its image.")
+        await asyncio.to_thread(_held_image, saved[0], run_dir / "image.mha")
+        cmd = [sys.executable, "-m", "konfai_apps.interactive", _worker_app(app_name)]
+        if device is not None:
+            cmd += ["--gpu", str(device)]
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(run_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )  # nosec B603
+        session = Session(session_id, run_dir, proc, device)
+        try:
+            word, detail = await asyncio.wait_for(
+                asyncio.to_thread(_read_answer, session, "ready"), SESSION_READY_SECONDS
+            )
+        except TimeoutError as error:
+            raise HTTPException(504, "The session's worker did not start in time.") from error
+        if word != "ready":
+            raise HTTPException(502, detail)
+    except BaseException:
+        if session is not None:
+            await asyncio.to_thread(_stop_session, session)
+        else:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        raise
+    session.last_used = time.monotonic()  # idle from now, not from before its worker started
+    SERVER_STATE.sessions[session_id] = session
+    return {"session_id": session_id}
+
+
+@protected.post("/sessions/{session_id}/predict")
+async def session_predict(session_id: str, inputs: Annotated[list[UploadFile] | None, File()] = None):
+    """Predict on the session's image with ``inputs`` (the app's other inputs, in its order: the prompts, the last
+    mask); answered with the prediction, a compressed MetaImage."""
+    session = SERVER_STATE.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, f"Unknown session '{session_id}'")
+    dispatched = False
+    try:
+        # One deadline from the request on: the session's lock and its device are waited for within it.
+        async with asyncio.timeout(SESSION_PREDICT_SECONDS), session.lock:
+            session.requests += 1
+            number = session.requests
+            for stale in (f"request{number - 1}", f"out{number - 1}"):
+                shutil.rmtree(session.run_dir / stale, ignore_errors=True)
+            saved = save_uploads(inputs, session.run_dir / f"request{number}") if inputs else []
+            output = session.run_dir / f"out{number}"
+            request = {
+                "id": number,
+                "inputs": [[str(session.run_dir / "image.mha")], *[[str(path)] for path in saved]],
+                "output": str(output),
+            }
+            semaphore = SERVER_STATE.gpu_semaphores.get(session.gpu) if session.gpu is not None else None
+            async with semaphore or nullcontext():
+                stdin = cast(TextIO, session.proc.stdin)  # a pipe
+                try:
+                    stdin.write(json.dumps(request) + "\n")
+                    stdin.flush()
+                except OSError as error:
+                    await _drop_session(session)
+                    raise HTTPException(410, "The session's worker stopped; open a new session.") from error
+                dispatched = True
+                try:
+                    word, detail = await asyncio.to_thread(_read_answer, session, str(number))
+                except asyncio.CancelledError:
+                    # Past the deadline, its worker still computes on the device: stopped before the device is freed.
+                    await asyncio.shield(asyncio.to_thread(_stop_session, session))
+                    raise
+            session.last_used = time.monotonic()
+            if word != "done":
+                if session.proc.poll() is not None:
+                    await _drop_session(session)
+                    raise HTTPException(410, detail)
+                raise HTTPException(422, detail)
+            found = sorted(
+                path for path in output.rglob("*") if path.is_file() and path.name.lower().endswith(IMAGE_SUFFIXES)
+            )
+            if not found:
+                raise HTTPException(500, "The prediction wrote no image.")
+            prediction = session.run_dir / f"prediction{number}.mha"
+            await asyncio.to_thread(_compressed, found[0], prediction)
+    except TimeoutError as error:
+        if not dispatched:
+            raise HTTPException(504, "The session's device stayed busy past the deadline; ask again.") from error
+        await _drop_session(session)  # its worker is still at it
+        raise HTTPException(504, "The prediction did not end in time; the session is closed.") from error
+    # Removed once sent: the lock is released before the response streams it.
+    return FileResponse(
+        prediction,
+        media_type="application/octet-stream",
+        filename="Prediction.mha",
+        background=BackgroundTask(prediction.unlink, missing_ok=True),
+    )
+
+
+@protected.delete("/sessions/{session_id}")
+async def close_session(session_id: str):
+    """Close an interactive session: its worker stopped, its model's memory freed, its files removed."""
+    session = SERVER_STATE.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, f"Unknown session '{session_id}'")
+    await _drop_session(session)
+    return {"session_id": session_id, "status": "closed"}
 
 
 @protected.get("/jobs/{job_id}")

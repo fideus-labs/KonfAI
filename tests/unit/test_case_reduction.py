@@ -35,6 +35,7 @@ from konfai.data.case_reduction import (
     _KEPT_FOLDS_SHARE_OF_REGIONS,
     CaseReduction,
     ReductionPlan,
+    check_post_stages,
     split_chain,
 )
 from konfai.data.patching import (
@@ -47,8 +48,10 @@ from konfai.data.patching import (
 from konfai.data.patching.budget import GROWTH_CAP_UNITS
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
+    CaseStatistic,
     Clip,
     Dilate,
+    LocalityKind,
     Normalize,
     Reduce,
     Resample,
@@ -362,6 +365,47 @@ def test_a_statistic_of_the_result_is_seeded_by_a_first_pass(tmp_path: Path) -> 
     reference = volumes.mean(axis=0)
     expected = (reference - reference.min()) / (reference.max() - reference.min())
     np.testing.assert_allclose(written, expected, rtol=1e-5, atol=1e-6)
+
+
+def _seeded() -> Attribute:
+    """What the pass over the reduction seeds a later stage with: the attribute ``write_into`` writes."""
+    from konfai.data.case_reduction import _RunningStatistics
+
+    statistics = _RunningStatistics()
+    statistics.update(torch.arange(8.0))
+    attribute = Attribute()
+    statistics.write_into(attribute)
+    return attribute
+
+
+@pytest.mark.parametrize(
+    ("stage", "seeded"),
+    [
+        (Normalize(min_value=0.0, max_value=1.0), True),
+        (Clip(min_value="min", max_value="max"), True),
+        (Clip(min_value="percentile:10", max_value="percentile:90"), False),
+        (CaseStatistic("oracle_support:Roughness"), False),
+        (Clip(min_value="min", max_value=50.0, mask="MASK"), False),
+    ],
+    ids=["min-max", "clip-to-min-max", "percentile", "case-statistic", "a-statistic-it-measures-itself"],
+)
+def test_a_statistic_after_the_reduction_reads_only_what_the_stat_pass_seeds(stage: Transform, seeded: bool) -> None:
+    # Each region after the Reduce is handed its seed: a key the pass does not measure would be read off the region.
+    locality = stage.patch_locality(Attribute())
+    assert locality.kind is LocalityKind.GLOBAL_STAT
+    held = _seeded()
+    assert seeded == (bool(locality.stat_keys) and all(key in held for key in locality.stat_keys))
+    if seeded:
+        check_post_stages([stage], "avg")
+    else:
+        with pytest.raises(ReductionError, match="which the statistics pass over the reduction does not measure"):
+            check_post_stages([stage], "avg")
+
+
+def test_a_percentile_after_the_reduction_is_refused_before_a_region_is_read(tmp_path: Path) -> None:
+    # As konfai refused it before it streamed percentiles: no region is clipped to its own percentiles.
+    with pytest.raises(ReductionError, match="Percentile:10"):
+        _run(tmp_path, [], Reduce(operator="Mean", output="avg"), [Clip(min_value="percentile:10", max_value=50.0)])
 
 
 def test_a_cohort_that_disagrees_on_geometry_is_refused_before_reading(tmp_path: Path) -> None:

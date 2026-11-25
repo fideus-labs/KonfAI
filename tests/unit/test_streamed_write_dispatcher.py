@@ -37,6 +37,7 @@ from konfai.data.patching.stage import _halo_radii
 from konfai.data.reduction import Mean, Reduction
 from konfai.data.transform import (
     Canonical,
+    Crop,
     Dilate,
     Flip,
     LocalityKind,
@@ -218,6 +219,41 @@ def test_stream_crop_padding_inverse_matches_whole_volume(seed: int) -> None:
     assert torch.equal(got, reference)
 
 
+@pytest.mark.parametrize(
+    ("seed", "fill", "empty"), [(0, None, False), (1, 0.0, False), (2, 7.0, False), (3, 5.0, True)]
+)
+def test_stream_a_crop_inverse_pads_the_box_back_as_the_whole_volume_does(seed: int, fill, empty: bool) -> None:
+    # Crop's inverse is Padding's forward: a region pulls the rows of the box it covers, and the edge (no
+    # fill) or the fill covers the rest; a case with no foreground is the fill everywhere.
+    rng = np.random.default_rng(seed)
+    box = np.array([[3, 2], [0, 1], [2, 0]])
+    in_shape = [Z, Y, X]
+    volume = torch.from_numpy(rng.integers(0, 9, size=(C, *in_shape)).astype(np.uint8))
+    crop = Crop(fill=fill, empty="fill" if empty else "refuse")
+    attribute = Attribute()
+    attribute["box"] = box
+    if empty:
+        attribute["boxempty"] = 1
+    assert crop.inverse_patch_locality(attribute).kind is LocalityKind.REGRID
+    out_shape = crop.inverse_transform_shape(in_shape, attribute)
+    reference = crop.inverse("case", volume.clone(), Attribute(attribute))
+    assert list(reference.shape[1:]) == out_shape == [Z + 5, Y + 1, X + 2]
+    got = _run_stream(
+        lambda target: crop.stream_region_target("case", target, in_shape, Attribute(attribute)),
+        lambda window, target, source: crop.stream_region_inverse(
+            "case", window, RegionContext(tuple(source), tuple(target), tuple(in_shape)), Attribute(attribute)
+        ),
+        in_shape,
+        out_shape,
+        volume,
+        _partitions(Z, rng),
+    )
+    assert torch.equal(got, reference)
+    walked = Attribute(attribute)
+    crop.inverse_stream_cache_attribute(walked, in_shape)
+    assert "box" not in walked and "boxempty" not in walked
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(seed: int) -> None:
     # The streamed inverse runs the code the whole-volume inverse runs, over a region that happens
@@ -278,6 +314,37 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
     )
     assert got.shape == reference.shape
     torch.testing.assert_close(got, reference, atol=1e-2, rtol=0)  # ~1e-4 relative on values ~100
+
+
+@pytest.mark.parametrize("seed", range(2))
+def test_an_inverse_b_spline_streams_on_what_its_locality_declares_of_a_header_of_spacing_alone(seed: int) -> None:
+    # A header with a Spacing and no Origin nor Direction: the inverse samples between the grids it reads, unit
+    # spacing, where the faces grid clips a B-spline to its input's range, and its locality asks for that range,
+    # which the write dispatcher measures and seeds. A 4 mm axis judged on the header would ask for nothing.
+    rng = np.random.default_rng(seed)
+    volume = torch.from_numpy(rng.standard_normal((C, 24, Y, X)).astype(np.float32)) * 100.0
+    resample = Resample([1.0, 1.0, 1.0], interpolation="bspline", grid="faces")
+    attribute = Attribute()
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 4.0])  # (x, y, z), as stored
+    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])  # the forward's
+    attribute["Size"] = np.asarray([6, Y, X])
+    attribute["Size"] = np.asarray([24, Y, X])
+    seeded = Attribute(attribute)
+    for key in resample.inverse_patch_locality(attribute).stat_keys:
+        reduce = torch.amin if key.startswith("NanMin") else torch.amax
+        seeded[key] = reduce(volume, dim=(1, 2, 3)).double().numpy()
+    reference = resample.inverse("case", volume.clone(), Attribute(attribute))
+    got = _run_stream(
+        lambda target: resample.stream_region_target("case", target, [24, Y, X], Attribute(seeded)),
+        lambda window, target, source: resample.stream_region_inverse(
+            "case", window, RegionContext(tuple(source), tuple(target), (24, Y, X)), Attribute(seeded)
+        ),
+        [24, Y, X],
+        [6, Y, X],
+        volume,
+        _partitions(24, rng),
+    )
+    torch.testing.assert_close(got, reference, atol=1e-3, rtol=0)
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -493,12 +560,22 @@ def test_plan_non_region_writable_format_buffers_and_writes_classically() -> Non
 # --------------------------------------------------------------------------------------
 
 
-def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, before=(), final=()):
+def _drive_prediction(
+    tmp_path,
+    transforms,
+    volume,
+    monkeypatch,
+    streamed=True,
+    before=(),
+    final=(),
+    sweep_axis=0,
+    store=("output.h5", "h5"),
+):
     """Push a whole case patch by patch through add_layer against an h5 sink and read the entry back.
 
     The forward ``transforms`` run once on ``volume`` (chained, stacking the attribute exactly as the
     input pipeline would), and the transformed volume plays the model output: the finalize chain must
-    invert it back.
+    invert it back. The patches are the planes along ``sweep_axis``, the axis the grid is swept along.
     """
     from konfai.utils.dataset import Dataset
 
@@ -512,13 +589,15 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     model_volume = volume.clone()
     for transform in transforms:
         model_volume = transform("CASE_000", model_volume, attribute)
-    z = model_volume.shape[1]
+    spatial = list(model_volume.shape[1:])
+    rows = spatial[sweep_axis]
     patch_slices = [
-        (slice(k, k + 1), slice(0, model_volume.shape[2]), slice(0, model_volume.shape[3])) for k in range(z)
+        tuple(slice(k, k + 1) if axis == sweep_axis else slice(0, extent) for axis, extent in enumerate(spatial))
+        for k in range(rows)
     ]
 
     class DummyPatch:
-        patch_size: ClassVar[list[int]] = [1, model_volume.shape[2], model_volume.shape[3]]
+        patch_size: ClassVar[list[int]] = [1 if axis == sweep_axis else extent for axis, extent in enumerate(spatial)]
         placement = "pad"
 
         @staticmethod
@@ -528,14 +607,14 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
 
         @staticmethod
         def get_sweep_axis(index_augmentation: int) -> int:
-            # These grids are cut along axis 0, as the dispatcher's slab contract expects.
             del index_augmentation
-            return 0
+            return sweep_axis
 
     class DummyManager:
         name = "CASE_000"
         patch = DummyPatch()
         shapes: ClassVar[list[list[int]]] = [list(model_volume.shape[1:])]
+        base_shape: ClassVar[list[int]] = list(volume.shape)
         cache_attributes: ClassVar[list[Attribute]] = [Attribute()]
 
     class DummyDatasetIter:
@@ -549,7 +628,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
 
     output_dataset = OutputDataset(
         same_as_group="src:dest",
-        dataset_filename=f"{tmp_path}/output.h5:h5",
+        dataset_filename=f"{tmp_path}/{store[0]}:{store[1]}",
         group="out",
         patch_combine=None,
         reduction="Mean",
@@ -559,16 +638,22 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     output_dataset.before_reduction_transforms = list(before)
     output_dataset.final_transforms = list(final)
 
-    for k in range(z):
+    for k in range(rows):
         # Patch.get_data squeezes size-1 patch axes, so a [1, Y, X] patch reaches add_layer as [C, Y, X].
         output_dataset.add_layer(
-            0, 0, k, model_volume[:, k].clone(), cast(DatasetIter, DummyDatasetIter()), Attribute(attribute)
+            0,
+            0,
+            k,
+            model_volume.select(sweep_axis + 1, k).clone(),
+            cast(DatasetIter, DummyDatasetIter()),
+            Attribute(attribute),
         )
         if output_dataset.is_done(0):
             result = output_dataset.get_output(0, [volume.shape[0]], cast(DatasetIter, DummyDatasetIter()))
             output_dataset.write_prediction(0, "CASE_000", result)
 
-    data, _ = Dataset(f"{tmp_path}/output.h5", "h5").read_data("out", "CASE_000")
+    output_dataset.finalize_writes()  # a background writer may still hold the case
+    data, _ = Dataset(f"{tmp_path}/{store[0]}", store[1]).read_data("out", "CASE_000")
     return torch.from_numpy(data)
 
 
@@ -604,11 +689,14 @@ def test_add_layer_streams_a_forward_region_final_transform(tmp_path, monkeypatc
     assert torch.equal(streamed, volume.flip(1))
 
 
-def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("sweep_axis", [0, 2])
+def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(
+    tmp_path, monkeypatch, capsys, sweep_axis: int
+) -> None:
     # The general case the composition exists for: Canonical + Resample + Padding forward,
     # so the finalize chain carries CROP + REGRID + ORIENTATION in sequence. With the labelmap cast
     # to uint8 before the reduction, the whole stack streams to the sink and must match the
-    # whole-volume path bit for bit.
+    # whole-volume path bit for bit, along whichever axis the grid is swept.
     volume = (torch.arange(1 * 6 * 4 * 3).reshape(1, 6, 4, 3) % 5).to(torch.float32)
     transforms = [
         Canonical(inverse=True),
@@ -616,20 +704,30 @@ def test_add_layer_streams_a_full_geometry_stack_through_the_composed_pipe(tmp_p
         Padding([0, 0, 0, 0, 2, 1], inverse=True),
     ]
     before = [TensorCast("uint8", inverse=False)]
-    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True, before=before)
+    streamed = _drive_prediction(
+        tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True, before=before, sweep_axis=sweep_axis
+    )
+    assert "streaming:" not in capsys.readouterr().out, "the case left the streamed path"
     reference = _drive_prediction(
-        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, before=before
+        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, before=before, sweep_axis=sweep_axis
     )
     assert streamed.dtype == reference.dtype
     assert torch.equal(streamed, reference)
     assert list(streamed.shape) == list(volume.shape)
 
 
-def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("accumulator", "case_grid"),
+    # The second network writes on a grid 64 times coarser than the case's: its output is written back 64 times larger.
+    [([64, 64, 64], [64, 64, 64]), ([32, 32, 32], [128, 128, 128])],
+)
+def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(
+    monkeypatch, accumulator: list[int], case_grid: list[int]
+) -> None:
     """The streamed-vs-assembled route is a function of configuration and data.
 
-    Same accumulators, two budgets: the verdict must flip with the budget, and with none pushed,
-    the gate prices the auto-budget's own fraction of the machine, never raw free memory.
+    Same output, two budgets: the verdict must flip with the budget. What is priced is the larger of the accumulators
+    and the output they are written back as on the case's grid, which the whole-volume path holds.
     """
     from types import SimpleNamespace
 
@@ -641,10 +739,242 @@ def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(monkeypa
     writer.group_dest = "CT"
     writer.nb_data_augmentation = 1
     layer = torch.zeros(2, 1, dtype=torch.float32)
-    dataset = SimpleNamespace(get_dataset_from_index=lambda group, index: SimpleNamespace(shapes=[[64, 64, 64]]))
-    assembled = 2 * 64 * 64 * 64 * layer.element_size()
+    case = SimpleNamespace(shapes=[accumulator], base_shape=[1, *case_grid])
+    dataset = SimpleNamespace(get_dataset_from_index=lambda group, index: case)
+    priced = 2 * max(int(np.prod(accumulator)), int(np.prod(case_grid))) * layer.element_size()
 
-    writer.set_memory_budget(assembled)  # accumulators are 100% of the budget: worth streaming
+    writer.set_memory_budget(priced)  # the output is 100% of the budget: worth streaming
     assert writer._worth_streaming(dataset, 0, layer)
-    writer.set_memory_budget(assembled * 1000.0)  # a sliver of the budget: assembling costs nothing
+    writer.set_memory_budget(priced * 1000.0)  # a sliver of the budget: assembling costs nothing
     assert not writer._worth_streaming(dataset, 0, layer)
+
+
+@pytest.mark.parametrize(("spacing", "back"), [([1.0, 1.0, 3.0], None), ([1.5, 1.5, 1.5], "linear")])
+def test_add_layer_streams_a_b_spline_inverse_from_the_buffer_once_its_range_is_measured(
+    tmp_path, monkeypatch, capsys, spacing: list[float], back: str | None
+) -> None:
+    # A B-spline on the faces grid clips to its input's range, which the buffer holds: measured there, the
+    # inverse streams from it into the sink and writes what the whole-volume inverse writes. The case is longer than a
+    # region's window, so a region does not read it all.
+    volume = torch.from_numpy((np.random.default_rng(5).standard_normal((1, 300, 12, 9)) * 300).astype(np.float32))
+    transforms = [Resample(spacing, grid="faces", interpolation="bspline", inverse_interpolation=back, inverse=True)]
+    tails: list[bool] = []
+    stream_tail = OutputDataset._stream_tail
+    monkeypatch.setattr(OutputDataset, "_stream_tail", lambda *args: tails.append(stream_tail(*args)) or tails[-1])
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
+    assert "could not be planned" not in capsys.readouterr().out
+    assert tails == ([True] if back is None else [])  # a linear inverse needs no range: it streams from the start
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.equal(streamed, reference)
+
+
+def test_a_second_b_spline_in_the_tail_reads_the_range_of_its_own_input(tmp_path, monkeypatch) -> None:
+    # Undone, the second B-spline reads what the first left shifted by the standardize: the range measured on the
+    # buffer is the first's alone, so the second must not clip to it.
+    volume = torch.from_numpy((np.random.default_rng(6).standard_normal((1, 13, 12, 9)) * 3).astype(np.float32))
+    transforms = [
+        Resample([1.0, 1.0, 3.0], grid="faces", interpolation="bspline", inverse=True),
+        Standardize(mean=[-100.0], std=[1.0], inverse=True),
+        Resample([1.0, 1.0, 2.0], grid="faces", interpolation="bspline", inverse=True),
+    ]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.equal(streamed, reference)
+
+
+def test_a_streamed_tail_cuts_its_blocks_by_the_output_it_writes(tmp_path, monkeypatch) -> None:
+    # Undone onto a grid 8 times finer, a slab of the buffer completes 8 times its voxels of output: the tail cuts its
+    # slabs by the output each row of the buffer writes, so its blocks are a slab each but the last, which holds what
+    # the halo held back. None grows with the case.
+    import konfai.predictor.output as output_module
+
+    slab = 1280
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    write = OutputDataset._write_stream_block
+    monkeypatch.setattr(
+        OutputDataset, "_write_stream_block", lambda self, *args: blocks.append(args[2].numel()) or write(self, *args)
+    )
+    transforms = [Resample([2.0, 2.0, 2.0], grid="faces", interpolation="bspline", inverse=True)]
+    largest = []
+    for rows in (300, 600):
+        volume = torch.from_numpy((np.random.default_rng(9).standard_normal((1, rows, 8, 8)) * 3).astype(np.float32))
+        blocks.clear()
+        streamed = _drive_prediction(tmp_path / f"streamed{rows}", transforms, volume, monkeypatch, streamed=True)
+        assert max(blocks[:-1]) <= slab
+        largest.append(max(blocks))
+    assert largest[1] <= largest[0] + slab
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.allclose(streamed, reference, rtol=float(np.finfo(np.float32).eps), atol=1e-9)
+
+
+@pytest.mark.parametrize("sweep_axis", [0, 2])
+def test_a_resample_apart_from_the_sweep_axis_is_never_one_block(tmp_path, monkeypatch, sweep_axis: int) -> None:
+    # The faces grid resamples axis 0 apart: a region reads its picked slices whole in plane. Swept along that axis, the
+    # pipe streams; swept along another, every region would read the whole case and the pipe would resample it in one
+    # block, so the case takes the buffered tail, which streams along axis 0 slab by slab.
+    import konfai.data.transform.resample as resample_module
+    import konfai.predictor.output as output_module
+
+    monkeypatch.setattr(resample_module, "SLAB_VOXELS", 4 * 12 * 9)
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", 4 * 12 * 9)
+    blocks: list[int] = []
+    region = Resample._spline_region
+    monkeypatch.setattr(Resample, "_spline_region", lambda *args: blocks.append((out := region(*args)).numel()) or out)
+    volume = torch.from_numpy((np.random.default_rng(12).standard_normal((1, 24, 12, 9)) * 3).astype(np.float32))
+    transforms = [Resample([1.0, 1.0, 4.0], grid="faces", interpolation="bspline", inverse=True)]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, sweep_axis=sweep_axis)
+    assert max(blocks) < volume.numel()
+    reference = _drive_prediction(
+        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, sweep_axis=sweep_axis
+    )
+    assert torch.equal(streamed, reference)
+
+
+@pytest.mark.parametrize("interpolation", ["bspline", "linear"])
+@pytest.mark.parametrize(("spacing", "apart", "sweep_axis"), [([1.0, 1.0, 4.0], 0, 2), ([4.0, 1.0, 1.0], 2, 0)])
+def test_a_tail_waiting_for_the_whole_case_streams_along_the_axis_resampled_apart(
+    tmp_path, monkeypatch, interpolation: str, spacing: list[float], apart: int, sweep_axis: int
+) -> None:
+    # Swept along another axis than the one the faces grid resamples apart, the pipe would read the whole case for its
+    # first row: the case is buffered, and its tail streams from the buffer along the axis apart. Every block holds a
+    # slab of values across its channels, none grows with the case, and the output is the whole route's to the bit.
+    import konfai.predictor.output as output_module
+
+    slab = 2 * 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    write = OutputDataset._write_stream_block
+    monkeypatch.setattr(
+        OutputDataset, "_write_stream_block", lambda self, *args: blocks.append(args[2].numel()) or write(self, *args)
+    )
+    transforms = [Flip("1", inverse=True), Resample(spacing, grid="faces", interpolation=interpolation, inverse=True)]
+    largest = []
+    for rows in (24, 48):
+        shape = [9, 12, 9]
+        shape[apart] = rows
+        volume = torch.from_numpy((np.random.default_rng(13).standard_normal((2, *shape)) * 3).astype(np.float32))
+        blocks.clear()
+        streamed = _drive_prediction(tmp_path / f"s{rows}", transforms, volume, monkeypatch, sweep_axis=sweep_axis)
+        assert len(blocks) == rows // 8
+        largest.append(max(blocks))
+        reference = _drive_prediction(
+            tmp_path / f"r{rows}", transforms, volume, monkeypatch, streamed=False, sweep_axis=sweep_axis
+        )
+        assert torch.equal(streamed, reference)
+    assert largest == [slab, slab]
+
+
+class _Repeat(Transform):
+    """Repeats its channels four times: a per-voxel stage that widens the tensor."""
+
+    locality = LocalityKind.POINTWISE
+
+    def output_channels(self, channels: int) -> int:
+        return 4 * channels
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor.repeat(4, *([1] * (tensor.dim() - 1)))
+
+
+def test_a_streamed_tail_cuts_its_blocks_by_the_widest_stage_of_its_pipe(tmp_path, monkeypatch) -> None:
+    # A per-voxel stage behind the resample widens each block four times: the tail counts the channels of the widest
+    # stage, not the buffer's, so a block still holds a slab of values.
+    import konfai.predictor.output as output_module
+
+    slab = 4 * 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    write = OutputDataset._write_stream_block
+    monkeypatch.setattr(
+        OutputDataset, "_write_stream_block", lambda self, *args: blocks.append(args[2].numel()) or write(self, *args)
+    )
+    transforms = [Resample([1.0, 1.0, 4.0], grid="faces", interpolation="linear", inverse=True)]
+    volume = torch.from_numpy((np.random.default_rng(14).standard_normal((1, 48, 12, 9)) * 3).astype(np.float32))
+    streamed = _drive_prediction(tmp_path / "s", transforms, volume, monkeypatch, final=[_Repeat()], sweep_axis=2)
+    assert max(blocks) == slab
+    reference = _drive_prediction(
+        tmp_path / "r", transforms, volume, monkeypatch, streamed=False, final=[_Repeat()], sweep_axis=2
+    )
+    assert torch.equal(streamed, reference)
+
+
+def test_a_streamed_tail_cuts_its_blocks_by_the_largest_grid_of_its_pipe(tmp_path, monkeypatch) -> None:
+    # Undone, the second resample grows the buffer eight times and the first halves it again: the tail counts the grid
+    # between them, the largest of its pipe, so no block of it holds much more than a slab.
+    import konfai.predictor.output as output_module
+
+    slab = 8 * 12 * 9
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    blocks: list[int] = []
+    apply = OutputDataset._apply_pipe_stage
+    monkeypatch.setattr(
+        OutputDataset,
+        "_apply_pipe_stage",
+        lambda self, *args: blocks.append((out := apply(self, *args)).numel()) or out,
+    )
+    transforms = [
+        Resample([1.0, 1.0, 0.5], grid="faces", interpolation="linear", inverse=True),
+        Resample([1.0, 1.0, 4.0], grid="faces", interpolation="linear", inverse=True),
+    ]
+    volume = torch.from_numpy((np.random.default_rng(15).standard_normal((1, 48, 12, 9)) * 3).astype(np.float32))
+    streamed = _drive_prediction(tmp_path / "s", transforms, volume, monkeypatch, sweep_axis=2)
+    assert 0 < max(blocks) < 2 * slab
+    reference = _drive_prediction(tmp_path / "r", transforms, volume, monkeypatch, streamed=False, sweep_axis=2)
+    assert torch.equal(streamed, reference)
+
+
+class _ForeignRange(Transform):
+    """Leaves in the case's attribute a range that describes some other tensor."""
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        cache_attribute["MinPerChannel"], cache_attribute["MaxPerChannel"] = np.asarray([-0.5]), np.asarray([0.5])
+        return tensor
+
+
+def test_a_b_spline_inverse_clips_to_its_own_input_whatever_range_the_case_holds(tmp_path, monkeypatch) -> None:
+    # A range present in the attribute need not be the range of the stage's input: the B-spline measures its own, so
+    # it waits in the tail, which seeds it from the buffer.
+    volume = torch.from_numpy((np.random.default_rng(10).standard_normal((1, 13, 12, 9)) * 3).astype(np.float32))
+    transforms = [Resample([1.0, 1.0, 3.0], grid="faces", interpolation="bspline", inverse=True), _ForeignRange()]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.equal(streamed, reference)
+
+
+def test_a_streamed_tail_measures_its_buffer_by_slabs(tmp_path, monkeypatch) -> None:
+    # The buffer's range is taken a slab at a time: no copy of the whole buffer reaches the host or a wider dtype.
+    import konfai.predictor.output as output_module
+
+    slab = 1280
+    monkeypatch.setattr(output_module, "SLAB_VOXELS", slab)
+    copied: list[int] = []
+    host_array = output_module._host_array
+    monkeypatch.setattr(
+        output_module, "_host_array", lambda tensor: copied.append(tensor.numel()) or host_array(tensor)
+    )
+    volume = torch.from_numpy((np.random.default_rng(11).standard_normal((1, 300, 8, 8)) * 3).astype(np.float32))
+    transforms = [Resample([2.0, 2.0, 2.0], grid="faces", interpolation="bspline", inverse=True)]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, streamed=True)
+    assert len(copied) > 1 and max(copied) <= slab
+    reference = _drive_prediction(tmp_path / "reference", transforms, volume, monkeypatch, streamed=False)
+    assert torch.allclose(streamed, reference, rtol=float(np.finfo(np.float32).eps), atol=1e-9)
+
+
+def test_a_buffered_case_with_no_tail_is_written_whole(tmp_path, monkeypatch) -> None:
+    # A destination that serves no region write buffers the case; with no stage left, the buffer is written as is.
+    volume = torch.from_numpy(np.random.default_rng(7).standard_normal((1, 6, 4, 3)).astype(np.float32))
+    written = _drive_prediction(tmp_path, [], volume, monkeypatch, store=("output", "gipl"))
+    assert torch.equal(written, volume)
+
+
+def test_a_bfloat16_buffer_streams_its_b_spline_inverse(tmp_path, monkeypatch) -> None:
+    volume = torch.from_numpy((np.random.default_rng(8).standard_normal((1, 13, 12, 9)) * 3).astype(np.float32))
+    transforms = [Resample([1.0, 1.0, 3.0], grid="faces", interpolation="bspline", inverse=True)]
+    # A bfloat16 buffer has no NumPy type: its range is read as float32; written back as float32.
+    before, final = [TensorCast("bfloat16", inverse=False)], [TensorCast("float32", inverse=False)]
+    streamed = _drive_prediction(tmp_path / "streamed", transforms, volume, monkeypatch, before=before, final=final)
+    reference = _drive_prediction(
+        tmp_path / "reference", transforms, volume, monkeypatch, streamed=False, before=before, final=final
+    )
+    assert torch.equal(streamed, reference)

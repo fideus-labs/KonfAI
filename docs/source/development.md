@@ -153,7 +153,7 @@ for the `konfai-apps pipeline` flow in
 of `pixi run test`. Install the package first, then run its suite:
 
 ```bash
-pip install -e "./konfai-apps[server]"
+pip install -e "./konfai-apps[server,extension]"
 pytest konfai-apps/tests
 ```
 

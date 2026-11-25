@@ -169,8 +169,20 @@ def _saturate_overshoot(blended: torch.Tensor, payload_dtype: torch.dtype) -> to
     return blended.clamp(float(info.min), float(info.max))
 
 
-#: The signed dtype of each unsigned one torch has no ``masked_fill`` for: the same bits, one view away.
+#: The signed dtype of each unsigned one torch has no ``masked_fill`` for (nor ``where`` on 2.12): the same bits, one
+#: view away.
 _SIGNED_VIEW = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}
+
+
+def _where(condition: torch.Tensor, values: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
+    """``torch.where(condition, values, other)`` on every torch: a uint16, uint32 or uint64 result, which torch 2.12
+    has no ``where`` for and 2.15 has, is selected through the signed view of the same bits. Any other goes to torch's
+    own ``where``, which keeps the gradient that a view of the dtype would drop."""
+    dtype = torch.result_type(values, other)
+    signed = _SIGNED_VIEW.get(dtype)
+    if signed is None:
+        return torch.where(condition, values, other)
+    return torch.where(condition, values.to(dtype).view(signed), other.to(dtype).view(signed)).view(dtype)
 
 
 def _masked_fill(values: torch.Tensor, mask: torch.Tensor, fill: float) -> torch.Tensor:
