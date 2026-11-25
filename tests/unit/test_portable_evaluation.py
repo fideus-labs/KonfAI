@@ -243,6 +243,7 @@ def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_f
     from konfai.portable_evaluation import _group_steps
 
     (tmp_path / "AfterMembers.py").write_text(
+        "import torch\n"
         "from konfai.data.transform import LocalityKind, Transform\n\n"
         "class Count(Transform):\n"
         "    locality = LocalityKind.WHOLE_VOLUME\n\n"
@@ -250,7 +251,7 @@ def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_f
         "        super().__init__()\n"
         "        self.channels = channels\n\n"
         "    def __call__(self, name, tensor, cache_attribute):\n"
-        "        if tensor.shape[0] != self.channels or not tensor.is_floating_point():\n"
+        "        if tensor.shape[0] != self.channels or tensor.dtype != torch.float32:\n"
         "            raise ValueError(f'{self.channels} float channels, not {tensor.dtype} {list(tensor.shape)}')\n"
         "        return tensor\n"
     )
@@ -329,11 +330,13 @@ def test_a_class_of_the_app_s_past_a_nested_model_is_probed_in_the_dtype_the_mod
     assert steps[-1]["op"] == "extension"
 
 
+@pytest.mark.parametrize("handed", [None, "int16"])
 def test_a_class_of_the_app_s_past_a_nested_model_undoing_its_cast_is_probed_in_what_the_run_stores(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, handed: str | None
 ) -> None:
-    # The nested chain casts the case to uint8 and undoes it: what it hands on is the stored dtype, which only the run
-    # knows, not uint8; a class taking floats is probed in float32.
+    # The nested chain casts what it is handed to uint8 and undoes it: what it hands on is what it was handed, the
+    # stored dtype, which only the run knows, or the int16 the chain before it casts to. A class taking floats is
+    # probed in float32 past the first, and refused past the second.
     from konfai.portable_evaluation import _group_steps
 
     (tmp_path / "UndoneNested.py").write_text(
@@ -352,16 +355,15 @@ def test_a_class_of_the_app_s_past_a_nested_model_undoing_its_cast_is_probed_in_
         "preprocessing": [{"op": "cast", "dtype": "uint8", "id": "Cast"}],
         "postprocessing": [{"op": "cast", "dtype": "uint8"}, {"op": "inverse", "of": "Cast"}],
     }
-    steps = _group_steps(
-        "Seg",
-        {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "UndoneNested:Floats": {}},
-        tmp_path,
-        {},
-        lambda group, _params, _out: {"id": group, "manifest": nested},
-        True,
-        (1, 3, None),
-    )
-    assert steps[-1]["op"] == "extension"
+    chain = {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "UndoneNested:Floats": {}}
+    if handed:
+        chain = {"TensorCast": {"dtype": handed}, **chain}
+    build = lambda group, _params, _out: {"id": group, "manifest": nested}  # noqa: E731
+    if handed:
+        with pytest.raises((ConfigError, EvaluatorError), match="takes no volume"):
+            _group_steps("Seg", chain, tmp_path, {}, build, True, (1, 3, None))
+    else:
+        assert _group_steps("Seg", chain, tmp_path, {}, build, True, (1, 3, None))[-1]["op"] == "extension"
 
 
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:

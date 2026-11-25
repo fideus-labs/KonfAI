@@ -601,9 +601,9 @@ _MEMBER_FOLD_OPS = ("variance", "standard_deviation", "segmentation_disagreement
 def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     """The dtype konfai's stage returns for an input of ``dtype`` (``None``: the stored one, known at run time),
     as the runtime's ``output_dtype`` settles it."""
-    if "manifest" in step:  # a nested model: what its own chain leaves of what it blends
+    if "manifest" in step:  # a nested model: what its own chain leaves of what it blends, and of what it is handed
         manifest = step["manifest"]
-        return _dtype_after(manifest.get("postprocessing", []), _blended(manifest)[1], _restored(manifest))
+        return _dtype_after(manifest.get("postprocessing", []), _blended(manifest)[1], _restored(manifest), dtype)
     op = step["op"]
     if op in ("cast", "onnx"):
         return str(step["dtype"])
@@ -659,11 +659,13 @@ def resolve_interpolation(
     return dtype
 
 
-def _dtype_after(steps: list[dict[str, Any]], dtype: str | None, restored: Collection[str] = ()) -> str | None:
-    """The dtype konfai's stages of ``steps`` leave of ``dtype``: the stored one (``None``) past the inverse of a
-    cast ``restored`` names."""
+def _dtype_after(
+    steps: list[dict[str, Any]], dtype: str | None, restored: Collection[str] = (), stored: str | None = None
+) -> str | None:
+    """The dtype konfai's stages of ``steps`` leave of ``dtype``: past the inverse of a cast ``restored`` names, the
+    one the chain was handed, ``stored`` (``None``: the stored one, known at run time)."""
     for step in steps:
-        dtype = None if step.get("op") == "inverse" and step.get("of") in restored else _result_dtype(step, dtype)
+        dtype = stored if step.get("op") == "inverse" and step.get("of") in restored else _result_dtype(step, dtype)
     return dtype
 
 
@@ -876,10 +878,10 @@ def _probe_after(
 
 
 def _handed(
-    steps: list[dict[str, Any]], dtype: str | None, restored: Collection[str] = ()
+    steps: list[dict[str, Any]], dtype: str | None, restored: Collection[str] = (), stored: str | None = None
 ) -> list[tuple[dict[str, Any], str | None]]:
     """Each of ``steps`` with the dtype konfai hands it, the first one handed ``dtype`` (:func:`_dtype_after`)."""
-    return [(step, _dtype_after(steps[:at], dtype, restored)) for at, step in enumerate(steps)]
+    return [(step, _dtype_after(steps[:at], dtype, restored, stored)) for at, step in enumerate(steps)]
 
 
 def _extension_step(
@@ -3156,7 +3158,8 @@ def _channels_after(
     where ``None``), a disagreement of them one."""
     if "manifest" in step:
         made, blended = _blended(step["manifest"])
-        for post, handed in _handed(step["manifest"].get("postprocessing", []), blended, _restored(step["manifest"])):
+        posts = step["manifest"].get("postprocessing", [])
+        for post, handed in _handed(posts, blended, _restored(step["manifest"]), dtype):
             made = _channels_after(post, made, rank, handed)
         return held * made if step.get("per_channel") else made
     if step["op"] in ("argmax", "magnitude", "threshold_labels", "segmentation_disagreement"):
