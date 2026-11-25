@@ -3126,7 +3126,8 @@ def export_checkpoints(
         from konfai.export import export_folds
 
         with tempfile.TemporaryDirectory() as scratch:
-            export_folds(folds, Path(scratch) / "pre.onnx", channels or 1, rank)
+            # On the shape the model's graph is traced on, its axes free where the export frees them.
+            export_folds(folds, Path(scratch) / "pre.onnx", channels or 1, rank, extents=None if whole else traced)
     # konfai runs `batch_size` patches through each forward; the runtime batches them alike where the
     # device holds them.
     batch = int(clean((config.get(root, {}).get("Dataset") or {}).get("batch_size")) or 1)

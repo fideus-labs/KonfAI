@@ -634,6 +634,40 @@ def test_a_cast_of_floats_to_integers_is_found_in_a_branch_of_the_graph(tmp_path
     assert floats_cast_to_integers(tmp_path / "branched.onnx") == ["int32"]
 
 
+def test_a_cast_in_a_branch_is_read_in_that_branch_s_names(tmp_path):
+    # Two branches name a value v of their own, a float in one and an integer in the other, which is read last: each
+    # cast is read in its branch, and the float one is found.
+    onnx = pytest.importorskip("onnx")
+    from konfai.export import floats_cast_to_integers
+    from onnx import TensorProto, helper
+
+    def branch(name: str, source: str, dtype: int) -> Any:
+        nodes = [
+            helper.make_node("Identity", [source], ["v"]),
+            helper.make_node("Cast", ["v"], [f"{name}_y"], to=TensorProto.INT32),
+        ]
+        values = [helper.make_tensor_value_info("v", dtype, [1])]
+        return helper.make_graph(
+            nodes, name, [], [helper.make_tensor_value_info(f"{name}_y", TensorProto.INT32, [1])], value_info=values
+        )
+
+    node = helper.make_node(
+        "If",
+        ["cond"],
+        ["y"],
+        then_branch=branch("then", "n", TensorProto.INT32),
+        else_branch=branch("otherwise", "x", TensorProto.FLOAT),
+    )
+    inputs = [
+        helper.make_tensor_value_info("x", TensorProto.FLOAT, [1]),
+        helper.make_tensor_value_info("n", TensorProto.INT32, [1]),
+        helper.make_tensor_value_info("cond", TensorProto.BOOL, []),
+    ]
+    graph = helper.make_graph([node], "scoped", inputs, [helper.make_tensor_value_info("y", TensorProto.INT32, [1])])
+    onnx.save(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)]), tmp_path / "scoped.onnx")
+    assert floats_cast_to_integers(tmp_path / "scoped.onnx") == ["int32"]
+
+
 def test_a_case_statistic_s_graphs_land_in_folders_made_for_both_before_either_is_written(tmp_path):
     # The finish graph's folder does not exist: it is made with the partial's before either graph is written, so the
     # partial replaces the previous one only where the finish lands too.

@@ -2885,6 +2885,7 @@ def test_a_class_casting_floats_to_integers_is_no_fold_of_a_graph(
     # a float, still folds.
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the export checks the graph it folds on other sizes
     from konfai.portable import compile_pipeline
 
     (tmp_path / f"{module}.py").write_text(
@@ -2902,6 +2903,35 @@ def test_a_class_casting_floats_to_integers_is_no_fold_of_a_graph(
 
     steps, _, _ = compile_pipeline({f"{module}:Cast": {}}, fold_out=fold_out, extension=True, dtype=handed)
     assert [step["op"] for step in steps] == [op]
+
+
+def test_a_patch_transform_is_checked_on_the_patch_the_model_is_traced_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A patch transform adding a ramp of the patch's 16 voxels holds on that patch alone: the fold is checked on it, as
+    # the model's graph is traced on it.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "PatchRamp.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Ramp(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor + torch.arange(16, dtype=tensor.dtype)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    held = json.loads(config.read_text())
+    held["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["patch_transforms"] = {"PatchRamp:Ramp": {}}
+    config.write_text(json.dumps(held))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", tmp_path / "out" / "p.json")
+    assert (tmp_path / "out" / "model.onnx").is_file()
 
 
 def test_a_patch_transform_casting_floats_to_integers_is_refused(

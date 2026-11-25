@@ -288,29 +288,25 @@ def _write_onnx(
 
 def floats_cast_to_integers(path: Path, handed: str = "float32") -> list[str]:
     """The integer or bool types the graph at ``path`` casts a floating tensor to, as its types infer, in its branches
-    and bodies too (an If's, a Loop's): all but its first cast to the ``handed`` dtype, of its input, the runtime's
-    float32 buffer, holding values of that dtype."""
+    and bodies too (an If's, a Loop's), each read in its own names and those around it: all but its first cast to the
+    ``handed`` dtype, of its input, the runtime's float32 buffer, holding values of that dtype."""
     onnx = _require("onnx")
-    held: dict[str, int] = {}
-    casts: list[Any] = []
+    floating = {onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16}
+    targets: list[int] = []
 
-    def visit(graph: Any) -> None:
+    def visit(graph: Any, around: dict[str, int]) -> None:
+        held = dict(around)
         held.update({value.name: value.type.tensor_type.elem_type for value in [*graph.input, *graph.value_info]})
         held.update({value.name: value.type.tensor_type.elem_type for value in graph.output})
         held.update({tensor.name: tensor.data_type for tensor in graph.initializer})
         for node in graph.node:
-            casts.extend([node] if node.op_type == "Cast" else [])
+            if node.op_type == "Cast" and held.get(node.input[0]) in floating:
+                targets.append(next(attribute.i for attribute in node.attribute if attribute.name == "to"))
             for attribute in node.attribute:
                 for inner in [attribute.g] if attribute.type == onnx.AttributeProto.GRAPH else attribute.graphs:
-                    visit(inner)
+                    visit(inner, held)
 
-    visit(onnx.shape_inference.infer_shapes(onnx.load(str(path))).graph)
-    floating = {onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16, onnx.TensorProto.DOUBLE, onnx.TensorProto.BFLOAT16}
-    targets = [
-        next(attribute.i for attribute in node.attribute if attribute.name == "to")
-        for node in casts
-        if held.get(node.input[0]) in floating
-    ]
+    visit(onnx.shape_inference.infer_shapes(onnx.load(str(path))).graph, {})
     held_as = (
         None if getattr(torch, handed).is_floating_point else onnx.helper.np_dtype_to_tensor_dtype(np.dtype(handed))
     )
@@ -546,22 +542,23 @@ def export_folds(
     dtype: str = "float32",
     opset: int = 18,
     stages: bool = True,
+    extents: list[int] | None = None,
 ) -> tuple[int, str]:
     """Export pointwise transforms of an output chain to one ONNX graph at ``onnx_path``, its input ``C =
     channels`` float32 (the runtime's buffers) cast inside the graph to the ``dtype`` konfai hands them, and its
     ``rank`` spatial axes free; return the channel count and the dtype konfai's transforms hand back. ``stages``: the
     transforms are a chain's stages, refused where they cast floats to integers, not an app Fold's ``enter``, which
-    holds its patches as it states."""
-    example = torch.randn(1, channels, *([8] * rank))
+    holds its patches as it states. ``extents``: the spatial shape the graph is traced on and kept to, where its axes
+    are not free."""
+    example = torch.randn(1, channels, *(extents or [8] * rank))
     with torch.no_grad():
         out = example[0].to(getattr(torch, dtype))
         for fold in folds:
             out = fold(out)
     module = _Folds(folds, getattr(torch, dtype)).eval()
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_onnx(
-        module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=True, folded=dtype if stages else None
-    )
+    folded = dtype if stages else None
+    _write_onnx(module, (example,), onnx_path, ["input"], ["output"], opset, dynamic=extents is None, folded=folded)
     return int(out.shape[0]), str(out.dtype).removeprefix("torch.")
 
 
