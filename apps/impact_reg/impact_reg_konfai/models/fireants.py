@@ -627,7 +627,8 @@ class ImpactFeatureLoss(torch.nn.Module):
         """Latch the level's normalisation on pieces of the pair instead of on the first evaluation: a registration
         by boxes hands each box read with its halo (a moved and a fixed tensor) and ones on the box's own voxels.
         Each layer's start is its mean over the voxels the boxes own, weighed by the voxels each counts (those both
-        masks keep, when masked): the level's mean, however its boxes cut it."""
+        masks keep, when masked): the level's mean, however its boxes cut it. Masks that meet nowhere leave every
+        layer at 1, as a layer at 0 is."""
         if not self._normalize:
             return
         totals: list[float] = []
@@ -653,7 +654,8 @@ class ImpactFeatureLoss(torch.nn.Module):
             if self._factors is None:
                 # Latched once a level, at the transform the scale starts from; a layer already at 0 keeps 1.
                 self._latch([float(value.detach()) for value in values])
-            values = [value * factor for value, factor in zip(values, self._factors, strict=True)]
+            factors = self._factors or [1.0] * len(values)  # none latched: no voxel counted
+            values = [value * factor for value, factor in zip(values, factors, strict=True)]
         return reduce(torch.add, [weight * value for weight, value in zip(weights, values, strict=True)])
 
 
