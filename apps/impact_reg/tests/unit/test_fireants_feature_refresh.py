@@ -137,3 +137,30 @@ def test_the_runs_by_boxes_are_the_whole_run_s(tmp_path: Path, monkeypatch: pyte
 def test_jacobian_mode_refuses_an_update_interval(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Jacobian mode extracts them at every step"):
         _engine(tmp_path, mode="Jacobian")
+
+
+def test_without_samples_the_linear_stages_take_every_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not told how many voxels to draw, the rigid and affine stages take every box of a level at every iteration, as
+    # the deformable stage does: FireANTs' own iteration, not a draw.
+    pytest.importorskip("fireants")
+    from impact_reg_konfai.models import fireants_sampled
+    from impact_reg_konfai.ooc import tiles
+
+    paths = []
+    for name, image in (("fixed", _blob()), ("moving", _blob(2.0))):
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    asked: dict = {}
+
+    def alignment(*args, box, boxes, **kwargs):
+        asked.update(box=box, boxes=boxes)
+        return torch.eye(4)[None]
+
+    monkeypatch.setattr(fireants_sampled, "sampled_linear_alignment", alignment)
+    monkeypatch.setattr(fireants_sampled, "_TOGETHER", 8**3)  # a draw far smaller than the image
+    (tmp_path / "scratch").mkdir()
+    engine = fireants.FireANTsEngine(
+        [2, 1], [1, 1], [0, 0], 3, "mse", 0.01, "none", "rigid_affine", "none", "cc", 0.1, 0.5, 1.0, 0, []
+    )
+    engine.register_sampled(*paths, None, None, -1, tmp_path / "scratch", tmp_path / "field.mha", box=16)
+    assert asked["boxes"] >= len(tiles((32, 32, 32), asked["box"]))

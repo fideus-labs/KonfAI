@@ -1370,15 +1370,14 @@ class FireANTsEngine:
         the pyramid levels and the warps live in files of ``scratch``.
 
         ``samples`` is how many voxels an iteration draws, in random boxes drawn anew at every iteration, as elastix
-        draws its points: an iteration's memory and time follow them and not the image. Unset, the rigid and affine
-        stages draw about two million, and the deformable stage takes what the device holds: every box of a level at
-        every iteration, on boxes as large as its memory, which is FireANTs' own iteration. The rigid and affine
-        stages run the preset's iterations on their draws, their step falling as elastix's gain does, which takes
-        them to the whole pair's optimum as the iterations grow. The deformable stage steps
-        the boxes it draws, each box as often on average as the preset gives a scale iterations (``epochs`` for
-        every scale, when given). A level the samples hold whole is registered as FireANTs registers it. The
-        displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what the
-        run measured."""
+        draws its points: an iteration's memory and time follow them and not the image. Unset, every stage takes
+        every box of a level at every iteration, on boxes as large as the device holds, which is FireANTs' own
+        iteration. Drawn, the rigid and affine stages run the preset's iterations on their draws, their step falling
+        as elastix's gain does, which takes them to the whole pair's optimum as the iterations grow; the deformable
+        stage steps the boxes it draws, each box as often on average as the preset gives a scale iterations
+        (``epochs`` for every scale, when given). A level the samples hold whole is registered as FireANTs registers
+        it. The displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what
+        the run measured."""
         from ..native import field_map, mapped_centre, mapped_window, mmap_image, read_information, write_field
         from ..ooc import ArraySource, HeaderImages, OnesSource, RegionSource, RescaledSource, StackedSource, tiles
         from .fireants_sampled import (
@@ -1443,11 +1442,13 @@ class FireANTsEngine:
                 cc_kernel_size=self._cc_kernel,
                 init_translation=init_translation,
                 device=device,
-                # Drawn, small boxes in many places: a global metric is estimated on them, and boxes side by side tell
-                # it less than boxes apart. Not told how many to draw, _TOGETHER voxels an iteration, as elastix draws
-                # its points: a level they hold whole is FireANTs' own iteration.
-                box=max(box // 3, 8),
-                boxes=max(1, (samples or _TOGETHER) // max(box // 3, 8) ** mapped["fixed"].array.ndim),
+                # Every box of a level, unless told how many voxels to draw: FireANTs' own iteration. Drawn, small
+                # boxes in many places: a global metric is estimated on them, and boxes side by side tell it less than
+                # boxes apart.
+                box=box if samples is None else max(box // 3, 8),
+                boxes=len(tiles(mapped["fixed"].array.shape, box))
+                if samples is None
+                else max(1, samples // max(box // 3, 8) ** mapped["fixed"].array.ndim),
                 together=samples or _TOGETHER,
                 seed=self._seed,
                 affine=self._linear_method != "rigid",

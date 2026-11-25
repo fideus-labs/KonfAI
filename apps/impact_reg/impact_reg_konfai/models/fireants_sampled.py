@@ -728,9 +728,9 @@ def static_feature_sources(
     which normalises it by the whole image's statistics (its intensities', its normalisations'); each layer keeps the cells of its own grid the
     block owns, assembled on that grid as the whole image's layer. A PCA is then fitted on the fixed image's layer and
     each image centred by its own mean, and every layer brought onto the image's voxels, block by block, as the whole
-    image's is (``onto_image_grid``). On a GPU the network runs in float16 (TS/M730's last layer, l2-normalised,
-    within 4e-3 of float32's at half its memory) and the blocks are as large as half the free memory holds them with
-    their halos, ``block`` voxels a side at least: halved, and the side done again, when one does not fit."""
+    image's is (``onto_image_grid``). The network runs in float16 where the preset asks for it (``mixed_precision``,
+    on a GPU), as the whole run does, and the blocks are as large as half the free memory holds them with their
+    halos, ``block`` voxels a side at least: halved, and the side done again, when one does not fit."""
     from konfai.metric.measure.impact import (
         SWEEP_BATCH,
         block_region,
@@ -936,7 +936,6 @@ def static_feature_sources(
             # A side at a time, the fixed one first: its features' basis projects both.
             bases: list[torch.Tensor] = []
             widths: list[int] = []
-            half, core.model.half = core.model.half, True  # float16 on a GPU only, for this extraction
             try:
                 # Blocks and halos on the input multiple and on the stride of the layers and normalisations gathered
                 # over them, so that a block owns whole cells of each.
@@ -978,8 +977,7 @@ def static_feature_sources(
                     widths = [int(array.shape[0]) for array in arrays]
                     volumes[side] += [(array, index) for array in arrays]
             finally:
-                core.model.half = half
-                if cuda:  # the float16 cast rounded the cached weights in place: their next use loads them again
+                if cuda and core.model.half:  # a float16 cast rounds the cached weights in place: reloaded for later
                     core.model.reload()
             loss._channels.append(widths)
     stacked = []
