@@ -946,7 +946,8 @@ def _run_transform(
             torch.cuda.empty_cache()
 
 
-#: The engines whose presets run by the sampled strategy, as the module a preset's classpath names.
+#: The engines whose presets run by the sampled strategy, as the module of ``impact_reg_konfai.models`` a preset's
+#: classpath names: the sampled route drives those engines themselves, so a class of another package is refused.
 _SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
 #: The compact transforms the sampled routes keep beside the dense field, ``<preset>_<name>`` in a case's output.
 _COMPACT_NAMES = ("Transform.h5", "ControlGrid.mha")
@@ -1707,7 +1708,7 @@ class ImpactRegKonfAIApp:
 
         config = _preset_config(preset, "Prediction.yml")
         classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
-        module = classpath.partition(":")[0].rsplit(".", 1)[-1]
+        module = classpath.removeprefix(f"{__package__}.models.").removesuffix(":RegistrationNet")
         if module not in _SAMPLED_ENGINES:
             raise KonfAIError(
                 "ImpactReg",

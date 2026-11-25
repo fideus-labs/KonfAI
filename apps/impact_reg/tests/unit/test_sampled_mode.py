@@ -102,8 +102,12 @@ def _pair(tmp_path: Path) -> tuple[Path, Path]:
     return paths[0], paths[1]
 
 
-def test_sampled_mode_refuses_a_preset_of_an_engine_it_does_not_know(presets: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("classpath", [OTHER, "custom.models.fireants:RegistrationNet"])
+def test_sampled_mode_refuses_a_preset_of_an_engine_it_does_not_know(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, classpath: str
+) -> None:
     fixed, moving = _pair(tmp_path)
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: _prediction(classpath, presets / "model.pt"))
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
     with pytest.raises(KonfAIError, match="no stage that runs on a subset"):
