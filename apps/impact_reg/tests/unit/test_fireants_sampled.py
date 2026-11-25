@@ -452,10 +452,13 @@ def test_a_level_s_normalisation_is_its_mean_however_its_boxes_cut_it(tmp_path, 
 
 
 class _Strided(torch.nn.Module):
-    """A convolution, then its average over 2^3 voxels: a layer at the image's resolution and one at half of it."""
+    """A convolution, then its average over 2^3 voxels: a layer at the image's resolution and one at half of it. With
+    ``flipped``, on the image read backwards along its last axis, as TotalSegmentator reorients what it is handed,
+    so that the coarse layer's cells are anchored at the end of that axis."""
 
-    def __init__(self) -> None:
+    def __init__(self, flipped: bool = False) -> None:
         super().__init__()
+        self.flipped = flipped
         self.conv = torch.nn.Conv3d(1, 4, 3, padding=1)
         for parameter in self.conv.parameters():
             torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(1))
@@ -467,22 +470,30 @@ class _Strided(torch.nn.Module):
         stats: torch.Tensor | None = None,
         direction: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
+        if self.flipped:
+            y = self.conv(x.flip(-1))
+            return [y.flip(-1), torch.nn.functional.avg_pool3d(y, 2).flip(-1)]
         y = self.conv(x)
         return [y, torch.nn.functional.avg_pool3d(y, 2)]
 
 
+@pytest.mark.parametrize("flipped", [False, True], ids=["as-is", "flipped"])
+@pytest.mark.parametrize("multiple", [0, 2], ids=["any-size", "multiple"])
+@pytest.mark.parametrize("layers", ["10", "01"], ids=["full", "strided"])
 @pytest.mark.parametrize("shape", [(20, 24, 28), (21, 25, 27)])
-def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
-    """Blocks read with half the receptive field around them give a full-resolution layer as the whole image does,
-    and the PCA fitted over the blocks its components."""
+def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers, multiple, flipped):
+    """Blocks read with half the receptive field around them, predicted as a segmentation is, give a layer as the
+    whole image does, at its resolution or at half of it, and the PCA fitted on it its components: an image that is
+    no whole number of the layer's cells, or of the input multiple the network pads it to, and a network that
+    anchors its cells at the end of an axis, included."""
     from impact_reg_konfai.models import fireants as engine
     from impact_reg_konfai.models.fireants_sampled import static_feature_sources
 
     path = tmp_path / "strided.pt"
-    torch.jit.script(_Strided()).save(str(path))
-    spec = engine.ModelSpec(ref=str(path), layers_mask="10", pca=2, distance="LNCC", feature_normalization="l2")
+    torch.jit.script(_Strided(flipped)).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), layers_mask=layers, pca=2, distance="LNCC", feature_normalization="l2")
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
-    loss.cores[0].model.fov = [3, 4]
+    loss.cores[0].model.fov, loss.cores[0].model.multiple = [3, 4], multiple
     crop = tuple(slice(0, extent) for extent in shape)
     fixed, moving = texture()[crop], texture((1.5, -1.0, 0.5))[crop]
     whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
@@ -501,11 +512,11 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
 
 
 class _Convolved(torch.nn.Module):
-    """A 3-D convolution of 3 voxels a side: a layer at the image's resolution."""
+    """A convolution of 3 voxels a side, 3-D or 2-D: a layer at the image's resolution."""
 
-    def __init__(self) -> None:
+    def __init__(self, dims: int = 3) -> None:
         super().__init__()
-        self.conv = torch.nn.Conv3d(1, 4, 3, padding=1)
+        self.conv = (torch.nn.Conv3d if dims == 3 else torch.nn.Conv2d)(1, 4, 3, padding=1)
         for parameter in self.conv.parameters():
             torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(1))
 
@@ -519,9 +530,11 @@ class _Convolved(torch.nn.Module):
         return [self.conv(x)]
 
 
-def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path):
-    """A 3-D network on a 2-D pair sees the plane lifted to a volume one voxel thick, as a run on the whole pair lifts
-    it: block by block it gives the whole plane's features, and the PCA fitted over the blocks its components."""
+@pytest.mark.parametrize("dims", [3, 2], ids=["3d-network", "2d-network"])
+def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path, dims):
+    """A 2-D pair is handed to a 3-D network as volumes one voxel thick, as a run on the whole pair lifts it, and to a
+    2-D network as planes: block by block either gives the whole plane's features, and the PCA fitted on them its
+    components."""
     from impact_reg_konfai.models import fireants as engine
     from impact_reg_konfai.models.fireants_sampled import static_feature_sources
 
@@ -529,7 +542,10 @@ def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path):
     torch.jit.script(_Convolved()).save(str(path))
     spec = engine.ModelSpec(ref=str(path), layers_mask="1", pca=2, distance="LNCC", feature_normalization="l2")
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
-    loss.cores[0].model.fov, loss.cores[0].model.lift = [3], True
+    core = loss.cores[0]
+    if dims == 2:  # a local file is a 3-D model to the registry: the 2-D network handed in, run as it is
+        core.model.model, core.model.dim, core.dimension = torch.jit.script(_Convolved(2)), 2, 2
+    core.model.fov, core.model.planes = [3], True
     fixed, moving = texture(size=PLANE)[:21, :25], texture((1.5, -1.0, 0.5), PLANE)[:21, :25]
     whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
     sources = static_feature_sources(

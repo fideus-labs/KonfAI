@@ -124,8 +124,9 @@ writes them back to the disk.
    boxes last had, composed and smoothed. Without `--samples` its boxes are all of them, which is FireANTs'
    iteration on the whole pair; with it, the ones it draws, each box stepping as often on average as the preset
    gives its scale iterations (`--epochs` for every scale).
-3. **IMPACT.** Jacobian mode runs the networks on each box. Static mode first extracts the feature volumes block
-   by block into files (the PCA and the means over every block), then registers them.
+3. **IMPACT.** Jacobian mode runs the networks on each box. Static mode first predicts the feature volumes as a
+   segmentation is predicted, block by block into files: each layer assembled on its own grid, its PCA fitted there,
+   then brought onto the image's as a run on the whole pair brings it. Then it registers them.
 4. **Field.** Written block by block; for SyN the forward warp is read through the inverse of the reverse one,
    computed on each block.
 

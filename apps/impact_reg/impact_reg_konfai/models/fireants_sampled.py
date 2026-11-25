@@ -659,16 +659,17 @@ def static_feature_sources(
     *,
     block: int = 96,
 ) -> tuple[ArraySource, ArraySource]:
-    """Static mode's feature volumes of ``loss`` (the engine's ``ImpactFeatureLoss``), extracted block by block into
-    memmaps of ``directory``: every model's kept layers over the fixed and the moving image, concatenated along the
-    channels as ``ImpactFeatureLoss.extract`` lays them out. Each block is read with half the model's receptive field
-    around it, half a block at most, run through the network, and its layers brought onto the block's voxels. The
-    network normalises every block by the whole image's statistics (its intensities', its normalisations'). A PCA is
-    fitted on the fixed image's features and each image centred by its own mean, in a first pass over every block:
-    the whole image's fit and means. On a GPU the network runs in float16 (TS/M730's last layer, l2-normalised,
+    """Static mode's feature volumes of ``loss`` (the engine's ``ImpactFeatureLoss``), predicted by blocks as a
+    segmentation is into memmaps of ``directory``: every model's kept layers over the fixed and the moving image,
+    concatenated along the channels as ``ImpactFeatureLoss.extract`` lays them out. Each block is read with half the
+    model's receptive field around it, half a block at most, and run through the network, which normalises it by the
+    whole image's statistics (its intensities', its normalisations'); each layer keeps the cells of its own grid the
+    block owns, assembled on that grid as the whole image's layer. A PCA is then fitted on the fixed image's layer and
+    each image centred by its own mean, and every layer brought onto the image's voxels, block by block, as the whole
+    image's is (``onto_image_grid``). On a GPU the network runs in float16 (TS/M730's last layer, l2-normalised,
     within 4e-3 of float32's at half its memory) and the blocks are as large as half the free memory holds them with
     their halos, ``block`` voxels a side at least: halved, and the side done again, when one does not fit."""
-    from konfai.metric.measure.impact import onto_image_grid
+    from konfai.metric.measure.impact import block_region, layer_window, onto_image_grid, own_cells
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
@@ -682,97 +683,117 @@ def static_feature_sources(
         found = _finalize_running_statistics(state)
         return Attribute({f"Image{key.capitalize()}": found[key] for key in ("min", "max", "mean", "std")})
 
-    def blocks_of(source: RegionSource, boxes, halo: int):
-        """Each block of ``boxes`` read with ``halo`` around it, and the slices of its own voxels in it."""
+    def read_block(source: RegionSource, tile, blocks: list[int], halo: int, stride: int):
+        """The block ``tile`` read with ``halo`` around it (``block_region``), and the slices of its own voxels in it.
+        The last block of an axis, short of ``blocks[0]``, is read back to a whole one, as a prediction's last patch
+        is, its start kept on ``stride``."""
+        start, stop = tile
+        halos = [halo + -(-(blocks[0] - (b - a)) // stride) * stride for a, b in zip(start, stop, strict=True)]
+        low, high, own = block_region(start, stop, halos, source.shape, stride)
+        return source.read(low, high)[:, :1], own
+
+    def blocks_of(source: RegionSource, boxes, blocks: list[int], halo: int, stride: int):
+        """Each block of ``boxes`` read (``read_block``), and the slices of its own voxels in it."""
         for tile in boxes:
-            low, high, own = box_region(tile, halo, source.shape)
-            yield source.read(low, high)[:, :1], own
+            yield read_block(source, tile, blocks, halo, stride)
 
-    def block_layers(core, box: torch.Tensor, own, statistics: Attribute, norms) -> list[torch.Tensor]:
-        """The layers of ``box`` brought onto its voxels, those of ``own`` (slices) kept, each in storage of its own."""
+    def owned_layers(
+        core, box: torch.Tensor, own, statistics: Attribute, norms
+    ) -> list[tuple[list[int], torch.Tensor]]:
+        """The layers of ``box``, each on its own grid, its stride along every axis and its cells covering ``own``
+        (slices of the block's voxels)."""
         layers = core.model.volume(box, core.normalization, 0, 0.0, statistics, norms)
-        crop = (slice(None), slice(None), *own)
-        return [onto_image_grid(layer, tuple(box.shape[2:]))[crop].float().contiguous() for layer in layers]
-
-    def layers_of(core, source: RegionSource, tile, halo: int, statistics: Attribute, norms) -> list[torch.Tensor]:
-        """``block_layers`` of the block ``tile`` of ``source``, read with ``halo`` around it."""
-        low, high, own = box_region(tile, halo, source.shape)
-        return block_layers(core, source.read(low, high)[:, :1], own, statistics, norms)
-
-    def add_moments(moments: list[list[torch.Tensor]], layers: list[torch.Tensor]) -> None:
-        """Adds ``layers`` to each layer's voxel count, channel sums and outer product, in double."""
-        for layer, features in enumerate(layers):
-            flat = features.flatten(2)[0].double()  # [C, N]
-            if layer == len(moments):
-                channels = flat.shape[0]
-                moments.append([torch.zeros(()), torch.zeros(channels), torch.zeros(channels, channels)])
-            count, total, outer = moments[layer]
-            moments[layer] = [count + flat.shape[1], total + flat.sum(dim=1).cpu(), outer + (flat @ flat.t()).cpu()]
+        return [
+            (
+                [2 ** round(math.log2(b / n)) for b, n in zip(box.shape[2:], layer.shape[2:], strict=True)],
+                layer[own_cells(own, box.shape[2:], layer.shape[2:])].float(),
+            )
+            for layer in layers
+        ]
 
     def block_cost(core, statistics: Attribute) -> float:
-        """The device bytes a voxel of a block takes, through the network, its layers placed and, with a PCA, their
-        moments, measured on a probe of 64 voxels a side."""
+        """The device bytes a voxel of a block takes through the network, measured on a probe of 64 voxels a side."""
         side = max(64, core.model.multiple)
         probe = torch.zeros((1, 1, *[side] * len(fixed.shape)), device=fixed.device)
         own = (slice(0, side),) * len(fixed.shape)
         norms = core.model.norms(lambda: [(probe, own)], statistics)
-
-        def run() -> None:
-            layers = block_layers(core, probe, own, statistics, norms)
-            if core.pca > 0:
-                add_moments([], layers)
-
-        _, taken = peak_bytes(run, fixed.device)
+        _, taken = peak_bytes(lambda: owned_layers(core, probe, own, statistics, norms), fixed.device)
         return taken / probe.numel()
 
-    def extract(core, index: int, side: str, source: RegionSource, blocks: list[int], halo: int, bases):
+    def basis_of(array: np.ndarray, side: int, components: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """A layer's channel mean over its cells and the basis of its ``components`` principal ones (``[C, K]``, the
+        largest last), by boxes of ``side`` cells a side, in double."""
+        count, total, outer = 0, 0.0, 0.0
+        for start, stop in tiles(array.shape[1:], side):
+            box = array[(slice(None), *(slice(a, b) for a, b in zip(start, stop, strict=True)))]
+            flat = to_device(box, str(fixed.device)).flatten(1).double()
+            count, total, outer = count + flat.shape[1], total + flat.sum(1), outer + flat @ flat.t()
+        mean = (total / count).cpu()
+        covariance = (outer.cpu() - count * torch.outer(mean, mean)) / max(count - 1, 1)
+        return mean.float(), torch.linalg.eigh(covariance)[1][:, -min(components, len(mean)) :].float()
+
+    def extract(core, index: int, side: str, source: RegionSource, blocks: list[int], halo: int, stride: int, bases):
         """``source``'s features of ``core`` by blocks of ``blocks[0]`` voxels a side, written to memmaps of
-        ``directory``, and the PCA bases that project both sides, fitted on the fixed one's (``bases`` otherwise). A
-        first pass over the blocks gathers the moments; the second projects and writes, on the first's features while
-        the device held them (a quarter of its free memory), computed again otherwise."""
+        ``directory``, and the PCA bases that project both sides, fitted on the fixed one's (``bases`` otherwise)."""
         boxes = tiles(source.shape, blocks[0])
         # The network's normalisations by the whole image's statistics, one pass over the blocks each.
-        norms = core.model.norms(functools.partial(blocks_of, source, boxes, halo), statistics[side])
-        retained: dict[int, list[torch.Tensor]] = {}
-        means: list[torch.Tensor] = []
-        if core.pca > 0:
-            room = free_bytes(source.device) / 4
-            moments: list[list[torch.Tensor]] = []
-            for at, tile in enumerate(boxes):
-                layers = layers_of(core, source, tile, halo, statistics[side], norms)
-                add_moments(moments, layers)
-                size = sum(4 * features.numel() for features in layers)
-                if size <= room:
-                    room -= size
-                    retained[at] = layers
-            means = [(total / count).float() for count, total, _ in moments]
-            if side == "fixed":
-                bases = []
-                for count, total, outer in moments:
-                    mean = total / count
-                    covariance = (outer - count * torch.outer(mean, mean)) / max(float(count) - 1, 1)
-                    _, eigenvectors = torch.linalg.eigh(covariance)
-                    bases.append(eigenvectors[:, -min(core.pca, len(mean)) :].float())  # {C, K}, largest last
-        arrays: list[np.ndarray] = []
-        for at, (start, stop) in enumerate(boxes):
-            layers = retained.pop(at, None) or layers_of(core, source, (start, stop), halo, statistics[side], norms)
-            for layer, features in enumerate(layers):
-                if core.pca > 0:
-                    centred = features - means[layer].to(features.device).view(1, -1, *[1] * len(source.shape))
-                    features = torch.einsum("bc...,ck->bk...", centred, bases[layer].to(features.device))
-                if layer == len(arrays):
-                    arrays.append(
+        norms = core.model.norms(functools.partial(blocks_of, source, boxes, blocks, halo, stride), statistics[side])
+        cells: list[np.ndarray] = []  # each layer on its own grid, as a prediction's output is assembled
+        ends: list[list[int]] = []  # how far along each axis its blocks reached: the whole image's layer
+        for start, stop in boxes:
+            box, own = read_block(source, (start, stop), blocks, halo, stride)
+            for layer, (strides, features) in enumerate(owned_layers(core, box, own, statistics[side], norms)):
+                at = [a // k for a, k in zip(start, strides, strict=True)]
+                if layer == len(cells):
+                    cells.append(
                         np.lib.format.open_memmap(
-                            str(directory / f"{side}_{index}_{layer}.npy"),
+                            str(directory / f"{side}_{index}_{layer}_cells.npy"),
                             mode="w+",
                             dtype=np.float32,
-                            shape=(features.shape[1], *source.shape),
+                            shape=(
+                                features.shape[1],
+                                *(-(-x // k) for x, k in zip(source.shape, strides, strict=True)),
+                            ),
                         )
                     )
+                    ends.append([0] * len(source.shape))
+                reach = [a + n for a, n in zip(at, features.shape[2:], strict=True)]
                 to_array(
-                    arrays[layer][(slice(None), *(slice(a, b) for a, b in zip(start, stop, strict=True)))],
-                    features[0],
+                    cells[layer][(slice(None), *(slice(a, b) for a, b in zip(at, reach, strict=True)))], features[0]
                 )
+                ends[layer] = [max(end, b) for end, b in zip(ends[layer], reach, strict=True)]
+        cells = [
+            array[(slice(None), *(slice(0, end) for end in reach))] for array, reach in zip(cells, ends, strict=True)
+        ]
+        means: list[torch.Tensor] = []
+        if core.pca > 0:  # fitted on the fixed image's layer, on its own grid, each side centred by its own mean
+            fitted = [basis_of(array, blocks[0], core.pca) for array in cells]
+            means = [mean for mean, _ in fitted]
+            bases = [basis for _, basis in fitted] if side == "fixed" else bases
+        arrays: list[np.ndarray] = []
+        for layer, array in enumerate(cells):
+            grid = tuple(array.shape[1:])
+            if grid == tuple(source.shape) and core.pca == 0:  # on the image's grid already
+                arrays.append(array)
+                continue
+            placed = np.lib.format.open_memmap(
+                str(directory / f"{side}_{index}_{layer}.npy"),
+                mode="w+",
+                dtype=np.float32,
+                shape=(bases[layer].shape[1] if core.pca > 0 else array.shape[0], *source.shape),
+            )
+            for start, stop in boxes:
+                box = list(zip(start, stop, strict=True))
+                window = layer_window(box, grid, source.shape)
+                features = to_device(array[(slice(None), *(slice(a, b) for a, b in window))], str(fixed.device))[None]
+                if core.pca > 0:
+                    centred = features - means[layer].to(features.device).view(1, -1, *[1] * len(grid))
+                    features = torch.einsum("bc...,ck->bk...", centred, bases[layer].to(features.device))
+                to_array(
+                    placed[(slice(None), *(slice(a, b) for a, b in box))],
+                    onto_image_grid(features, tuple(source.shape), box, grid)[0],
+                )
+            arrays.append(placed)
         return arrays, bases
 
     def halved(blocks: list[int], stride: int) -> bool:
@@ -794,19 +815,20 @@ def static_feature_sources(
                     "Static mode by blocks takes feature models of the image's dimension at its own resolution: a 2D"
                     " network on a volume and a voxel_size both lay their features out over the whole image."
                 )
-            # Blocks and halos on the input multiple and on the stride of the normalisations gathered over them.
-            stride = max(1, int(core.model.multiple), core.model.norm_stride(fixed.device))
-            blocks = [math.ceil(block / stride) * stride]
-            try:
-                halo = min((core.model.receptive_field - 1) // 2, blocks[0] // 2)
-            except MeasureError:  # a model that sees whole images: a quarter of a block around each
-                halo = blocks[0] // 4
-            halo = math.ceil(halo / stride) * stride
             # A side at a time, the fixed one first: its features' basis projects both.
             bases: list[torch.Tensor] = []
             widths: list[int] = []
             half, core.model.half = core.model.half, True  # float16 on a GPU only, for this extraction
             try:
+                # Blocks and halos on the input multiple and on the stride of the layers and normalisations gathered
+                # over them, so that a block owns whole cells of each.
+                stride = max(1, int(core.model.multiple), core.model.block_stride(fixed.device))
+                blocks = [math.ceil(block / stride) * stride]
+                try:
+                    halo = min((core.model.receptive_field - 1) // 2, blocks[0] // 2)
+                except MeasureError:  # a model that sees whole images: a quarter of a block around each
+                    halo = blocks[0] // 4
+                halo = math.ceil(halo / stride) * stride
                 # The larger the blocks, the less of the network's work goes to their halos; a probe the device does
                 # not hold leaves them at ``block``, which the extraction halves while they do not fit.
                 with contextlib.suppress(torch.cuda.OutOfMemoryError), out_of_memory_as_torch(cuda):
@@ -816,7 +838,7 @@ def static_feature_sources(
                         blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
                 for side, source in sources.items():
                     arrays, bases = halve_on_oom(
-                        functools.partial(extract, core, index, side, source, blocks, halo, bases),
+                        functools.partial(extract, core, index, side, source, blocks, halo, stride, bases),
                         functools.partial(halved, blocks, stride),
                         cuda,
                     )
@@ -824,6 +846,8 @@ def static_feature_sources(
                     volumes[side] += [(array, index) for array in arrays]
             finally:
                 core.model.half = half
+                if cuda:  # the float16 cast rounded the cached weights in place: their next use loads them again
+                    core.model.reload()
             loss._channels.append(widths)
     stacked = []
     for side, source in sources.items():

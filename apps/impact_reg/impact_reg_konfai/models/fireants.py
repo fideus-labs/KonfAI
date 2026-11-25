@@ -1417,8 +1417,8 @@ class FireANTsEngine:
             custom_loss = self._impact_loss()
             custom_loss._masked = deformable_masked
             custom_loss.reset()
-            for core in custom_loss.cores:  # a 3-D network on a plane: lifted to a volume one voxel thick
-                core.model.lift = core.dimension > mapped["fixed"].array.ndim
+            for core in custom_loss.cores:  # a 2-D pair: planes, which a 3-D network lifts to volumes one voxel thick
+                core.model.planes = mapped["fixed"].array.ndim == 2
             extent = [
                 size * step
                 for size, step in zip(readers["fixed"].GetSize(), readers["fixed"].GetSpacing(), strict=True)

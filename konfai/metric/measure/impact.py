@@ -759,14 +759,29 @@ def _centre_features(
     return tuple(features)
 
 
-def _blocks(image: torch.Tensor, block: int, halo: int) -> Iterator[tuple[torch.Tensor, tuple[slice, ...]]]:
-    """``image``'s blocks of ``block`` voxels a side, each with ``halo`` around it inside the image, and the slices of
-    its own voxels in it: the partition ``ImpactFeatureModel.norms`` sums over."""
+def block_region(
+    start: Sequence[int], stop: Sequence[int], halo: Sequence[int], shape: Sequence[int], stride: int = 1
+) -> tuple[list[int], list[int], tuple[slice, ...]]:
+    """The voxels ``[low, high)`` a block ``[start, stop)`` of an image of ``shape`` is read over, ``halo`` before it
+    and at least as many after it, and the slices of its own voxels in them. A block that starts on a multiple of
+    ``stride`` ends as far from the image's end as a whole number of it: a network that anchors a layer's cells at the
+    end of what it is handed (one that flips an axis, as TotalSegmentator's reorientation does) then meets the whole
+    image's cells, as one that anchors them at the start does."""
+    low = [max(0, a - h) for a, h in zip(start, halo, strict=True)]
+    high = [min(n, b + h) for b, h, n in zip(stop, halo, shape, strict=True)]
+    high = [end + (n - end) % stride for end, n in zip(high, shape, strict=True)]
+    return low, high, tuple(slice(a - lo, b - lo) for a, b, lo in zip(start, stop, low, strict=True))
+
+
+def _blocks(
+    image: torch.Tensor, block: int, halo: int, stride: int = 1
+) -> Iterator[tuple[torch.Tensor, tuple[slice, ...]]]:
+    """``image``'s blocks of ``block`` voxels a side, each read with ``halo`` around it (``block_region``), and the
+    slices of its own voxels in it: the partition ``ImpactFeatureModel.norms`` sums over."""
     shape = list(image.shape[2:])
     for target in _sweep_targets(shape, [block] * len(shape)):
-        low = [max(0, axis.start - halo) for axis in target]
-        high = [min(n, axis.stop + halo) for axis, n in zip(target, shape, strict=True)]
-        own = tuple(slice(axis.start - lo, axis.stop - lo) for axis, lo in zip(target, low, strict=True))
+        start, stop = [axis.start for axis in target], [axis.stop for axis in target]
+        low, high, own = block_region(start, stop, [halo] * len(shape), shape, stride)
         yield image[(slice(None), slice(None), *(slice(lo, hi) for lo, hi in zip(low, high, strict=True)))], own
 
 
@@ -782,14 +797,17 @@ def own_cells(own: Sequence[slice], box: Sequence[int], layer: Sequence[int]) ->
     )
 
 
-def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
+def _feature_grid(
+    shape: tuple[int, ...], patch: int, overlap: float, multiple: int, pad_value: float | None = None
+) -> ModelPatch:
     """The grid one extraction runs on, cut as the predictor cuts a network's input: ``patch`` 0, or an axis no longer
     than it, is one tile spanning that axis (a cube wider than the axis would pad it up to the tile); the tiles share
     ``overlap`` of their width under a raised-cosine window that sums to one; a free axis rounds up to ``multiple``
-    (an encoder-decoder's skip connections), cropped back off at blend time."""
+    (an encoder-decoder's skip connections), cropped back off at blend time, padded with ``pad_value`` (a tile's own
+    minimum when None)."""
     size = [int(patch) if 0 < patch < extent else 0 for extent in shape]
     share: float | int = float(overlap) if patch > 0 else 0
-    grid = ModelPatch(size, share)
+    grid = ModelPatch(size, share, pad_value=pad_value)
     if multiple > 1:
         grid.free_axis_multiple = [int(multiple)] * len(shape)
     grid.patch_combine = Cosinus()
@@ -836,19 +854,48 @@ def _layer_accumulator(
     return Accumulator(patches, size, combine)
 
 
-def onto_image_grid(layer: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+def _cells_read(start: int, stop: int, size: int, extent: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The two cells of a layer of ``size`` along an image axis of ``extent`` that each voxel of ``[start, stop)``
+    reads (``onto_image_grid``), and the weight of the second."""
+    at = torch.arange(start, stop, dtype=torch.float64) * (size / extent)
+    low = at.floor().long()
+    return low, (low + 1).clamp(max=size - 1), at - low
+
+
+def layer_window(box: Sequence[tuple[int, int]], grid: Sequence[int], shape: Sequence[int]) -> list[tuple[int, int]]:
+    """The cells of a layer of ``grid`` that ``onto_image_grid`` reads for the voxels ``box`` (``(start, stop)`` along
+    each axis) of an image of ``shape``."""
+    window = []
+    for (start, stop), size, extent in zip(box, grid, shape, strict=True):
+        if size == extent:
+            window.append((start, stop))
+            continue
+        low, high, _ = _cells_read(start, stop, size, extent)
+        window.append((int(low[0]), int(high[-1]) + 1))
+    return window
+
+
+def onto_image_grid(
+    layer: torch.Tensor,
+    shape: tuple[int, ...],
+    box: Sequence[tuple[int, int]] | None = None,
+    grid: Sequence[int] | None = None,
+) -> torch.Tensor:
     """A layer ``[B, C, *grid]`` brought linearly onto the image grid ``shape`` it was extracted from, placed as
     itk-impact places a feature map (``AllocateFeatureImage``): its first voxel on the image's, its spacing the image's
-    extent over its own size, a point past its last voxel reading that voxel (ITK's linear interpolator)."""
+    extent over its own size, a point past its last voxel reading that voxel (ITK's linear interpolator). With
+    ``box`` (``(start, stop)`` along each axis), the voxels of that box alone, ``layer`` then the cells of a layer of
+    ``grid`` that ``layer_window`` gives for it."""
     # ponytail: one axis at a time holds two gathered copies of the map, a slab loop if a layer ever outgrows that.
-    for axis, extent in enumerate(shape):
-        size = layer.shape[2 + axis]
-        if size == extent:
+    grid = grid or layer.shape[2:]
+    box = box or [(0, extent) for extent in shape]
+    for axis, ((start, stop), (first, _)) in enumerate(zip(box, layer_window(box, grid, shape), strict=True)):
+        if grid[axis] == shape[axis]:
+            layer = layer.narrow(2 + axis, start - first, stop - start)
             continue
-        at = torch.arange(extent, device=layer.device, dtype=torch.float64) * (size / extent)
-        low = at.floor().long()
-        high = (low + 1).clamp(max=size - 1)
-        weight = (at - low).to(layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
+        low, high, weight = _cells_read(start, stop, grid[axis], shape[axis])
+        low, high = (low - first).to(layer.device), (high - first).to(layer.device)
+        weight = weight.to(layer.device, layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
         layer = torch.lerp(layer.index_select(2 + axis, low), layer.index_select(2 + axis, high), weight)
     return layer
 
@@ -883,9 +930,9 @@ class ImpactFeatureModel:
         self.direction: torch.Tensor | None = None
         self.voxel_size: list[float] | None = None
         self.half = False
-        # A 3-D network handed planes, lifted to volumes one voxel thick (``_PlaneLift``), as a run on the whole pair
-        # lifts a 2-D pair.
-        self.lift = False
+        # Handed planes (a 2-D pair): a 3-D network lifts them to volumes one voxel thick (``_PlaneLift``), as a run on
+        # the whole pair lifts a 2-D pair, and a 2-D one reads them as they are; otherwise it sweeps a volume's slices.
+        self.planes = False
         # Each tile under a checkpoint (see _masked_feature_loss): for a caller that differentiates through
         # the network on volumes too large to keep every tile's activations.
         self.checkpoint = False
@@ -894,6 +941,7 @@ class ImpactFeatureModel:
         self.model: torch.nn.Module | None = None
         self._mapped: torch.device | None = None  # where _on mapped the file; None for a network handed in
         self._norm_stride: int | None = None  # measured once (norm_stride)
+        self._block_stride: int | None = None  # measured once (block_stride)
 
     @classmethod
     def download(
@@ -945,28 +993,66 @@ class ImpactFeatureModel:
         step = max(self.multiple, step, 1)
         return -(-(self.receptive_field // 2) // step) * step
 
+    def _probe_side(self) -> int:
+        """64 voxels, rounded up to the input multiple."""
+        multiple = max(1, self.multiple)
+        return -(-64 // multiple) * multiple
+
+    def _stride_of(self, layer: torch.Tensor) -> int:
+        """The stride of ``layer``, computed on the probe (``_probe_side``) along every axis: a power of two of the
+        image's voxels, or refused, as itk-impact refuses such a layer by regions."""
+        side = self._probe_side()
+        ratios = {side // cells if cells and side % cells == 0 else 0 for cells in layer.shape[2:]}
+        if any(ratio & (ratio - 1) or not ratio for ratio in ratios):
+            raise MeasureError(
+                f"'{self.model_path}' gives a layer of {list(layer.shape[2:])} cells for {side} voxels a side, on no"
+                " lattice of a power of two of the image's voxels, which blocks need.",
+                "Weigh layers at the image's resolution, or at a power of two of it.",
+            )
+        return max(ratios)
+
+    def _probe(self, device: torch.device | str) -> list:
+        """The network's inputs for a probe of ``_probe_side`` voxels a side, of what it is handed."""
+        dims = 2 if self.planes else 3
+        probe = torch.rand((1, self.in_channels, *[self._probe_side()] * dims), device=device)  # a spread to normalise
+        return self.inputs(probe, _statistics(probe)[0])
+
     def norm_stride(self, device: torch.device | str) -> int:
         """The coarsest stride of the normalisations ``norms`` gathers (1 for a network with none): blocks whose
         origins and halos are whole multiples of it meet their cells where the whole image does. Measured once, on a
-        probe of 64 voxels a side, each normalisation fed the probe's own statistics of the ones before it."""
+        probe, each normalisation fed the probe's own statistics of the ones before it."""
         if self._norm_stride is None:
-            side = max(64, self.multiple)
-            dims = self.dim - self.lift  # a plane for a 3-D network lifted to one
-            probe = torch.rand((1, self.in_channels, *[side] * dims), device=device)  # a spread to normalise
-            network = self.network(probe.device)
+            inputs = self._probe(device)
+            network = self.network(inputs[0].device)
             norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
             norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
             strides, gathered = [1], cast(list[torch.Tensor], [])
             if norm_count is not None:
-                tensor, _, stats, *direction = self.inputs(probe, _statistics(probe)[0])
+                tensor, _, stats, *direction = inputs
                 for _ in range(int(norm_count(len(self.weights)))):
                     layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
-                    strides.append(2 ** round(math.log2(side / min(layer.shape[2:]))))
+                    strides.append(self._stride_of(layer))
                     axes = (0, *range(2, layer.dim()))
                     mean = layer.double().mean(axes)
                     gathered.append(torch.stack([mean, layer.double().var(axes, unbiased=False)]).float())
             self._norm_stride = max(strides)
         return self._norm_stride
+
+    def block_stride(self, device: torch.device | str) -> int:
+        """The stride a block of the image must start on to own whole cells of every weighted layer and of every
+        normalisation (``norm_stride``), as the whole image's. Measured once, on a probe."""
+        if self._block_stride is None:
+            inputs = self._probe(device)
+            with torch.no_grad():
+                outputs = self.network(inputs[0].device)(*inputs)
+            self._block_stride = max([self.norm_stride(device), *(self._stride_of(outputs[k]) for k in self.kept)])
+        return self._block_stride
+
+    def reload(self) -> None:
+        """Forget the network loaded from its file, which its next use loads again: a float16 cast (``half``) rounds
+        its weights in place. A network handed in is kept."""
+        if self._mapped is not None:
+            self.model, self._mapped = None, None
 
     def _half(self, device: torch.device) -> bool:
         # float16 has no 3-D pooling on the CPU.
@@ -984,9 +1070,9 @@ class ImpactFeatureModel:
         along its first spatial axis."""
         network = self._on(device)
         network = network.half() if self._half(device) else network.float()
-        if self.dim == 2:
+        if self.dim == 2 and not self.planes:
             return _SliceSweep(network)
-        return _PlaneLift(network) if self.lift else network
+        return _PlaneLift(network) if self.dim == 3 and self.planes else network
 
     def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
         """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat
@@ -1000,7 +1086,10 @@ class ImpactFeatureModel:
         if self._half(tensor.device):
             tensor = tensor.half()
         stats = [float(attribute[key]) for key in ("ImageMin", "ImageMax", "ImageMean", "ImageStd")]
-        rest: list = [] if self.direction is None else [self.direction]
+        direction = self.direction
+        if direction is None and self.dim == 2 and self.planes:  # the plane's own axes, as the sweep tells a slice
+            direction = torch.eye(2, dtype=torch.int16)
+        rest: list = [] if direction is None else [direction]
         if norms:  # after the direction, an empty one when the images are fed as given
             rest = [*(rest or [torch.tensor([])]), list(norms)]
         return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats), *rest]
@@ -1026,7 +1115,8 @@ class ImpactFeatureModel:
             count = 0
             for box, own in boxes():
                 # Padded as ``volume`` pads a tile, up to the input multiple after the block's own voxels.
-                (box,) = next(iter(_feature_grid(tuple(box.shape[2:]), 0, 0.0, self.multiple).disassemble(box)))
+                grid = _feature_grid(tuple(box.shape[2:]), 0, 0.0, self.multiple, float(statistics["ImageMin"]))
+                (box,) = next(iter(grid.disassemble(box)))
                 tensor, _, stats, *direction = self.inputs(box, statistics)
                 layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
                 part = layer[own_cells(own, box.shape[2:], layer.shape[2:])].double()
@@ -1064,12 +1154,13 @@ class ImpactFeatureModel:
         does."""
         network = self.network(image.device)
         statistics = statistics if statistics is not None else _statistics(image)[0]
-        grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
+        # Padded with the image's minimum: a block of a larger image as the whole image is.
+        grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple, float(statistics["ImageMin"]))
         if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
             # Blocks and halos on the normalisations' stride, so that each meets their cells as the whole image does.
             stride = self.norm_stride(image.device)
             block = -(-patch // stride) * stride
-            norms = self.norms(lambda: _blocks(image, block, self._halo(stride)), statistics)
+            norms = self.norms(lambda: _blocks(image, block, self._halo(stride), stride), statistics)
         accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
             outputs = network(*self.inputs(tile, statistics, norms or ()))
