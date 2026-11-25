@@ -25,7 +25,7 @@ import threading
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from types import EllipsisType
 from typing import Any, cast
@@ -40,6 +40,7 @@ from konfai.data.data_manager import (
 )
 from konfai.data.patching import (
     Accumulator,
+    Fold,
     PathCombine,
     SlabAligner,
     SlabRegionStream,
@@ -47,8 +48,10 @@ from konfai.data.patching import (
     blend_axes,
     blend_overlap,
 )
+from konfai.data.patching.budget import _STREAM_STATS
 from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
 from konfai.data.reduction import Concat, Reduction
+from konfai.data.spline import SLAB_VOXELS
 from konfai.data.transform import (
     InferenceStack,
     LocalityKind,
@@ -58,10 +61,12 @@ from konfai.data.transform import (
     TransformInverse,
     TransformLoader,
 )
+from konfai.data.transform.resample import RANGE_KEYS, _host_array
 from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset, DataStream, drop_native_form
+from konfai.utils.dataset.statistics import data_statistics
 from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
@@ -135,11 +140,15 @@ def _corner_context(shape: list[int]) -> RegionContext:
     return RegionContext(corner, corner, tuple(int(extent) for extent in shape))
 
 
-def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
-    """Where one z-slab of the accumulator grid sits: the same region as source and target."""
-    slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
-    shape = tuple(int(extent) for extent in spatial)
-    return RegionContext(slices, slices, shape)
+def _slab(region: slice, spatial: list[int], axis: int) -> tuple[slice, ...]:
+    """The slab ``region`` of the accumulator grid along ``axis``, whole on every other axis."""
+    return tuple(region if dim == axis else slice(0, int(extent)) for dim, extent in enumerate(spatial))
+
+
+def _slab_context(region: slice, spatial: list[int], axis: int) -> RegionContext:
+    """Where one slab of the accumulator grid sits: the same region as source and target."""
+    slices = _slab(region, spatial, axis)
+    return RegionContext(slices, slices, tuple(int(extent) for extent in spatial))
 
 
 @dataclass(frozen=True)
@@ -186,6 +195,8 @@ class _StreamPlan:
     to_sink: bool
     # Prefix stages declared SLAB: run through ``Transform.stream_slab`` so they learn where each slab sits.
     slab_stages: frozenset[int] = frozenset()
+    #: The spatial axis the slabs are cut along: the one the case's patch grid is swept along.
+    axis: int = 0
 
     @property
     def boundary(self) -> int:
@@ -208,6 +219,8 @@ class _RegionState:
     """
 
     shapes: list[list[int]]
+    #: The most values a voxel holds between two stages of the pipe: a block's widest form, channels included.
+    widest: int
     stream: SlabRegionStream | None = None
     # The attribute the latest emission ran the pipe on: what the sink opens with.
     attribute: Attribute | None = None
@@ -216,6 +229,12 @@ class _RegionState:
 # Below this fraction of allocatable memory, the case takes the whole-volume path.
 # KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction.
 _STREAM_WORTH_MIN_FRACTION = 0.05
+
+
+def _has_its_statistics(locality: PatchLocality, attribute: Attribute) -> bool:
+    """Whether a stage holds the statistics it reads: none, or ones it takes as present (``Normalize`` behind a
+    ``Clip`` that records its bounds). A stage measuring its own input finds no slab that holds it."""
+    return not locality.stat_keys or (locality.takes_present and all(key in attribute for key in locality.stat_keys))
 
 
 def _records_oom(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -436,6 +455,9 @@ class OutputDataset(Dataset, NeedDevice):
             if self.patch_combine is not None:
                 axes = blend_axes(patch_size)
                 self.patch_combine.set_patch_config(axes, blend_overlap(overlap, axes))
+        elif isinstance(self._window, Fold):
+            # It stays on any grid: the output is what it leaves.
+            self.patch_combine = self._window
         self.nb_data_augmentation = nb_data_augmentation
 
     def to(self, device: int):
@@ -495,12 +517,30 @@ class OutputDataset(Dataset, NeedDevice):
         number_of_channels_per_model: list[int] | None = None,
     ):
         with PREDICTION_CLOCK.phase("blend"):
+            fold = self.patch_combine if isinstance(self.patch_combine, Fold) else None
+            # The case opens on what the fold holds, on the patch's grid; a patch inverse keeps the patch's shape, so
+            # one voxel of the first patch entered as it came sizes it, a copy (an enter may work in place, and the
+            # patch enters once) spread over the patch's grid.
+            opening = index_augmentation not in self.output_layer_accumulator.get(index_dataset, {})
             self._ensure_case_state(
-                index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
+                index_dataset,
+                index_augmentation,
+                (
+                    fold.enter(layer[(slice(None),) + (slice(0, 1),) * (layer.dim() - 1)].clone()).expand(
+                        -1, *layer.shape[1:]
+                    )
+                    if fold is not None and opening
+                    else layer
+                ),
+                dataset,
+                attribute,
+                number_of_channels_per_model,
             )
             attributes = self.attributes[index_dataset][index_augmentation]
-            for transform in self._inverses(dataset, patch=True):
+            for transform in self._inverses(dataset, patch=True):  # the model's output, undone before the fold
                 layer = transform.inverse(self.names[index_dataset], layer, attributes[index_patch])
+            if fold is not None:
+                layer = fold.enter(layer)
             accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
             slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
         if not self._stream_plans.get(index_dataset):
@@ -544,22 +584,21 @@ class OutputDataset(Dataset, NeedDevice):
             self.output_layer_accumulator[index_dataset] = {}
             self.attributes[index_dataset] = {}
             self.names[index_dataset] = input_dataset.name
-            # The streamed consumers index their slabs on the first spatial axis: a grid swept along
-            # another axis takes the whole-volume path. max(1, ...): the count is set by load().
-            sweeps_first_axis = all(
-                input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
-            )
+            # The slabs are cut along the axis the patch grids are swept along, one for every copy: the aligner
+            # joins their rows. max(1, ...): the count is set by load().
+            axes = {input_dataset.patch.get_sweep_axis(a) for a in range(max(1, self.nb_data_augmentation))}
+            axis = min(axes)
             plan = (
-                self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model)
-                if self._streaming_enabled and sweeps_first_axis
+                self._plan_stream(dataset, index_dataset, source_attribute, layer, number_of_channels_per_model, axis)
+                if self._streaming_enabled and len(axes) == 1
                 else None
             )
             self._stream_plans[index_dataset] = plan
             if self._streaming_enabled and plan is None:
                 reason = (
-                    self._stream_refusal(dataset, index_dataset, source_attribute, layer)
-                    if sweeps_first_axis
-                    else "its patch grid is swept along another axis than the first, the one slabs are written along"
+                    self._stream_refusal(dataset, index_dataset, source_attribute, layer, axis)
+                    if len(axes) == 1
+                    else "its copies' patch grids are swept along different axes, and their slabs are joined along one"
                 )
                 self._report_once(
                     f"whole-volume: {reason}",
@@ -567,8 +606,10 @@ class OutputDataset(Dataset, NeedDevice):
                     " Reported once per reason.",
                 )
             elif plan is not None and not plan.to_sink:
-                path = "buffered (the prefix streams, the tail runs whole-volume)"
-                self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
+                reason = "the prefix streams into a buffer held whole, and the tail runs from it"
+                self._report_once(
+                    f"buffered: {reason}", f"streaming: case '{input_dataset.name}' takes the buffered path: {reason}."
+                )
         # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
         # per patch, taken before any inverse ran.
         attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
@@ -608,9 +649,11 @@ class OutputDataset(Dataset, NeedDevice):
                     f"case '{self.names[index_dataset]}' accumulates on the host.",
                 )
         target = self._accum_device[index_dataset]
-        # A GPU accumulator takes the patch straight in; a CPU one takes an offloaded copy.
+        # A GPU accumulator takes the patch straight in; a CPU one takes an offloaded copy, but for the case's only
+        # patch, copied straight into the host buffer: staged, the whole case would be held twice.
         if target.type == "cpu":
-            if layer.device.type != "cpu":
+            accumulator.device = target
+            if layer.device.type != "cpu" and len(accumulator.patch_slices) > 1:
                 with self._borrow_cpu_patch(layer) as cpu_patch:
                     return accumulator.add_layer(index_patch, cpu_patch) or []
         elif str(layer.device) != str(target):
@@ -641,7 +684,8 @@ class OutputDataset(Dataset, NeedDevice):
         if copy_finished:
             slabs = slabs + cast(StreamingAccumulator, accumulator).finalize()
         try:
-            aligner = self._aligners.setdefault(index_dataset, SlabAligner(self.nb_data_augmentation))
+            axis = cast(_StreamPlan, self._stream_plans[index_dataset]).axis
+            aligner = self._aligners.setdefault(index_dataset, SlabAligner(self.nb_data_augmentation, axis=axis))
             joint = aligner.push(index_augmentation, slabs, copy_finished)
             self._consume_slabs(index_dataset, joint, number_of_channels_per_model, dataset)
             finished = aligner.complete
@@ -679,11 +723,13 @@ class OutputDataset(Dataset, NeedDevice):
             print(f"[KonfAI] {message}")
 
     def _worth_streaming(self, dataset: DatasetIter, index: int, layer: torch.Tensor) -> bool:
-        """Whether this case's accumulators are heavy enough for the per-slab machinery to pay. The
-        estimate is taken before the patch-level inverses, so a dtype-widening inverse under-counts by
-        at most 2x."""
-        spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
-        assembled = int(layer.shape[0]) * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
+        """Whether this case's output is heavy enough for the per-slab machinery to pay: its accumulators, or the output
+        they are written back as on the case's own grid, which a resample undone can make many times larger (the
+        whole-volume path holds it). The estimate is taken before the patch-level inverses, so a dtype-widening
+        inverse under-counts by at most 2x."""
+        case = dataset.get_dataset_from_index(self.group_dest, index)
+        voxels = max(int(np.prod(case.shapes[0])) * self.nb_data_augmentation, int(np.prod(case.base_shape[1:])))
+        assembled = int(layer.shape[0]) * voxels * layer.element_size()
         raw = os.environ.get("KONFAI_STREAM_WORTH_THRESHOLD")
         try:
             fraction = float(raw) if raw is not None else _STREAM_WORTH_MIN_FRACTION
@@ -703,9 +749,10 @@ class OutputDataset(Dataset, NeedDevice):
         return resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
 
     def _stream_refusal(
-        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None
+        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None, axis: int = 0
     ) -> str | None:
-        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it."""
+        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it. ``axis``: the one its
+        slabs are cut along."""
         if self.nb_data_augmentation < 1:
             return "no copy of the case is planned"
         if not self.reduction.voxel_local:
@@ -717,16 +764,22 @@ class OutputDataset(Dataset, NeedDevice):
             )
         if self.nb_data_augmentation != 1:
             try:
-                streamable = self._tta_streamable(dataset, index, attribute)
+                streamable = self._tta_streamable(dataset, index, attribute, axis)
             except Exception as error:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
                 return f"a TTA copy's un-augment could not be probed ({type(error).__name__}: {error})"
             if not streamable:
                 return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform streams through ``stream_slab``; any other
-            # non-voxel-local one refuses outright.
-            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
+            # A SLAB before-reduction transform streams through ``stream_slab``, which hands it slabs of the first
+            # axis; any other non-voxel-local one refuses outright.
+            if locality.kind is LocalityKind.SLAB:
+                if axis != 0:
+                    return (
+                        f"the before-reduction transform {type(transform).__name__} takes slabs of the first axis, and"
+                        f" the case's patch grid is swept along axis {axis}"
+                    )
+            elif not self._voxel_local(locality, attribute):
                 return f"the before-reduction transform {type(transform).__name__} is not voxel-local"
         return None
 
@@ -737,8 +790,9 @@ class OutputDataset(Dataset, NeedDevice):
         attribute: Attribute,
         layer: torch.Tensor | None = None,
         number_of_channels_per_model: list[int] | None = None,
+        axis: int = 0,
     ) -> _StreamPlan | None:
-        """The streaming plan for this case, or ``None`` for the whole-volume path.
+        """The streaming plan for this case, its slabs cut along ``axis``, or ``None`` for the whole-volume path.
 
         The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``. What
         streaming cannot honour becomes a whole-volume TAIL run once on a post-reduction buffer, as does
@@ -747,7 +801,7 @@ class OutputDataset(Dataset, NeedDevice):
         act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``): see
         ``_stream_refusal``.
         """
-        if self._stream_refusal(dataset, index, attribute, layer) is not None:
+        if self._stream_refusal(dataset, index, attribute, layer, axis) is not None:
             return None
         stages = [
             *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
@@ -765,11 +819,13 @@ class OutputDataset(Dataset, NeedDevice):
             locality = stage.locality(Attribute(attribute))
             if self._voxel_local(locality, attribute):
                 continue
-            if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None:
-                # A SLAB stage streams through ``stream_slab`` only on the accumulator grid.
+            if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None and axis == 0:
+                # A SLAB stage streams through ``stream_slab``, slabs of the first axis, only on the accumulator grid.
                 slab_stages.add(position)
                 continue
-            if locality.kind.is_region:
+            # A region stage measuring its own input (a B-spline's range) waits in the tail, seeded from the buffer: a
+            # statistic present in the case's attribute describes another tensor.
+            if locality.kind.is_region and _has_its_statistics(locality, attribute):
                 if pipe_start is None:
                     pipe_start = position
                 continue
@@ -779,8 +835,8 @@ class OutputDataset(Dataset, NeedDevice):
             # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator grid.
             if pipe_start is not None:
                 tail_start = min(tail_start, pipe_start)
-            return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages))
-        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True, slab_stages=frozenset(slab_stages))
+            return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages), axis=axis)
+        return _StreamPlan(stages, pipe_start, len(stages), to_sink=True, slab_stages=frozenset(slab_stages), axis=axis)
 
     @staticmethod
     def _copy_draw(dataset: DatasetIter, index_augmentation: int) -> tuple[list[DataAugmentation], int] | None:
@@ -808,8 +864,8 @@ class OutputDataset(Dataset, NeedDevice):
             tensor = data_augmentation.inverse(case, a, tensor)
         return tensor
 
-    def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute) -> bool:
-        """Whether every copy's un-augment acts slab by slab, read from the declarations alone.
+    def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute, axis: int = 0) -> bool:
+        """Whether every copy's un-augment acts slab by slab along ``axis``, read from the declarations alone.
 
         A POINTWISE draw does; an ORIENTATION draw does when its declared region remap fixes the slab
         axis row for row and its shape fold keeps the slab extent. Any other kind refuses outright.
@@ -829,12 +885,12 @@ class OutputDataset(Dataset, NeedDevice):
                 if locality.kind is not LocalityKind.ORIENTATION:
                     return False
                 out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
-                if out_shape[0] != shape[0]:
+                if out_shape[axis] != shape[axis]:
                     return False
-                plane = tuple(slice(0, extent) for extent in out_shape[1:])
-                for row in range(out_shape[0]):
-                    source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
-                    if (source[0].start, source[0].stop) != (row, row + 1):
+                for row in range(out_shape[axis]):
+                    target = _slab(slice(row, row + 1), out_shape, axis)
+                    source = augmentation.stream_region_source(case, a, target, shape)
+                    if (source[axis].start, source[axis].stop) != (row, row + 1):
                         return False
                 shape = out_shape
         return True
@@ -858,13 +914,13 @@ class OutputDataset(Dataset, NeedDevice):
                 for target, emitted in cast(SlabRegionStream, state.stream).push(region, block):
                     self._write_stream_block(index, target, emitted, cast(Attribute, state.attribute))
             elif plan.to_sink:
-                spatial = self.output_layer_accumulator[index][0].shape
-                target = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
+                target = _slab(region, self.output_layer_accumulator[index][0].shape, plan.axis)
                 self._write_stream_block(index, target, block, attribute)
             else:
                 buffer = self._stream_buffers[index]
-                lead = (slice(None),) * (block.dim() - len(self.output_layer_accumulator[index][0].shape))
-                buffer[(*lead, region)] = block.to(buffer.device)
+                spatial = self.output_layer_accumulator[index][0].shape
+                lead = (slice(None),) * (block.dim() - len(spatial))
+                buffer[(*lead, *_slab(region, spatial, plan.axis))] = block.to(buffer.device)
 
     def _init_stream_state(
         self, index: int, plan: _StreamPlan, block: torch.Tensor, attribute: Attribute
@@ -875,7 +931,7 @@ class OutputDataset(Dataset, NeedDevice):
         if plan.pipe_start is not None:
             state = self._make_pipe_state(index, plan, spatial, block)
             if state is None:
-                plan = _StreamPlan(plan.stages, None, plan.pipe_start, to_sink=False, slab_stages=plan.slab_stages)
+                plan = replace(plan, pipe_start=None, tail_start=plan.pipe_start, to_sink=False)
                 self._stream_plans[index] = plan
             else:
                 self._region_states[index] = state
@@ -889,15 +945,21 @@ class OutputDataset(Dataset, NeedDevice):
         return plan
 
     def _make_pipe_state(
-        self, index: int, plan: _StreamPlan, in_shape: list[int], block: torch.Tensor
+        self,
+        index: int,
+        plan: _StreamPlan,
+        in_shape: list[int],
+        block: torch.Tensor,
+        seed: tuple[tuple[str, np.ndarray], ...] = (),
     ) -> _RegionState | None:
         """Wire the case's streamed pipe into one :class:`SlabRegionStream`, or answer ``None`` for
-        the buffered tail where streaming would not be exact.
+        the buffered tail where streaming would not be exact or would wait for the whole case.
 
         The pull map folds each stage's declaration backward from the written region down to the
         accumulator; ``produce`` walks the pipe forward over the pulled window. The fold is planned
         by walking a one-voxel corner of the first slab through the pipe with one evolving attribute,
-        and ``produce`` replays the same transitions on a fresh copy per emission.
+        and ``produce`` replays the same transitions on a fresh copy per emission. ``seed`` is the
+        first stage's statistics, pushed right before it runs and taken back after it.
         """
         attr0 = self._post_prefix_attributes[index]
         pipe = plan.stages[cast(int, plan.pipe_start) :]
@@ -905,14 +967,21 @@ class OutputDataset(Dataset, NeedDevice):
 
         corner: tuple[EllipsisType | slice, ...] = (Ellipsis, *([slice(0, 1)] * len(in_shape)))
         probe = block[corner].clone()
+        widest = probe.numel()
         walking = Attribute(attr0)
         shapes = [list(in_shape)]
         kinds: list[LocalityKind] = []
         pull_fns: list[Callable[[tuple[slice, ...]], list[slice]]] = []
         try:
-            for stage in pipe:
+            for position, stage in enumerate(pipe):
                 shape = shapes[-1]
-                locality = stage.locality(Attribute(walking))
+                judged = Attribute(walking)
+                for key, value in seed if position == 0 else ():
+                    judged[key] = value
+                locality = stage.locality(judged)
+                if locality.kind.is_region and not ((position == 0 and seed) or _has_its_statistics(locality, judged)):
+                    # A statistic of the stage's own input, which no slab holds: only the first stage is seeded.
+                    raise PredictorError(f"{type(stage.transform).__name__} needs {sorted(locality.stat_keys)}")
                 kinds.append(locality.kind)
                 snapshot = Attribute(walking)
                 if locality.kind is LocalityKind.HALO:
@@ -958,12 +1027,13 @@ class OutputDataset(Dataset, NeedDevice):
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
                     probe = stage.stream_region(name, probe, _corner_context(shape), walking)
+                widest = max(widest, probe.numel())
         except Exception as error:  # nosec B110 - an unplannable pipe keeps the case on the buffered path
             reason = f"its region pipe could not be planned ({type(error).__name__}: {error})"
             self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
             return None
 
-        state = _RegionState(shapes)
+        state = _RegionState(shapes, widest)
 
         def spans_for(target: tuple[slice, ...]) -> list[list[slice]]:
             """The region of each inter-stage space behind ``target``, folded back to the accumulator."""
@@ -981,13 +1051,23 @@ class OutputDataset(Dataset, NeedDevice):
             spans = spans_for(target)
             block = window
             for i, (stage, kind) in enumerate(zip(pipe, kinds, strict=True)):
+                for key, value in seed if i == 0 else ():
+                    attribute[key] = value
                 block = self._apply_pipe_stage(
                     stage, kind, block, tuple(spans[i + 1]), spans[i], shapes[i], shapes[i + 1], attribute, name
                 )
+                for key, _ in seed if i == 0 else ():
+                    attribute.pop(key)
             state.attribute = attribute
             return block
 
-        state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1])
+        state.stream = SlabRegionStream(pull, produce, in_shape, shapes[-1], plan.axis)
+        if not state.stream.streams:
+            # One block of the whole case (the faces grid resampling apart an axis other than the slab axis): the
+            # buffered tail streams it along the axis it does stream along (``_stream_tail``).
+            reason = "every region of its pipe reads the whole case along the slab axis"
+            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason} ({plan.axis}).")
+            return None
         return state
 
     def _apply_pipe_stage(
@@ -1080,9 +1160,65 @@ class OutputDataset(Dataset, NeedDevice):
         result = self._stream_buffers.pop(index)
         attribute = Attribute(self._post_prefix_attributes[index])
         name = self.names[index]
+        if self._stream_tail(index, plan, result, attribute):
+            return
+        self._report_once("tail whole", f"streaming: case '{name}' runs its tail whole-volume on the buffer.")
         for stage in plan.stages[plan.tail_start :]:
             result = stage(name, result, attribute)
         self._submit_final_write(index, name, result, attribute)
+
+    def _stream_tail(self, index: int, plan: _StreamPlan, buffer: torch.Tensor, attribute: Attribute) -> bool:
+        """Stream the tail from the buffer into the sink when its stages are region or per-voxel ones and all it waited
+        for is the buffer: whole along the slab axis (the faces grid resampling another axis apart), or its range per
+        channel, which its first stage clips to (a B-spline), measured on the buffer and seeded for that stage alone.
+        The tail runs as a region pipe along the first axis it streams along, the slab axis first, and the finalized
+        case is never held whole. A later stage wanting a statistic of its own input keeps the tail whole
+        (``_make_pipe_state`` refuses it). Whether it streamed."""
+        localities = [stage.locality(Attribute(attribute)) for stage in plan.stages[plan.tail_start :]]
+        spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
+        if not localities or localities[0].stat_keys not in (frozenset(), frozenset(RANGE_KEYS)):
+            return False
+        if not all(locality.kind.is_region or self._voxel_local(locality, attribute) for locality in localities):
+            return False
+        if buffer.dim() != len(spatial) + 1 or not self.can_stream_data(attribute):
+            return False
+        seed: tuple[tuple[str, np.ndarray], ...] = ()
+        if localities[0].stat_keys:
+            # Each channel's range, NaN left out, folded slab by slab as the store's statistics are: only the slab in
+            # hand is moved to the host or widened.
+            extent = spatial[plan.axis]
+            rows = max(1, SLAB_VOXELS // max(1, buffer.numel() // extent))
+            slabs = (
+                _host_array(buffer.narrow(plan.axis + 1, first, min(rows, extent - first)))
+                for first in range(0, extent, rows)
+            )
+            stats = data_statistics(slabs, keys=[_STREAM_STATS[key] for key in RANGE_KEYS])
+            seed = tuple((key, np.asarray(stats[_STREAM_STATS[key]], np.float64)) for key in RANGE_KEYS)
+        tail = replace(plan, pipe_start=plan.tail_start, tail_start=len(plan.stages), to_sink=True)
+        for axis in sorted(range(len(spatial)), key=lambda axis: axis != plan.axis):
+            state = self._make_pipe_state(index, replace(tail, axis=axis), spatial, buffer, seed)
+            if state is not None:
+                break
+        if state is None:
+            return False
+        self._report_once(
+            f"tail along {axis}",
+            f"streaming: case '{self.names[index]}' streams its tail from the buffer along axis {axis}.",
+        )
+        self._region_states[index] = state
+        stream = cast(SlabRegionStream, state.stream)
+        # A slab completes what its rows become through the pipe, which an inverse onto a finer grid makes many times
+        # larger: sized on the pipe's largest grid, in every channel of its widest stage.
+        extent = spatial[axis]
+        per_row = state.widest * max(int(np.prod(shape)) for shape in state.shapes) // extent
+        rows = max(1, SLAB_VOXELS // max(1, per_row))
+        for first in range(0, extent, rows):
+            region = slice(first, min(first + rows, extent))
+            for target, block in stream.push(region, buffer[(slice(None), *_slab(region, spatial, axis))]):
+                self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
+        for target, block in stream.finalize():
+            self._write_stream_block(index, target, block, cast(Attribute, state.attribute))
+        return True
 
     def _prepare_copy_slab(
         self,
@@ -1093,6 +1229,7 @@ class OutputDataset(Dataset, NeedDevice):
         dataset: DatasetIter,
         region: slice,
         spatial: list[int],
+        axis: int,
     ) -> torch.Tensor:
         """One copy's slab through the per-copy head of ``_get_output``: un-augment it, split the model
         chunks, run before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A
@@ -1101,7 +1238,7 @@ class OutputDataset(Dataset, NeedDevice):
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
         chunks = self._split_model_chunks(layer, number_of_channels_per_model, attribute)
-        context = _slab_context(region, spatial)
+        context = _slab_context(region, spatial, axis)
         results = []
         for chunk in chunks:
             for transform in self.before_reduction_transforms:
@@ -1126,7 +1263,7 @@ class OutputDataset(Dataset, NeedDevice):
         dataset: DatasetIter,
         region: slice,
     ) -> tuple[torch.Tensor, Attribute]:
-        """The finalize chain of ``_get_output``/``get_output``, on one z-slab of every copy, up to
+        """The finalize chain of ``_get_output``/``get_output``, on one slab of every copy, up to
         the plan's prefix boundary.
 
         Each step is the whole-volume computation restricted to the slab (same ops, same order, same
@@ -1135,14 +1272,14 @@ class OutputDataset(Dataset, NeedDevice):
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         blocks = [
             self._prepare_copy_slab(
-                index, index_augmentation, layer, number_of_channels_per_model, dataset, region, spatial
+                index, index_augmentation, layer, number_of_channels_per_model, dataset, region, spatial, plan.axis
             )
             for index_augmentation, layer in copies.items()
         ]
         result = self._reduce_copies(blocks)
         attribute = Attribute(self.attributes[index][0][0])
         self._split_model_chunks(next(iter(copies.values())), number_of_channels_per_model, attribute)
-        context = _slab_context(region, spatial)
+        context = _slab_context(region, spatial, plan.axis)
         for position, stage in enumerate(plan.stages[: plan.boundary]):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
@@ -1258,7 +1395,7 @@ class OutputDataset(Dataset, NeedDevice):
         # device flip mid-case and hand the reduction a mixed-device list.
         if index not in self._reduce_device:
             self._reduce_device[index] = (
-                self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
+                self._reduction_device(chunks[0], self.names[index], len(chunks)) if chunks else torch.device("cpu")
             )
         reduce_device = self._reduce_device[index]
         results = []
@@ -1276,9 +1413,10 @@ class OutputDataset(Dataset, NeedDevice):
             return results[0].unsqueeze(0)
         return torch.stack(results, dim=0)
 
-    def _reduction_device(self, chunk: torch.Tensor, nb_chunks: int = 1) -> torch.device:
-        """Device for the channel-reduction transforms: this dataset's CUDA device when every chunk (plus
-        working headroom) fits free VRAM, else CPU (the memory-safe fallback)."""
+    def _reduction_device(self, chunk: torch.Tensor, name: str, nb_chunks: int = 1) -> torch.device:
+        """Device for the channel-reduction transforms of case ``name``: this dataset's CUDA device when every chunk
+        (plus working headroom, what each transform declares for the case) fits free VRAM, else CPU (the
+        memory-safe fallback)."""
         # NeedDevice stores a CUDA ordinal (int) on GPU and a torch.device on CPU; normalise to a device.
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or self._host_only:
@@ -1287,15 +1425,14 @@ class OutputDataset(Dataset, NeedDevice):
         # own working buffers and output (a Concat's is every copy again), and the after-reduction
         # transforms work on that output: budget the whole case, plus one copy's working temp.
         copies = max(1, self.nb_data_augmentation)
+        held = [transform.case_working_multiple(name) for transform in self.after_reduction_transforms]  # for the case
         if self._copy_fold() is not None:
             # The copies are folded as they come: one in flight, the running total, and what the
             # after-reduction transforms that follow the fold work with on it.
-            rest = max((transform.working_multiple for transform in self.after_reduction_transforms[1:]), default=0.0)
-            parked, fold = 1, 1.0 + rest
+            parked, fold = 1, 1.0 + max(held[1:], default=0.0)
         else:
             folded = self.reduction.output_channels(1, copies)
-            after = max((transform.working_multiple for transform in self.after_reduction_transforms), default=0.0)
-            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + after)
+            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + max(held, default=0.0))
         needed = chunk.numel() * chunk.element_size() * max(1, nb_chunks) * (parked + 1 + fold)
         try:
             free = _free_vram(device, needed)
@@ -1484,7 +1621,8 @@ class OutputLayerDataset(OutputDataset):
         self.names[index_dataset] = input_dataset.name
         self._stream_plans[index_dataset] = None
         window = self.patch_combine
-        if window is not None and any(r != 1 for r in ratio):
+        # A Fold has no window to bring onto the layer's grid.
+        if window is not None and not isinstance(window, Fold) and any(r != 1 for r in ratio):
             window = copy.deepcopy(window)
             window.set_patch_config(
                 [int(len(axis) * r) if len(axis) > 1 else 1 for axis, r in zip(window.windows_1d, ratio, strict=True)],

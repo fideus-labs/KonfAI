@@ -128,40 +128,67 @@ def test_masked_stages_declare_the_kind_their_configuration_makes_them() -> None
 # --------------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def three_row_pieces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The statistics folded in pieces of three rows of the case, so a scan merges several."""
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 3 * 19 * 35 * 2)
+
+
+def _random_intensity(dataset: Dataset, channels: int = 1) -> np.ndarray:
+    """A stored volume whose mean and deviation a float32 reduction rounds (centred far from 0):
+    the case's phantom is too regular to show it."""
+    volume, attribute = dataset.read_data("Intensity", CASE_NAME)
+    noise = np.random.default_rng(3).standard_normal((channels, *volume.shape[1:])) * 300.0 + 3e4
+    dataset.write("Intensity", CASE_NAME, noise.astype(np.float32), attribute)
+    return noise.astype(np.float32)
+
+
+@pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)
+def test_a_standardize_streams_to_the_whole_volume_s_bits(
+    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, three_row_pieces: None
+) -> None:
+    """A streamed ``Standardize`` is seeded with the store's statistics, and the whole-volume route
+    folds the tensor in hand as that scan folds the store: the two write the same bits."""
+    dataset = build_case(tmp_path / "case", GEOMETRIES[MAIN])
+    _random_intensity(dataset)
+    got = sweep(dataset, "Intensity", Standardize(inverse=False), tmp_path / "streamed", route, monkeypatch)
+    want = whole_volume(dataset, "Intensity", Standardize(inverse=False), tmp_path / "whole")
+    assert got.verdict.name == "STREAM"
+    np.testing.assert_array_equal(got.array, want.array)
+    for key in ("Mean", "Std"):
+        assert got.attribute[key] == want.attribute[key]
+
+
 @pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)
 def test_a_masked_standardize_streams_and_matches_the_whole_volume(
-    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, three_row_pieces: None
 ) -> None:
     """The published Synthesis pattern: ``Standardize(mask: ...)`` must stream (the statistic is
-    seeded once from the masked disk scan) and produce the whole-volume path's values. The two
-    routes accumulate the moments at different widths (float32 over the assembled tensor, float64
-    in the scan), so they agree to that rounding rather than bit for bit."""
+    seeded once from the masked disk scan) and produce the whole-volume path's values, bit for bit:
+    both fold the values under the mask piece by piece."""
     dataset = build_case(tmp_path / "case", GEOMETRIES[MAIN])
+    _random_intensity(dataset)
     got = sweep(dataset, "Intensity", Standardize(mask="Labels"), tmp_path / "streamed", route, monkeypatch)
     want = whole_volume(dataset, "Intensity", Standardize(mask="Labels"), tmp_path / "whole")
     assert got.verdict.name == "STREAM"
-    assert got.array.shape == want.array.shape
-    np.testing.assert_allclose(got.array, want.array, rtol=0, atol=1e-4)
+    np.testing.assert_array_equal(got.array, want.array)
 
 
 @pytest.mark.parametrize("route", ROUTES, ids=lambda route: route.name)
 def test_a_nonzero_standardize_streams_and_matches_the_whole_volume(
-    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    route: Route, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, three_row_pieces: None
 ) -> None:
-    """The non-zero standardization streams the same way: the
-    per-channel statistics seeded once from the disk scan over the stored volume's non-zero voxels, the
-    zeros kept, within the two routes' rounding (float32 torch reductions against the float64 scan)."""
+    """The non-zero standardization streams the same way: the per-channel statistics seeded once from
+    the disk scan over the stored volume's non-zero voxels, the zeros kept, the whole volume's bits."""
     dataset = build_case(tmp_path / "case", GEOMETRIES[MAIN])
-    volume, attribute = dataset.read_data("Intensity", CASE_NAME)
-    volume = np.concatenate([volume, volume * 0.5], axis=0)
+    volume = _random_intensity(dataset, channels=2)
     volume[:, : volume.shape[1] // 3] = 0.0
-    dataset.write("Intensity", CASE_NAME, volume, attribute)
+    dataset.write("Intensity", CASE_NAME, volume, dataset.read_data("Intensity", CASE_NAME)[1])
     stage = Standardize(nonzero=True, inverse=False)
     got = sweep(dataset, "Intensity", stage, tmp_path / "streamed", route, monkeypatch)
     want = whole_volume(dataset, "Intensity", Standardize(nonzero=True, inverse=False), tmp_path / "whole")
     assert got.verdict.name == "STREAM"
-    assert got.array.shape == want.array.shape
-    np.testing.assert_allclose(got.array, want.array, rtol=0, atol=1e-4)
+    np.testing.assert_array_equal(got.array, want.array)
     assert not got.array[volume == 0].any()
 
 

@@ -29,7 +29,6 @@ import numpy as np
 import pytest
 from konfai.utils.budget import set_per_rank_budget
 from konfai.utils.dataset import Dataset
-from konfai.utils.dataset import core as core_module
 from konfai.utils.dataset import h5 as h5_module
 from konfai.utils.dataset import statistics as statistics_module
 from konfai.utils.dataset.statistics import (
@@ -394,6 +393,115 @@ def test_the_scan_answers_the_same_whatever_the_budget_read_it_in(
             np.testing.assert_array_equal(got[key], reference[key], err_msg=f"{key} at {budget} B")
 
 
+def test_a_store_s_grain_keeps_the_scan_on_the_pieces_of_the_volume_in_hand(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A block raised to the store's grain stays a whole number of pieces, so the scan answers what the
+    volume in hand folds to, bit for bit: what a streamed ``Standardize`` is seeded with is what its
+    whole-volume route measures. Pieces of 3 rows, a grain of 7: a block of 14 rows would shift them."""
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 3 * 40 * 40)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 16 * 40 * 40)
+    monkeypatch.setattr(Dataset, "read_granularity", lambda self, groups, name: (1, 7, 40, 40))
+    volume = _volume((1, 64, 40, 40))
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    blocks = _scan_blocks(dataset, monkeypatch)
+
+    got = dataset.read_data_statistics("CT", "P0")
+
+    assert {shape[1] % 3 for shape in blocks[:-1]} == {0}
+    want = statistics_module.data_statistics([volume])
+    for key in _KEYS:
+        np.testing.assert_array_equal(got[key], want[key], err_msg=key)
+
+
+def test_a_grain_whose_common_multiple_with_the_pieces_is_tall_keeps_the_pieces_height() -> None:
+    """[1, 16384, 100, 100] on a 1024-row grain folds in 26-row pieces: their common multiple, 13312 rows, is ~508 MiB
+    a block where raising to the grain read 39 MiB. Past the grain and the scan's own block, the block keeps the
+    pieces' height (a whole number of them, so the fold's order is the same), and decodes the grain again instead."""
+
+    class Store:
+        def read_granularity(self, group: str, name: str) -> tuple[int, ...]:
+            return (1, 1024, 100, 100)
+
+        def _scanned_element_bytes(self, group: str, name: str, shape: list[int]) -> int:
+            return 4
+
+    shape = [1, 16384, 100, 100]
+    set_per_rank_budget(None)
+    rows = statistics_module._scan_rows([(Store(), "CT")], "CASE", shape, 26)
+    assert rows % 26 == 0
+    assert rows * 100 * 100 * 4 <= 1024 * 100 * 100 * 4, f"{rows} rows"
+
+    # Under 128 MiB the scan's own block (780 rows) holds 144,320,000 B with the grain it decodes past it; a lower
+    # whole number of pieces fits (650 rows: 133,920,000 B), where refusing would refuse a feasible scan.
+    try:
+        set_per_rank_budget(128 * 2**20)
+        rows = statistics_module._scan_rows([(Store(), "CT")], "CASE", shape, 26)
+    finally:
+        set_per_rank_budget(None)
+    assert rows % 26 == 0 and rows >= 26, f"{rows} rows"
+
+
+def test_a_scan_of_an_entry_shorter_than_a_piece_is_priced_on_the_rows_it_has(tmp_path: Path, image_attributes) -> None:
+    """A piece is 16384 rows of [1, 4, 4, 4]: the scan reads the entry's 4, three blocks of 256 B, and fits 1 MiB."""
+    volume = _volume((1, 4, 4, 4))
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    try:
+        set_per_rank_budget(2**20)
+        got = dataset.read_data_statistics("CT", "P0")
+    finally:
+        set_per_rank_budget(None)
+    want = statistics_module.data_statistics([volume])
+    for key in _KEYS:
+        np.testing.assert_array_equal(got[key], want[key], err_msg=key)
+
+
+@pytest.mark.parametrize("backend", ["mha", "gipl"])
+def test_a_scan_with_a_halo_holds_its_padded_blocks_within_the_budget(
+    tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """A block read with ``halo`` rows more on both sides and padded around its plane is what a scan holds: under
+    1 MiB, eight rows of [1, 64, 64, 64] float32 and a halo of 4 hold 16 x 72 x 72 voxels, three of them in flight;
+    the rows of the scan without a halo (21) would hold 29. A budget the shortest such block exceeds is refused, where
+    the store serves regions (a store read whole is held whole anyway)."""
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 64 * 64)
+    dataset = Dataset(tmp_path / "store", backend)
+    dataset.write("CT", "P0", _volume((1, 64, 64, 64)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    try:
+        set_per_rank_budget(2**20)
+        held = [block.nbytes * 3 for block in dataset.iter_data_blocks("CT", "P0", halo=4)()]
+        set_per_rank_budget(2**19)
+        if backend == "mha":
+            with pytest.raises(DatasetManagerError, match="per-rank memory budget"):
+                dataset.iter_data_blocks("CT", "P0", halo=4)
+    finally:
+        set_per_rank_budget(None)
+    assert max(held) <= 2**20, f"{max(held)} B"
+
+
+def test_a_scan_of_some_channels_folds_what_the_volume_in_hand_folds_of_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fold's pieces are cut from the whole block, every channel of it, and each piece's channels selected
+    after: a scan of one of three channels, its blocks six rows high, folds what the volume in hand folds of it, to
+    the bit. Cut from the selected channel, pieces of an update of four values were four rows where the blocks hold
+    six, so the two folds took other pieces."""
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 4)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 3 * 6)
+    volume = (np.random.default_rng(9).standard_normal((3, 64, 1, 1)) * 300 + 3e4).astype(np.float32)
+    dataset = Dataset(tmp_path / "store", "h5")
+    dataset.write("CT", "P0", volume)
+    set_per_rank_budget(None)
+
+    got = dataset.read_data_statistics("CT", "P0", [1])
+
+    want = statistics_module.data_statistics([volume], [1])
+    for key in _KEYS:
+        np.testing.assert_array_equal(got[key], want[key], err_msg=key)
+
+
 def test_a_budget_the_shortest_block_of_a_scan_exceeds_is_refused(
     tmp_path: Path, image_attributes, budgeted_scan: None
 ) -> None:
@@ -445,7 +553,6 @@ def test_an_extrema_only_request_folds_min_and_max_in_the_stored_dtype(tmp_path:
         raise AssertionError("the moments fold ran for an extrema-only request")
 
     monkeypatch.setattr(statistics_module, "_update_running_statistics", no_moments)
-    monkeypatch.setattr(core_module, "_update_running_statistics", no_moments)
     got = dataset.read_data_statistics("CT", "P0", keys=["min", "max_per_channel"])
     for key in ("min", "max", "min_per_channel", "max_per_channel"):
         assert got[key] == full[key]

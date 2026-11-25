@@ -22,20 +22,28 @@ import pytest
 from konfai.utils.errors import ConfigError, EvaluatorError
 
 
-def _evaluation(tmp_path: Path, metrics: str, groups: str = "", validation: str = "None") -> Path:
-    """An Evaluation.yml over two small MetaImage cases, each ``Volume_0``, ``Reference_0``, ``Mask_0`` and
-    ``Unread_0``."""
+def _evaluation(
+    tmp_path: Path,
+    metrics: str,
+    groups: str = "",
+    validation: str = "None",
+    shape: tuple[int, ...] = (8, 9, 10),
+    chain: str = "              Statistics: {}\n              TensorCast: {dtype: float32}\n",
+) -> Path:
+    """An Evaluation.yml over two small MetaImage cases of ``shape``, each ``Volume_0``, ``Reference_0``, ``Mask_0``
+    and ``Unread_0``, the output prepared by ``chain``."""
     import numpy as np
 
     sitk = pytest.importorskip("SimpleITK")
 
+    count = int(np.prod(shape))
     for case in ("P000", "P001"):
         (tmp_path / "Dataset" / case).mkdir(parents=True)
         for name, array in [
-            ("Volume_0", np.arange(720, dtype=np.float32).reshape(8, 9, 10) % 7),
-            ("Reference_0", np.arange(720, dtype=np.float32).reshape(8, 9, 10) % 5),
-            ("Mask_0", np.ones((8, 9, 10), np.uint8)),
-            ("Unread_0", np.zeros((8, 9, 10), np.uint8)),
+            ("Volume_0", np.arange(count, dtype=np.float32).reshape(shape) % 7),
+            ("Reference_0", np.arange(count, dtype=np.float32).reshape(shape) % 5),
+            ("Mask_0", np.ones(shape, np.uint8)),
+            ("Unread_0", np.zeros(shape, np.uint8)),
         ]:
             sitk.WriteImage(sitk.GetImageFromArray(array), str(tmp_path / "Dataset" / case / f"{name}.mha"))
     config = tmp_path / "Evaluation.yml"
@@ -44,7 +52,7 @@ def _evaluation(tmp_path: Path, metrics: str, groups: str = "", validation: str 
         f"        Reference;Mask:\n          criterions_loader:\n{metrics}"
         "  Dataset:\n    groups_src:\n"
         "      Volume_0:\n        groups_dest:\n          Output:\n            transforms:\n"
-        "              Statistics: {}\n              TensorCast: {dtype: float32}\n"
+        f"{chain}"
         "      Reference_0:\n        groups_dest:\n          Reference:\n            transforms: None\n"
         "      Mask_0:\n        groups_dest:\n          Mask:\n            transforms: None\n"
         f"{groups}"
@@ -100,9 +108,308 @@ def test_an_evaluation_compiles_its_groups_criteria_and_maps_under_konfais_keys(
     jsonschema.validate(program, program_schema())
 
 
+def test_a_class_of_the_app_s_is_probed_on_what_its_chain_hands_it_of_the_case(tmp_path: Path, monkeypatch) -> None:
+    # A OneHot hands the class two channels, of a case of two axes: it is probed on them, not on one channel of three.
+    from konfai.portable_evaluation import compile_evaluation
+
+    (tmp_path / "PairOfPlanes.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Background(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tuple(tensor.shape[:1]) != (2,) or tensor.dim() != 3:\n"
+        "            raise ValueError(f'two channels of a plane, not {list(tensor.shape)}')\n"
+        "        return tensor[:1]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    chain = "              OneHot: {num_classes: 2}\n              PairOfPlanes:Background: {}\n"
+    config = _evaluation(tmp_path, "            Dice: {labels: [1]}\n", shape=(9, 10), chain=chain)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_evaluation(
+        config, tmp_path / "Evaluations", tmp_path / "program" / "evaluation.json", extension=extension
+    )
+    assert [step["op"] for step in program["groups"][0]["steps"]] == ["one_hot", "extension"]
+
+
+@pytest.mark.parametrize("per_channel", [False, True])
+def test_a_class_of_the_app_s_past_a_nested_model_is_probed_on_what_the_model_hands_on(
+    tmp_path: Path, monkeypatch, per_channel: bool
+) -> None:
+    # The nested app's head gives three channels, its own chain an argmax of them: one channel, or one for each of the
+    # two the group holds when it runs on each.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "AfterNested.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Labels(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, channels: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.channels = channels\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != self.channels:\n"
+        "            raise ValueError(f'{self.channels} channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = {"model": "Seg.onnx", "output": {"channels": 3}, "postprocessing": [{"op": "argmax"}]}
+    inference = {"repo_id": "a", "model_name": "b", "per_channel": per_channel}
+    chain = {"KonfAIInference": inference, "AfterNested:Labels": {"channels": 2 if per_channel else 1}}
+    steps = _group_steps(
+        "Seg", chain, tmp_path, {}, lambda group, _params, _out: {"id": group, "manifest": manifest}, True, (2, 3, 1)
+    )
+    assert steps[-1]["op"] == "extension"
+
+
+@pytest.mark.parametrize(
+    ("before", "handed"),
+    [
+        ({"TensorCast": {"dtype": "int16"}}, "int16"),
+        ({"KonfAIInference": {"repo_id": "a", "model_name": "b"}}, "int64"),
+    ],
+    ids=["past-a-cast", "past-a-nested-model's-argmax"],
+)
+def test_a_class_of_the_app_s_in_an_evaluation_chain_is_probed_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch, before: dict, handed: str
+) -> None:
+    # Past a cast to int16, or a nested app whose chain ends on an argmax, konfai hands the class integer labels of
+    # that dtype, which the class takes alone.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "EvaluatedLabels.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, dtype: str = 'int64') -> None:\n"
+        "        super().__init__()\n"
+        "        self.dtype = dtype\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if str(tensor.dtype) != f'torch.{self.dtype}':\n"
+        "            raise TypeError(f'{self.dtype}, not {tensor.dtype}')\n"
+        "        return tensor & 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = {"model": "Seg.onnx", "output": {"channels": 3}, "postprocessing": [{"op": "argmax"}]}
+    steps = _group_steps(
+        "Seg",
+        {**before, "EvaluatedLabels:Odd": {"dtype": handed}},
+        tmp_path,
+        {},
+        lambda group, _params, _out: {"id": group, "manifest": manifest},
+        True,
+        (1, 2, 1),
+    )
+    assert steps[-1]["op"] == "extension"
+
+
+def test_a_class_of_the_app_s_run_again_to_count_its_channels_is_run_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Probing the last class runs the ones before it again: the bitwise one past an Argmax takes int64 labels there too.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "EvaluatedBits.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Whole(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    chain = {"Argmax": {}, "EvaluatedBits:Odd": {}, "EvaluatedBits:Whole": {}}
+    steps = _group_steps("Seg", chain, tmp_path, {}, None, True, (2, 2, 1))
+    assert [step["op"] for step in steps] == ["argmax", "extension", "extension"]
+
+
+@pytest.mark.parametrize(
+    ("fold", "before", "members", "channels"),
+    [
+        ("StandardDeviation", {}, 3, 2),
+        ("Variance", {}, 1, 6),
+        ("SegmentationDisagreement", {}, 3, 1),
+        ("Variance", {"OneHot": {"num_classes": 3}}, None, 1),
+        ("StandardDeviation, Variance", {}, 3, 1),
+    ],
+    ids=[
+        "three-members-of-two",
+        "one-member-of-six",
+        "a-disagreement",
+        "one-member-a-channel-of-a-one-hot",
+        "a-spread-of-a-spread",
+    ],
+)
+def test_a_class_of_the_app_s_past_a_fold_of_the_members_is_probed_on_what_the_fold_leaves(
+    tmp_path: Path, monkeypatch, fold: str, before: dict, members: int | None, channels: int
+) -> None:
+    # A stack of members cast to int16: a spread leaves one member's, a disagreement one channel, each in float32.
+    # Where no header counts them, each channel the fold is handed is a member, as past a fold of them.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "AfterMembers.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Count(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, channels: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.channels = channels\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != self.channels or tensor.dtype != torch.float32:\n"
+        "            raise ValueError(f'{self.channels} float channels, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    folds = {name: {} for name in fold.split(", ")}
+    chain = {**before, "TensorCast": {"dtype": "int16"}, **folds, "AfterMembers:Count": {"channels": channels}}
+    stored = 1 if members is None else 2 * members if members > 1 else 6
+    steps = _group_steps("Spread", chain, tmp_path, {}, None, True, (stored, 3, members))
+    assert steps[-1]["op"] == "extension"
+
+
+@pytest.mark.parametrize(("members", "count"), [(2, 2), (None, None)])
+def test_the_first_case_s_stacked_members_are_read_off_its_header(
+    tmp_path: Path, image_attributes, members, count
+) -> None:
+    # As konfai counts them: the header's count, else none, one member a channel of what the fold is handed.
+    from types import SimpleNamespace
+
+    import numpy as np
+    from konfai.portable_evaluation import _first_case
+    from konfai.utils.dataset import Dataset
+
+    attribute = image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    if members is not None:
+        attribute["konfai_members"] = members
+    dataset = Dataset(tmp_path / "Stacks", "mha")
+    dataset.write("Stack", "P0", np.zeros((4, 3, 5, 6), np.float32), attribute)
+    assert _first_case(SimpleNamespace(case_names=["P0"], datasets={"stacks": dataset}), "Stack") == (4, 3, count)
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {"output": {"channels": 3}, "blended": {"channels": 2, "dtype": "uint8", "params": {}}},
+        {
+            "output": {"channels": 1},
+            "postprocessing": [
+                {"op": "cast", "dtype": "uint8"},
+                {"op": "extension", "class": "NestedChain:Repeat", "params": {}, "whole": True},
+            ],
+        },
+    ],
+    ids=["what-its-fold-leaves", "past-its-own-chain"],
+)
+def test_a_class_of_the_app_s_past_a_nested_model_is_probed_in_the_dtype_the_model_hands_on(
+    tmp_path: Path, monkeypatch, manifest: dict
+) -> None:
+    # The nested app's Fold leaves two uint8 channels; or its own chain casts its one to uint8, which a class of its
+    # own repeats into two, as it does integers only: two uint8 channels either way.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "NestedChain.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Repeat(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor if tensor.is_floating_point() else tensor[:1].repeat(2, 1, 1, 1)\n\n"
+        "class Bytes(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if str(tensor.dtype) != 'torch.uint8' or tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two uint8 channels, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    nested = {"model": "Seg.onnx", **manifest}
+    steps = _group_steps(
+        "Seg",
+        {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "NestedChain:Bytes": {}},
+        tmp_path,
+        {},
+        lambda group, _params, _out: {"id": group, "manifest": nested},
+        True,
+        (1, 3, 1),
+    )
+    assert steps[-1]["op"] == "extension"
+
+
+@pytest.mark.parametrize("handed", [None, "int16"])
+def test_a_class_of_the_app_s_past_a_nested_model_undoing_its_cast_is_probed_in_what_the_run_stores(
+    tmp_path: Path, monkeypatch, handed: str | None
+) -> None:
+    # The nested chain casts what it is handed to uint8 and undoes it: what it hands on is what it was handed, the
+    # stored dtype, which only the run knows, or the int16 the chain before it casts to. A class taking floats is
+    # probed in float32 past the first, and refused past the second.
+    from konfai.portable_evaluation import _group_steps
+
+    (tmp_path / "UndoneNested.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if not tensor.is_floating_point():\n"
+        "            raise ValueError(f'floats, not {tensor.dtype}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    nested = {
+        "model": "Seg.onnx",
+        "output": {"channels": 1},
+        "preprocessing": [{"op": "cast", "dtype": "uint8", "id": "Cast"}],
+        "postprocessing": [{"op": "cast", "dtype": "uint8"}, {"op": "inverse", "of": "Cast"}],
+    }
+    chain = {"KonfAIInference": {"repo_id": "a", "model_name": "b"}, "UndoneNested:Floats": {}}
+    if handed:
+        chain = {"TensorCast": {"dtype": handed}, **chain}
+    build = lambda group, _params, _out: {"id": group, "manifest": nested}  # noqa: E731
+    if handed:
+        with pytest.raises((ConfigError, EvaluatorError), match="takes no volume"):
+            _group_steps("Seg", chain, tmp_path, {}, build, True, (1, 3, None))
+    else:
+        assert _group_steps("Seg", chain, tmp_path, {}, build, True, (1, 3, None))[-1]["op"] == "extension"
+
+
 def test_a_criterion_with_no_portable_form_is_refused_by_name(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="Criterion 'MSE' has no portable form"):
         _compile(tmp_path, "            MSE: {reduction: mean}\n")
+
+
+def test_a_criterion_of_the_apps_own_is_measured_by_its_extension(tmp_path: Path, monkeypatch) -> None:
+    # Named by classpath: with the app's extension the program names the criterion by it, with the keys konfai binds
+    # it with; without it, the criterion has no portable form.
+    import jsonschema
+    from konfai.portable_evaluation import compile_evaluation
+    from konfai.portable_schema import program_schema
+
+    (tmp_path / "OwnCriteria.py").write_text(
+        "import torch\n"
+        "from konfai.metric.measure import Criterion\n\n\n"
+        "class Bias(Criterion):\n"
+        "    def __init__(self, scale: float = 1.0) -> None:\n"
+        "        super().__init__()\n"
+        "        self.scale = scale\n\n"
+        "    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:\n"
+        "        return self.scale * (output - targets[0]).mean()\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _evaluation(tmp_path, "            OwnCriteria:Bias: {scale: 2.0}\n")
+    out = tmp_path / "program" / "evaluation.json"
+    with pytest.raises(EvaluatorError, match="Criterion 'Bias' has no portable form"):
+        compile_evaluation(config, tmp_path / "Evaluations", out)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_evaluation(config, tmp_path / "Evaluations", out, extension=extension)
+
+    assert program["extension"] == "own.wasm" and (out.parent / "own.wasm").is_file()
+    (criterion,) = program["metrics"][0]["criteria"]
+    assert (criterion["metric"], criterion["class"]) == ("extension", "OwnCriteria:Bias")
+    assert criterion["params"]["scale"] == 2.0
+    jsonschema.validate(program, program_schema())
 
 
 def test_an_evaluation_split_into_train_and_validation_is_refused(tmp_path: Path) -> None:

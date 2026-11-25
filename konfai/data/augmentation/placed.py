@@ -27,6 +27,7 @@ try:
 except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.data.augmentation.base import DataAugmentation, _hashed_normal_field, _require_simpleitk
+from konfai.data.sampling import _where
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
@@ -163,7 +164,7 @@ class CutOUT(PlacedDraw):
         for mask in masks[1:]:
             result = torch.logical_or(result, mask)
         # The bool mask broadcasts over the channels, never repeated C times and re-tested.
-        return torch.where(result.unsqueeze(0).to(tensor.device), tensor, self._fill(tensor))
+        return _where(result.unsqueeze(0).to(tensor.device), tensor, self._fill(tensor))
 
     def _fill(self, tensor: torch.Tensor) -> torch.Tensor:
         """The fill, in an integer group's own dtype when that dtype holds it exactly: a label map
@@ -175,7 +176,7 @@ class CutOUT(PlacedDraw):
             bounds = None
         if bounds is not None and value.is_integer() and bounds.min <= value <= bounds.max:
             return torch.tensor(int(value), dtype=tensor.dtype, device=tensor.device)
-        return torch.tensor(self.value).to(tensor.device)
+        return torch.tensor(value, device=tensor.device)
 
 
 class PlacedMask(DataAugmentation):
@@ -230,7 +231,7 @@ class PlacedMask(DataAugmentation):
             if tensor.dtype == torch.uint8
             else torch.tensor(self.value).to(tensor.device)
         )
-        return torch.where(
+        return _where(
             mask.to(tensor.device) != 0,
             torch.nn.functional.pad(tensor, tuple(padding), mode="constant", value=value.item())[tuple(slices)],
             value,

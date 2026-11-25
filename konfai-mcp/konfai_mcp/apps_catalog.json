@@ -3,6 +3,7 @@
     "VBoussot/ImpactSynth",
     "VBoussot/ImpactReg",
     "VBoussot/ImpactSeg",
+    "HCedric/IMPACTSeg",
     "VBoussot/MRSegmentator-KonfAI",
     "VBoussot/TotalSegmentator-KonfAI"
   ]

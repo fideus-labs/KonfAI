@@ -22,6 +22,7 @@ from konfai.data.patching.accumulate import SlabAligner as SlabAligner
 from konfai.data.patching.accumulate import SlabRegionStream as SlabRegionStream
 from konfai.data.patching.accumulate import StreamingAccumulator as StreamingAccumulator
 from konfai.data.patching.blend import Cosinus as Cosinus
+from konfai.data.patching.blend import Fold as Fold
 from konfai.data.patching.blend import Gaussian as Gaussian
 from konfai.data.patching.blend import GaussianFloat16 as GaussianFloat16
 from konfai.data.patching.blend import Mean as Mean
@@ -61,6 +62,7 @@ __all__ = [
     "Cosinus",
     "DatasetManager",
     "DatasetPatch",
+    "Fold",
     "Gaussian",
     "GaussianFloat16",
     "HeldMeter",

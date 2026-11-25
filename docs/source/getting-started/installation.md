@@ -32,7 +32,9 @@ python -m pip install ".[imaging]"
 KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
 drivers and CUDA version. If your PyTorch already matches your machine, there is
 nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
-first, then KonfAI. For containers, see [Docker](#docker) below.
+first, then KonfAI. The `export` extra, `all` which holds it, and `dev` need
+PyTorch 2.7 or later but not 2.9: install such a build for your machine first.
+For containers, see [Docker](#docker) below.
 
 ## Platforms
 
@@ -65,7 +67,7 @@ every extra but `monai`, `[dev]` adds the test, lint and docs tooling.
 | `monai` | `monai` | MONAI networks and losses named by classpath (`monai.networks.nets:UNet`) and MONAI Bundles, see {doc}`../usage/adopting-konfai` |
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
-| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` 0.6.1+, `onnx-ir` 0.1.15+, `torch>=2.7,!=2.9.*` | ONNX export, see {doc}`../usage/python-api` |
 | `check` | `jsonschema` | `konfai <WORKFLOW> --check`, see {doc}`../reference/cli` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
 | `all` | everything above but `monai`, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |

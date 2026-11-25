@@ -22,6 +22,7 @@ what has no portable form must be refused at compile time and never approximated
 
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable
 from importlib import import_module
@@ -286,8 +287,8 @@ def test_a_write_naming_no_dataset_is_refused() -> None:
         ({"spacing": [1.5, 1.5, 1.5], "transforms": {"T": False}}, "transforms"),
         ({"spacing": [1.5, 1.5, 1.5], "align": "center"}, "center"),
         ({}, "neither"),
-        ({"spacing": [1.5, 1.5, 1.5], "shape": [64, 64, 64]}, "both"),
-        ({"spacing": [1.5, 1.5, 1.5], "interpolation": "bspline"}, "bspline"),
+        ({"spacing": [1.5, 1.5, 1.5], "shape": [64, 64, 64]}, "spacing and shape"),
+        ({"spacing": [1.5, 1.5, 1.5], "interpolation": "lanczos"}, "lanczos"),
     ],
 )
 def test_a_resample_the_runtime_cannot_place_is_refused(params: dict, expected: str) -> None:
@@ -468,6 +469,75 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
         {"op": "cast", "dtype": "int64", "in": ["t1"], "out": "t2"},
         {"op": "cast", "dtype": "float32", "in": ["t2"], "out": "output"},
     ]
+    # A grid rule's inverse places the grid by that rule, which the hoisted resample does not carry.
+    manifest["preprocessing"][0]["grid"] = "faces"
+    with pytest.raises(ConfigError, match="faces rule"):
+        assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+
+
+@pytest.mark.parametrize(
+    ("forward", "filled"),
+    [
+        ({"reference": {"entry": "c", "datasets": [{"root": "./References", "format": "mha", "group": "REF"}]}}, True),
+        ({"spacing": [1.5, 1.5], "field_group": "FIELD"}, True),
+        (
+            {
+                "spacing": [1.5, 1.5],
+                "transforms": {
+                    "groups": [{"group": "AFFINE", "invert": False}],
+                    "datasets": [{"root": "./Transforms", "format": "h5"}],
+                },
+            },
+            True,
+        ),
+        ({"spacing": [1.5, 1.5]}, False),
+        ({"shape": [6, 6]}, False),
+    ],
+    ids=[
+        "by-a-reference",
+        "by-a-map",
+        "by-stored-transforms",
+        "by-a-spacing-on-the-extent",
+        "by-a-shape-on-the-extent",
+    ],
+)
+def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict, filled: bool) -> None:
+    # konfai's inverse fills what it reads outside what it holds with the fill its stage states (its inverse_fill):
+    # the resample hoisted past the reduction carries it wherever the grid undone may not cover the input. A grid
+    # placed on the input's extent covers every voxel of it, and its op carries none (an origin alignment, which
+    # does not cover it, is test_a_hoisted_inverse_carries_the_fill_only_an_origin_alignment_reads).
+    manifest = {
+        "input": {"channels": 1},
+        "output": {"channels": 2},
+        "patch": {"size": [4, 4]},
+        "preprocessing": [{"op": "resample", "id": "r", "interpolation": "linear", **forward}],
+        "postprocessing": [{"op": "inverse", "of": "r", "interpolation": "linear", "fill": -1000.0}],
+    }
+    program = assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+    (resample,) = [step for step in program["steps"] if str(step.get("op", "")).startswith("resample_")]
+    assert resample.get("fill") == (-1000.0 if filled else None)
+
+
+def test_an_own_class_undone_past_the_reduction_is_replayed_with_every_inverse_there() -> None:
+    # The app's own class fitted the grid before the resample: its inverse, and the resample's, land where they read,
+    # which past the class is not the caller's grid, so both replay what the models' chain recorded.
+    fit = {"op": "extension", "id": "fit", "class": "app:FitBox", "params": {}, "whole": True}
+    manifest = {
+        "input": {"channels": 1},
+        "output": {"channels": 2},
+        "patch": {"size": [4, 4]},
+        "preprocessing": [fit, {"op": "resample", "spacing": [1.5, 1.5], "id": "r", "interpolation": "linear"}],
+        "postprocessing": [
+            {"op": "inverse", "of": "r", "interpolation": "linear"},
+            {"op": "inverse", "of": "fit"},
+            {"op": "argmax", "dim": 0},
+        ],
+    }
+    program = assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+    ops = [step for step in program["steps"] if "op" in step]
+    assert [step["op"] for step in ops] == ["mean", "inverse", "inverse", "argmax"]
+    assert {key: ops[1][key] for key in ("of", "interpolation")} == {"of": "r", "interpolation": "linear"}
+    assert ops[2]["of"] == "fit"
 
 
 def test_a_padding_the_runtime_cannot_fill_is_refused() -> None:
@@ -552,6 +622,34 @@ def test_a_tensor_cast_the_predictor_undoes_carries_its_id() -> None:
     # refused rather than hoisted as a cast the compiler would have to guess.
     with pytest.raises(ConfigError, match="the inverse of 'TensorCast'"):
         assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+
+
+def test_a_chain_of_threshold_labels_bspline_nearest_even_and_nonzero_compiles() -> None:
+    # The resample on a grid rule is undone by that rule at the spacing it asked for.
+    chain = {
+        "Resample": {"spacing": [1.5, 1.5, 3.0], "grid": "faces", "interpolation": "bspline"},
+        "Standardize": {"nonzero": True, "inverse": False},
+    }
+    outputs = {"final_transforms": {"ThresholdLabels": {"labels": [3, 7], "priority": [1, 0]}}}
+    config = _prediction(chain, outputs)
+    config["Predictor"]["Dataset"]["groups_src"]["g"]["groups_dest"]["g"]["transforms"]["Resample"][
+        "inverse_interpolation"
+    ] = "nearest_even"
+    manifest, _, _ = transform_manifest(config, "Predictor")
+    assert manifest["preprocessing"][1:] == [
+        {"op": "resample", "spacing": [1.5, 1.5, 3.0], "grid": "faces", "interpolation": "bspline", "id": "Resample"},
+        {"op": "standardize", "nonzero": True},
+    ]
+    assert manifest["postprocessing"] == [
+        {
+            "op": "inverse",
+            "of": "Resample",
+            "grid": "faces",
+            "spacing": [1.5, 1.5, 3.0],
+            "interpolation": "nearest_even",
+        },
+        {"op": "threshold_labels", "threshold": 0.5, "labels": [3, 7], "priority": [1, 0], "sigmoid": True},
+    ]
 
 
 def test_a_one_hot_the_predictor_undoes_is_refused_by_name() -> None:
@@ -683,14 +781,15 @@ def test_a_crop_finds_its_box_at_run_time_after_stages_that_move_nothing() -> No
     # reaches it, so after them the runtime crops the volume konfai finds the box in.
     chain = [
         {"Statistics": {}},
+        {"TensorCast": {"dtype": "float32"}},  # a value of the store is one of float32, and keeps its box
         {"Save": {"dataset": "./Work:nii.gz"}},
         {"Crop": {"inverse": True}},
         {"Clip": {"min_value": 0.0, "max_value": 400.0}},
         _WRITE,
     ]
     ops, _ = steps(chain, "CT")
-    assert [op["op"] for op in ops] == ["save", "crop", "clip"]
-    assert ops[1] == {"op": "crop"}
+    assert [op["op"] for op in ops] == ["cast", "save", "crop", "clip"]
+    assert ops[2] == {"op": "crop"}
 
 
 @pytest.mark.parametrize(
@@ -698,6 +797,8 @@ def test_a_crop_finds_its_box_at_run_time_after_stages_that_move_nothing() -> No
     [
         {"Clip": {"min_value": 0.0, "max_value": 400.0}},
         {"TensorCast": {"dtype": "int16"}},
+        {"TensorCast": {"dtype": "float32", "round": True}},  # 0.4 rounds to 0, out of a nonzero box
+        {"TensorCast": {"dtype": "float16"}},  # rounds to half, across a percentile the stored values are not
         {"Mask": {"path": "MASK"}},
         {"Flip": {"dims": "0"}},
         {"Resample": {"spacing": [1.5, 1.5, 1.5], "interpolation": "linear"}},
@@ -724,6 +825,14 @@ def test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_nam
     # konfai crops to the box of the group as stored, the runtime to the box of the volume in hand.
     with pytest.raises(ConfigError, match="'Crop' follows 'Resample'"):
         transform_manifest(_prediction({"Resample": {"spacing": [1, 1, 1]}, "Crop": {}}, {}), "Predictor")
+    # A crop to a shape finds no box: both engines keep the centre of the volume they are handed.
+    centred = {"Resample": {"spacing": [1, 1, 1]}, "Crop": {"shape": [4, 4, 4]}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction(centred, {}), "Predictor")
+    assert {"op": "crop", "shape": [4, 4, 4], "id": "Crop"} in manifest["preprocessing"]
+    # A handed crop measures its box on the volume in hand, as the runtime always does: the step is a plain crop.
+    handed = {"Resample": {"spacing": [1, 1, 1]}, "Crop": {"handed": True, "nonzero": True}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction(handed, {}), "Predictor")
+    assert {"op": "crop", "nonzero": True, "id": "Crop"} in manifest["preprocessing"]
 
 
 @pytest.mark.parametrize("sink", ["OutputLayerDataset", "Custom:ConfidenceSelect"])
@@ -915,6 +1024,31 @@ def test_every_konfai_stage_and_draw_is_carried_or_refused_by_name() -> None:
             compile_pipeline({stage: {}}, fold=False)
 
 
+def test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse() -> None:
+    # The inverse reads with the interpolation and the fill the stage states for it, not the forward's.
+    resample = {
+        "spacing": [1.0, 1.0, 1.0],
+        "grid": "faces",
+        "antialias": "gaussian",
+        "fill": "edge",
+        "interpolation": "linear",
+        "inverse_interpolation": "nearest",
+        "inverse_fill": 0.0,
+    }
+    manifest, _folds, _per_copy = transform_manifest(_prediction({"Resample": resample}, {}), "Predictor")
+    assert {
+        "op": "resample",
+        "spacing": [1.0, 1.0, 1.0],
+        "grid": "faces",
+        "antialias": "gaussian",
+        "fill": "edge",
+        "interpolation": "linear",
+        "id": "Resample",
+    } in manifest["preprocessing"]
+    inverse = {"op": "inverse", "of": "Resample", "grid": "faces", "spacing": [1.0, 1.0, 1.0]}
+    assert {**inverse, "interpolation": "nearest"} in manifest["postprocessing"]
+
+
 _AUG = "konfai.data.augmentation:"
 
 #: What a resolved config spells for the stages the compilers read through `_CHAIN_OPS`, a `Write`, a `Save`,
@@ -927,10 +1061,20 @@ _AUG = "konfai.data.augmentation:"
 CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
     "Argmax": {"dim": 1},
     "Softmax": {"dim": 1},
-    "Canonical": {"inverse": False},
-    "Crop": {"inverse": False},
+    "Canonical": {"inverse": False, "resample": False},
+    "Crop": {
+        "inverse": False,
+        "source": "OTHER",
+        "labels": [1],
+        "margin_mm": 5.0,
+        "fill": 0.0,
+        "empty": "fill",
+        "nonzero": True,
+        "shape": [4, 4, 4],
+        "handed": test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_name,
+    },
     "Clip": {"min_value": 3.0, "max_value": "max", "mask": "MASK"},
-    "TensorCast": {"dtype": "int16", "inverse": False},
+    "TensorCast": {"dtype": "int16", "inverse": False, "round": True},
     "Resample": {
         "spacing": [3.0, 3.0, 3.0],
         "shape": [4, 4, 4],
@@ -943,20 +1087,26 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
         "inverse": False,
         "field": "F",
         "field_group": "G",
+        "grid": "zoom",
+        "antialias": "gaussian",
+        "inverse_interpolation": test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse,
+        "inverse_fill": test_a_resample_on_a_grid_rule_compiles_its_antialias_and_inverse,
     },
     "Padding": {"padding": [2, 2, 2, 2, 2, 2], "mode": "constant:3", "inverse": False},
     "Dilate": {"dilate": 3},
     "Flip": {"dims": "0", "inverse": False},
     "Permute": {"dims": "2|0|1", "inverse": False},
-    "Standardize": {"mean": 3.0, "std": 2.0, "mask": "MASK", "inverse": False},
+    "Standardize": {"mean": 3.0, "std": 2.0, "mask": "MASK", "inverse": False, "nonzero": True},
     "Normalize": {"min_value": 0.0, "max_value": 2.0, "inverse": False},
     "UnNormalize": {"min_value": 0.0, "max_value": 2.0},
     "SelectLabel": {"labels": ["(1,2)"]},
     "FlatLabel": {"labels": [1]},
+    "ThresholdLabels": {"labels": [4, 5], "threshold": 0.3, "priority": [1, 0], "sigmoid": False},
     "OneHot": {"num_classes": 3, "inverse": False},
     "Gradient": {"per_dim": True},
     "HistogramMatching": {"reference_group": "S"},
     "Percentage": {"baseline": 2.0},
+    "KeepLargestComponent": {"mask": 1, "per_label": True, "connectivity": 26},
     "Mask": {"path": "OTHER", "value_outside": 5.0},
     "Write": {"dataset": "./Other:mha", "group": "G2"},
     "Save": {"dataset": "./Other:mha", "group": "G2"},
@@ -969,19 +1119,10 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
 #: A value the compilers refuse, naming the parameter: konfai reads it and the portable runtime has no form for it.
 REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
     "Clip": {"save_clip_min": True, "save_clip_max": True},
-    "Standardize": {"lazy": True, "nonzero": True},
-    "Canonical": {"resample": False, "orientation": "LPS"},
-    "Crop": {
-        "source": "OTHER",
-        "labels": [1],
-        "margin_mm": 5.0,
-        "fill": 0.0,
-        "empty": "keep",
-        "nonzero": True,
-        "handed": True,
-    },
+    "Standardize": {"lazy": True},
+    "Canonical": {"orientation": "LPS"},
     "Normalize": {"lazy": True, "channels": [0]},
-    "Resample": {"transforms": "T", "grid": "faces", "antialias": "gaussian", "inverse_interpolation": "linear"},
+    "Resample": {"transforms": "T"},
     "Write": {"scale_factors": [2]},
     "Save": {"scale_factors": [2]},
     _AUG + "Brightness": {"groups": ["CT"]},
@@ -989,6 +1130,7 @@ REFUSED_PARAMETERS: dict[str, dict[str, object]] = {
 
 #: A value that leaves the compiled step as it is, and why konfai's own values do not depend on it here.
 IGNORED_PARAMETERS: dict[str, dict[str, tuple[object, str]]] = {
+    "KeepLargestComponent": {"rows": (8, "it sizes the slabs the components are found by, not which are kept.")},
     "Canonical": {
         "fill": (
             -1024.0,
@@ -1027,6 +1169,7 @@ _BASELINE: dict[str, dict[str, object]] = {
     "Padding": {"padding": [1, 1, 1, 1, 1, 1]},
     "UnNormalize": {"min_value": -1.0, "max_value": 1.0},
     "OneHot": {"num_classes": 2},
+    "ThresholdLabels": {"labels": [1, 2]},
     "HistogramMatching": {"reference_group": "R"},
     "Percentage": {"baseline": 1.0},
     "Mask": {"path": "MASK"},
@@ -1139,6 +1282,426 @@ def test_a_model_reading_two_groups_names_the_second_and_the_chain_that_prepares
     assert program["steps"][0]["in"] == ["input", "MASK"]
 
 
+def test_an_extension_carried_is_a_file_named_apart_from_what_the_program_names(tmp_path: Path) -> None:
+    # A program names its extension beside it: a file that is there (refused before the compile writes anything),
+    # never one of the files it names otherwise (an exported graph copied over), nor the program itself. One already
+    # beside it is reused under its own name; a string of the program that names no file is none of them.
+    from konfai.portable import carry_extension, compile_destinations
+
+    out = tmp_path / "out" / "prediction.json"
+    out.parent.mkdir()
+    (out.parent / "model.onnx").write_bytes(b"graph")
+    program = {"models": {"model": "model.onnx"}}
+    with pytest.raises(ConfigError, match=r"missing\.wasm' is no file"):
+        compile_destinations(out, out.parent / "missing.wasm")
+    for name in ("model.onnx", "prediction.json"):
+        (tmp_path / name).write_bytes(b"\0asm")
+        with pytest.raises(ConfigError, match=re.escape(name)):
+            carry_extension(tmp_path / name, dict(program), out)
+    assert (out.parent / "model.onnx").read_bytes() == b"graph"
+    beside = out.parent / "own.wasm"
+    beside.write_bytes(b"\0asm")
+    named = dict(program)
+    carry_extension(beside, named, out)
+    assert named["extension"] == "own.wasm"
+    # A class's own parameters name no graph of the program's, a map of models among them.
+    (tmp_path / "variant.wasm").write_bytes(b"\0asm")
+    stepped = {**program, "outputs": [{"steps": [{"op": "extension", "params": {"models": {"v": "variant.wasm"}}}]}]}
+    carry_extension(tmp_path / "variant.wasm", stepped, out)
+    assert stepped["extension"] == "variant.wasm"
+    # A name the program holds as no file (a label's, a group's) is no collision; a graph's spelled in other cases is.
+    for name in ("roi.wasm", "labels.onnx"):
+        (tmp_path / name).write_bytes(b"\0asm")
+        named = {
+            **program,
+            "outputs": [{"labels": {"1": "roi.wasm"}, "steps": [{"op": "mask", "group": "labels.onnx"}]}],
+        }
+        carry_extension(tmp_path / name, named, out)
+        assert named["extension"] == name and (out.parent / name).read_bytes() == b"\0asm"
+    (tmp_path / "MODEL.ONNX").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"MODEL\.ONNX"):
+        carry_extension(tmp_path / "MODEL.ONNX", dict(program), out)
+    (tmp_path / "fold_0.onnx").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"fold_0\.onnx"):
+        carry_extension(tmp_path / "fold_0.onnx", {"models": {"fold_0": "fold_0.onnx"}}, out)
+    # A link left where it would land is not written through.
+    (out.parent / "engine.wasm").symlink_to(out.parent / "model.onnx")
+    (tmp_path / "engine.wasm").write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match="link"):
+        carry_extension(tmp_path / "engine.wasm", dict(program), out)
+    assert (out.parent / "model.onnx").read_bytes() == b"graph"
+
+
+@pytest.mark.parametrize(
+    "site", ["the extension", "a graph", "a transform program", "an evaluation program", "a prediction program"]
+)
+def test_every_file_a_compile_writes_lands_on_nothing_but_a_file_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    # A directory where the compile writes is refused by name, as any destination it would write into or through
+    # (konfai.utils.utils.owned_destination).
+    from konfai.portable import carry_extension, compile_transform
+
+    out = tmp_path / "out"
+    out.mkdir()
+    if site == "the extension":
+        (out / "engine.wasm").mkdir()
+        (tmp_path / "engine.wasm").write_bytes(b"\0asm")
+        write, name = lambda: carry_extension(tmp_path / "engine.wasm", {}, out / "prediction.json"), "engine.wasm"
+    elif site == "a graph":
+        pytest.importorskip("onnxscript")
+        from konfai.export import export_folds
+
+        (out / "fold.onnx").mkdir()
+        write, name = lambda: export_folds([lambda tensor: tensor * 2], out / "fold.onnx", 1, 2, "float32"), "fold.onnx"
+    elif site == "a transform program":
+        config = _reducing_config(tmp_path, "Clip: {min_value: 0.0, max_value: 1.0}\n")
+        (out / "transform.json").mkdir()
+        write, name = (
+            lambda: compile_transform(config, tmp_path / "Transforms", out / "transform.json"),
+            "transform.json",
+        )
+    elif site == "a prediction program":
+        pytest.importorskip("onnxscript")
+        import torch
+        from konfai.portable import compile_prediction
+
+        config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+        from TinySeg import TinySegNet
+
+        torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+        (out / "prediction.json").mkdir()
+        write, name = (
+            lambda: compile_prediction(
+                config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", out / "prediction.json"
+            ),
+            "prediction.json",
+        )
+    else:
+        from konfai.portable_evaluation import compile_evaluation
+        from test_portable_evaluation import _evaluation
+
+        config = _evaluation(tmp_path, "            Dice: {labels: [1]}\n")
+        (out / "evaluation.json").mkdir()
+        write, name = (
+            lambda: compile_evaluation(config, tmp_path / "Evaluations", out / "evaluation.json"),
+            "evaluation.json",
+        )
+    with pytest.raises(ConfigError, match=rf"{re.escape(name)}' is a directory"):
+        write()
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "a link at the program",
+        "a link at the manifest",
+        "a missing extension",
+        "a link where the extension lands",
+        "a link at a statistic's finish graph",
+        "a program named as a graph",
+        "an extension named as a graph",
+        "a link at the second model's graph",
+    ],
+)
+def test_a_compile_refuses_its_destinations_before_it_writes_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+) -> None:
+    # The program, the extension it carries, the manifest an export writes beside the graph and a statistic's second
+    # graph: each is refused before a graph is written over the one a previous compile left.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.export import export_case_statistic, export_to_onnx
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "model.onnx").write_bytes(b"the previous graph")
+    (tmp_path / "elsewhere.json").write_text("not the program's")
+    extension = None
+    if planted == "a link at the program":
+        (out / "prediction.json").symlink_to(tmp_path / "elsewhere.json")
+    elif planted in ("a link at the manifest", "a link at a statistic's finish graph"):
+        (out / ("manifest.json" if planted == "a link at the manifest" else "finish.onnx")).symlink_to(
+            tmp_path / "elsewhere.json"
+        )
+    elif planted == "a link where the extension lands":
+        extension = tmp_path / "engine.wasm"
+        extension.write_bytes(b"\0asm")
+        (out / "engine.wasm").symlink_to(tmp_path / "elsewhere.json")
+    elif planted == "an extension named as a graph":  # from another folder, which the graph's would be copied over
+        extension = tmp_path / "model.onnx"
+        extension.write_bytes(b"\0asm")
+    elif planted == "a program named as a graph":
+        pass  # no extension: the program alone
+    elif planted == "a link at the second model's graph":
+        (out / "model_0.onnx").write_bytes(b"the previous graph")
+        (out / "model_1.onnx").symlink_to(tmp_path / "elsewhere.json")
+    else:
+        extension = tmp_path / "missing.wasm"
+
+    class Mean:  # a CaseStatistic's two halves: a block's sum and count, then their quotient
+        halo = 0
+
+        def partial(self, block):
+            return torch.stack([block.sum(), torch.ones_like(block).sum()])
+
+        def finish(self, total):
+            return total[0] / total[1]
+
+    program = out / ("model.onnx" if planted == "a program named as a graph" else "prediction.json")
+    with pytest.raises(ConfigError, match=r"is a link|is no file|named as a graph"):
+        if planted == "a link at the manifest":
+            export_to_onnx(TinySegNet(), out, torch.randn(1, 1, 16, 16))
+        elif planted == "a link at a statistic's finish graph":
+            export_case_statistic(Mean(), out / "model.onnx", out / "finish.onnx", rank=3)
+        else:
+            folds = [tmp_path / "fold_0.pt"] * (2 if planted == "a link at the second model's graph" else 1)
+            compile_prediction(config, folds, tmp_path / "Predictions", program, extension=extension)
+    assert (out / "model.onnx").read_bytes() == b"the previous graph"
+    if planted == "a link at the second model's graph":
+        assert (out / "model_0.onnx").read_bytes() == b"the previous graph"
+    assert (tmp_path / "elsewhere.json").read_text() == "not the program's"
+
+
+def test_a_class_of_the_app_s_run_again_takes_a_dtype_it_takes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stored dtype only the run knows, a class taking int16 alone is run again, to count its channels, in a
+    # dtype it takes.
+    (tmp_path / "StoredInt.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Pairs(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int16:\n"
+        "            raise TypeError(f'int16, not {tensor.dtype}')\n"
+        "        return tensor.repeat(2, *[1] * (tensor.dim() - 1))\n\n"
+        "class Two(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n\n"
+        "class First(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[:1]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest, _folds, _per_copy = transform_manifest(
+        _two_groups({"StoredInt:Pairs": {}, "StoredInt:Two": {}, "StoredInt:First": {}}), "Predictor", extension=True
+    )
+    assert [step["class"] for step in manifest["reads"][0]["preprocessing"]] == [
+        "StoredInt:Pairs",
+        "StoredInt:Two",
+        "StoredInt:First",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("trim", "copies", "refused"),
+    [(1, 1, "off the grid"), (0, 1, None), (0, 2, "hands the model 2 channels of the 1")],
+    ids=["trims", "keeps-the-grid", "keeps-the-grid-in-two-channels"],
+)
+def test_a_class_of_the_app_s_moving_a_second_input_off_the_grid_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trim: int, copies: int, refused: str | None
+) -> None:
+    # konfai patches every group of a case on the first one's grid: a whole-volume class of the app's own that trims
+    # the second is refused as konfai's own regridding stages are, one that keeps the grid compiles, and one that hands
+    # on other channels than the group holds is refused, the model's graph taking the group as it holds them.
+    (tmp_path / "SecondGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Trim(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __init__(self, by: int = 1, copies: int = 1) -> None:\n"
+        "        super().__init__()\n"
+        "        self.by, self.copies = by, copies\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return [extent - 2 * self.by for extent in shape]\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        kept = tensor[(slice(None), *[slice(self.by, extent - self.by) for extent in tensor.shape[1:]])]\n"
+        "        return kept.repeat(self.copies, *[1] * (kept.dim() - 1))\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _two_groups({"SecondGrid:Trim": {"by": trim, "copies": copies}})
+    if refused:
+        with pytest.raises(ConfigError, match=refused):
+            transform_manifest(config, "Predictor", extension=True)
+    else:
+        assert transform_manifest(config, "Predictor", extension=True)[0]["reads"][0]["preprocessing"][0]["op"] == (
+            "extension"
+        )
+
+
+def test_a_class_of_the_app_s_is_probed_on_each_grid_as_a_case_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class remembering a case's first spacing (konfai's case_facts) brings any grid to a unit spacing: the placed
+    # grid is probed as another case, whose facts are its own, and the move is seen.
+    (tmp_path / "CaseGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Unit(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        self.datasets[0].case_facts.setdefault(name, cache_attribute.get_np_array('Spacing'))\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        spacing = cache_attribute.get_np_array('Spacing') / self.datasets[0].case_facts[name]\n"
+        "        cache_attribute['Spacing'] = spacing\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"CaseGrid:Unit": {}}), "Predictor", extension=True)
+
+
+def test_a_class_of_the_app_s_reads_the_header_of_the_grid_it_is_probed_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class copying its group's stored spacing keeps the grid: the placed grid's header is the placed one.
+    (tmp_path / "HeaderGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Header(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        self.group = group_src\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        cache_attribute['Spacing'] = self.datasets[0].get_infos(self.group, name)[1].get_np_array('Spacing')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = transform_manifest(_two_groups({"HeaderGrid:Header": {}}), "Predictor", extension=True)[0]
+    assert manifest["reads"][0]["preprocessing"][0]["op"] == "extension"
+
+
+def test_a_class_of_the_app_s_is_probed_in_each_stored_dtype_it_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Where only the run knows the stored dtype, a class keeping the grid of an integer volume and trimming a float one
+    # is refused: each stored dtype it takes is a case it may be handed.
+    (tmp_path / "DtypeGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Trim(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[:, 1:] if tensor.is_floating_point() else tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="for the stored dtypes it takes"):
+        transform_manifest(_two_groups({"DtypeGrid:Trim": {}}), "Predictor", extension=True)
+
+
+def test_a_class_of_the_app_s_taking_blocks_of_voxels_is_probed_on_a_volume_it_takes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class folding blocks of 2 x 2 x 2 voxels takes even extents alone: the probe's are, and other along each axis.
+    (tmp_path / "Blocks.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Even(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if any(extent % 2 for extent in tensor.shape[1:]):\n"
+        "            raise ValueError(f'even extents, not {list(tensor.shape[1:])}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    manifest = transform_manifest(_two_groups({"Blocks:Even": {}}), "Predictor", extension=True)[0]
+    assert manifest["reads"][0]["preprocessing"][0]["op"] == "extension"
+
+
+def test_a_class_of_the_app_s_is_probed_for_its_dtype_on_each_as_a_case_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class keeping a case's first dtype returns the dtype each case holds: probed for it in each stored dtype on a
+    # fresh instance, it states no dtype of its own.
+    (tmp_path / "FirstDtype.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class First(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.to(self.datasets[0].case_facts.setdefault(name, tensor.dtype))\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    step = transform_manifest(_two_groups({"FirstDtype:First": {}}), "Predictor", extension=True)[0]["reads"][0][
+        "preprocessing"
+    ][0]
+    assert step["op"] == "extension" and "dtype" not in step
+
+
+def test_a_class_of_the_app_s_swapping_a_second_input_s_axes_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A swap of two axes keeps a cube's extents: the class is probed on extents that differ along each axis.
+    (tmp_path / "SwappedGrid.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Swap(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return [shape[1], shape[0], *shape[2:]]\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.transpose(1, 2)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"SwappedGrid:Swap": {}}), "Predictor", extension=True)
+
+
+def test_a_class_of_the_app_s_shifting_a_second_input_by_its_spacing_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A shift by the spacing less one voxel's millimetre is none on a grid of unit spacing: the class is probed on
+    # another grid too.
+    (tmp_path / "ShiftedGrid.py").write_text(
+        "import numpy as np\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Shift(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        spacing = cache_attribute.get_np_array('Spacing')\n"
+        "        cache_attribute['Origin'] = cache_attribute.get_np_array('Origin') + spacing - 1\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"ShiftedGrid:Shift": {}}), "Predictor", extension=True)
+
+
+def test_a_class_of_the_app_s_straightening_a_second_input_s_grid_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class that sets the direction to the identity keeps an identity grid: it is probed on an oblique one too.
+    (tmp_path / "StraightGrid.py").write_text(
+        "import numpy as np\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Straight(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        cache_attribute['Direction'] = np.eye(len(shape)).flatten()\n"
+        "        return shape\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ConfigError, match="off the grid"):
+        transform_manifest(_two_groups({"StraightGrid:Straight": {}}), "Predictor", extension=True)
+
+
+def test_a_group_a_second_input_s_chain_reads_beside_the_case_is_read_too() -> None:
+    # The runtime reads the entries a program names: a masked bound of the second group's chain reads its mask, which
+    # konfai hands the stage as stored, as the first group's chain's own.
+    second = {"Clip": {"min_value": "min", "max_value": "max", "mask": "BODY"}}
+    manifest, _folds, _per_copy = transform_manifest(_two_groups(second), "Predictor")
+    assert manifest["reads"][0]["preprocessing"][0]["mask_group"] == "BODY"
+    assert manifest["reads"][1:] == [{"group": "BODY", "channels": 1, "preprocessing": []}]
+
+
 def test_a_test_time_copy_is_drawn_on_every_group_the_model_reads() -> None:
     # konfai shares one draw across the groups of a case, so a copy flips them all; only the first is
     # undone, since the output chain undoes that group's chain alone.
@@ -1229,7 +1792,6 @@ _STACK = {"InferenceStack": {"mode": "mean"}}
     [
         # A mask nothing applies: the program would write the unmasked prediction.
         ({}, {"before_reduction_transforms": _MASK}, "Mask"),
-        ({}, {"final_transforms": _MASK}, "Mask"),
         # A list-spelled chain binds a repeated stage under an occurrence key.
         ({"Mask#2": _MASK["Mask"]}, {}, "Mask#2"),
         # konfai folds the copies at a stack that opens the after-reduction chain, and nowhere else.
@@ -1389,6 +1951,17 @@ def test_the_dtype_integer_copies_fold_into_is_cast_where_they_fold(
         *cast,
         {"op": "inverse", "of": "Resample", "interpolation": "linear"},
     ]
+
+
+@pytest.mark.parametrize("members", ["float16", "bfloat16", "float64"])
+def test_a_mean_stack_of_float_members_is_averaged_in_float32_as_konfai_s(members: str) -> None:
+    # konfai's stack averages its members in float32 and rounds the mean back to theirs: each copy is widened before
+    # the copies fold, and their mean cast back past it.
+    before = {"before_reduction_transforms": {"TensorCast": {"dtype": members}}}
+    config = _prediction({}, {**before, "after_reduction_transforms": _STACK, "reduction": "Concat"}, "Concat", 1)
+    manifest, _, per_copy = transform_manifest(config, "Predictor")
+    post = manifest["postprocessing"]
+    assert post[per_copy - 1 : per_copy + 1] == [{"op": "cast", "dtype": "float32"}, {"op": "cast", "dtype": members}]
 
 
 @pytest.mark.parametrize(
@@ -1581,6 +2154,71 @@ def _tiny_prediction(
     return config
 
 
+def test_a_class_of_the_app_s_before_a_folded_graph_is_run_again_in_the_dtype_it_is_handed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The graph a pointwise class folds into is exported on the channels the steps before it leave: a whole class
+    # taking the argmax's int64 labels is run again in them to count its own.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "FoldedAfter.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Double(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n"
+    )
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["final_transforms"] = {
+        "Argmax": {"dim": 0},
+        "FoldedAfter:Odd": {},
+        "FoldedAfter:Double": {},
+    }
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+    (model,) = program["outputs"][0]["program"]["steps"]
+    assert [step["op"] for step in model["manifest"]["postprocessing"]][-3:] == ["argmax", "extension", "onnx"]
+
+
+def test_an_extension_beside_the_program_named_as_a_graph_is_refused_before_a_graph_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The export would write its model.onnx over the extension: refused first, the extension as it was.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    out = tmp_path / "out" / "prediction.json"
+    out.parent.mkdir()
+    extension = out.parent / "model.onnx"
+    extension.write_bytes(b"\0asm")
+    with pytest.raises(ConfigError, match=r"model\.onnx"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+    assert extension.read_bytes() == b"\0asm" and not out.exists()
+
+
 def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1616,6 +2254,723 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
     assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == ["end"] * 2
     assert [step["manifest"]["patch"]["stride"] for step in steps[:2]] == [[16, 16]] * 2
+
+
+def test_an_apps_own_fold_compiles_to_the_patch_combine_of_its_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The app's Fold is named by classpath: the program names the extension's patch combine by it, what it enters a
+    # patch as is part of the model's graph, and the manifest states what it leaves.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    onnxruntime = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "Fusion.py").write_text(
+        "import torch\n"
+        "from konfai.data.patching import Fold\n\n\n"
+        "class Surest(Fold):\n"
+        "    def enter(self, patch):\n"
+        "        score, label = patch.max(0, keepdim=True)\n"
+        "        return torch.cat((label.to(torch.uint8), (score * 255).round().to(torch.uint8)))\n\n"
+        "    def fold(self, held, patch):\n"
+        "        return torch.where(patch[1:] >= held[1:], patch, held)\n\n"
+        "    def leave(self, held):\n"
+        "        return held[:1]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    output = resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]
+    output |= {"patch_combine": "Fusion:Surest", "final_transforms": "None"}
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    out = tmp_path / "out" / "prediction.json"
+
+    with pytest.raises(KonfAIError, match="'Fusion:Surest' is the app's own"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", out)
+    extension = tmp_path / "fusion.wasm"
+    extension.write_bytes(b"\0asm")
+    # Two models: each graph ends on the head, and their mean is entered by a graph of its own.
+    folds = [tmp_path / "fold_0.pt", tmp_path / "fold_1.pt"]
+    torch.save({"Model": TinySegNet().network_states()}, folds[1])
+    both = compile_prediction(
+        config, folds, tmp_path / "Predictions", tmp_path / "two" / "prediction.json", extension=extension
+    )
+    assert both["models"] == {"model_0": "model_0.onnx", "model_1": "model_1.onnx", "model_enter": "model_enter.onnx"}
+    averaged = both["outputs"][0]["program"]
+    assert averaged["enter"] == {"model": "model_enter"} and len(averaged["averaged"]["model"]) == 2
+    assert averaged["steps"][0]["manifest"]["output"]["channels"] == 2
+    enter = onnxruntime.InferenceSession(str(tmp_path / "two" / "model_enter.onnx"), providers=["CPUExecutionProvider"])
+    mean = np.stack([np.full((16, 16), 0.25, np.float32), np.full((16, 16), 0.75, np.float32)])[None]
+    (entered,) = enter.run(None, {"input": mean})
+    assert (entered[0, 0] == 1).all() and (entered[0, 1] == 191).all()
+    program = compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+
+    assert program["extension"] == "fusion.wasm" and (out.parent / "fusion.wasm").read_bytes() == b"\0asm"
+    # An extension already beside the program is the one it names: compiled again, nothing is copied over itself.
+    again = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", out, extension=out.parent / "fusion.wasm"
+    )
+    assert again["extension"] == "fusion.wasm"
+    (step,) = program["outputs"][0]["program"]["steps"]
+    manifest = step["manifest"]
+    assert (manifest["blend"], manifest["output"]["channels"]) == ("Fusion:Surest", 2)
+    assert manifest["blended"] == {"channels": 1, "dtype": "uint8", "params": {}}
+    session = onnxruntime.InferenceSession(str(out.parent / "model.onnx"), providers=["CPUExecutionProvider"])
+    (entered,) = session.run(None, {"input": np.ones((1, 1, 16, 16), np.float32)})
+    assert entered.dtype == np.float32 and entered.shape[1] == 2
+    assert set(np.unique(entered[:, 0])) <= {0.0, 1.0} and entered[:, 1].max() <= 255
+
+
+def test_an_apps_own_classes_compile_to_the_steps_its_extension_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A transform, a test-time draw and a reduction of the app's own, each named by classpath: with the app's
+    # extension the program names them by it, built with the keys konfai binds them with; without it, a transform is
+    # folded into the model's graph and the two others are refused.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "Own.py").write_text(
+        "import torch\n"
+        "from konfai.data.augmentation import DataAugmentation\n"
+        "from konfai.data.reduction import Reduction\n"
+        "from konfai.data.transform import LocalityKind, PatchLocality, Transform, TransformInverse\n\n\n"
+        "class Smooth(Transform):\n"
+        "    def patch_locality(self, cache_attribute):\n"
+        "        if 'Spacing' not in cache_attribute:\n"
+        "            return PatchLocality(LocalityKind.WHOLE_VOLUME, reason='a halo in millimetres')\n"
+        "        return PatchLocality(LocalityKind.HALO, halo=(1,))\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return torch.nn.functional.avg_pool3d(tensor.float()[None], 3, 1, 1, count_include_pad=False)[0]\n\n\n"
+        "class Centered(Transform):\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float() - tensor.float().mean()\n\n\n"
+        "class Scale(TransformInverse):\n"
+        "    def __init__(self, scale: float = 2.0, inverse: bool = True) -> None:\n"
+        "        super().__init__(inverse)\n"
+        "        self.scale = scale\n\n"
+        "    def patch_locality(self, cache_attribute):\n"
+        "        return PatchLocality(LocalityKind.POINTWISE)\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float() * self.scale\n\n"
+        "    def inverse(self, name, tensor, cache_attribute):\n"
+        "        return tensor / self.scale\n\n\n"
+        "class Gain(DataAugmentation):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __init__(self, g_std: float = 0.1, groups: list[str] | None = None) -> None:\n"
+        "        super().__init__(groups)\n"
+        "        self.g_std = g_std\n\n"
+        "    def _state_init(self, index, shapes, caches_attribute):\n"
+        "        return shapes\n\n"
+        "    def _compute(self, name, index, a, tensor):\n"
+        "        return tensor * (1 + self.g_std)\n\n"
+        "    def _inverse(self, index, a, tensor):\n"
+        "        return tensor\n\n\n"
+        "class Largest(Reduction):\n"
+        "    voxel_local = True\n\n"
+        "    def __call__(self, tensors):\n"
+        "        return torch.stack(tensors).amax(0)\n\n\n"
+        "class Double(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n\n\n"
+        "class Strongest(Transform):\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != 2:\n"
+        "            raise ValueError('Strongest reads the head and its two channels')\n"
+        "        return tensor[tensor.flatten(1).sum(1).argmax()][None]\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    predictor = resolved["Predictor"]
+    # konfai undoes an input transform once the copies are folded, which a program does for a resample alone.
+    # A class reads the voxel it writes, its neighbours as far as the halo it declares for a grid, or, declaring
+    # nothing, the whole volume.
+    own = {"Own:Scale": {"scale": 4.0, "inverse": False}, "Own:Smooth": {}, "Own:Centered": {}}
+    predictor["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = own
+    predictor["Dataset"]["augmentations"] = {"TTA": {"data_augmentations": {"Own:Gain": {"g_std": 0.5}}, "nb": 2}}
+    # A class is compiled on what its place in the chain hands it, the head's two channels here, and one reading the
+    # whole volume may write fewer.
+    predictor["outputs_dataset"]["Head:Softmax"]["OutputDataset"] |= {
+        "reduction": "Own:Largest",
+        # A pointwise class a graph carries is folded into one, extension or not.
+        "before_reduction_transforms": {"Own:Strongest": {}, "Own:Double": {}},
+    }
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+
+    with pytest.raises(KonfAIError, match="'Own:Gain'"):
+        compile_prediction(config, [checkpoint], tmp_path / "Predictions", tmp_path / "bare" / "prediction.json")
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    out = tmp_path / "out" / "prediction.json"
+    program = compile_prediction(config, [checkpoint], tmp_path / "Predictions", out, extension=extension)
+
+    assert program["extension"] == "own.wasm"
+    steps = program["outputs"][0]["program"]["steps"]
+    # The identity and two drawn copies, then the app's own fold of the three.
+    models = [step["manifest"] for step in steps if "manifest" in step]
+    assert len(models) == 3
+    # The stored dtype only the run knows, Scale returns float32 of it; the classes after it are handed float32,
+    # which they return.
+    scale = {"op": "extension", "class": "Own:Scale", "params": own["Own:Scale"], "dtype": "float32"}
+    smooth = {"op": "extension", "class": "Own:Smooth", "params": {}, "halo": 1}
+    centered = {"op": "extension", "class": "Own:Centered", "params": {}, "whole": True}
+    assert models[0]["preprocessing"] == [scale, smooth, centered]
+    # A copy's draw closes its preprocessing with a seed of its own, and is undone first.
+    draws = [manifest["preprocessing"][-1] for manifest in models[1:]]
+    assert [draw["class"] for draw in draws] == ["Own:Gain"] * 2 and all(draw["id"] == "__tta_0" for draw in draws)
+    # The keys konfai binds the draw with, the defaults it resolved among them, and the copy's seed.
+    assert draws[0]["params"].keys() == {"g_std", "groups", "seed"} and draws[0]["params"] != draws[1]["params"]
+    assert models[1]["postprocessing"][0] == {"op": "inverse", "of": "__tta_0"}
+    (fold,) = [step for step in steps if step.get("op") == "extension_reduce"]
+    assert fold["class"] == "Own:Largest" and len(fold["in"]) == 3
+    strongest = {"op": "extension", "class": "Own:Strongest", "params": {}, "whole": True}
+    assert all(strongest in model["postprocessing"] for model in models)
+    assert '"Own:Double"' not in json.dumps(program)
+    assert all(model["postprocessing"][-1]["op"] == "onnx" for model in models)
+
+
+def test_a_final_chain_reading_groups_of_the_case_closes_the_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # konfai's final chain reads groups of the case as stored: a class of the app's (read_companion) and a Mask. The
+    # program runs that end of the chain on its buffers, the first group being its input and any other one read
+    # with the case.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+    from konfai.utils.dataset import Attribute, Dataset
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    for case in ("CASE_000", "CASE_001"):
+        Dataset(str(tmp_path / "Dataset"), "mha").write("BODY", case, np.ones((1, 1, 16, 16), np.uint8), Attribute())
+    (tmp_path / "OwnGroup.py").write_text(
+        "from konfai.data.transform import Transform\n\n\n"
+        "class ScaleOnto(Transform):\n"
+        "    def __init__(self, reference_group: str = 'MR') -> None:\n"
+        "        super().__init__()\n"
+        "        self.reference_group = reference_group\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        reference = self.read_companion(self.reference_group, name)\n"
+        "        return tensor.float() * float((tensor.float() * reference).sum() + 1)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    final = {
+        "OwnGroup:ScaleOnto": {"reference_group": "MR"},
+        "Mask": {"path": "BODY", "value_outside": -1},
+        "Argmax": {"dim": 0},
+    }
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["final_transforms"] = final
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+
+    assert program["input_group"] == ["MR", "BODY"]
+    model, scale, mask, argmax = program["outputs"][0]["program"]["steps"]
+    assert not any("extra" in step for step in model["manifest"]["postprocessing"])
+    assert scale == {
+        "op": "extension",
+        "class": "OwnGroup:ScaleOnto",
+        "params": {"reference_group": "MR"},
+        "whole": True,
+        "groups": ["MR"],
+        "in": [model["out"], "input"],
+        "out": "t0",
+    }
+    assert mask == {"op": "mask", "value_outside": -1.0, "in": ["t0", "BODY"], "out": "t1"}
+    assert argmax == {"op": "argmax", "in": ["t1"], "out": "output"}
+
+
+def test_an_own_class_that_moves_the_grid_is_undone_by_the_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class that reads the whole volume may leave another grid: its step is marked `whole`, and the output is
+    # put back on the grid the class read by the inverse of that step.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    from TinySeg import TinySegNet
+
+    (tmp_path / "OwnGrid.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import TransformInverse\n\n\n"
+        "class Trim(TransformInverse):\n"
+        "    def __init__(self, margin: int = 1, inverse: bool = True) -> None:\n"
+        "        super().__init__(inverse)\n"
+        "        self.margin = margin\n\n"
+        "    def transform_shape(self, group_src, name, shape, cache_attribute):\n"
+        "        return [*shape[:-2], *(extent - 2 * self.margin for extent in shape[-2:])]\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor[..., self.margin : -self.margin, self.margin : -self.margin]\n\n"
+        "    def inverse(self, name, tensor, cache_attribute):\n"
+        "        return torch.nn.functional.pad(tensor, [self.margin] * 4)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    resolved = json.loads(config.read_text())
+    transforms = {"OwnGrid:Trim": {"margin": 2, "inverse": True}}
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = transforms
+    config.write_text(json.dumps(resolved))
+    checkpoint = tmp_path / "fold_0.pt"
+    torch.save({"Model": TinySegNet().network_states()}, checkpoint)
+    extension = tmp_path / "own.wasm"
+    extension.write_bytes(b"\0asm")
+    program = compile_prediction(
+        config, [checkpoint], tmp_path / "Predictions", tmp_path / "out" / "prediction.json", extension=extension
+    )
+
+    manifest = program["outputs"][0]["program"]["steps"][0]["manifest"]
+    trim = {"op": "extension", "class": "OwnGrid:Trim", "params": transforms["OwnGrid:Trim"], "whole": True}
+    assert manifest["preprocessing"] == [trim | {"id": "OwnGrid:Trim"}]
+    assert {"op": "inverse", "of": "OwnGrid:Trim"} in manifest["postprocessing"]
+
+
+def test_a_crop_on_a_needed_apps_group_compiles_to_a_read_beside_the_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The box comes from another app's output, which no dataset of the compile holds: the plan measures no box,
+    # and the program reads that group beside the case, where the runtime measures it.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.data.transform import Crop
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    crop = {"source": "BODY", "labels": [2, 7], "margin_mm": 10.0, "fill": 0.0, "empty": "fill"}
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = {"Crop": crop}
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "model.pt")
+    program = compile_prediction(
+        config, [tmp_path / "model.pt"], tmp_path / "Predictions", tmp_path / "out" / "prediction.json"
+    )
+    manifest = program["outputs"][0]["program"]["steps"][0]["manifest"]
+    step = {"op": "crop", "source_group": "BODY", "labels": [2, 7], "margin_mm": 10.0, "fill": 0.0, "empty": "fill"}
+    assert manifest["preprocessing"] == [step | {"id": "Crop"}]
+    assert manifest["reads"] == [{"group": "BODY", "channels": 1, "preprocessing": []}]
+    assert program["input_group"] == ["MR", "BODY"]
+    assert Crop.plan_without_source is False
+
+
+def test_a_pointwise_output_transform_with_no_op_compiles_to_a_graph_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A transform of the app's own, per voxel, after the blend: exported beside the model as one graph, which the
+    # program runs where the chain places it, on the channels the steps before it leave.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "Post.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Hottest(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return (tensor * 10).floor().to(tensor.dtype)[:1]\n"
+    )
+    resolved = json.loads(config.read_text())
+    resolved["Predictor"]["outputs_dataset"]["Head:Softmax"]["OutputDataset"]["after_reduction_transforms"] = {
+        "KeepLargestComponent": {"mask": 1},
+        "Post:Hottest": {},
+    }
+    config.write_text(json.dumps(resolved))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "model.pt")
+    program = compile_prediction(
+        config, [tmp_path / "model.pt"], tmp_path / "Predictions", tmp_path / "out" / "prediction.json"
+    )
+    post = program["outputs"][0]["program"]["steps"][0]["manifest"]["postprocessing"]
+    # keep_largest_component drops its mask channel: the graph after it takes one channel of the head's two.
+    assert post[0] == {"op": "keep_largest_component", "mask": 1}
+    assert post[1] == {"op": "onnx", "model": "model_post_0.onnx", "channels": 1, "dtype": "float32"}
+    assert [step["op"] for step in post[2:]] == ["argmax", "cast"]
+    session = ort.InferenceSession(str(tmp_path / "out" / "model_post_0.onnx"), providers=["CPUExecutionProvider"])
+    assert session.get_inputs()[0].shape[1] == 1
+    # On the case's three axes, which the output chain runs on, though the patch traced has two.
+    blended = np.random.default_rng(0).random((1, 1, 3, 5, 7), dtype=np.float32)
+    np.testing.assert_array_equal(session.run(None, {"input": blended})[0], np.floor(blended[:, :1] * 10))
+
+
+def test_a_case_statistic_of_a_second_input_compiles_to_two_float64_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model reads the image and its CaseStatistic: the second read names the two graphs beside the model, which
+    # onnxruntime runs on a block of another shape to what the statistic's own functions give: the class built with
+    # the mapping's scale, which a float32 constant would move.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+    import numpy as np
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TwoInputs:TwoInputNet", "Head:Softmax")
+    resolved = json.loads(config.read_text())
+    statistic = {
+        "transforms": {"CaseStatistic": {"statistic": "oracle_support:ScaledRoughness", "scale": 0.9}},
+        "is_input": True,
+    }
+    resolved["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["SIGMA"] = statistic
+    config.write_text(json.dumps(resolved))
+    program = compile_prediction(config, [], tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
+    reads = program["outputs"][0]["program"]["steps"][0]["manifest"]["reads"]
+    step = {"op": "case_statistic", "halo": 1, "partial": "model_statistic_0_partial.onnx"}
+    assert reads == [
+        {"group": "MR", "channels": 1, "preprocessing": [step | {"finish": "model_statistic_0_finish.onnx"}]}
+    ]
+    from oracle_support import ScaledRoughness
+
+    partial = ort.InferenceSession(str(tmp_path / "out" / step["partial"]), providers=["CPUExecutionProvider"])
+    finish = ort.InferenceSession(str(tmp_path / "out" / "model_statistic_0_finish.onnx"))
+    assert [(i.name, i.type) for i in partial.get_inputs()] == [("block", "tensor(double)")]
+    assert [(i.name, i.type) for i in finish.get_outputs()] == [("statistic", "tensor(double)")]
+    block = torch.from_numpy(np.random.default_rng(0).random((1, 7, 12, 9)))
+    total = partial.run(None, {"block": block.numpy()})[0]
+    np.testing.assert_allclose(total, ScaledRoughness().partial(block).numpy(), rtol=1e-12)
+    value = finish.run(None, {"total": total})[0]
+    assert value.shape == () and value == ScaledRoughness(0.9).finish(torch.from_numpy(total)).item()
+
+
+def test_a_whole_class_of_the_app_s_is_probed_in_the_dtype_its_chain_hands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past an Argmax konfai hands the class int64 labels, which a bitwise test takes and a float32 volume does not.
+    (tmp_path / "Labels.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _prediction({}, {"after_reduction_transforms": {"Argmax": {}, "Labels:Odd": {}}})
+    manifest, _folds, _per_copy = transform_manifest(config, "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["argmax", "extension"]
+
+
+def test_a_class_of_the_app_s_past_a_case_statistic_is_probed_in_float32(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # konfai's CaseStatistic hands on float32 whatever it is handed: an int16 cast before it is no longer what the
+    # class is handed.
+    from konfai.portable import _probe_after, compile_pipeline
+
+    (tmp_path / "StatisticMap.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.float32 or tensor.shape[0] != 1:\n"
+        "            raise ValueError(f'one float32 channel, not {tensor.dtype} {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    statistic = {"op": "case_statistic", "halo": 1, "partial": "partial.onnx", "finish": "finish.onnx"}
+    chain = {"TensorCast": {"dtype": "int16"}, "CaseStatistic": {"statistic": "x:Y"}, "StatisticMap:Floats": {}}
+    steps, _, _ = compile_pipeline(
+        chain, extension=True, case_statistic=lambda _params: statistic, probe=_probe_after(3, lambda: 1)
+    )
+    assert [step["op"] for step in steps] == ["cast", "case_statistic", "extension"]
+
+
+def test_a_class_of_the_app_s_handed_a_known_dtype_states_what_it_returns_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past an Argmax the class is handed int64 labels, the only dtype it takes, and returns uint8: its step says so.
+    # In the input chain, where only the run knows the stored dtype, a class returning what it reads states none.
+    (tmp_path / "KnownLabels.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Bytes(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int64:\n"
+        "            raise TypeError(f'labels, not {tensor.dtype}')\n"
+        "        return tensor.to(torch.uint8)\n\n"
+        "class Same(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n\n"
+        "class Floats(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.float()\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _prediction({}, {"after_reduction_transforms": {"Argmax": {}, "KnownLabels:Bytes": {}}})
+    manifest, _folds, _per_copy = transform_manifest(config, "Predictor", extension=True)
+    (step,) = [step for step in manifest["postprocessing"] if step.get("class") == "KnownLabels:Bytes"]
+    assert step["dtype"] == "uint8"
+    # A second input's chain starts from its stored dtype, with no cast before the class: one returning what it reads
+    # states no dtype, one returning float32 of any says so.
+    for name, stated in (("KnownLabels:Same", None), ("KnownLabels:Floats", "float32")):
+        manifest, _folds, _per_copy = transform_manifest(_two_groups({name: {}}), "Predictor", extension=True)
+        assert manifest["reads"][0]["preprocessing"][0].get("dtype") == stated, name
+
+
+@pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
+def test_a_class_of_the_app_s_past_the_reduction_is_run_again_in_the_dtype_the_reduction_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # The copies' labels averaged are float32 again: the class after the reduction, run again to count what it hands
+    # the next one, in its phase or the final one, splits them into two channels as konfai's run does, which it would
+    # not of int64 labels.
+    (tmp_path / "Phases.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Split(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor.repeat(2, *[1] * (tensor.dim() - 1)) if tensor.is_floating_point() else tensor\n\n"
+        "class Pair(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.shape[0] != 2:\n"
+        "            raise ValueError(f'two channels, not {list(tensor.shape)}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    outputs = {"before_reduction_transforms": {"Argmax": {}}, "after_reduction_transforms": {"Phases:Split": {}}}
+    outputs[phase] = {**outputs.get(phase, {}), "Phases:Pair": {}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction({}, outputs), "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["extension", "extension"]
+
+
+@pytest.mark.parametrize("phase", ["after_reduction_transforms", "final_transforms"])
+def test_a_class_of_the_app_s_past_a_vote_is_run_again_in_the_labels_the_vote_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # A vote of the copies' labels keeps them int64: a class taking labels only, after it, is run again in them.
+    (tmp_path / "VotedPhases.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Odd(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor & 1\n\n"
+        "class Whole(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        if tensor.dtype != torch.int64:\n"
+        "            raise TypeError(f'labels, not {tensor.dtype}')\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    outputs = {
+        "before_reduction_transforms": {"Argmax": {}},
+        "after_reduction_transforms": {"VotedPhases:Odd": {}},
+        "reduction": "Vote",
+    }
+    outputs[phase] = {**outputs.get(phase, {}), "VotedPhases:Whole": {}}
+    manifest, _folds, _per_copy = transform_manifest(_prediction({}, outputs), "Predictor", extension=True)
+    assert [step["op"] for step in manifest["postprocessing"]][-2:] == ["extension", "extension"]
+
+
+@pytest.mark.parametrize(
+    ("transforms", "phase", "module", "body", "folded"),
+    [
+        ({}, "before_reduction_transforms", "Integers", "tensor & 1", True),
+        ({}, "after_reduction_transforms", "Votes", "tensor & 1", True),
+        ({"TensorCast#2": {"dtype": "int16", "inverse": True}}, "final_transforms", "Doubles", "tensor * 2", False),
+    ],
+    ids=["in-the-dtype-the-fold-leaves", "in-the-dtype-a-vote-keeps", "past-an-undone-cast"],
+)
+def test_a_pointwise_class_of_the_app_s_folds_in_the_dtype_its_chain_hands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transforms: dict, phase: str, module: str, body: str, folded: bool
+) -> None:
+    # Past the app's Fold, which leaves uint8, and a vote of the copies, which keeps it, a class taking integer labels
+    # traces and folds into a graph; past the inverse of a cast only the run knows the dtype, and a class that would
+    # trace in any stays its extension's step.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # a class folds where its graph exports and checks
+    (tmp_path / f"{module}.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Own(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        f"        return {body}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    handed: list[str] = []
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]], dtype: str) -> dict[str, Any]:
+        handed.append(dtype)
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": dtype}
+
+    config = _prediction(transforms, {phase: {f"{module}:Own": {}}, "reduction": "Vote"})
+    manifest, _, _ = transform_manifest(config, "Predictor", fold_out=fold_out, blended="uint8", extension=True)
+    ops = [step["op"] for step in manifest["postprocessing"]]
+    assert (handed, "onnx" in ops, "extension" in ops) == ((["uint8"], True, False) if folded else ([], False, True))
+
+
+def test_an_output_chain_folds_an_apps_own_class_through_a_plain_fold_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fold_out that says nothing of the dtype it reads folds a class of the app's own as konfai hands a fold its
+    # input, in float32.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # a class folds where its graph exports and checks
+    from konfai.portable import compile_pipeline
+
+    (tmp_path / "PlainFold.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Twice(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor * 2\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    folded: list[int] = []
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
+        folded.append(len(folds))
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": "float32"}
+
+    steps, _, _ = compile_pipeline({"PlainFold:Twice": {}}, fold_out=fold_out, extension=True)
+    assert folded == [1] and [step["op"] for step in steps] == ["onnx"]
+
+
+@pytest.mark.parametrize(
+    ("module", "body", "handed", "op"),
+    [
+        ("CastToBytes", "(tensor * 10).to(torch.uint8)", "float32", "extension"),
+        ("CastToBool", "tensor.bool()", "float32", "extension"),
+        ("CastLabels", "tensor.to(torch.uint8)", "int64", "onnx"),
+        ("CastToHalf", "tensor.half()", "float32", "onnx"),
+    ],
+    ids=["floats-to-uint8", "floats-to-bool", "integers-to-uint8", "floats-to-half"],
+)
+def test_a_class_casting_floats_to_integers_is_no_fold_of_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: str, body: str, handed: str, op: str
+) -> None:
+    # Past their range backends cast floats to integers apart (one wraps, one saturates, one refuses), where the
+    # program's own steps run torch's rule: such a class runs from the app's extension; a cast between integers, or to
+    # a float, still folds.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    pytest.importorskip("onnxruntime")  # the export checks the graph it folds on other sizes
+    from konfai.portable import compile_pipeline
+
+    (tmp_path / f"{module}.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Cast(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        f"        return {body}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def fold_out(folds: list[Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"op": "onnx", "model": "post.onnx", "channels": 1, "dtype": "uint8"}
+
+    steps, _, _ = compile_pipeline({f"{module}:Cast": {}}, fold_out=fold_out, extension=True, dtype=handed)
+    assert [step["op"] for step in steps] == [op]
+
+
+def test_a_patch_transform_is_checked_on_the_patch_the_model_is_traced_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A patch transform adding a ramp of the patch's 16 voxels holds on that patch alone: the fold is checked on it, as
+    # the model's graph is traced on it.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    (tmp_path / "PatchRamp.py").write_text(
+        "import torch\n"
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Ramp(Transform):\n"
+        "    locality = LocalityKind.POINTWISE\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor + torch.arange(16, dtype=tensor.dtype)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    held = json.loads(config.read_text())
+    held["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["patch_transforms"] = {"PatchRamp:Ramp": {}}
+    config.write_text(json.dumps(held))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", tmp_path / "out" / "p.json")
+    assert (tmp_path / "out" / "model.onnx").is_file()
+
+
+def test_a_patch_transform_casting_floats_to_integers_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A patch transform is baked into the model's graph, where a cast of floats to integers runs apart on backends.
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    held = json.loads(config.read_text())
+    group = held["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]
+    group["patch_transforms"] = {"TensorCast": {"dtype": "int16", "inverse": False}}
+    config.write_text(json.dumps(held))
+    from TinySeg import TinySegNet
+
+    torch.save({"Model": TinySegNet().network_states()}, tmp_path / "fold_0.pt")
+    with pytest.raises(ConfigError, match="casts floating values to int16"):
+        compile_prediction(config, [tmp_path / "fold_0.pt"], tmp_path / "Predictions", tmp_path / "out" / "p.json")
+    assert not (tmp_path / "out" / "model.onnx").exists()
+
+
+def test_a_case_statistic_of_a_group_of_several_channels_is_refused_before_its_graphs_are_traced() -> None:
+    # Its partial graph is traced on one channel, a stored scalar volume, and would refuse a block of two at run time.
+    from konfai.portable import _probe_after, compile_pipeline
+
+    traced: list[dict[str, Any]] = []
+
+    def statistic(params: dict[str, Any]) -> dict[str, Any]:
+        traced.append(params)
+        return {"op": "case_statistic", "halo": 1, "partial": "p.onnx", "finish": "f.onnx"}
+
+    chain = {"CaseStatistic": {"statistic": "oracle_support:Roughness"}}
+    with pytest.raises(ConfigError, match="2 channels"):
+        compile_pipeline(chain, case_statistic=statistic, probe=_probe_after(3, lambda: 2))
+    assert not traced
+    steps, _, _ = compile_pipeline(chain, case_statistic=statistic, probe=_probe_after(3, lambda: 1))
+    assert [step["op"] for step in steps] == ["case_statistic"]
 
 
 def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2081,6 +3436,8 @@ def test_an_overlap_without_a_patch_combine_is_refused_by_name() -> None:
     check_blend([0, 0, 0], None)
     check_blend(None, "Overwrite")
     check_blend([16, 16, 16], "Gaussian")
+    with pytest.raises(KonfAIError, match="patch_combine 'mypkg:MyBlend' is no blend the portable runtime runs"):
+        check_blend([16, 16, 16], "mypkg:MyBlend")
 
 
 def test_an_output_mirroring_another_group_than_the_first_input_is_refused_by_name() -> None:
@@ -2201,12 +3558,15 @@ def test_an_end_or_spread_placement_exports_the_step_konfai_walks(
 
 
 @pytest.mark.parametrize("size", [[0, 16, 16], [16, 0, 16], [16, 16, -1]])
-def test_an_onnx_export_refuses_free_patch_axes_instead_of_dropping_them(size: list[int]) -> None:
+def test_an_onnx_export_refuses_some_free_patch_axes_instead_of_dropping_them(size: list[int]) -> None:
     from konfai.portable import derive_onnx_params
 
     config = {"Predictor": {"Dataset": {"Patch": {"patch_size": size}}}}
-    with pytest.raises(ConfigError, match=r"patch_size.*free axis"):
+    with pytest.raises(ConfigError, match=r"patch_size.*frees some axes"):
         derive_onnx_params(config, "Predictor")
+    # Every axis free is one window per case, exported with its axes free.
+    config["Predictor"]["Dataset"]["Patch"]["patch_size"] = [0, 0, 0]
+    assert derive_onnx_params(config, "Predictor")[0] == [0, 0, 0]
 
 
 @pytest.mark.parametrize(("prob", "copies"), [(0.0, [[], []]), (1.0, [[0], [2]])])
@@ -2264,6 +3624,264 @@ def test_a_normalize_over_some_channels_is_refused_by_name() -> None:
         compile_pipeline({"Normalize": {"channels": [0], "inverse": False}}, fold=False)
     steps, _folds, _inverted = compile_pipeline({"Normalize": {"channels": None, "inverse": False}}, fold=False)
     assert steps == [{"op": "normalize", "min_value": -1.0, "max_value": 1.0}]
+
+
+#: What each op compiles from at the least: the arguments its konfai class cannot do without.
+_LEAST = {
+    "TensorCast": {"dtype": "float32"},
+    "Resample": {"spacing": [1.0, 1.0, 1.0]},
+    "Padding": {"padding": [1, 1, 1, 1, 1, 1]},
+    "Flip": {"dims": "0"},
+    "Permute": {"dims": "1|0|2"},
+    "SelectLabel": {"labels": ["(1,2)"]},
+    "ThresholdLabels": {"labels": [1]},
+    "OneHot": {"num_classes": 2},
+    "HistogramMatching": {"reference_group": "REF"},
+    "Percentage": {"baseline": 1.0},
+    "Mask": {"path": "BODY"},
+    "Brightness": {"b_std": 0.1},
+}
+
+
+#: The parameters each stage of the chain vocabulary is run with beyond its least ones, where they change the dtype.
+_DTYPE_VARIANTS = {
+    "Gradient": [{}, {"per_dim": True}],
+    "Standardize": [{}, {"nonzero": True, "inverse": False}],
+    "TensorCast": [{"dtype": "int16"}, {"dtype": "float32"}],
+}
+_DTYPES = (
+    "bool",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+)
+#: The dtypes konfai's stage refuses, each a row the portable runtime is tested against: any other failure fails. A
+#: variant refusing otherwise than its stage is keyed by the stage and its parameters.
+_REFUSED: dict[Any, tuple[str, ...]] = {
+    "Argmax": ("bool",),
+    "Clip": ("uint8", "int8", "uint16", "uint32", "uint64"),  # bounds past the dtype's range
+    "Dilate": ("uint16", "uint32", "uint64"),
+    "FlatLabel": ("uint16", "uint32", "uint64"),
+    "Gradient": ("bool", "uint16", "uint32", "uint64"),
+    "HistogramMatching": tuple(dtype for dtype in _DTYPES if dtype not in ("float16", "float32")),
+    "Mask": ("uint16", "uint32", "uint64"),
+    "Normalize": ("bool", "uint16", "uint32", "uint64", "bfloat16"),
+    "SelectLabel": ("uint16", "uint32", "uint64"),
+    "Standardize": ("bool",),
+    ("Standardize", '{"inverse": false, "nonzero": true}'): (),  # a mask of the nonzero voxels takes bool
+    "UnNormalize": ("uint16", "uint32", "uint64"),
+}
+
+
+def _tabled(step: dict[str, Any], dtype: str, returned: str | None) -> None:
+    """One row of the table of what each op of a program returns of each dtype (``None``: konfai's stage refuses it),
+    appended as a JSON line to the file ``KONFAI_DTYPE_TABLE`` names, which the portable runtime tests against."""
+    if table := os.environ.get("KONFAI_DTYPE_TABLE"):
+        with open(table, "a", encoding="utf-8") as rows:
+            rows.write(json.dumps({"step": step, "dtype": dtype, "returns": returned}) + "\n")
+
+
+@pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
+def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_path: Path) -> None:
+    # konfai's stage run on a volume of each dtype it takes: what the compiler says it leaves (_result_dtype, which
+    # settles the default interpolation and the dtype a fold is traced in after it) is what it returns.
+    import numpy as np
+    import torch
+    from konfai.data.augmentation.color import Brightness
+    from konfai.portable import _probe_attribute, _probed, _result_dtype, _stage_class
+    from konfai.utils.dataset import Attribute, Dataset
+
+    companions = Dataset(str(tmp_path / "Companions"), "mha")
+    for group in ("REF", "BODY"):
+        companions.write(group, "probe", np.ones((1, 6, 7, 8), np.float32), Attribute(_probe_attribute(3)))
+    for params in _DTYPE_VARIANTS.get(stage, [_LEAST.get(stage, {})]):
+        step, ran, refused, rows = _CHAIN_OPS[stage](dict(params)), [], [], []
+        for dtype in _DTYPES:
+            volume = (torch.arange(6 * 7 * 8).reshape(1, 6, 7, 8) % 2).to(getattr(torch, dtype))
+            try:
+                if stage == "Brightness":  # a draw: run as konfai draws a copy of the case
+                    draw = Brightness(**params)
+                    draw.load(1.0)
+                    draw.state_init(0, [list(volume.shape[1:])], [Attribute()])
+                    returned = draw("probe", 0, [volume], [Attribute()])[0]
+                else:
+                    built = _stage_class(stage)(**params)
+                    built.set_datasets([companions])
+                    returned = _probed(built, volume, _probe_attribute(3))
+            except (RuntimeError, TypeError, ValueError, KonfAIError):  # a dtype the stage does not take
+                rows.append((step, dtype, None))
+                refused.append(dtype)
+                continue
+            ran.append((dtype, _result_dtype(step, dtype), str(returned.dtype).removeprefix("torch.")))
+            rows.append((step, dtype, ran[-1][2]))
+        assert ran, f"{stage} {params} takes none of {_DTYPES}"
+        stated = _REFUSED.get((stage, json.dumps(params, sort_keys=True)), _REFUSED.get(stage, ()))
+        assert tuple(refused) == stated, (stage, params, refused)  # no other failure
+        assert [(dtype, said) for dtype, said, _ in ran] == [(dtype, got) for dtype, _, got in ran], (stage, params)
+        for row in rows:  # tabled once every check of the stage holds
+            _tabled(*row)
+
+
+@pytest.mark.parametrize(
+    ("op", "fold"),
+    [
+        ("mean", "reduction:Mean"),
+        ("median", "reduction:Median"),
+        # Emitted for an InferenceStack of mode median alone, which takes torch's lower middle.
+        ("median_lower", "stack:median"),
+        ("std", "reduction:Std"),
+        ("variance", "ensemble:Variance"),
+        ("standard_deviation", "ensemble:StandardDeviation"),
+        ("segmentation_disagreement", "ensemble:SegmentationDisagreement"),
+    ],
+)
+def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op: str, fold: str) -> None:
+    # Three copies of each dtype, folded by konfai's reduction, or a stack of three members by its ensemble stage or
+    # by the InferenceStack the op is emitted for.
+    import torch
+    from konfai.data import reduction
+    from konfai.data.transform import ensemble
+    from konfai.portable import _result_dtype
+    from konfai.utils.dataset import Attribute
+
+    module, name = fold.split(":")
+    cls = getattr({"reduction": reduction, "ensemble": ensemble}.get(module, ensemble), name, None)
+    rows: list[tuple[dict[str, Any], str, str | None]] = []
+    for dtype in _DTYPES:
+        values = (torch.arange(3 * 6 * 7).reshape(3, 1, 6, 7) % 3).to(getattr(torch, dtype))
+        if module == "reduction":
+            returned = cls()([copy[None] for copy in values])
+        elif module == "stack":
+            returned = ensemble.InferenceStack(mode=name)._reduce(values)
+        else:
+            returned = cls()("probe", values[:, 0], Attribute())
+        assert _result_dtype({"op": op}, dtype) == str(returned.dtype).removeprefix("torch."), (op, dtype)
+        rows.append(({"op": op}, dtype, str(returned.dtype).removeprefix("torch.")))
+    for row in rows:  # tabled once every dtype's check holds
+        _tabled(*row)
+
+
+def test_a_resample_past_a_gradient_of_labels_is_linear_as_konfai_s() -> None:
+    # A gradient of uint8 labels is float32 in konfai, which a Resample stating nothing reads linearly, where uint8
+    # labels it reads by nearest.
+    manifest, _, _ = transform_manifest(
+        _prediction({"TensorCast": {"dtype": "uint8"}, "Gradient": {}, "Resample": {"spacing": [2.0, 2.0, 2.0]}}, {}),
+        "Predictor",
+    )
+    assert [step.get("interpolation") for step in manifest["preprocessing"] if step["op"] == "resample"] == ["linear"]
+
+
+@pytest.mark.parametrize("stage", sorted(_CHAIN_OPS))
+def test_every_op_refuses_a_key_its_konfai_class_does_not_take(stage: str) -> None:
+    # konfai builds a stage from the keys its config gives and refuses one its class does not take: the compiler
+    # refuses it too, whatever its op reads, rather than compile a program that runs without it.
+    least = _LEAST.get(stage, {})
+    assert _CHAIN_OPS[stage](dict(least))["op"]
+    with pytest.raises(TransformError, match="no_such_key"):
+        _CHAIN_OPS[stage]({**least, "no_such_key": 1})
+
+
+def test_a_chain_draw_s_prob_is_refused_as_konfai_s_build_refuses_it(tmp_path: Path) -> None:
+    # konfai binds a draw of a chain by its constructor keys alone (a test-time draw's prob is read apart, through
+    # Prob): its build refuses a prob nothing reads, and the op refuses it too, the program never drawing without it.
+    from konfai.portable import compile_transform
+
+    config = _reducing_config(tmp_path, "Expand: {nb: 2, seed: 3}\nBrightness: {b_std: 5.0, prob: 0.5}\n")
+    with pytest.raises(ConfigError, match=r"Brightness\.prob"):
+        compile_transform(config, tmp_path / "Transforms")
+    with pytest.raises(TransformError, match="prob"):
+        _CHAIN_OPS["Brightness"]({"b_std": 5.0, "prob": 0.5})
+
+
+def test_a_chain_konfai_refuses_to_build_compiles_to_no_program() -> None:
+    # SynthSeg-KonfAI at 728e5cb: a Crop that crops only, then one that pads only, and a Resample on a grid konfai has
+    # no rule for. konfai's run refuses each as it builds it, and so does the compile, in both chains it compiles.
+    from konfai.data.transform import Crop, Resample
+    from konfai.portable import compile_pipeline
+
+    crop = {"shape": [0, 0, 0], "only": "crop", "fill": 0.0, "inverse": True}
+    resample = {"spacing": [1.0, 1.0, 1.0], "grid": "first_face", "interpolation": "linear"}
+    with pytest.raises(TypeError, match="only"):
+        Crop(**crop)
+    with pytest.raises(TransformError, match="first_face"):
+        Resample(**resample)
+    chains = [
+        {"Crop": crop, "Clip": {"min_value": "percentile:0.5", "max_value": "percentile:99.5"}, "Crop#2": crop},
+        {"Resample": resample},
+    ]
+    for chain in chains:
+        with pytest.raises(TransformError, match=r"only|first_face"):
+            compile_pipeline(chain, fold=True, invertible=True)
+        with pytest.raises(TransformError, match=r"only|first_face"):
+            steps({**chain, "Write": {"dataset": "./Out:mha"}}, "CT")
+
+
+@pytest.mark.parametrize(
+    ("chain", "refused"),
+    [
+        # Crop.transform_shape: a Crop behind another of the chain would read the first one's box.
+        (
+            {
+                "Crop": {"shape": [4, 4, 4]},
+                "Clip": {"min_value": 0.0, "max_value": 1.0},
+                "Crop#2": {"shape": [6, 6, 6]},
+            },
+            "earlier 'Crop'",
+        ),
+        # Crop.transform_shape: a source group no dataset holds, the case's to say (a needed app's output, staged
+        # beside it at run time): no rule of the chain's.
+        ({"Crop": {"source": "BODY"}}, None),
+    ],
+    ids=["a-second-crop", "a-crop-source-staged-at-run-time"],
+)
+def test_a_group_chain_konfai_plans_to_no_case_compiles_to_no_program(chain: dict, refused: str | None) -> None:
+    # konfai binds a group's chain stage by stage, each with the stages before it, and plans it before a case runs:
+    # each rule of that planning, refused at compile with konfai's own message where konfai refuses every case.
+    from konfai.portable import transform_manifest
+
+    config = {"Predictor": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": chain}}}}}}}
+    compiles = [
+        lambda: transform_manifest(config, "Predictor"),
+        lambda: steps({**chain, "Write": {"dataset": "./Out:mha"}}, "CT"),
+    ]
+    for compile_it in compiles:
+        if refused is None:
+            compile_it()
+            continue
+        with pytest.raises(TransformError, match=refused):
+            compile_it()
+
+
+def test_a_keep_largest_component_carries_its_labels_and_connectivity_and_refuses_another() -> None:
+    from konfai.portable import compile_pipeline
+
+    with pytest.raises(KonfAIError, match="connectivity=18"):
+        compile_pipeline({"KeepLargestComponent": {"connectivity": 18}}, fold=False)
+    steps, _folds, _inverted = compile_pipeline(
+        {"KeepLargestComponent": {"per_label": True, "connectivity": 26}}, fold=False
+    )
+    assert steps == [{"op": "keep_largest_component", "per_label": True, "connectivity": 26}]
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+def test_a_per_axis_gradient_hands_on_a_channel_per_spatial_axis_of_the_case(rank: int) -> None:
+    # The channels the compiler counts after the step are konfai's own Gradient's, in 2-D as in 3-D.
+    import torch
+    from konfai.data.transform import Gradient
+    from konfai.portable import _channels_after
+    from konfai.utils.dataset import Attribute
+
+    handed = Gradient(per_dim=True)("case", torch.rand(2, *[5] * rank), Attribute())
+    assert _channels_after({"op": "gradient", "per_dim": True}, 2, rank) == handed.shape[0]
 
 
 def test_an_in_plane_quarter_turn_turns_about_the_slice_axis_alone() -> None:
@@ -2539,3 +4157,13 @@ def test_the_compiler_imports_without_pyyaml() -> None:
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([root, os.environ.get("PYTHONPATH", "")])}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_output_chain_reads_the_dtype_an_apps_fold_leaves() -> None:
+    # A Fold leaving uint8 labels: the copies' Mean reads them as float32 and their Vote keeps them, so konfai's
+    # Resample undoes the first linearly and the second by the nearest voxel.
+    for reduction, interpolation in (("Mean", "linear"), ("Vote", "nearest")):
+        config = _prediction({"Resample": {"spacing": [1, 1, 1], "inverse": True}}, {"reduction": reduction})
+        manifest, _folds, _per_copy = transform_manifest(config, "Predictor", blended="uint8")
+        [undone] = [step for step in manifest["postprocessing"] if step["op"] == "inverse"]
+        assert undone["interpolation"] == interpolation

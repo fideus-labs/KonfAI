@@ -40,6 +40,7 @@ from konfai.data.geometry import (
     Grid,
     WorldBox,
     apply_remap,
+    flip,
     remap_region,
     remap_shape,
     signed_permutation,
@@ -522,7 +523,7 @@ class Flip(DataAugmentation):
 
     def _flip(self, tensor: torch.Tensor, index: int, a: int) -> torch.Tensor:
         dims = self.flip[index][a]
-        result = torch.flip(tensor, dims=dims)
+        result = flip(tensor, dims)
         # With the header kept, mirroring voxel axis j mirrors the world about the plane normal to that
         # axis's direction, so a vector (channels in world x, y, z order) is reflected by I - 2 u u^T, u
         # the direction's column j (j = tensor.dim() - 1 - dim, tensor axes being reversed). Negating
