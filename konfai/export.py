@@ -506,8 +506,8 @@ def export_folds(
     opset: int = 18,
 ) -> tuple[int, str]:
     """Export pointwise transforms of an output chain to one ONNX graph at ``onnx_path``, its input ``C =
-    channels`` in the ``dtype`` konfai hands them and its ``rank`` spatial axes free; return the channel count and
-    the dtype konfai's transforms hand back."""
+    channels`` float32 (the runtime's buffers) cast inside the graph to the ``dtype`` konfai hands them, and its
+    ``rank`` spatial axes free; return the channel count and the dtype konfai's transforms hand back."""
     example = torch.randn(1, channels, *([8] * rank))
     with torch.no_grad():
         out = example[0].to(getattr(torch, dtype))
@@ -537,8 +537,8 @@ def export_case_statistic(statistic: Any, partial_path: Path, finish_path: Path,
     # A region of 8 voxels and the halo on both sides, as the streamed fold hands it.
     block = torch.rand(1, *([8 + 2 * int(statistic.halo)] * rank), dtype=torch.float64)
     partial = _Function(statistic.partial).eval()
-    partial_path.parent.mkdir(parents=True, exist_ok=True)
-    for path in (partial_path, finish_path):  # refused before either graph is written over the pair beside it
+    for path in (partial_path, finish_path):  # refused, or its folder made, before either graph is written
+        path.parent.mkdir(parents=True, exist_ok=True)
         owned_destination(path)
     _write_onnx(partial, (block,), partial_path, ["block"], ["partial"], opset, dynamic=True, free_from=1)
     with torch.no_grad():

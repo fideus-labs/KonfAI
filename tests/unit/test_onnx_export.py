@@ -607,6 +607,26 @@ def test_a_model_on_a_device_is_checked_on_that_device(tmp_path):
     export_to_onnx(_Conv().cuda().eval(), tmp_path, example, "head", dynamic=True)
 
 
+def test_a_case_statistic_s_graphs_land_in_folders_made_for_both_before_either_is_written(tmp_path):
+    # The finish graph's folder does not exist: it is made with the partial's before either graph is written, so the
+    # partial replaces the previous one only where the finish lands too.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    from konfai.export import export_case_statistic
+
+    class Mean:
+        halo = 0
+
+        def partial(self, block):
+            return torch.stack([block.sum(), torch.ones_like(block).sum()])
+
+        def finish(self, total):
+            return total[0] / total[1]
+
+    export_case_statistic(Mean(), tmp_path / "partial.onnx", tmp_path / "graphs" / "finish.onnx", rank=3)
+    assert (tmp_path / "partial.onnx").is_file() and (tmp_path / "graphs" / "finish.onnx").is_file()
+
+
 def test_a_case_statistic_is_traced_past_its_halo_and_checked_on_every_spatial_axis(tmp_path):
     # Its partial takes ``[1, *spatial]``, the region and ``halo`` voxels on both sides: a 9-voxel stencil (halo 4)
     # has a region to trace on, and a partial right on the first spatial axis 48 voxels longer and wrong on it twice as
