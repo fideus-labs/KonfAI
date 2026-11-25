@@ -1336,12 +1336,14 @@ class FireANTsEngine:
             )
         if self._deformable_method == "none":
             return
-        if self._deformable_metric == "impact" and any(
-            spec.voxel_size is not None for specs in self._impact_levels for spec in specs
+        if (
+            self._deformable_metric == "impact"
+            and self._mode == "Jacobian"
+            and any(spec.voxel_size is not None for specs in self._impact_levels for spec in specs)
         ):
             raise NotImplementedError(
-                "a model's voxel_size is read against the whole image, where the deformable stage reads its boxes or"
-                " its blocks: by boxes the models see the image at its own resolution."
+                "a model's voxel_size is read against the whole image, where the Jacobian loss runs the network on"
+                " each box: by boxes, a model with a voxel_size registers in Static mode."
             )
         if min(fixed_shape) < MIN_IMG_SIZE:
             raise NotImplementedError(
@@ -1525,11 +1527,19 @@ class FireANTsEngine:
                 registration.close()
             return registration, written
 
-        def static_pair(moving_source: RegionSource, moving_mask: RegionSource) -> list:
+        def extent_of(reader) -> list[float]:
+            return [size * step for size, step in zip(reader.GetSize(), reader.GetSpacing(), strict=True)]
+
+        def static_pair(moving_source: RegionSource, moving_mask: RegionSource, moving_reader) -> list:
             """Static: the feature volumes extracted by blocks into files, with the mask channel beside them so that
             masked still means what it says."""
             features = static_feature_sources(
-                custom_loss, sources("impact", False)[0], moving_source, scratch, block=max(box, 64)
+                custom_loss,
+                sources("impact", False)[0],
+                moving_source,
+                scratch,
+                block=max(box, 64),
+                extents=(extent_of(readers["fixed"]), extent_of(moving_reader)),
             )
             custom_loss.release()
             if not deformable_masked:
@@ -1540,7 +1550,7 @@ class FireANTsEngine:
         if not refresh:
             pair = sources(self._deformable_metric, deformable_masked)
             if custom_loss is not None and self._mode == "Static":
-                pair = static_pair(sources("impact", False)[1], mask_source("moving"))
+                pair = static_pair(sources("impact", False)[1], mask_source("moving"), readers["moving"])
             registration, _ = stage(self._scales, iterations, pair, readers["moving"], affine_matrix, field, self._seed)
         else:
             # feature_map_update_interval, as a run on the whole pair (``_refreshed_stage``): runs of that many
@@ -1579,7 +1589,7 @@ class FireANTsEngine:
                         )
                         moving_mask = ArraySource(held, device)
                 custom_loss.start_at(level)
-                pair = static_pair(moving_source, moving_mask)
+                pair = static_pair(moving_source, moving_mask, moving_reader)
                 # Each run draws boxes of its own, as one stage's iterations draw anew.
                 step_path = scratch / f"run_{number}.mha"
                 registration, step = stage([scale], [count], pair, moving_reader, init, step_path, self._seed + number)

@@ -58,6 +58,7 @@ from ..ooc import (
     ArraySource,
     HeaderImages,
     RegionSource,
+    ResampledSource,
     StackedSource,
     TensorSource,
     blur_level,
@@ -718,6 +719,7 @@ def static_feature_sources(
     directory: Path,
     *,
     block: int = 96,
+    extents: tuple[list[float] | None, list[float] | None] = (None, None),
 ) -> tuple[ArraySource, ArraySource]:
     """Static mode's feature volumes of ``loss`` (the engine's ``ImpactFeatureLoss``), predicted by blocks as a
     segmentation is into memmaps of ``directory``: every model's kept layers over the fixed and the moving image,
@@ -729,7 +731,14 @@ def static_feature_sources(
     image's is (``onto_image_grid``). On a GPU the network runs in float16 (TS/M730's last layer, l2-normalised,
     within 4e-3 of float32's at half its memory) and the blocks are as large as half the free memory holds them with
     their halos, ``block`` voxels a side at least: halved, and the side done again, when one does not fit."""
-    from konfai.metric.measure.impact import SWEEP_BATCH, block_region, layer_window, onto_image_grid, own_cells
+    from konfai.metric.measure.impact import (
+        SWEEP_BATCH,
+        block_region,
+        grid_size,
+        layer_window,
+        onto_image_grid,
+        own_cells,
+    )
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
@@ -805,20 +814,28 @@ def static_feature_sources(
         covariance = (outer.cpu() - count * torch.outer(mean, mean)) / max(count - 1, 1)
         return mean.float(), torch.linalg.eigh(covariance)[1][:, -min(components, len(mean)) :].float()
 
-    def extract(core, index: int, side: str, source: RegionSource, blocks: list[int], halo: int, stride: int, bases):
+    def extract(
+        core,
+        index: int,
+        side: str,
+        source: RegionSource,
+        stats: Attribute,
+        blocks: list[int],
+        halo: int,
+        stride: int,
+        bases,
+    ):
         """``source``'s features of ``core`` by blocks of ``blocks[0]`` voxels a side, written to memmaps of
         ``directory``, and the PCA bases that project both sides, fitted on the fixed one's (``bases`` otherwise)."""
         boxes = boxes_of(core, source.shape, blocks)
         slabs = core.dimension < len(source.shape)  # a 2-D network swept over a volume's slices
         # The network's normalisations by the whole image's statistics, one pass over the blocks each.
-        norms = core.model.norms(
-            functools.partial(blocks_of, source, boxes, blocks, halo, stride, slabs), statistics[side]
-        )
+        norms = core.model.norms(functools.partial(blocks_of, source, boxes, blocks, halo, stride, slabs), stats)
         cells: list[np.ndarray] = []  # each layer on its own grid, as a prediction's output is assembled
         ends: list[list[int]] = []  # how far along each axis its blocks reached: the whole image's layer
         for start, stop in boxes:
             box, own = read_block(source, (start, stop), blocks, halo, stride, slabs)
-            for layer, (strides, features) in enumerate(owned_layers(core, box, own, statistics[side], norms)):
+            for layer, (strides, features) in enumerate(owned_layers(core, box, own, stats, norms)):
                 at = [a // k for a, k in zip(start, strides, strict=True)]
                 if layer == len(cells):
                     cells.append(
@@ -872,6 +889,21 @@ def static_feature_sources(
             arrays.append(placed)
         return arrays, bases
 
+    def back_on_image(array: np.ndarray, shape: Sequence[int], path: Path) -> np.ndarray:
+        """Features on a model's grid brought onto the image's voxels, block by block, as a run on the whole pair
+        brings them (``resampled`` with the border past the last feature, which ``onto_image_grid`` is)."""
+        placed = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float32, shape=(array.shape[0], *shape))
+        grid = tuple(array.shape[1:])
+        for start, stop in tiles(shape, block):
+            box = list(zip(start, stop, strict=True))
+            window = layer_window(box, grid, shape)
+            features = to_device(array[(slice(None), *(slice(a, b) for a, b in window))], str(fixed.device))[None]
+            to_array(
+                placed[(slice(None), *(slice(a, b) for a, b in box))],
+                onto_image_grid(features, tuple(shape), box, grid)[0],
+            )
+        return placed
+
     def halved(blocks: list[int], stride: int) -> bool:
         """``blocks[0]`` halved, a whole number of ``stride``: whether it could be."""
         if blocks[0] <= stride:
@@ -886,11 +918,21 @@ def static_feature_sources(
     loss._channels = []
     with torch.no_grad():
         for index, core in enumerate(loss.cores):
+            # A model with a voxel_size reads each image on a grid at it over the image's extent, as a run on the
+            # whole pair resamples it (``resampled``), normalised by that image's statistics; its features come back
+            # onto the image's voxels as the whole run brings them (``back_on_image``).
+            read, read_statistics = sources, statistics
             if core.model.voxel_size is not None:
-                raise NotImplementedError(
-                    "Static mode by blocks takes feature models at the image's own resolution: a voxel_size lays the"
-                    " features out over the whole image."
-                )
+                if core.dimension < len(fixed.shape):
+                    raise NotImplementedError(
+                        "a 2D network with a voxel_size sweeps the slices of the volume resampled at it, which blocks"
+                        " of the volume do not cut: register with a 3D model or with the image's own resolution."
+                    )
+                read = {
+                    side: ResampledSource(source, grid_size(extent, core.model.voxel_size, source.shape))
+                    for (side, source), extent in zip(sources.items(), extents, strict=True)
+                }
+                read_statistics = {side: statistics_of(source) for side, source in read.items()}
             # A side at a time, the fixed one first: its features' basis projects both.
             bases: list[torch.Tensor] = []
             widths: list[int] = []
@@ -909,7 +951,7 @@ def static_feature_sources(
                 # not hold leaves them at ``block``, which the extraction halves while they do not fit.
                 with contextlib.suppress(torch.cuda.OutOfMemoryError), out_of_memory_as_torch(cuda):
                     if cuda:
-                        cost = block_cost(core, statistics["fixed"])
+                        cost = block_cost(core, read_statistics["fixed"])
                         widest = int((free_bytes(fixed.device) / 2 / cost) ** (1 / len(fixed.shape)))
                         held = max(0, (widest - stride) // 2 // stride * stride)
                         if held < halo:  # no block with the whole field around it fits: the widest halo that does
@@ -920,12 +962,19 @@ def static_feature_sources(
                             )
                             halo = held
                         blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
-                for side, source in sources.items():
+                for side, source in read.items():
                     arrays, bases = halve_on_oom(
-                        functools.partial(extract, core, index, side, source, blocks, halo, stride, bases),
+                        functools.partial(
+                            extract, core, index, side, source, read_statistics[side], blocks, halo, stride, bases
+                        ),
                         functools.partial(halved, blocks, stride),
                         cuda,
                     )
+                    if source is not sources[side]:
+                        arrays = [
+                            back_on_image(array, sources[side].shape, directory / f"{side}_{index}_{layer}_image.npy")
+                            for layer, array in enumerate(arrays)
+                        ]
                     widths = [int(array.shape[0]) for array in arrays]
                     volumes[side] += [(array, index) for array in arrays]
             finally:

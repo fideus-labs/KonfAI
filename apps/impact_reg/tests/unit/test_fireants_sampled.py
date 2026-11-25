@@ -41,6 +41,7 @@ from impact_reg_konfai.ooc import (  # noqa: E402
     ArraySource,
     HeaderImages,
     OnesSource,
+    ResampledSource,
     RescaledSource,
     StackedSource,
     blur_level,
@@ -562,6 +563,73 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers
     signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)
     for reference, found in zip(whole, blocks, strict=True):
         assert torch.allclose(found * signs, reference, atol=1e-5)
+
+
+@pytest.mark.parametrize("layers", ["10", "01"], ids=["full", "strided"])
+def test_static_features_at_a_voxel_size_by_blocks_are_the_whole_image_s(tmp_path, layers):
+    """A model with a voxel_size reads the image resampled at it, by blocks of that grid, and its features come back
+    onto the image's voxels: the whole image's, the moving image on its own extent."""
+    from impact_reg_konfai.models import fireants as engine
+    from impact_reg_konfai.models.fireants_sampled import static_feature_sources
+
+    path = tmp_path / "strided.pt"
+    torch.jit.script(_Strided()).save(str(path))
+    spec = engine.ModelSpec(
+        ref=str(path),
+        layers_mask=layers,
+        pca=2,
+        distance="LNCC",
+        feature_normalization="l2",
+        voxel_size=[1.4, 0.7, 1.9],
+    )
+    loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
+    loss.cores[0].model.fov, loss.cores[0].model.multiple = [3, 4], 2
+    fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:20, :24, :26]
+    extents = ([27.0, 25.0, 21.0], [26.0, 24.0, 20.0])  # mm along L, P, S: one voxel a mm
+    whole = loss.extract(
+        *(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25, extents
+    )
+    sources = static_feature_sources(
+        loss,
+        ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
+        ArraySource(np.ascontiguousarray(moving)[None], "cpu"),
+        tmp_path,
+        block=8,
+        extents=extents,
+    )
+    blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
+    signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)
+    for reference, found in zip(whole, blocks, strict=True):
+        assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
+
+
+class _Counted(ArraySource):
+    """An image source that keeps the size of every box it was asked."""
+
+    def __init__(self, array):
+        super().__init__(array, "cpu")
+        self.reads = []
+
+    def read(self, start, stop):
+        self.reads.append(math.prod(b - a for a, b in zip(start, stop, strict=True)))
+        return super().read(start, stop)
+
+
+@pytest.mark.parametrize(
+    "shape, size", [((97, 83, 71), (40, 33, 30)), ((40, 31, 29), (77, 70, 61)), ((61, 47), (13, 50))]
+)
+def test_a_resampled_box_is_the_whole_resampled_image_s_and_reads_at_most_2_to_the_dims_times_it(shape, size):
+    """A box of an image resampled at a model's voxel size is the whole resampled image's, read in runs of the planes
+    it interpolates from: downsampling reads no more than 2**dims times the box at once."""
+    from konfai.metric.measure.impact import resampled
+
+    image = torch.rand(2, *shape, generator=torch.Generator().manual_seed(0))
+    source, whole = _Counted(image.numpy()), resampled(image[None], size)
+    for box in [(0, s) for s in size], [(s // 3, s - 1) for s in size]:
+        source.reads.clear()
+        found = ResampledSource(source, size).read([a for a, _ in box], [b for _, b in box])
+        assert torch.allclose(found, whole[(slice(None), slice(None), *(slice(a, b) for a, b in box))], atol=1e-5)
+        assert max(source.reads) <= 2 ** len(size) * math.prod(b - a for a, b in box)
 
 
 class _Dilated(torch.nn.Module):

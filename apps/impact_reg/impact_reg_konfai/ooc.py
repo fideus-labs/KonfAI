@@ -226,6 +226,56 @@ class RescaledSource(RegionSource):
         return self.source.bytes_read
 
 
+def _lerp(region: torch.Tensor, axis: int, low: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """``region`` linearly interpolated along spatial ``axis`` between voxels ``low`` and ``low + 1``, zero past its
+    last voxel."""
+    region = torch.nn.functional.pad(region, [0, 0] * (region.dim() - 3 - axis) + [0, 1])
+    low = low.to(region.device)
+    weight = weight.to(region.device, region.dtype).view([-1 if d == 2 + axis else 1 for d in range(region.dim())])
+    return torch.lerp(region.index_select(2 + axis, low), region.index_select(2 + axis, low + 1), weight)
+
+
+class ResampledSource(RegionSource):
+    """``source`` on a grid of ``size`` over the same extent, box by box, as ``konfai.metric.measure.impact.resampled``
+    resamples an image for a model at its voxel size: voxel ``i`` of an axis at the source's continuous index
+    ``i * old / new``, the first voxels aligned, linearly interpolated, zero past the source's last voxel."""
+
+    def __init__(self, source: RegionSource, size: Sequence[int]) -> None:
+        self.source, self.shape = source, tuple(int(extent) for extent in size)
+        self.channels, self.device = source.channels, source.device
+
+    def read(self, start: Sequence[int], stop: Sequence[int]) -> torch.Tensor:
+        lows, weights = [], []
+        for a, b, old, new in zip(start, stop, self.source.shape, self.shape, strict=True):
+            at = torch.arange(a, b, dtype=torch.float64) * (old / new)
+            lows.append(at.floor().long())
+            weights.append(at - lows[-1])
+        inner = [
+            (int(low[0]), min(int(low[-1]) + 2, old)) for low, old in zip(lows[1:], self.source.shape[1:], strict=True)
+        ]
+        # Only the planes of the first axis a point interpolates from, read in runs of at most 2**dims times the box
+        # (one plane at least): downsampling by r would otherwise read r**dims times the box, most of it between points.
+        needed = torch.unique(torch.cat([lows[0], lows[0] + 1]).clamp(max=self.source.shape[0] - 1))
+        plane = math.prod(b - a for a, b in inner)
+        span = max(1, 2 ** len(self.shape) * math.prod(b - a for a, b in zip(start, stop, strict=True)) // plane)
+        pieces, i = [], 0
+        while i < len(needed):
+            j = int(torch.searchsorted(needed, needed[i] + span))
+            first, last = int(needed[i]), int(needed[j - 1]) + 1
+            region = self.source.read([first, *(a for a, _ in inner)], [last, *(b for _, b in inner)])
+            region = region.index_select(2, (needed[i:j] - first).to(region.device))
+            for axis, (low, weight) in enumerate(zip(lows[1:], weights[1:], strict=True), start=1):
+                region = _lerp(region, axis, low - inner[axis - 1][0], weight)
+            pieces.append(region)
+            i = j
+        # The second plane a point reads is the next needed one, or zeros past the source's last.
+        return _lerp(torch.cat(pieces, 2), 0, torch.searchsorted(needed, lows[0]), weights[0])
+
+    @property
+    def bytes_read(self) -> int:  # type: ignore[override]
+        return self.source.bytes_read
+
+
 class HeaderImages:
     """What FireANTs' registrations read of a ``BatchedImages`` to set themselves up, from an image's header alone:
     the torch (normalized, align_corners) to physical mapping, the shape and the device. ``__call__`` has no image to
