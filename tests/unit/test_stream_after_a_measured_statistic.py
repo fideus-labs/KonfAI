@@ -33,11 +33,22 @@ import torch
 from konfai.data.augmentation import ContrastAroundMean, Gamma
 from konfai.data.augmentation.base import DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import Clip, Normalize, Resample, Standardize, Statistics, Transform
+from konfai.data.transform import (
+    CaseStatistic,
+    Clip,
+    Normalize,
+    Permute,
+    Resample,
+    Standardize,
+    Statistics,
+    TensorCast,
+    Transform,
+    stat_seed_valid,
+)
 from konfai.data.transform.base import LocalityKind, PatchLocality
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.ome_zarr import write_ome_zarr
-from oracle_support import manager
+from oracle_support import CASE_NAME, geometry, manager
 
 
 def _source(tmp_path):
@@ -521,3 +532,280 @@ def test_a_free_rotation_or_scale_streams_bit_for_bit(streaming_dataset_stub):
 
         assert case.stream_refusal(1, True) is None, dtype
         assert _same(_patches(case, 1, True), _whole(case, 1, True)), dtype
+
+
+@pytest.mark.parametrize(
+    ("before", "save"),
+    [
+        ([], False),
+        ([Resample(spacing=[2.0, 2.0, 2.0], interpolation="linear")], False),
+        ([Resample(spacing=[2.0, 2.0, 2.0], interpolation="linear")], True),
+    ],
+    ids=["stored", "resampled", "resampled-saved"],
+)
+def test_a_percentile_bound_streams_on_the_number_the_whole_volume_gives(tmp_path, before, save):
+    # On the stored volume, numpy's percentile read by bounded passes seeds the Clip; after a resample, a pass over
+    # the whole volume measures it. Either way the regions land where the whole volume does, and a bound reaches the
+    # header only when it is saved.
+    _source(tmp_path)
+    clip = Clip(min_value="percentile:0.5", max_value="percentile:99.5", save_clip_min=save, save_clip_max=save)
+    chain = [*before, clip, Normalize(min_value=0, max_value=1)]
+    case = manager(Dataset(tmp_path / "src", "omezarr"), chain)
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region(tuple(slice(0, extent) for extent in case.spatial_shape), 0, False)
+
+    case.load(chain, [], load_augmentations=False)
+    assert torch.equal(region, case.data[0])
+    assert ("Percentile:0.5" in case.cache_attributes[0]) is save
+    assert ("Percentile:0.5" in case.landed_attributes(0)) is save
+
+
+def test_a_store_percentile_is_read_on_the_channels_its_stage_declares(tmp_path):
+    # Two stages of one case reading the median of another channel each get their own channel's, as the moments are
+    # read: the first answer does not serve the second, and no stage's channels read the volume's.
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, np.stack([np.zeros((6, 6, 6)), np.full((6, 6, 6), 100.0)]), geometry())
+    case = manager(dataset, [])
+
+    def median(channels: list[int] | None) -> float:
+        locality = PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Percentile:50.0"}), stat_channels=channels
+        )
+        return float(dict(case._store_seed(dataset, "CT", CASE_NAME, Attribute(), locality))["Percentile:50.0"])
+
+    assert [median([0]), median([1]), median(None)] == [0.0, 100.0, 50.0]
+
+
+def test_a_case_statistic_is_folded_by_slabs_of_the_store_to_the_whole_volume_s_value(tmp_path, monkeypatch):
+    # A statistic of the app's own, read with a halo: bounded slabs of the stored volume, each read with its neighbour
+    # rows, fold to the value the whole volume gives, and every region is that one float32.
+    import konfai.utils.dataset.statistics as statistics
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 8 * 32 * 32)
+    monkeypatch.setattr(statistics, "_STATISTICS_CHUNK_ELEMENTS", 8 * 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    stage = CaseStatistic("oracle_support:Roughness")
+    case = manager(dataset, [stage])
+    rows: list[range] = []
+    read = Dataset.read_data_slice
+    monkeypatch.setattr(Dataset, "read_data", lambda *_: pytest.fail("the statistic must not read the whole volume"))
+    monkeypatch.setattr(
+        Dataset, "read_data_slice", lambda self, g, n, s: rows.append(range(*s[1].indices(40))) or read(self, g, n, s)
+    )
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region((slice(3, 9), slice(0, 32), slice(0, 32)), 0, False)
+
+    assert len(set(rows)) > 3 and max(map(len, rows)) < 40
+    whole = stage(CASE_NAME, torch.from_numpy(volume), Attribute())
+    assert whole.dtype == torch.float32 and whole.shape == (1, 40, 32, 32)
+    assert torch.equal(region, whole[:, 3:9])
+
+
+def test_a_case_statistic_of_a_store_read_whole_folds_it_by_slabs(tmp_path, monkeypatch):
+    # A store that serves no region alone (GIPL) is read whole once, as every region read of it decodes it whole; the
+    # fold still takes that volume by slabs, never all of it at once in float64 with the class's working copies.
+    import konfai.utils.dataset.statistics as statistics
+    from oracle_support import Roughness
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 8 * 32 * 32)
+    monkeypatch.setattr(statistics, "_STATISTICS_CHUNK_ELEMENTS", 8 * 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    assert not dataset.bounded_region_reads("CT", CASE_NAME)
+    rows: list[int] = []
+    whole: list[tuple] = []
+    partial, read = Roughness.partial, Dataset.read_data
+    monkeypatch.setattr(Roughness, "partial", lambda self, block: rows.append(block.shape[1]) or partial(self, block))
+    monkeypatch.setattr(Dataset, "read_data", lambda self, *entry: whole.append(entry) or read(self, *entry))
+    stage = CaseStatistic("oracle_support:Roughness")
+    case = manager(dataset, [stage])
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    assert len(whole) == 1  # read whole once: a region read of it would decode it whole for each block
+    region = case.read_region((slice(3, 9), slice(0, 32), slice(0, 32)), 0, False)
+
+    assert len(rows) > 3 and max(rows) < 40
+    assert torch.equal(region, stage(CASE_NAME, torch.from_numpy(volume), Attribute())[:, 3:9])
+
+
+@pytest.mark.parametrize(("extension", "grain"), [("mha", None), ("mha", 8), ("gipl", None)])
+def test_a_case_statistic_s_scan_holds_its_float64_fold_within_the_budget(tmp_path, monkeypatch, extension, grain):
+    # Three float32 blocks in flight fit the budget at 26 rows, and at 24 on the grain of 8, each block starting and
+    # stopping on it; the fold holds each block in float64 and the class's partial three float64 copies more, 32 B an
+    # element over the 12 the blocks in flight cost, beside the volume a store read whole holds.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from oracle_support import Roughness
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    if grain:
+        monkeypatch.setattr(Dataset, "read_granularity", lambda self, groups, name: (1, grain, 32, 32))
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32)).astype(np.float32)
+    dataset = Dataset(tmp_path / "src", extension)
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    sizes: list[int] = []
+    partial = Roughness.partial
+    monkeypatch.setattr(Roughness, "partial", lambda self, block: sizes.append(block.numel()) or partial(self, block))
+    blocks: list[slice] = []  # the rows each block reads along the first spatial axis, its halo of 1 included
+    read_slice = Dataset.read_data_slice
+
+    def read(self, groups, name, slices):
+        if len(slices) == 4 and slices[2] == slice(None):
+            blocks.append(slices[1])
+        return read_slice(self, groups, name, slices)
+
+    monkeypatch.setattr(Dataset, "read_data_slice", read)
+    stage, budget = CaseStatistic("oracle_support:Roughness"), 1_500_000
+    set_per_rank_budget(budget)
+    try:
+        stage._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+
+    resident = volume.nbytes if extension == "gipl" else 0
+    assert sizes and max(sizes) * (3 * 4 + 4 * 8) + resident <= budget, f"blocks of {max(sizes)} elements"
+    if grain:
+        edges = [block.start + 1 for block in blocks if block.start] + [
+            block.stop - 1 for block in blocks if block.stop < 40
+        ]
+        assert edges and all(edge % grain == 0 for edge in edges), blocks
+
+
+@pytest.mark.parametrize("extension", ["mha", "gipl"])
+def test_a_case_statistic_whose_shortest_block_and_fold_exceed_the_budget_is_refused(tmp_path, monkeypatch, extension):
+    # One row read with its halo holds 3 x 34 x 34 voxels: 152,592 B with the fold, over 100,000 B, whether the store
+    # is read by regions or whole.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", extension)
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.float32), geometry())
+    set_per_rank_budget(100_000)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
+        # The moments of a store read whole keep their rule: one row of 12,288 B over 10,000 B is read, and blocks of
+        # 24 rows in 300,000 B, the volume unpriced.
+        set_per_rank_budget(10_000)
+        if extension == "gipl":
+            assert dataset.read_data_statistics("CT", CASE_NAME)["mean"] == 0.0
+            set_per_rank_budget(300_000)
+            assert statistics._block_rows([], CASE_NAME, [1, 40, 32, 32]) == 24
+    finally:
+        set_per_rank_budget(None)
+
+
+@pytest.mark.parametrize(("dtype", "budget"), [(np.float32, 200_000), (np.float64, 500_000)])
+def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budget(
+    tmp_path, monkeypatch, dtype, budget
+):
+    # Read whole, the store holds the volume (163,840 B in float32) beside the shortest block and its fold (152,592 B):
+    # over 200,000 B together, the scan is refused, though the block alone fits. A float64 store holds twice as much,
+    # and its blocks in flight too: 327,680 B and 194,208 B, over 500,000 B, which a float32 pricing of its blocks
+    # (152,592 B) would fit.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), dtype), geometry())
+    set_per_rank_budget(budget)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+
+
+def test_a_store_read_whole_over_the_budget_at_a_byte_an_element_is_refused_before_it_is_read(tmp_path, monkeypatch):
+    # 40,960 voxels do not fit 30,000 B whatever the element size: refused before the store is decoded whole.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+    from konfai.utils.errors import DatasetManagerError
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, np.zeros((1, 40, 32, 32), np.uint8), geometry())
+    monkeypatch.setattr(Dataset, "read_data", lambda *args, **kwargs: pytest.fail("the store was decoded whole"))
+    set_per_rank_budget(30_000)
+    try:
+        with pytest.raises(DatasetManagerError, match="over the per-rank memory budget"):
+            CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+
+
+class Total:
+    """A ``CaseStatistic`` class reading no voxel past its own: the mean of the volume, with no halo."""
+
+    halo = 0
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        return torch.stack([block.sum(), torch.ones_like(block).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return total[0] / total[1]
+
+
+def test_a_store_read_whole_is_scanned_by_views_of_the_volume_it_holds(tmp_path, monkeypatch):
+    # With no halo, a store read whole hands its blocks as views of the volume (327,680 B in float64): the scan holds it
+    # and the fold (32,768 B a row), not three blocks of its own more (24,576 B), and fits 370,000 B.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32))
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    set_per_rank_budget(370_000)
+    try:
+        measured = CaseStatistic("test_stream_after_a_measured_statistic:Total")._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+    assert float(measured) == pytest.approx(volume.mean())
+
+
+class AlongX:
+    """A ``CaseStatistic`` class that tells the axes apart: the RMS of the difference of each voxel's two neighbours
+    along x."""
+
+    halo = 1
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        step = block[:, 1:-1, 1:-1, 2:] - block[:, 1:-1, 1:-1, :-2]
+        return torch.stack([(step**2).sum(), torch.ones_like(step).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(total[0] / total[1])
+
+
+def test_a_statistic_of_the_voxels_arrangement_is_measured_behind_a_reorientation(tmp_path):
+    # A reorientation keeps the values a moment or a percentile reads, not the arrangement a class may read: behind a
+    # Permute the stored volume's y is the stage's x, so the stored volume's number is not the stage's, and the regions
+    # take the one the whole route measures.
+    volume = np.random.default_rng(0).normal(size=(1, 12, 16, 20)).astype(np.float32).cumsum(axis=3)
+    dataset = Dataset(tmp_path / "src", "mha")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    chain = [Permute("0|2|1"), CaseStatistic("test_stream_after_a_measured_statistic:AlongX")]
+    case = manager(dataset, chain)
+
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, apply_augmentations=False) is None
+    region = case.read_region(tuple(slice(0, extent) for extent in case.spatial_shape), 0, False)
+
+    case.load(chain, [], load_augmentations=False)
+    assert torch.equal(region, case.data[0])
+    # The rule itself: what a reorientation keeps, and what a cast that keeps every value keeps.
+    turned, cast = (stage.patch_locality(Attribute()) for stage in (Permute("0|2|1"), TensorCast("float32")))
+    assert stat_seed_valid([turned], {"Percentile:50"}) and stat_seed_valid([cast], {chain[1].key})
+    assert not stat_seed_valid([turned], {chain[1].key})

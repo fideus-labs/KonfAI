@@ -42,6 +42,7 @@ from konfai.utils.runtime.environment import clear_directory_except_logs as clea
 from konfai.utils.runtime.environment import configure_workflow_environment as configure_workflow_environment
 from konfai.utils.runtime.environment import confirm_overwrite_or_raise as confirm_overwrite_or_raise
 from konfai.utils.runtime.environment import description as description
+from konfai.utils.runtime.environment import expandable_cuda_segments as expandable_cuda_segments
 from konfai.utils.runtime.environment import get_cpu_info as get_cpu_info
 from konfai.utils.runtime.environment import get_device as get_device
 from konfai.utils.runtime.environment import get_gpu_memory as get_gpu_memory
@@ -83,6 +84,7 @@ __all__ = [
     "confirm_overwrite_or_raise",
     "description",
     "execute_distributed_object",
+    "expandable_cuda_segments",
     "find_free_port",
     "get_cpu_info",
     "get_device",

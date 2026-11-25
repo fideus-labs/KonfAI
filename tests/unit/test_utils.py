@@ -83,3 +83,61 @@ def test_state_is_the_one_runtime_re_exports() -> None:
 
     assert runtime_state is konfai.utils.State
     assert [str(state) for state in konfai.utils.State] == ["TRAIN", "RESUME", "PREDICTION", "EVALUATION", "TRANSFORM"]
+
+
+@pytest.mark.parametrize(
+    ("held", "asked", "refused"), [("Engine.wasm", "Engine.wasm", False), ("Engine.wasm", "engine.wasm", True)]
+)
+def test_a_destination_s_own_name_is_its_own_in_any_case(tmp_path, held: str, asked: str, refused: bool) -> None:
+    # A file kept under the very name asked is replaced; one its folder holds in another case is refused.
+    from konfai.utils.errors import ConfigError
+    from konfai.utils.utils import owned_destination
+
+    (tmp_path / held).write_text("old")
+    if refused:
+        with pytest.raises(ConfigError, match=f"named '{held}' in another case"):
+            owned_destination(tmp_path / asked)
+    else:
+        assert owned_destination(tmp_path / asked) == tmp_path / asked
+
+
+@pytest.mark.parametrize(
+    ("planted", "refused"),
+    [
+        ("nothing", None),
+        ("a file of its own", None),
+        ("a directory", "a directory"),
+        ("a link to a file", "a link"),
+        ("a link to nothing", "a link"),
+        ("a file shared with another path", "shared with another path"),
+        ("a file of another case", "named 'MANIFEST.json' in another case"),
+    ],
+)
+def test_a_destination_is_nothing_or_a_file_of_its_own(tmp_path, planted: str, refused: str | None) -> None:
+    # What a compile or a bundle's update writes it writes whole, into nothing it would write into or through.
+    import os
+
+    from konfai.utils.errors import ConfigError
+    from konfai.utils.utils import owned_destination
+
+    destination = tmp_path / "manifest.json"
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text("not the destination's")
+    if planted == "a file of its own":
+        destination.write_text("old")
+    elif planted == "a directory":
+        destination.mkdir()
+    elif planted == "a link to a file":
+        destination.symlink_to(elsewhere)
+    elif planted == "a link to nothing":
+        destination.symlink_to(tmp_path / "gone.json")
+    elif planted == "a file shared with another path":
+        os.link(elsewhere, destination)
+    elif planted == "a file of another case":  # one file on a file system telling no case apart
+        (tmp_path / "MANIFEST.json").write_text("the folder's")
+    if refused is None:
+        assert owned_destination(destination) == destination
+    else:
+        with pytest.raises(ConfigError, match=rf"manifest\.json' is {refused}"):
+            owned_destination(destination)
+    assert elsewhere.read_text() == "not the destination's"

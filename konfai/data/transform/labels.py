@@ -18,12 +18,15 @@
 """Label and channel transforms: masks, dilation, argmax/softmax, label merging and selection, one-hot."""
 
 import contextlib
+import itertools
+from array import array
 from collections.abc import Sequence
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+from konfai.data.sampling import _where
 from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse, sitk
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
@@ -314,6 +317,162 @@ class Softmax(Transform):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # torch.softmax has no integer kernel, and a store serves int16.
         return torch.softmax(tensor if tensor.is_floating_point() else tensor.float(), dim=self.dim)
+
+
+def _components(labels: np.ndarray, full: bool = False, per_label: bool = False) -> np.ndarray:
+    """The components of ``labels``' non-zero voxels, face to face or, ``full``, every touching voxel; ``per_label``,
+    of voxels of one value only. Numbered from 1 in the order of their first voxel in scan order (some numbers
+    unused ``per_label``), 0 outside: ITK's ``ConnectedComponentImageFilter`` and, ``per_label``,
+    ``ScalarConnectedComponentImageFilter`` at distance 0."""
+    _require_simpleitk()
+    foreground = sitk.GetImageFromArray((labels != 0).astype(np.uint8))
+    if per_label:
+        values = labels.astype(np.float64) if labels.dtype in (np.bool_, np.float16) else labels  # none in SimpleITK
+        components = sitk.ScalarConnectedComponent(sitk.GetImageFromArray(values), foreground, 0.0, full)
+    else:
+        components = sitk.ConnectedComponent(foreground, full)
+    return sitk.GetArrayViewFromImage(components).astype(np.int64)
+
+
+def largest_component(labels: np.ndarray, rows: int, per_label: bool = False, full: bool = False) -> np.ndarray:
+    """Where the largest component of ``labels``' non-zero voxels lies (:func:`_components`), or ``per_label`` the
+    largest of each value; of two of one size, the first in scan order, as ``scipy.ndimage.label`` numbers them.
+    Two passes over slabs of ``rows`` planes along the first axis: the first numbers each slab's components, joins
+    them across the slab's face with the slab before, voxels of one value facing each other or, ``full``, touching
+    (a union-find whose root is the lowest number, the first in scan order, and holds its component's size); the
+    second numbers each slab again and keeps the voxels of the kept roots. Memory: one slab's numbers beside the
+    answer, and per component of the volume its parent and its size (8 bytes each) and its value, up to one
+    component per voxel."""
+    parent, sizes = array("q", [0]), array("q", [0])
+    values = [np.zeros(1, dtype=labels.dtype)]
+    offsets, face = [], None
+    plane = labels.shape[1:]
+    shifts = list(itertools.product((-1, 0, 1), repeat=len(plane))) if full else [(0,) * len(plane)]
+
+    def root(label: int) -> int:
+        while parent[label] != label:
+            parent[label] = parent[parent[label]]
+            label = parent[label]
+        return label
+
+    for start in range(0, labels.shape[0], rows):
+        slab = labels[start : start + rows]
+        local = _components(slab, full, per_label)
+        offset, count = len(parent) - 1, int(local.max())
+        offsets.append(offset)
+        parent.extend(range(offset + 1, offset + count + 1))
+        counts = np.bincount(local.ravel(), minlength=count + 1)[1:].astype(np.int64, copy=False)
+        sizes.frombytes(memoryview(counts).cast("B"))
+        value = np.zeros(count + 1, dtype=labels.dtype)
+        value[local] = slab
+        values.append(value[1:])
+        np.add(local, offset, out=local, where=local > 0)  # numbered across the volume, in place
+        if face is not None:
+            pairs: set[tuple[int, int]] = set()
+            for shift in shifts:  # face[i + shift] against local[0][i]
+                before = tuple(slice(max(s, 0), n + min(s, 0)) for s, n in zip(shift, plane, strict=True))
+                after = tuple(slice(max(-s, 0), n - max(s, 0)) for s, n in zip(shift, plane, strict=True))
+                a, b = face[before], local[0][after]
+                touching = (a > 0) & (b > 0) & (labels[start - 1][before] == slab[0][after])
+                pairs.update(zip(a[touching].tolist(), b[touching].tolist(), strict=True))
+            for a, b in pairs:
+                low, high = sorted((root(a), root(b)))
+                if low != high:  # the root takes the size of the tree it joins
+                    parent[high], sizes[low], sizes[high] = low, sizes[low] + sizes[high], 0
+        face = local[-1].copy()  # a view would hold the whole slab past it
+    del slab, local, face, value, counts
+    for label in range(len(parent)):  # parent[label] <= label: each root is resolved before its members
+        parent[label] = parent[parent[label]]
+    roots, totals = np.frombuffer(parent, dtype=np.int64), np.frombuffer(sizes, dtype=np.int64)  # 0 but at a root
+    keep = np.zeros(len(roots), dtype=bool)
+    if per_label:
+        # Of each value's roots, the largest; of two of one size, the lowest, the sort being stable.
+        value = np.concatenate(values)
+        del values
+        candidates = np.flatnonzero(totals)
+        if len(candidates):
+            order = candidates[np.lexsort((-totals[candidates], value[candidates]))]
+            keep[order[np.r_[True, value[order][1:] != value[order][:-1]]]] = True
+    else:
+        keep[np.argmax(totals)] = True  # the largest root, the lowest of two of one size
+        keep[0] = False  # no foreground at all
+    keep = keep[roots]  # per component, whether its root is kept; 0's root is 0, never kept
+    del roots, totals
+    parent, sizes = array("q"), array("q")  # the records freed: the second pass holds a slab of ITK's numbers
+    kept = np.zeros(labels.shape, dtype=bool)
+    for start, offset in zip(range(0, labels.shape[0], rows), offsets, strict=True):
+        local = _components(labels[start : start + rows], full, per_label)
+        np.add(local, offset, out=local, where=local > 0)
+        kept[start : start + rows] = keep[local]
+    return kept
+
+
+class KeepLargestComponent(Transform):
+    """Set every voxel outside the largest component of a foreground to 0, the component's voxels face to face
+    (``connectivity: 6``, 4 in 2-D) or every touching one (26, 8 in 2-D); of two of one size, the first in scan
+    order is kept.
+
+    The foreground is the non-zero voxels of the channel ``mask``, which the output drops, else of any channel.
+    ``per_label`` joins only voxels of one value and keeps the largest component of each value, the values read
+    from the channel ``mask`` or from the case's one channel: ``per_label: true, connectivity: 26`` is MONAI's
+    ``KeepLargestConnectedComponent()`` on a label map, which picks one of two components of one size by its sort,
+    no rule, where this keeps the first in scan order. It is found by slabs of ``rows`` planes
+    (:func:`largest_component`), but which component is largest is known once the last slab is read: the stage
+    needs the whole volume."""
+
+    # The foreground, the kept voxels and a slab's int64 numbers, two slabs' worth with ITK's while one is read:
+    # measured 5.3 for a case of ``rows`` planes or fewer, one slab. Beside the numbers, a parent, a size and a value
+    # per component of the volume: 5.75 on one broken into every other voxel, the most a foreground can be.
+    working_multiple = 6.0
+
+    def __init__(self, mask: int | None = None, rows: int = 64, per_label: bool = False, connectivity: int = 6) -> None:
+        super().__init__()
+        if connectivity not in (4, 6, 8, 26):
+            raise TransformError(
+                f"'KeepLargestComponent' was given connectivity={connectivity}.",
+                "Give 6 (4 in 2-D) to join voxels face to face, 26 (8 in 2-D) to join every touching voxel.",
+            )
+        self.mask = mask
+        self.rows = int(rows)
+        self.per_label = bool(per_label)
+        self.full = connectivity in (8, 26)
+
+    def case_working_multiple(self, name: str) -> float:
+        """``per_label``, up to a component per voxel, each with its value, and a sort of their roots to find each
+        value's largest: 15.25 measured on an int64 map of a value per voxel."""
+        return 16.0 if self.per_label else self.working_multiple
+
+    def output_channels(self, channels: int) -> int:
+        return channels - 1 if self.mask is not None else channels
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME, reason="which component is largest is known once every slab is read"
+        )
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        channels = tensor.shape[0]
+        if self.mask is None:
+            if self.per_label and channels != 1:
+                raise TransformError(
+                    f"'KeepLargestComponent' with per_label reads its labels from one channel, and case '{name}'"
+                    f" has {channels}.",
+                    "Name the channel holding the labels in mask.",
+                )
+            values, labels = tensor, tensor[0] if self.per_label else (tensor != 0).any(0)
+        else:
+            if not -channels <= self.mask < channels:
+                raise TransformError(
+                    f"'KeepLargestComponent' reads its foreground from channel {self.mask} of case '{name}', which"
+                    f" has {channels}.",
+                    f"Give mask a channel from {-channels} to {channels - 1}.",
+                )
+            mask = self.mask % channels
+            values = torch.cat([tensor[:mask], tensor[mask + 1 :]])
+            labels = tensor[mask] if self.per_label else tensor[mask] != 0
+        kept = torch.from_numpy(largest_component(labels.cpu().numpy(), self.rows, self.per_label, self.full))
+        kept = kept.to(values.device)
+        return _where(kept, values, torch.zeros((), dtype=values.dtype, device=values.device))
 
 
 class Otsu(Transform):

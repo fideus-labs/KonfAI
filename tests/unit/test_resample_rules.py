@@ -25,10 +25,12 @@ import numpy as np
 import pytest
 import torch
 from konfai.data import spline
+from konfai.data.geometry import Grid
 from konfai.data.transform import Canonical, LocalityKind, Resample
+from konfai.data.transform.resample import _RuleGrid
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
-from oracle_support import assert_same_as_scipy, geometry
+from oracle_support import assert_same_as_scipy, geometry, resample_faces, resize, zoom
 
 _RNG = np.random.default_rng(7)
 _VOLUME = (_RNG.normal(size=(13, 17, 11)) * 100).astype(np.float64)
@@ -44,21 +46,20 @@ def _ndi():
 def test_zoom_is_scipys_to_the_bit(order: int, corners: bool, shape: tuple[int, ...]) -> None:
     ndi = _ndi()
     want = ndi.zoom(_VOLUME, np.divide(shape, _VOLUME.shape), order=order, mode="nearest", grid_mode=not corners)
-    assert_same_as_scipy(spline.zoom(_VOLUME, shape, order, corners), want)
+    assert_same_as_scipy(zoom(_VOLUME, shape, order, corners), want)
 
 
 @pytest.mark.parametrize("shape", [(20, 9, 11), (7, 30, 5)])
 def test_resize_is_skimages_to_the_bit(shape: tuple[int, ...]) -> None:
-    resize = pytest.importorskip("skimage.transform").resize
-    want = resize(_VOLUME, shape, 3, mode="edge", anti_aliasing=False)
-    assert_same_as_scipy(spline.resize(_VOLUME, shape, 3), want)
+    want = pytest.importorskip("skimage.transform").resize(_VOLUME, shape, 3, mode="edge", anti_aliasing=False)
+    assert_same_as_scipy(resize(_VOLUME, shape, 3), want)
 
 
 @pytest.mark.parametrize(("shape", "order"), [((30, 50, 20), 3), ((30, 50, 20), 1)])
 def test_resample_faces_resizes_each_channel_as_scikit_image(shape: tuple[int, ...], order: int) -> None:
     data = (_RNG.normal(size=(2, 12, 40, 33)) * 300).astype(np.float32)
-    want = np.stack([spline.resize(channel.astype(np.float64), shape, order) for channel in data])
-    np.testing.assert_array_equal(spline.resample_faces(data, shape, order, None), want)
+    want = np.stack([resize(channel.astype(np.float64), shape, order) for channel in data])
+    np.testing.assert_array_equal(resample_faces(data, shape, order, None), want)
 
 
 @pytest.mark.parametrize(("shape", "axis"), [((40, 60, 66), 0), ((12, 70, 20), 2)])
@@ -66,13 +67,13 @@ def test_resample_faces_resizes_slices_alone_then_picks_the_axis_apart_by_neares
     shape: tuple[int, ...], axis: int
 ) -> None:
     data = (_RNG.normal(size=(1, 12, 40, 33)) * 300).astype(np.float32)
-    out = spline.resample_faces(data, shape, 3, axis)
+    out = resample_faces(data, shape, 3, axis)
     source = np.moveaxis(data[0].astype(np.float64), axis, 0)
     plane = tuple(extent for a, extent in enumerate(shape) if a != axis)
     for k, picked in enumerate(np.moveaxis(out[0], axis, 0)):
         # the output slice k reads the input slice nearest its centre, n / m (k + 1/2) - 1/2, rounded half up
         j = min(int(np.floor(source.shape[0] / shape[axis] * (k + 0.5) - 0.5 + 0.5)), source.shape[0] - 1)
-        np.testing.assert_array_equal(picked, spline.resize(source[max(j, 0)], plane, 3))
+        np.testing.assert_array_equal(picked, resize(source[max(j, 0)], plane, 3))
 
 
 @pytest.mark.parametrize(
@@ -111,7 +112,7 @@ def test_a_resample_on_the_faces_grid_counts_its_voxels_and_comes_back(
     case, interpolation: str, back: str | None
 ) -> None:
     """``grid: faces`` counts ``round(s / s' * n)`` voxels per axis, resamples them through
-    ``spline.resample_faces`` (the coarse axis apart where it is over the threshold), and its inverse brings the
+    the faces grid's ``resample_region`` (the coarse axis apart where it is over the threshold), and its inverse brings the
     case back onto its own grid."""
     spacing, shape = case
     plans = [1.0, 1.0, 3.0]
@@ -124,24 +125,28 @@ def test_a_resample_on_the_faces_grid_counts_its_voxels_and_comes_back(
     assert tuple(out.shape[1:]) == counted
     axis = spline.separate_axis(list(spacing[::-1]), list(plans[::-1]))
     if interpolation == "bspline" or axis is not None:
-        np.testing.assert_array_equal(out.numpy(), spline.resample_faces(data, counted, order, axis).astype(np.float32))
+        np.testing.assert_array_equal(out.numpy(), resample_faces(data, counted, order, axis).astype(np.float32))
     restored = stage.inverse("case", out.clone(), attribute)
     assert tuple(restored.shape[1:]) == shape
 
 
-def test_a_spline_resample_declares_the_whole_volume_and_a_resample_onto_its_own_spacing_streams() -> None:
-    def kind(stage: Resample, spacing: list[float]) -> LocalityKind:
-        return stage.patch_locality(Attribute(geometry([0.0] * 3, spacing, None))).kind
+def test_a_spline_resample_streams_and_a_faces_b_spline_asks_for_its_input_s_range() -> None:
+    def declared(stage: Resample, spacing: list[float]) -> tuple[LocalityKind, frozenset[str]]:
+        locality = stage.patch_locality(Attribute(geometry([0.0] * 3, spacing, None)))
+        return locality.kind, locality.stat_keys
 
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 2.5]) == (
-        LocalityKind.WHOLE_VOLUME
-    )
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 3.0]) == (
-        LocalityKind.REGRID
-    )
-    # Linear on the faces grid is ITK's linear, until an axis is resampled apart.
-    assert kind(Resample(spacing=[1.0, 1.0, 3.0], grid="faces"), [1.0, 1.0, 2.5]) == LocalityKind.REGRID
-    assert kind(Resample(spacing=[1.0, 1.0, 1.0], grid="faces"), [0.7, 0.7, 4.0]) == LocalityKind.WHOLE_VOLUME
+    ranged = (LocalityKind.REGRID, frozenset({"NanMinPerChannel", "NanMaxPerChannel"}))
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 2.5]) == ranged
+    plain = (LocalityKind.REGRID, frozenset())
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces", interpolation="bspline"), [1.0, 1.0, 3.0]) == plain
+    # scipy's zoom clips nothing; linear on the faces grid is ITK's, or slices resized apart, each clipped alone.
+    assert declared(Resample(spacing=[1.5, 1.5, 1.5], grid="zoom", interpolation="bspline"), [0.8, 0.8, 2.5]) == plain
+    assert declared(Resample(spacing=[1.0, 1.0, 3.0], grid="faces"), [1.0, 1.0, 2.5]) == plain
+    linear = Resample(spacing=[1.0, 1.0, 1.0], grid="faces", interpolation="linear")
+    assert declared(linear, [0.7, 0.7, 4.0]) == plain
+    # Unstated, the interpolation is the dtype's, which only the tensor tells: held whole.
+    assert declared(Resample(spacing=[1.0, 1.0, 1.0], grid="faces"), [0.7, 0.7, 4.0])[0] == LocalityKind.WHOLE_VOLUME
+    assert declared(Resample(spacing=[1.0, 1.0, 1.0], grid="faces", interpolation="bspline"), [0.7, 0.7, 4.0]) == plain
 
 
 def test_zoom_counts_and_samples_as_scipy_and_records_the_zoomed_spacing() -> None:
@@ -177,6 +182,51 @@ def test_the_centers_grid_counts_round_n_minus_one_s_over_s_prime_plus_one() -> 
     attribute = Attribute(geometry([3.0, -2.0, 7.0], spacing, None))
     shape = stage.transform_shape("Volume", "case", [16, 40, 33], attribute)
     assert shape == [int(np.round((n - 1) * s / 1.5 + 1.0)) for n, s in zip([16, 40, 33], spacing[::-1], strict=True)]
+
+
+_TILT = np.deg2rad(12.5)
+#: Directions (columns): the axes and a tilt about x, which keep voxel 0, and VerSe 715's, which centres the grids.
+_DIRECTIONS = {
+    "axes": np.eye(3),
+    "tilted": np.array([[1.0, 0.0, 0.0], [0.0, np.cos(_TILT), -np.sin(_TILT)], [0.0, np.sin(_TILT), np.cos(_TILT)]]),
+    "verse": np.array(
+        [
+            [0.9987560953641755, -0.010064606841436, 0.04883610702867956],
+            [-0.01293068385654846, -0.9981900794403377, 0.05873127933589366],
+            [-0.04815661312746052, 0.05928970396299656, 0.9970785683575054],
+        ]
+    ),
+}
+
+
+@pytest.mark.parametrize("direction", list(_DIRECTIONS))
+@pytest.mark.parametrize("spacing", [1.5, 3.0])
+def test_the_centers_grid_sits_where_monais_spacing_puts_it(direction: str, spacing: float) -> None:
+    """MONAI's ``Spacing`` keeps voxel 0 where the map between the two grids is a scaling, and centres the grids where
+    a direction off the axes leaves the columns a little skewed (VerSe 715's): the count and voxel 0 of
+    ``grid: centers`` are its own, either way."""
+    utils = pytest.importorskip("monai.data.utils")
+    matrix = _DIRECTIONS[direction] @ np.diag([0.79, 0.85, 2.5])
+    origin, size_xyz = np.array([3.0, -2.0, 7.0]), [33, 40, 16]
+    affine = np.eye(4)
+    affine[:3, :3], affine[:3, 3] = matrix, origin
+    shape, offset = utils.compute_shape_offset(size_xyz, affine, utils.zoom_affine(affine, [spacing] * 3, False))
+    norms = np.linalg.norm(matrix, axis=0)
+    case = Grid(tuple(size_xyz[::-1]), origin, norms, matrix / norms)
+    grid = _RuleGrid([spacing] * 3, "centers").of(case, "case")
+    assert list(grid.size_zyx[::-1]) == shape.tolist()
+    np.testing.assert_allclose(grid.origin_xyz, offset, rtol=0, atol=1e-6)  # MONAI's axes are the rotation
+    assert np.array_equal(grid.origin_xyz, origin) == (direction != "verse")  # both branches are met
+
+
+def test_the_centers_grid_of_a_skewed_case_on_its_own_spacing_is_the_case() -> None:
+    """A direction whose columns are skewed fails the corner test; centred along that direction, the grid of the
+    case's own spacing is the case's own grid."""
+    direction = np.array([[1.0, -0.6, 0.0], [0.0, 0.8, 0.0], [0.0, 0.0, 1.0]])
+    case = Grid((10, 10, 10), np.array([3.0, -2.0, 7.0]), np.ones(3), direction)
+    grid = _RuleGrid([1.0, 1.0, 1.0], "centers").of(case, "case")
+    assert grid.size_zyx == case.size_zyx
+    np.testing.assert_allclose(grid.origin_xyz, case.origin_xyz, rtol=0, atol=1e-12)
 
 
 def test_nearest_even_picks_as_grid_sample() -> None:

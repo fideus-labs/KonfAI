@@ -359,6 +359,12 @@ and it changes nothing for pointwise stages, crops, reorientations and axis-alig
 `Resample` through a rotation or a displacement field can differ by about 1e-5 of the data's range between
 two slab heights.
 
+A cubic B-spline `Resample` streams too: each region is read off a window 32 voxels wider than its taps, and the
+prefilter forgets what lies past it. A value differs from the whole volume's by at most one float32 ulp, except a
+value under about 2^-25 of the volume's largest (an exact 0 against the last tail of a far peak), and a NaN reaches
+only the regions whose window holds it, where the whole volume spreads it everywhere. On the faces grid, where it
+clips to its input's range, that range is measured by slabs before the regions are read.
+
 ## Statistics
 
 `Normalize`, `Standardize` and other stages that need a figure of the whole volume (`Min`, `Max`, `Mean`,
@@ -413,6 +419,11 @@ borders. Without a declaration the transform takes the whole volume, which is al
 | another grid | `REGRID` | `stream_region_source()` and `stream_region()` |
 | a whole-volume statistic | `GLOBAL_STAT`, with `stat_keys` | nothing |
 | really the whole volume | nothing | nothing |
+
+A statistic none of these keys name (a noise estimate) needs no transform of its own:
+`CaseStatistic: {statistic: model:NoiseSigma}` names a class with a `halo`, a `partial(block)` and a
+`finish(total)`. KonfAI folds the stored volume by bounded slabs, each read with `halo` neighbour voxels, sums the
+partials and hands on one channel holding `finish` of that sum.
 
 ## Python API
 

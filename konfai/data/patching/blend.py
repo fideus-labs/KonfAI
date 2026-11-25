@@ -171,6 +171,34 @@ class Trim(PathCombine):
         return window
 
 
+class Fold(PathCombine):
+    """A ``patch_combine`` that is no weighted sum: each voxel holds what :meth:`fold` returns, patch after patch.
+
+    A patch enters as :meth:`enter` returns it, ``[S, ...]``. The accumulator holds as much for each voxel, zeros
+    before any patch, folds each patch into the voxels it covers in the order they arrive, and writes
+    :meth:`leave` of what is held. The three read one voxel at a time, which is what lets the output stream, and
+    the output takes its channels and its dtype from :meth:`leave` whatever the grid, a lone patch included.
+
+    An app writes its own in a module of its bundle and names it by classpath. KonfAI Edge runs the patch combine
+    of that name in the app's extension, :meth:`enter` being part of the model's graph.
+    """
+
+    def enter(self, patch: torch.Tensor) -> torch.Tensor:
+        """What a patch ``[C, ...]`` of the model's output is folded as."""
+        return patch
+
+    @abstractmethod
+    def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+        """What the voxels holding ``held`` hold once ``patch`` covers them, both ``[S, ...]``."""
+
+    def leave(self, held: torch.Tensor) -> torch.Tensor:
+        """What is written of ``held``."""
+        return held
+
+    def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
+        return torch.ones(size)
+
+
 class Gaussian(PathCombine):
     """Gaussian importance weighting: per axis ``exp(-(i - (size - 1) / 2) ** 2 / (2 * sigma ** 2))``, ``sigma``
     being ``sigma_scale * size``.

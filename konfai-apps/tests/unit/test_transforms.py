@@ -16,7 +16,6 @@
 
 """Tests for ``konfai_apps.transforms``: the KonfAIInference chain stage."""
 
-import os
 import sys
 import types
 from pathlib import Path
@@ -133,28 +132,6 @@ def test_konfai_inference_forwards_config_overrides_to_the_nested_run(monkeypatc
 
     assert recorded["ref"] == "Org/Repo:tiny"
     assert recorded["config_overrides"] == overrides
-
-
-def test_konfai_inference_defragments_the_nested_allocator(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A heavy nested model (e.g. a 3D segmentation a metric relies on) can OOM on a large volume purely from
-    # allocator fragmentation; the nested run enables expandable segments so it fits without config changes.
-    class FakeKonfAIApp:
-        def __init__(self, ref: str, download: bool, force_update: bool) -> None:
-            pass
-
-        def infer(self, *args: object, **kwargs: object) -> None:
-            pass
-
-    monkeypatch.setattr(konfai_apps, "KonfAIApp", FakeKonfAIApp)
-    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
-
-    KonfAIInference(repo_id="Org/Repo", model_name="tiny").infer_entry(Path("/tmp/in"), Path("/tmp/out"), [0])
-    assert "expandable_segments:True" in os.environ["PYTORCH_CUDA_ALLOC_CONF"]
-
-    # An explicit caller setting must win (setdefault, not overwrite).
-    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
-    KonfAIInference(repo_id="Org/Repo", model_name="tiny").infer_entry(Path("/tmp/in"), Path("/tmp/out"), [0])
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "max_split_size_mb:128"
 
 
 def test_konfai_inference_targets_the_ranks_own_device(monkeypatch: pytest.MonkeyPatch) -> None:

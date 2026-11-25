@@ -21,10 +21,9 @@ when the gate refuses.
 
 The geometry variants exercise the write dispatcher end to end, one per region kind and then in
 composition: a ``Canonical`` inverse (ORIENTATION: in-slab mirrors), a ``Padding`` inverse (CROP), a
-a spacing ``Resample`` inverse on a uint8 chain (REGRID, streamed in nearest mode, byte-exact) and on
-a float chain (REGRID, streamed in linear mode, matching the reference to float-rounding), a
-two-inverse pipe, and the full three-inverse stack (crop + rescale + reorient composed, streamed
-end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
+a spacing ``Resample`` inverse on a uint8 chain and on a float chain (REGRID: each of its rows reads all
+three slices of the case, so the case is buffered and its tail streams along them), a two-inverse pipe, and the full
+three-inverse stack (crop + rescale + reorient composed, streamed end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: an in-plane flip
 streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
 whole-volume. Every variant is compared voxel for voxel against its own kill-switch reference."""
 
@@ -163,8 +162,7 @@ _CROP_ORIGIN = (0.5, -1.0, 2.5)
 _CROP_SPACING = (1.05, 0.95, 1.15)
 
 # ResampleLabel/GeometryStack cast to uint8 before the reduction, so the tensor reaching the REGRID
-# stage resamples in nearest mode (byte-exact). ResampleFloat keeps the float chain, so it resamples in
-# linear mode and matches the reference to float-rounding.
+# stage resamples in nearest mode. ResampleFloat keeps the float chain, so it resamples in linear mode.
 _UINT8_BEFORE_REDUCTION = """        before_reduction_transforms:
           TensorCast:
             dtype: uint8
@@ -179,12 +177,14 @@ _VARIANT_USES_STREAMED_WRITER = {
     "base": True,
     "Canonical": True,
     "Padding": True,
+    # Each row of the resample reads all three slices: the case is buffered, and its tail streams from the buffer
+    # along the slices, the axis the faces grid resamples apart.
     "ResampleLabel": True,
     "ResampleFloat": True,
     "GeometryPair": True,
     "GeometryStack": True,
-    # Crop declares no streamed inverse, so its inverse is assembled; the forward streams.
-    "Crop": False,
+    # Crop's inverse pads the box back region by region, as its forward crops.
+    "Crop": True,
     "CropForward": True,
     "TTA": True,
     "TTAZ": False,
@@ -292,12 +292,7 @@ def test_streamed_prediction_is_voxel_identical_to_reference(
         reference_array = SimpleITK.GetArrayFromImage(reference)
         streamed_array = SimpleITK.GetArrayFromImage(streamed)
         assert streamed_array.dtype == reference_array.dtype, (variant, case)
-        if variant == "ResampleFloat":
-            # A float rescale streams its linear interpolation, matching the whole-volume reference to
-            # float-rounding rather than bit for bit.
-            np.testing.assert_allclose(streamed_array, reference_array, atol=1e-2, err_msg=f"{variant}/{case}")
-        else:
-            np.testing.assert_array_equal(streamed_array, reference_array, err_msg=f"{variant}/{case}")
+        np.testing.assert_array_equal(streamed_array, reference_array, err_msg=f"{variant}/{case}")
 
 
 @pytest.mark.parametrize("variant", _ALL_VARIANTS)

@@ -20,7 +20,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
 | EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
-| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`) | KonfAI Edge with `patch.stride` (unreleased) |
+| one model's manifest | `konfai_edge_manifest` | 5 (`patch.stride`), 6 with a `GaussianFloat16` blend or a patch combine of the app's extension | KonfAI Edge with `patch.stride` (unreleased) |
 
 A bump on one side is a line in this table and in the runtime's README.
 
@@ -116,7 +116,7 @@ criterion runs its network on the whole volume, as `IMPACTReg` does).
 | Any other | Refused by name |
 
 Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per
-channel, with test-time copies or with config overrides, a `Crop` after a stage that
+channel, with test-time copies or with config overrides, a `Crop` without `handed` after a stage that
 moved the grid or the values (as in a transform chain: KonfAI finds the box in the
 group as stored, the runtime in the volume it is handed), and an output and a target
 on two pixel grids (KonfAI's `Dice` puts a target of another shape on the output's
@@ -163,9 +163,10 @@ refused by name. The tables list every stage konfai ships.
 | Transform | Portable form |
 |---|---|
 | `Argmax` | `argmax`; `dim` must be 0 |
-| `Canonical` | `canonical`; undone after the forward when `inverse` |
+| `Canonical` | `canonical`, onto the nearest axes with `resample: false`; undone after the forward when `inverse` |
+| `CaseStatistic` | `case_statistic`, in the chain of a group the model reads past its first: `halo`, and its class's `partial` (float64 `block` `[C, *spatial]` to `[K]`) and `finish` (`total` `[K]` to a 0-d `statistic`) as two float64 graphs beside the model |
 | `Clip` | `clip`; a data-dependent bound reads the `mask` group beside the case |
-| `Crop` | `crop`; refused after a stage that moves the grid or the values |
+| `Crop` | `crop`, its `source` group read beside the case; refused after a stage that moves the grid or the values, unless `handed` |
 | `Dilate` | `dilate` in a TRANSFORM chain or on a nested model's group; refused elsewhere in a prediction |
 | `Expand` | The chain's structure: the steps each copy runs, the copies' entry names and the seed |
 | `FlatLabel` | `relabel` |
@@ -175,6 +176,7 @@ refused by name. The tables list every stage konfai ships.
 | `Gradient` | `gradient` |
 | `HistogramMatching` | `histogram_match`; reads the reference group beside the case |
 | `InferenceStack` | The program's reduction, at the head of `after_reduction_transforms` over concatenated copies; refused elsewhere |
+| `KeepLargestComponent` | `keep_largest_component` |
 | `Magnitude` | `magnitude` |
 | `Mask` | `mask` in a TRANSFORM chain; in a prediction, a step over a nested model's group in `before_reduction_transforms`; refused elsewhere |
 | `MergeLabels` | The program's `merge_labels` reduction, at the head of `after_reduction_transforms`; refused elsewhere |
@@ -185,16 +187,17 @@ refused by name. The tables list every stage konfai ships.
 | `Percentage` | `percentage` |
 | `Permute` | `permute`; undone after the forward when `inverse` |
 | `Reduce` | The chain's structure: the fold between the steps each case runs and the steps run once |
-| `Resample` | `resample` onto a spacing, a shape or, in a TRANSFORM, a reference image; undone after the forward when `inverse` |
+| `Resample` | `resample` onto a spacing (placed by konfai or by a `grid` rule), a shape or, in a TRANSFORM, a reference image; undone after the forward when `inverse` |
 | `Save` | `save`, naming its destination; in a prediction, no step (see below) |
 | `SegmentationDisagreement` | Refused by name |
 | `SelectLabel` | `relabel` |
 | `Softmax` | `softmax`; `dim` must be 0 |
 | `Squeeze` | Refused by name |
 | `StandardDeviation` | Refused by name |
-| `Standardize` | `standardize`; a measured statistic reads the `mask` group beside the case; undone after the forward when `inverse` |
+| `Standardize` | `standardize`; a measured statistic reads the `mask` group beside the case, or the non-zero voxels with `nonzero`; undone after the forward when `inverse` |
 | `Statistics` | No step: it records a fact and alters no value |
 | `Sum` | Refused by name |
+| `ThresholdLabels` | `threshold_labels`: one uint8 channel |
 | `TensorCast` | `cast`; undone after the forward when `inverse`, back to the stored dtype (refused past a reduction) |
 | `UnNormalize` | `unnormalize` |
 | `Variance` | Refused by name |
@@ -249,6 +252,68 @@ mean commutes with the blend. With a `before_reduction_transforms` chain, the
 program averages each copy's models and runs the chain on that average, as
 konfai does; the copies then fold by the output's `reduction`.
 
+### An app's own classes
+
+An app extends konfai with classes in its `.py` files, named by classpath in its
+configs. KonfAI Edge runs the same classes from the app's extension: a
+WebAssembly module written against `konfai-edge-ext`, which implements each
+class under the same classpath. Pass it as `extension=...` to
+`compile_prediction` or `compile_evaluation`: the program names the file, which
+is copied beside it.
+
+| Class of the app | In the program | What the extension is handed |
+|---|---|---|
+| `Transform` whose `patch_locality` is `POINTWISE` | an `extension` step | the volume, and what to undo when the stage is undone |
+| `Transform` whose `patch_locality` is `HALO` | an `extension` step carrying its `halo` | a block with its neighbours and its grid |
+| `Transform` of any other `patch_locality` (`WHOLE_VOLUME`, `REGRID`, ...) | an `extension` step marked `whole` | the whole volume and its grid, and what to undo |
+| `DataAugmentation` whose `locality` is `POINTWISE`, as a test-time draw | an `extension` step carrying a `seed` | a copy to draw from the seed, then to undo |
+| `Reduction` that is `voxel_local`, as the copies' `reduction` | an `extension_reduce` step | the copies |
+| `Fold`, as the output's `patch_combine` | the manifest's `blend` | the patches, where they overlap |
+| `Criterion`, in an evaluation | a criterion of `metric: extension` | the output and its targets |
+
+The extension builds each class from the keys konfai binds it with, and is
+handed its volumes voxel by voxel. A transform that reads past the voxel it
+writes is handed the volume with its grid instead. With a halo it streams block
+by block, keeps the grid and the channels and is not undone; its halo is the
+one it declares for a grid, which the extension states again for each case's
+grid when it depends on the spacing. Reading the whole
+volume, it may leave another grid, which the extension states as
+`transform_shape` does (one fitted to the values, bounded by another it states
+first), and be undone after the model with what it measured on the volume, or
+write other channels
+(labels out of posteriors) and not be undone; the case is then held whole.
+Undone past the reduction of the test-time copies (an `InferenceStack`), it is
+replayed there with what it measured, and so is every other step undone there. Each
+class is compiled on the channels and the axes its place in the chain hands it.
+The extension is handed float32 values; a transform reading past the voxel is
+also told the dtype they are held in. Such a transform may read the volume box by
+box from the runtime instead of being handed it, for a volume past the 4 GiB an
+extension's memory holds, and is then undone the same way.
+At the end of the `final_transforms`, a class reading the whole volume may read
+groups of the case as stored (`read_companion`), and a `Mask` may mask by one:
+the program runs that end of the chain on the prediction, and reads those groups
+with the case.
+In an output chain, a pointwise transform that exports to ONNX is folded into a
+graph, with or without an extension. Without an extension, a pointwise
+transform before the model is folded into its graph and the other classes are
+refused. A reduction takes no parameter.
+
+`konfai-apps bundle --extension app.wasm` copies the extension into the bundle.
+With `konfai-apps[extension]` installed, it also runs each class in Python and
+from the extension on the same random voxels, and refuses a bundle whose two
+halves disagree, on the values or on the grid a transform leaves. It checks
+every config the bundle holds once updated, passed or kept, that KonfAI Edge
+runs: a `Predictor` or an `Evaluator` config (`Prediction.yml`,
+`Evaluation.yml`, `Uncertainty.yml`), never the `Trainer` one (`Config.yml`).
+A test-time draw is opened and not compared: the extension
+draws from the seed, konfai from torch's generator.
+
+What a `Fold` enters a patch as is part of the model's graph. Several models
+under a `Fold` are run as one: the program's `averaged` key names the models
+whose outputs the runtime averages on each patch, its `enter` key the graph
+their mean goes through, and a run selects among them by checkpoint. This form
+takes one pass and no `InferenceStack`.
+
 ## Refusals, by name
 
 Each refusal names the stage and says what konfai does instead, so the config can
@@ -274,14 +339,16 @@ In either workflow:
 - `Padding` with a mode other than `constant` or `constant:<value>`.
 - `Resample` with `field`, `field_group` or `transforms`, with an `align` other than `extent`,
   with both or neither of `spacing` and `shape`, with an interpolation other
-  than `nearest`, `linear` or `cubic`, with a `reference` outside a TRANSFORM,
+  than `nearest`, `nearest_even`, `linear`, `cubic` or `bspline`, with a `reference` outside a TRANSFORM,
   or with a reference whose group konfai cannot tell. The runtime reads `cubic`
   only between grids whose axes keep their own (no permuted or oblique
   direction) and refuses it otherwise.
 - A `Crop` after any stage that moves the grid or the values (`Clip`, a cast to
-  an integer, `Mask`, `Flip`, `Permute`, `Resample`, `Padding`, another `Crop`):
+  an integer, `Mask`, `Flip`, `Permute`, `Resample`, `Padding`, another `Crop`,
+  a pointwise transform compiled to a graph):
   konfai crops to the box of the group as stored, the runtime to the box of the
-  volume in hand. A cast to a float, a `Statistics` and a `Save` move nothing.
+  volume in hand. A cast to a float, a `Statistics` and a `Save` move nothing;
+  `handed: true` has konfai measure the box on the volume in hand too.
 - `Softmax` or `Argmax` with `dim` other than 0.
 - `Mask` with a `path` ending in `.mha`: the runtime reads a mask stored as a
   group of the case.
@@ -304,7 +371,8 @@ In a PREDICTION:
 
 - A model tiling its input by a `ModelPatch`: the export runs the whole patch
   through the network.
-- A `patch_size` with an axis at zero or below.
+- A `patch_size` with some axes at zero or below and others not. Every axis at zero is one
+  window per case: the graph is exported with its spatial axes free, and checked at another shape.
 - No group with `is_input: true`.
 - A test-time draw other than `Flip`, `Permute` or `Rotate` with `is_quarter`;
   `Permute` with `prob_permute: None` and a copy count other than 2.
@@ -319,8 +387,10 @@ In a PREDICTION:
   a `Mask` over a nested model's group in `before_reduction_transforms`, a
   `Dilate` on that group). A stage bound with no parameters (`Reduce:`) in a
   prediction chain.
-- A stage that is neither a runtime op nor a pointwise torch transform (which
-  the export folds into the graph); a runtime op after a folded transform.
+- A stage that is neither a runtime op nor a pointwise torch transform; in the input chain, a
+  runtime op after a folded transform. The export folds an input chain's pointwise transforms into
+  the model's graph, and exports a run of them in an output chain as a graph of its own, which the
+  program runs where the chain places it (`onnx`), except past a concatenation of models or copies.
 - `patch_transforms` with a stage that is not pointwise or that is undone.
 - A second input group whose chain runs a `resample`, `pad`, `crop`,
   `canonical` or `permute` (every group is patched on the first one's grid), or
@@ -334,13 +404,15 @@ In a PREDICTION:
 - A `MergeLabels` with test-time passes, or, with several models, followed by a
   stage other than undoing an index selection or a nearest resample: the
   program merges each model's finished label map.
-- A same-class ensemble whose run-once tail undoes anything but one resample,
-  or runs an op other than `softmax`, `argmax` or `cast` past the reduction.
+- A same-class ensemble whose run-once tail undoes anything but one resample
+  (by `nearest`, `linear` or `cubic`), or runs an op other than `softmax`,
+  `argmax` or `cast` past the reduction.
 - A nested model's group with a stage other than `KonfAIInference`, `Resample`,
   `Dilate` or `Save`; a `Mask` reading a group no nested model builds; a nested
-  `Resample` stating no interpolation when the nested chain does not end on a
-  cast; a nested model with several checkpoints; an ensemble export with no
-  declared reduction (both through `konfai-apps`).
+  `Resample` with `align`, `grid` or `antialias`, interpolating other than by
+  `nearest`, `linear` or `cubic`, or stating no interpolation when the nested
+  chain does not end on a cast; a nested model with several checkpoints; an
+  ensemble export with no declared reduction (both through `konfai-apps`).
 
 A `Save` in a prediction's input chain compiles to no step: konfai writes what
 reaches it and, on a later run, reads that entry in place of the stages before
@@ -378,9 +450,11 @@ precision.
 
 ## Precision and reproducibility
 
-Use the runtime's `--precision float32 --host-tail` for the reference comparison
-route. The default tail keeps suitable operations on the device; its float32
-reductions can round differently from the host. `float16` is an optional
+With a Burn build of the runtime, use `--precision float32 --host-tail` for the
+reference comparison route. The default tail keeps suitable operations on the
+device; its float32 reductions can round differently from the host. An ONNX
+Runtime build has neither flag: it runs the graph in float32 and the output
+chain on the host, which is that route already. `float16` is an optional
 execution mode, not the parity baseline. It requires compatible operators and,
 in the browser, an adapter granting `shader-f16`.
 

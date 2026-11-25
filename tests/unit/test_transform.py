@@ -54,6 +54,7 @@ from konfai.data.transform import (
     Variance,
 )
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset.statistics import nonzero_statistics
 from konfai.utils.errors import TransformError
 
 # --------------------------------------------------------------------------------------
@@ -451,6 +452,86 @@ def test_crop_moves_the_origin_along_a_sheared_direction() -> None:
     np.testing.assert_allclose(attribute.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
 
 
+def _crop_then_pad(volume: np.ndarray, shape: list[int]) -> np.ndarray:
+    """mri_synthseg's ``crop_volume(cropping_shape=shape)`` (mode center) then ``pad_volume(padding_shape=shape)``,
+    padding 0: the oracle of ``Crop(shape, fill=0)``."""
+    low = np.maximum([int((volume.shape[i] - shape[i]) / 2) for i in range(3)], 0)
+    high = np.minimum([low[i] + shape[i] for i in range(3)], np.array(volume.shape))
+    cropped = volume[low[0] : high[0], low[1] : high[1], low[2] : high[2]]
+    before = np.maximum(np.int32(np.floor((np.array(shape) - np.array(cropped.shape)) / 2)), 0)
+    after = np.maximum(np.int32(np.ceil((np.array(shape) - np.array(cropped.shape)) / 2)), 0)
+    return np.pad(cropped, tuple(zip(before, after, strict=True)), mode="constant", constant_values=0)
+
+
+def test_a_crop_to_a_shape_is_mri_synthsegs_crop_then_pad_from_the_header_alone() -> None:
+    # No dataset holds the case: the centre where the volume is larger, a pad of fill where it is smaller, odd
+    # differences split as mri_synthseg splits them; streamed region by region, and undone by the inverse.
+    volume = torch.arange(7 * 5 * 6, dtype=torch.float32).reshape(1, 7, 5, 6) + 1
+    crop = Crop(shape=[4, 0, 9], fill=0.0)
+    attribute = Attribute()
+
+    assert crop.transform_shape("CT", "case", [7, 5, 6], attribute) == [4, 5, 9]
+    assert crop.patch_locality(attribute).kind is LocalityKind.REGRID
+    cropped = crop("case", volume.clone(), Attribute(attribute))
+    assert np.array_equal(cropped[0].numpy(), _crop_then_pad(volume[0].numpy(), [4, 5, 9]))
+    for target in ((slice(0, 2), slice(0, 5), slice(0, 9)), (slice(1, 4), slice(2, 4), slice(5, 9))):
+        source = crop.stream_region_source("case", target, [7, 5, 6], attribute)
+        context = RegionContext(tuple(source), target, (7, 5, 6))
+        region = crop.stream_region("case", volume[(slice(None), *source)], context, attribute)
+        assert torch.equal(region, cropped[(slice(None), *target)])
+    back = crop.inverse("case", cropped, Attribute(attribute))
+    assert torch.equal(back[:, 1:5], volume[:, 1:5]) and not back[:, [0, 5, 6]].any()
+    with pytest.raises(TransformError, match="shape"):
+        Crop(shape=[4, 4, 4], source="BODY")
+    # A second crop of the chain would read the first's box.
+    again = Crop(shape=[2, 0, 0])
+    again.preceding = [crop]
+    with pytest.raises(TransformError, match="earlier 'Crop'"):
+        again.transform_shape("CT", "case", [4, 5, 9], Attribute())
+
+
+@pytest.mark.parametrize("fill", [0.0, None])
+def test_a_region_far_past_the_volume_pads_only_what_it_covers(monkeypatch, fill) -> None:
+    # A crop to a shape far larger than the volume, its inverse and a pad: a region past the volume reads its nearest
+    # rows, and the pad holds that region, not the gap between it and them (1.7 GiB for one plane of Crop(shape=[4096,
+    # 512, 512]) over a 512^3 volume).
+    pad, held = F.pad, []
+
+    def measured(*args, **kwargs):
+        out = pad(*args, **kwargs)
+        held.append(out.numel())
+        return out
+
+    def streamed(read, run, stage, target, attribute):
+        held.clear()
+        source = read("case", target, [4, 5, 6], attribute)
+        region = run("case", volume[(slice(None), *source)], RegionContext(tuple(source), target, (4, 5, 6)), attribute)
+        assert max(held) <= 2 * region.numel(), stage
+        return region
+
+    volume = torch.arange(1 * 4 * 5 * 6, dtype=torch.float32).reshape(1, 4, 5, 6) + 1
+    crop = Crop(shape=[400, 0, 0], fill=fill)
+    attribute, back = Attribute(), Attribute()
+    crop.transform_shape("CT", "case", [4, 5, 6], attribute)
+    back["box"] = np.array([[100, 100], [0, 0], [0, 0]])  # a crop that dropped 100 rows on each side
+    padding = Padding([0, 0, 0, 0, 0, 3], mode="replicate" if fill is None else "constant")
+    whole = crop("case", volume.clone(), Attribute(attribute))
+    restored = crop.inverse("case", volume.clone(), Attribute(back))
+    padded = padding("case", volume.clone(), Attribute())
+    monkeypatch.setattr(F, "pad", measured)
+    for rows in (slice(0, 1), slice(196, 200), slice(399, 400)):  # before the volume, across its start, after it
+        target = (rows, slice(0, 5), slice(0, 6))
+        region = streamed(crop.stream_region_source, crop.stream_region, "crop", target, attribute)
+        assert torch.equal(region, whole[(slice(None), *target)])
+    for rows in (slice(0, 1), slice(99, 101), slice(203, 204)):
+        target = (rows, slice(0, 5), slice(0, 6))
+        region = streamed(crop.stream_region_target, crop.stream_region_inverse, "inverse", target, back)
+        assert torch.equal(region, restored[(slice(None), *target)])
+    target = (slice(5, 7), slice(0, 5), slice(0, 6))  # past the volume's last row, which the block holds with others
+    region = streamed(padding.stream_region_source, padding.stream_region, "padding", target, Attribute())
+    assert torch.equal(region, padded[(slice(None), *target)])
+
+
 def test_crop_inverse_pads_back_a_case_without_geometry() -> None:
     attribute = Attribute()
     attribute["box"] = np.array([[1, 2], [0, 1], [3, 0]])
@@ -547,15 +628,15 @@ def _zero_backed_volume() -> torch.Tensor:
 
 
 def test_standardize_nonzero_standardizes_each_channel_over_its_non_zero_voxels_to_the_bit() -> None:
-    """Each channel over its own non-zero voxels: their float32 mean and population deviation (0 read as 1),
-    applied to them alone, the zeros kept; recorded per channel."""
+    """Each channel over its own non-zero voxels: their mean and population deviation (0 read as 1) as a
+    streamed case is seeded with them, applied to them alone, the zeros kept; recorded per channel."""
     volume = _zero_backed_volume()
     attribute = Attribute()
     out = Standardize(nonzero=True, inverse=False)("c", volume.clone(), attribute)
     expected = volume.to(torch.float32, copy=True)
-    for channel in expected:
+    seed = nonzero_statistics([volume.numpy()])
+    for channel, mean, std in zip(expected, seed["mean_per_channel"], seed["std_per_channel"], strict=True):
         values = channel[channel != 0]
-        mean, std = float(torch.mean(values)), float(torch.std(values, unbiased=False)) or 1.0
         channel[channel != 0] = (values - mean) / std
     assert out.dtype is torch.float32
     assert torch.equal(out, expected)
@@ -568,6 +649,83 @@ def test_standardize_nonzero_standardizes_each_channel_over_its_non_zero_voxels_
     assert torch.equal(stated, torch.where(volume != 0, volume / 2.0, volume))
     # A channel of zeros alone is left as it is.
     assert not Standardize(nonzero=True, inverse=False)("c", torch.zeros(2, 4, 4), Attribute()).any()
+
+
+@pytest.mark.parametrize(
+    ("make", "untraced"),
+    [(lambda: Standardize(inverse=False), 2.0), (lambda: Standardize(nonzero=True, inverse=False), 2.0)],
+    ids=["measuring", "nonzero"],
+)
+def test_a_standardize_prices_the_float64_pieces_its_statistics_hold(
+    tmp_path: Path, image_attributes, make, untraced: float
+) -> None:
+    """One row of a [1, 1, 2048, 2048] case is over a piece of the statistics fold (2^18 values), so the piece is
+    the whole case, held in float64: its host copy (torch's, ``untraced`` volumes-worth at the plan's four bytes),
+    its centred values, and over the non-zero voxels their selection (numpy's, traced). The stage prices them for
+    this case, and the whole-volume fallback with it; a CT's pieces are slivers and keep the class's figure."""
+    import tracemalloc
+
+    from konfai.data.materialize import CaseMaterializer
+    from konfai.data.patching import DatasetManager, DatasetPatch
+
+    array = (np.random.default_rng(0).standard_normal((1, 1, 2048, 2048)) + 3.0).astype(np.float32)
+    case_bytes = array.size * 4
+    stage = make()
+    stage.transform_shape("CT", "CASE", [1, 2048, 2048], Attribute())
+    tensor = torch.from_numpy(array.copy())
+    tracemalloc.start()
+    stage("CASE", tensor, Attribute())
+    _, traced = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    held = traced / case_bytes + untraced
+    # The few KiB of Python objects a call makes beside its buffers are no volume's worth.
+    assert stage.case_working_multiple("CASE") >= held - 0.01
+
+    sliver = make()
+    sliver.transform_shape("CT", "CT_CASE", [300, 512, 512], Attribute())
+    assert sliver.case_working_multiple("CT_CASE") == (2.5 if sliver.nonzero else sliver.working_multiple)
+
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "CASE", array, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+
+    # Sixteen channels of one 512 x 512 row: each plane is within the grain, the row of them is not, and the piece is
+    # the whole case again. The channels are the case's header's.
+    shallow = (np.random.default_rng(1).standard_normal((16, 1, 512, 512)) + 3.0).astype(np.float32)
+    dataset.write("CT", "SHALLOW", shallow, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    wide = make()
+    wide.set_datasets([dataset])
+    wide.transform_shape("CT", "SHALLOW", [1, 512, 512], Attribute())
+    tensor = torch.from_numpy(shallow.copy())
+    tracemalloc.start()
+    wide("SHALLOW", tensor, Attribute())
+    _, traced = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    shallow_held = traced / (shallow.size * 4) + untraced
+    assert wide.case_working_multiple("SHALLOW") >= shallow_held - 0.01
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE",
+        dataset=dataset,
+        patch=DatasetPatch([0, 0, 0]),
+        transforms=[make()],
+        data_augmentations_list=[],
+    )
+    assert CaseMaterializer(manager).fallback_working_set_bytes() >= (2 + held - 0.01) * case_bytes
+    priced = make()
+    priced.set_datasets([dataset])
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="SHALLOW",
+        dataset=dataset,
+        patch=DatasetPatch([0, 0, 0]),
+        transforms=[priced],
+        data_augmentations_list=[],
+    )
+    assert CaseMaterializer(manager).fallback_working_set_bytes() >= (2 + shallow_held - 0.01) * shallow.size * 4
 
 
 def test_standardize_nonzero_refuses_an_inverse_and_a_mask() -> None:
@@ -1526,6 +1684,21 @@ def test_a_repeated_stage_binds_by_occurrence(tmp_path, monkeypatch: pytest.Monk
     assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip", "Clip#2")] == [(-1024, 5000), (0, 10)]
 
 
+def test_a_case_statistic_gives_its_other_keys_to_the_class(write_config) -> None:
+    # The class reads the keys the stage does not: one neither reads is still reported.
+    from konfai.data.transform import TransformLoader
+    from konfai.utils.config import strict_config
+    from konfai.utils.errors import ConfigError
+
+    stage = "T:\n  transforms:\n    CaseStatistic: {{statistic: 'oracle_support:ScaledRoughness', {}: 0.9}}\n"
+    write_config(stage.format("scale"))
+    with strict_config("T"):
+        assert TransformLoader().get_transform("CaseStatistic", "T.transforms").statistic.scale == 0.9
+    write_config(stage.format("scal"))
+    with pytest.raises(ConfigError, match=r"'T\.transforms\.CaseStatistic\.scal'"), strict_config("T"):
+        TransformLoader().get_transform("CaseStatistic", "T.transforms")
+
+
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mask draw is PlacedMask: `Mask` names one class, so its bare name resolves without an
     ambiguity warning, before an Expand marker and past it."""
@@ -1608,3 +1781,154 @@ def test_the_three_axis_default_is_refused_by_name_on_a_2d_case(stage) -> None:
         stage.transform_shape("CT", "P0", [5, 6], Attribute())
     with pytest.raises(TransformError, match="axes"):
         stage("P0", torch.zeros(1, 5, 6), Attribute())
+
+
+@pytest.mark.parametrize("rows", [1, 3, 64])
+def test_keep_largest_component_keeps_scipys_largest_label_whatever_the_slabs(
+    rows: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Joined across the slabs' faces, the components are scipy's (face connectivity), and of two of one size the
+    # first in scan order is kept, as numbering them and taking the first maximum does.
+    ndi = pytest.importorskip("scipy.ndimage")
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    rng = np.random.default_rng(3)
+    foreground = rng.random((12, 9, 11)) > 0.55
+    foreground[:, 4, 5] = True  # a column through every slab
+    foreground[0, 0, :2] = foreground[11, 8, -2:] = True  # two components of one size
+    components, _count = ndi.label(foreground)
+    wanted = components == np.argmax(np.bincount(components.ravel())[1:]) + 1
+    labels = torch.from_numpy(rng.integers(1, 9, size=(1, *foreground.shape)).astype(np.int32))
+    tensor = torch.cat([labels, torch.from_numpy(foreground[None].astype(np.int32))])
+
+    kept = KeepLargestComponent(mask=1, rows=rows)("case", tensor, Attribute())
+
+    assert torch.equal(kept, torch.where(torch.from_numpy(wanted), labels, 0))
+    # Without per_label, one component whatever the values it holds.
+    from konfai.data.transform.labels import largest_component
+
+    assert largest_component(np.array([[1, 0, 2], [1, 0, 0]]), rows).tolist() == [[True, False, False]] * 2
+    with pytest.raises(TransformError, match="from -2 to 1"):  # never wrapped onto channel 0
+        KeepLargestComponent(mask=2, rows=rows)("case", tensor, Attribute())
+    pair = np.zeros((1, 2, 2), dtype=bool)
+    pair[0, 0, 0] = pair[0, 1, 1] = True  # two one-voxel components: the first in scan order
+    assert KeepLargestComponent(rows=rows)("case", torch.from_numpy(pair), Attribute()).numpy()[0, 0].tolist() == [
+        True,
+        False,
+    ]
+    # SimpleITK numbers the slabs: without it the stage says how to install it when it runs, not on import.
+    monkeypatch.setattr("konfai.utils.ITK.sitk", None)
+    with pytest.raises(TransformError, match=r"konfai\[itk\]"):
+        KeepLargestComponent()("case", torch.from_numpy(pair), Attribute())
+
+
+@pytest.mark.parametrize("rows", [1, 4, 64])
+@pytest.mark.parametrize("seed", [0, 2, 3])
+def test_keep_largest_component_per_label_is_monais_keep_largest_connected_component(rows: int, seed: int) -> None:
+    # Touching islands of five labels, joined only to their own label, across the slabs' faces; at 26 a corner
+    # joins them too. MONAI keeps whichever of two of one size its sort lands on: these seeds have none.
+    transforms = pytest.importorskip("monai.transforms")
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    rng = np.random.default_rng(seed)
+    labels = torch.from_numpy(rng.integers(1, 6, (1, 11, 9, 10)) * (rng.random((1, 11, 9, 10)) < 0.6))
+    for connectivity, hops in ((26, None), (6, 1)):
+        wanted = torch.as_tensor(transforms.KeepLargestConnectedComponent(connectivity=hops)(labels.clone()))
+        stage = KeepLargestComponent(rows=rows, per_label=True, connectivity=connectivity)
+        assert torch.equal(stage("case", labels.clone(), Attribute()), wanted)
+        # The labels read from the channel mask names, the values from the others.
+        pair = torch.cat([labels * 10, labels])
+        stage = KeepLargestComponent(mask=1, rows=rows, per_label=True, connectivity=connectivity)
+        assert torch.equal(stage("case", pair, Attribute()), wanted * 10)
+
+
+@pytest.mark.parametrize(("per_label", "connectivity"), [(False, 6), (False, 26), (True, 6), (True, 26)])
+def test_keep_largest_component_holds_what_it_declares_on_the_most_broken_map(
+    per_label: bool, connectivity: int
+) -> None:
+    # One record per component of the volume, beside one slab's numbers: on a map broken into as many components as
+    # the configuration allows (every other voxel face to face, one in eight touching, per label a value per voxel and
+    # 8 bytes each, every first byte the same), what the numbers, the records and the sort take stays inside the
+    # declaration, in one slab and in several.
+    import tracemalloc
+
+    pytest.importorskip("SimpleITK")
+    from konfai.data.patching.budget import CASE_ELEMENT_BYTES
+    from konfai.data.transform import KeepLargestComponent
+    from konfai.data.transform.labels import largest_component
+
+    z, y, x = np.indices((32, 32, 32))
+    if per_label:
+        labels = 256 * np.arange(1, z.size + 1, dtype=np.int64).reshape(z.shape)
+    else:
+        labels = (z % 2 == 0) & (y % 2 == 0) & (x % 2 == 0) if connectivity == 26 else (z + y + x) % 2 == 0
+    stage = KeepLargestComponent(per_label=per_label, connectivity=connectivity)
+    tracemalloc.start()
+    try:
+        for rows in (stage.rows, 4):
+            largest_component(labels, rows, per_label, stage.full)
+        held = tracemalloc.get_traced_memory()[1] / (labels.size * CASE_ELEMENT_BYTES)
+    finally:
+        tracemalloc.stop()
+    # And the foreground the stage hands it, a bool per voxel that torch holds and the tracer does not see (per_label,
+    # the map itself).
+    assert held + (0 if per_label else 1 / CASE_ELEMENT_BYTES) <= stage.case_working_multiple("case")
+
+
+@pytest.mark.parametrize("per_label", [False, True])
+def test_keep_largest_component_sends_every_voxel_outside_it_to_0(per_label: bool) -> None:
+    # The background is no component, also when the foreground is empty: the values outside are 0.
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    labels = torch.zeros((1, 2, 3, 3), dtype=torch.int16)
+    labels[0, 0, 0, :2] = 4
+    values = torch.full_like(labels, 7)
+    stage = KeepLargestComponent(mask=1, per_label=per_label)
+    assert torch.equal(stage("case", torch.cat([values, labels]), Attribute()), values * (labels == 4))
+    assert not stage("case", torch.cat([values, torch.zeros_like(labels)]), Attribute()).any()
+    # A float label of any value is one, also one whose remainder rounds up to the divisor (-1e-7 % 16 is 16.0).
+    floats = torch.tensor([[[[-1e-7, -1e-7, 0.0], [0.0, 0.0, 2.5]]]])
+    assert torch.equal(KeepLargestComponent(per_label=True)("case", floats, Attribute()), floats)
+
+
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32, np.uint64])
+def test_keep_largest_component_keeps_an_unsigned_map_bit_for_bit(dtype: type) -> None:
+    # torch 2.12 has no where for uint16, uint32 or uint64, 2.15 has: on either the stage keeps such a map in its dtype,
+    # its values past the signed half too.
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    top = dtype(np.iinfo(dtype).max)
+    kept = KeepLargestComponent()(
+        "case", torch.from_numpy(np.array([[[[top, top // 2 + 1, 0, 1]]]], dtype)), Attribute()
+    )
+    assert kept.numpy().dtype == dtype and kept.numpy().tolist() == [[[[top, top // 2 + 1, 0, 0]]]]
+
+
+@pytest.mark.parametrize("rows", [1, 64])
+def test_keep_largest_component_per_label_keeps_the_first_of_two_of_one_size(rows: int) -> None:
+    pytest.importorskip("SimpleITK")
+    from konfai.data.transform import KeepLargestComponent
+
+    labels = torch.zeros((1, 4, 3, 3), dtype=torch.int16)
+    labels[0, 0, 0, 0] = labels[0, 1, 1, 1] = labels[0, 3, 2, 2] = 2  # the first two by a corner, across a face
+    labels[0, 1, 1, 2] = labels[0, 3, 0, 0] = 5  # the first beside a 2, which it does not join
+    full = KeepLargestComponent(rows=rows, per_label=True, connectivity=26)("case", labels, Attribute())
+    face = KeepLargestComponent(rows=rows, per_label=True)("case", labels, Attribute())
+    assert full.nonzero().tolist() == [[0, 0, 0, 0], [0, 1, 1, 1], [0, 1, 1, 2]]
+    assert face.nonzero().tolist() == [[0, 0, 0, 0], [0, 1, 1, 2]]
+    with pytest.raises(TransformError, match="per_label reads its labels from one channel"):
+        KeepLargestComponent(per_label=True)("case", labels.expand(2, -1, -1, -1), Attribute())
+    with pytest.raises(TransformError, match="connectivity=18"):
+        KeepLargestComponent(connectivity=18)
+
+
+def test_a_rounding_cast_is_numpys_rint() -> None:
+    # Half to even, where a plain cast truncates; the values it moves are no statistic a later stage may reuse.
+    values = torch.tensor([[-1.5, -0.5, 0.5, 1.5, 2.5, 2.6]])
+    cast = TensorCast("int16", round=True, inverse=False)
+    assert np.array_equal(cast("case", values, Attribute()).numpy(), np.rint(values.numpy()).astype(np.int16))
+    assert not cast.patch_locality(Attribute()).preserves_statistics

@@ -42,7 +42,7 @@ jobs:
 
       - name: Install standalone apps package
         run: |
-          pip install -e "./konfai-apps[server]"
+          pip install -e "./konfai-apps[server,extension]"
 
       - name: Install standalone MCP package
         run: |

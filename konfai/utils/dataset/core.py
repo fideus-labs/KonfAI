@@ -36,7 +36,6 @@ except ImportError:
 from typing import TYPE_CHECKING
 
 from konfai.utils import uri
-from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
     AFFINE_ATTRIBUTE,
@@ -55,17 +54,7 @@ from konfai.utils.dataset.itk_transform_file import ItkTransformFile
 from konfai.utils.dataset.ome_zarr_file import OmeZarrFile
 from konfai.utils.dataset.sitk_file import SitkFile
 from konfai.utils.dataset.staging import _recover_orphaned_backup, is_staging_entry
-from konfai.utils.dataset.statistics import (
-    _finalize_running_statistics,
-    _lerp_like_numpy,
-    _order_statistics,
-    _scan_rows,
-    _statistics_chunk_length,
-    _update_pieces,
-    _update_running_extrema,
-    _update_running_statistics,
-    needs_moments,
-)
+from konfai.utils.dataset.statistics import _block_rows, _lerp_like_numpy, _order_statistics, data_statistics
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
     STORE_FORMS,
@@ -624,36 +613,46 @@ class Dataset:
         with contextlib.suppress(DatasetManagerError):
             self._resolve_entry(groups, name, lambda file, _group, entry: file.plan_region_reads(entry, windows))
 
-    def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
+    def iter_data_blocks(
+        self, groups: str, name: str, halo: int = 0, fold_bytes: int = 0
+    ) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
         quantile scan iterate. A store that cannot serve bounded region reads (GIPL) is read whole
-        once and kept for every pass: the declared whole-volume route, which the plan names LOAD and
-        refuses when the volume does not fit the budget."""
+        once, as each region read of it decodes it whole, and kept for every pass, which take it by
+        the same blocks: a fold holds the volume as stored and one block of its own. With ``halo``,
+        each block carries ``halo`` voxels more on both sides of every spatial axis: its neighbours
+        where the volume has them, its edge replicated past the volume's border. A caller holding ``fold_bytes`` an
+        element of the block it takes gets blocks that fit the budget with it."""
         shape, _ = self.get_infos(groups, name)
-        if len(shape) < 2 or not self.bounded_region_reads(groups, name):
-            resident: list[np.ndarray] = []
+        bounded = len(shape) >= 2 and self.bounded_region_reads(groups, name)
+        resident: list[np.ndarray] = []
 
-            def whole() -> Iterator[np.ndarray]:
-                if not resident:
-                    resident.append(self.read_data(groups, name)[0])
-                yield resident[0]
+        def read(slices: tuple[slice, ...]) -> np.ndarray:
+            if bounded:
+                return self.read_data_slice(groups, name, slices)[0]
+            if not resident:
+                resident.append(self.read_data(groups, name)[0])
+            return resident[0][slices]
 
-            return whole
-        # A whole number of update pieces: the fold sees the same pieces in the same order whatever
-        # the read grain, so the budget never changes what the running mean and std answer.
-        rows = _scan_rows(
-            [(self, groups)], name, shape, _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
-        )
+        if len(shape) < 2:
+            return lambda: iter([read((slice(None),))])
+        # The budget never changes what the running mean and std answer: the fold sees the same pieces.
+        # A fold's scan of a store read whole reads it first, as its first block would: its element size prices it.
+        # Over the budget at a byte an element, the volume is refused before it is decoded.
+        if fold_bytes and not bounded:
+            _block_rows([], name, shape, halo, fold_bytes, 1)
+        stored = read((slice(None),) * len(shape)).dtype.itemsize if fold_bytes and not bounded else None
+        rows = _block_rows([(self, groups)] if bounded else [], name, shape, halo, fold_bytes, *filter(None, [stored]))
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
-                slices = (
-                    slice(None),
-                    slice(start, min(int(shape[1]), start + rows)),
-                    *(slice(None) for _ in shape[2:]),
-                )
-                yield self.read_data_slice(groups, name, slices)[0]
+                stop = min(int(shape[1]), start + rows)
+                low, high = max(0, start - halo), min(int(shape[1]), stop + halo)
+                slices = (slice(None), slice(low, high), *(slice(None) for _ in shape[2:]))
+                block = read(slices)
+                widths = [(0, 0), (halo - start + low, halo - high + stop)] + [(halo, halo)] * (len(shape) - 2)
+                yield np.pad(block, widths, mode="edge") if halo else block
 
         return slabs
 
@@ -663,10 +662,13 @@ class Dataset:
         probe = (slice(0, 1),) * len(shape)
         return max(1, int(self.read_data_slice(groups, name, probe)[0].dtype.itemsize))
 
-    def read_data_quantile(self, groups: str, name: str, q: float) -> Any:
+    def read_data_quantile(self, groups: str, name: str, q: float, channels: list[int] | None = None) -> Any:
         """``numpy.quantile(volume, q)`` (the default ``linear`` method, to the value) without
-        holding the volume: bounded passes over :meth:`iter_data_blocks`."""
-        low, high, weight = _order_statistics(self.iter_data_blocks(groups, name), float(q))
+        holding the volume: bounded passes over :meth:`iter_data_blocks`, of the ``channels`` given
+        (every one without)."""
+        blocks = self.iter_data_blocks(groups, name)
+        selected = blocks if channels is None else lambda: (block[channels] for block in blocks())
+        low, high, weight = _order_statistics(selected, float(q))
         if not np.issubdtype(np.asarray(low).dtype, np.inexact):
             # numpy.quantile promotes an integer input to float64 before it interpolates.
             low, high = np.float64(low), np.float64(high)
@@ -691,12 +693,7 @@ class Dataset:
         both to those), folded over :meth:`iter_data_blocks`: the volume is never held. ``keys``
         names the statistics the caller reads (``min``, ``max_per_channel``, ...): without a mean or
         std the fold stays in the stored dtype and computes the extrema only. ``None`` computes the four."""
-        update = _update_running_statistics if needs_moments(keys) else _update_running_extrema
-        state = None
-        for block in self.iter_data_blocks(groups, name)():
-            for piece in _update_pieces(block if channels is None else block[channels]):
-                state = update(state, piece)
-        return _finalize_running_statistics(state)
+        return data_statistics(self.iter_data_blocks(groups, name)(), channels, keys)
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self.exists_on_disk():

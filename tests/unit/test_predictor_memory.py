@@ -265,8 +265,9 @@ def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() 
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
+            # Two patches: a case's only patch is not staged (test_predictor_offload_borrow).
             del index_augmentation
-            return [(slice(0, 2), slice(0, 2))]
+            return [(slice(0, 2), slice(0, 2)), (slice(2, 4), slice(0, 2))]
 
         @staticmethod
         def get_sweep_axis(index_augmentation: int) -> int:
@@ -484,6 +485,21 @@ def test_get_output_hands_the_assembled_volume_on_as_a_view() -> None:
     assert stacked.shape == (1, 3, 2, 2)
     assert stacked.data_ptr() == assembled.data_ptr()
     assert torch.equal(stacked[0], torch.arange(12, dtype=torch.float32).reshape(3, 2, 2))
+
+
+def test_the_reduction_device_is_asked_for_the_case_it_reduces(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The transforms price what they hold for the case (case_working_multiple), which only its name tells them.
+    output_dataset = OutputDataset(
+        same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+    )
+    dataset = _single_patch_dataset_iter()
+    output_dataset.add_layer(0, 0, 0, torch.zeros(3, 2, 2), dataset, Attribute())
+    asked: list[str] = []
+    monkeypatch.setattr(
+        OutputDataset, "_reduction_device", lambda self, chunk, name, nb: asked.append(name) or torch.device("cpu")
+    )
+    output_dataset._get_output(0, 0, [3], dataset)
+    assert asked == ["CASE_000"]
 
 
 def test_predict_log_skips_measure_sync_when_tensorboard_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1091,7 +1107,7 @@ def test_an_out_of_memory_restart_finishes_on_the_host_only_after_an_error_in_th
     output_dataset.reset()  # the restart resets the output before it reads the record
     assert output_dataset.finish_on_host() and not output_dataset.finish_on_host()  # taken once
     assert output_dataset._accumulate_device(layer, accumulator).type == "cpu"
-    assert output_dataset._reduction_device(chunk).type == "cpu"
+    assert output_dataset._reduction_device(chunk, "case").type == "cpu"
 
     # A forward that ran out of memory while a case's accumulator sat on the device: the host frees it.
     beside = OutputDataset(
@@ -1188,66 +1204,6 @@ def test_offload_small_cuda_patch_takes_plain_path(monkeypatch: pytest.MonkeyPat
     assert ds._pin_buffer is None  # small patches never allocate the pinned buffer
 
 
-def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The streamed consumers index their slabs on the first spatial axis; a grid ordered along another
-    axis must not stream, or one axis's slab lands in another. Whole-volume is the safe path until the
-    consumers carry the axis."""
-
-    class DummyPatch:
-        patch_size: ClassVar[list[int]] = [2, 2]
-        placement = "pad"
-
-        @staticmethod
-        def get_patch_slices(index_augmentation: int):
-            del index_augmentation
-            return [(slice(0, 2), slice(0, 2))]
-
-        @staticmethod
-        def get_sweep_axis(index_augmentation: int) -> int:
-            del index_augmentation
-            return 1
-
-    class DummyManager:
-        name = "CASE_000"
-        patch = DummyPatch()
-        cache_attributes: ClassVar[list[Attribute]] = [Attribute({"Origin": [0.0, 0.0]})]
-
-    class DummyGroupTransform:
-        patch_transforms: ClassVar[list[object]] = []
-
-    class DummyDatasetIter:
-        groups_src: ClassVar[dict[str, dict[str, object]]] = {"src": {"dest": DummyGroupTransform()}}
-
-        @staticmethod
-        def get_dataset_from_index(group_dest: str, index: int):
-            return DummyManager()
-
-    output_dataset = OutputDataset(
-        same_as_group="src:dest",
-        dataset_filename="./Output:mha",
-        group="out",
-        patch_combine=None,
-        reduction="Mean",
-    )
-    output_dataset._streaming_enabled = True
-    # A plan would exist if streaming were allowed to consider this case at all.
-    monkeypatch.setattr(OutputDataset, "_plan_stream", lambda self, *a, **k: object(), raising=True)
-
-    output_dataset.add_layer(
-        index_dataset=0,
-        index_augmentation=0,
-        index_patch=0,
-        layer=torch.zeros(1, 2, 2),
-        dataset=cast(DatasetIter, DummyDatasetIter()),
-        attribute=Attribute({"Spacing": np.asarray([1.0, 1.0])}),
-    )
-
-    assert output_dataset._stream_plans[0] is None, "an off-axis sweep must fall back to whole-volume"
-    from konfai.data.patching import StreamingAccumulator
-
-    assert not isinstance(output_dataset.output_layer_accumulator[0][0], StreamingAccumulator)
-
-
 class _StockNet(Network):
     """A network with a weight and the stock loader: the ``Model`` entry is where its weights come from."""
 
@@ -1337,3 +1293,52 @@ def test_a_window_set_aside_for_a_single_patch_is_back_once_a_replan_tiles_the_a
     output.set_patch_config([100, 80, 100], "20%", 1)
     assert output.patch_combine is window
     assert window.overlaps == [20, 16, 20]
+
+
+def test_a_fold_stays_on_a_grid_of_one_patch(tmp_path) -> None:
+    # The output is what it leaves: dropped as a window is, the output would be the model's own channels.
+    from konfai.data.patching import Fold
+
+    class Kept(Fold):
+        def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+            return patch
+
+    output = OutputDataset(
+        same_as_group="src:dest",
+        dataset_filename=f"{tmp_path}/output:mha",
+        group="out",
+        patch_combine="Mean",
+        reduction="Mean",
+    )
+    output.patch_combine = fold = Kept()
+    for overlap in ("20%", None):
+        output.set_patch_config([0, 0, 0], overlap, 1)
+        assert output.patch_combine is fold
+
+
+@pytest.mark.parametrize("sink", ["OutputDataset", "OutputLayerDataset"])
+def test_a_fold_enters_each_patch_once_also_the_first_of_a_case(sink: str) -> None:
+    # The case opens on what the fold holds, on the patch's grid (a layer's output scales the case's by it), and an
+    # enter may work in place: the patch blended is entered once.
+    from konfai.data.patching import Fold
+    from konfai.predictor.output import OutputLayerDataset
+
+    class Raised(Fold):
+        def enter(self, patch: torch.Tensor) -> torch.Tensor:
+            return patch.add_(1)
+
+        def fold(self, held: torch.Tensor, patch: torch.Tensor) -> torch.Tensor:
+            return patch
+
+    if sink == "OutputLayerDataset":
+        output_dataset: OutputDataset = OutputLayerDataset(dataset_filename="./Output:mha", group="out")
+        output_dataset.group_src, output_dataset.group_dest = "src", "dest"
+    else:
+        output_dataset = OutputDataset(
+            same_as_group="src:dest", dataset_filename="./Output:mha", group="out", patch_combine=None, reduction="Mean"
+        )
+    output_dataset.patch_combine = Raised()
+    dataset = _single_patch_dataset_iter()
+    output_dataset.add_layer(0, 0, 0, torch.zeros(2, 2, 2), dataset, Attribute())
+
+    assert torch.equal(output_dataset._get_output(0, 0, [2], dataset), torch.ones(1, 2, 2, 2))

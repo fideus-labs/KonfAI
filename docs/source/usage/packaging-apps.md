@@ -67,7 +67,9 @@ the run's `.pt`. An app still reads the `.pt` weights of an older bundle, and ta
 is no custom Python file to include. For your own model, add `--model-py Model.py`.
 Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files. A helper
 file cannot end in `.pt` or `.safetensors`: an app reserves those for its models.
-Check the generated `requirements.txt` before distributing the app.
+Where the bundle holds no `requirements.txt` (passed with `--requirements`, a
+support file, or one it keeps), the command drafts one from the imports of its
+`Model.py`: check it before distributing the app.
 
 ## Check the packaged result
 
@@ -105,6 +107,13 @@ before it predicts, the app runs the needed app on the same inputs (as many as t
 stages its output for each case as the group `body`, beside `Volume_0`. A stage of the config then reads it,
 for example `Crop: {source: body, labels: [10, 11], margin_mm: 20}`. A bare name is a sibling of the app (the
 same folder, or the same Hugging Face repository); `repo_id:app_name` or a path names any other.
+
+`--set NAME=VALUE` reaches the model's parameters by name. To expose another key of the prediction config, such as
+an argument of a transform stage, map a name to its dotted path from the config root in `app.json`:
+`"parameters": {"crop_shape": "Predictor.Dataset.groups_src.Volume_0.groups_dest.Volume.transforms.model:CentreCrop.shape"}`.
+`konfai-apps show` and a UI's parameters dialog then list `crop_shape` with its value and the constraints the
+stage's types declare, and `--set crop_shape=[160,192,160]` writes that key. A name the model already takes, or a
+path the config does not have, is refused.
 
 ## Fine-tune it
 

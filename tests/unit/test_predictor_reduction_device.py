@@ -19,7 +19,7 @@ from typing import cast
 import pytest
 import torch
 from konfai.data.reduction import Concat, Mean
-from konfai.data.transform import InferenceStack, Resample, Softmax
+from konfai.data.transform import InferenceStack, KeepLargestComponent, Resample, Softmax
 from konfai.predictor import OutputDataset
 from konfai.predictor import output as output_module
 from konfai.utils.utils import get_patch_slices_from_shape
@@ -42,19 +42,19 @@ def test_output_dataset_device_defaults_to_cpu_without_to(monkeypatch: pytest.Mo
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     ds = OutputDataset(same_as_group="default:default", dataset_filename="default|./Dataset:mha")
     assert ds.device == torch.device("cpu")
-    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16)).type == "cpu"
+    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16), "case").type == "cpu"
 
 
 def test_reduction_device_is_cpu_for_a_cpu_dataset() -> None:
     ds = _dataset(torch.device("cpu"))
-    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16)).type == "cpu"
+    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16), "case").type == "cpu"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU reduction only applies on CUDA")
 def test_reduction_device_uses_gpu_when_it_fits_and_falls_back_when_it_does_not() -> None:
     ds = _dataset(0)  # the on-GPU convention: a CUDA ordinal int, not a torch.device
     # a tiny chunk comfortably fits free VRAM -> reduction runs on the dataset's CUDA device
-    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16)).type == "cuda"
+    assert ds._reduction_device(torch.zeros(4, 8, dtype=torch.float16), "case").type == "cuda"
 
     # a chunk claiming more than free VRAM -> memory-safe CPU fallback
     class _Oversized:
@@ -64,7 +64,7 @@ def test_reduction_device_uses_gpu_when_it_fits_and_falls_back_when_it_does_not(
         def element_size(self) -> int:
             return 2
 
-    assert ds._reduction_device(_Oversized()).type == "cpu"
+    assert ds._reduction_device(_Oversized(), "case").type == "cpu"
 
 
 def test_the_reduction_device_prices_every_copy_and_the_fold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,11 +75,11 @@ def test_the_reduction_device_prices_every_copy_and_the_fold(monkeypatch: pytest
     room = int(10.5 * copy.numel() * copy.element_size())
     monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: room)
     ds = _dataset(0, nb_data_augmentation=8)
-    assert ds._reduction_device(copy).type == "cuda"
+    assert ds._reduction_device(copy, "case").type == "cuda"
     ds.after_reduction_transforms = [Softmax(dim=0)]
-    assert ds._reduction_device(copy).type == "cpu"
+    assert ds._reduction_device(copy, "case").type == "cpu"
     ds.after_reduction_transforms, ds.reduction = [], Concat()
-    assert ds._reduction_device(copy).type == "cpu"
+    assert ds._reduction_device(copy, "case").type == "cpu"
 
 
 def test_folded_copies_price_what_follows_the_fold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,9 +89,29 @@ def test_folded_copies_price_what_follows_the_fold(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: 5 * copy.numel() * copy.element_size())
     ds = _dataset(0, nb_data_augmentation=8)
     ds.reduction, ds.after_reduction_transforms = Concat(), [InferenceStack("", "stack", mode="Seg")]
-    assert ds._reduction_device(copy).type == "cuda"
+    assert ds._reduction_device(copy, "case").type == "cuda"
     ds.after_reduction_transforms.append(Resample())
-    assert ds._reduction_device(copy).type == "cpu"
+    assert ds._reduction_device(copy, "case").type == "cpu"
+
+
+def test_the_reduction_device_prices_a_stage_at_what_it_declares_for_the_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KeepLargestComponent per label declares 16 volumes where the class says 6. Eight copies, the Mean's one and
+    the fold's output with the stage's working copies on it are 26 copies' worth, not 16; folded as they come, one
+    in flight, the total and the stage's are 19, not 9."""
+    copy = torch.zeros(6, 64, dtype=torch.float32)
+    room = {"copies": 20.0}
+    monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: room["copies"] * copy.numel() * 4)
+    ds = _dataset(0, nb_data_augmentation=8)
+    ds.after_reduction_transforms = [KeepLargestComponent()]
+    assert ds._reduction_device(copy, "case").type == "cuda"
+    ds.after_reduction_transforms = [KeepLargestComponent(per_label=True)]
+    assert ds._reduction_device(copy, "case").type == "cpu"
+    room["copies"] = 12.0
+    ds.reduction, folded = Concat(), InferenceStack("", "stack", mode="Seg")
+    ds.after_reduction_transforms = [folded, KeepLargestComponent()]
+    assert ds._reduction_device(copy, "case").type == "cuda"
+    ds.after_reduction_transforms = [folded, KeepLargestComponent(per_label=True)]
+    assert ds._reduction_device(copy, "case").type == "cpu"
 
 
 class _FakeAccumulator:
@@ -210,9 +230,9 @@ def test_reduction_device_budgets_every_parked_chunk() -> None:
             return 2
 
     fits_alone = int(free / 8)  # (2*1+1) x chunk fits free VRAM...
-    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 1).type == "cuda"
+    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), "case", 1).type == "cuda"
     # ...but (2*8+1) x chunk does not: eight parked chunks must fall back to the CPU reduction.
-    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), 8).type == "cpu"
+    assert ds._reduction_device(cast(torch.Tensor, _Chunk(fits_alone)), "case", 8).type == "cpu"
 
 
 def test_reduction_declares_slab_locality_by_type() -> None:

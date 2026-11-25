@@ -38,16 +38,22 @@ from konfai.portable import (
     _budget_bytes,
     _built,
     _destination,
+    _dtype_after,
+    _extension_step,
     _file_stem,
     _literal_group,
     _or_konfai,
     _portable_root,
+    _probe_after,
     _write_target,
     base_name,
+    carry_extension,
     chain_items,
     clean,
+    compile_destinations,
     is_save,
     moves_the_volume,
+    own_class,
     records_only,
     refuse_a_late_crop,
     refuse_a_stage_konfai_does_not_carry,
@@ -180,17 +186,23 @@ _MEMBER_FOLDS: dict[str, str] = {
 }
 
 
-def _criterion(criterion: Any, key: str, output_group: str, out: Path) -> dict[str, Any]:
-    """One criterion as the runtime scores it, under the key konfai records it by."""
+def _criterion(
+    criterion: Any, key: str, output_group: str, out: Path, own: tuple[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """One criterion as the runtime scores it, under the key konfai records it by. ``own`` is the classpath and the
+    keys the config binds a criterion of the app's own with, where the app carries its extension of KonfAI Edge:
+    the extension measures it."""
     name = type(criterion).__name__
+    recorded = {"key": key, "maximize": bool(getattr(criterion, "maximize", False))}
+    if own is not None:
+        return recorded | {"metric": "extension", "class": own[0], "params": own[1]}
     if type(criterion).__module__.split(".")[0] != "konfai" or name not in CRITERIA:
         raise EvaluatorError(
             f"Criterion '{name}' has no portable form, so this evaluation cannot run outside Python.",
-            f"Portable criteria are: {', '.join(sorted(CRITERIA))}. {_or_konfai('Score it', _EVALUATE)}",
+            f"Portable criteria are: {', '.join(sorted(CRITERIA))}, and a criterion of the app's own with its"
+            f" extension of KonfAI Edge (extension=...). {_or_konfai('Score it', _EVALUATE)}",
         )
-    return {"key": key, "maximize": bool(getattr(criterion, "maximize", False))} | CRITERIA[name](
-        criterion, output_group, out
-    )
+    return recorded | CRITERIA[name](criterion, output_group, out)
 
 
 def _group_steps(
@@ -199,12 +211,15 @@ def _group_steps(
     out: Path,
     nested: dict[str, dict[str, Any]],
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None,
+    extension: bool = False,
+    held: tuple[int, int, int | None] = (1, 3, None),
 ) -> list[dict[str, Any]]:
     """A ``groups_dest`` chain as the steps the runtime runs on the case it reads: the chain ops, a ``statistics``
     where konfai's ``Statistics`` records the volume's on the case, a model step for a ``KonfAIInference``, the
     nested app's model exported once however many groups run it, and a ``save`` where a ``Save`` writes what
     reaches it (konfai reads that entry back on a later run in place of the stages before it; the runtime runs
-    them again)."""
+    them again). A class of the app's own is probed on what the steps before it make of ``held``, the case's
+    channels, spatial rank and stacked members."""
     steps: list[dict[str, Any]] = []
     moved = None  # the first stage that may move the grid or the values a Crop finds its box in
     for name, params in chain_items(chain):
@@ -224,6 +239,11 @@ def _group_steps(
                     _or_konfai("Drop ignore_background", _EVALUATE),
                 )
             steps.append(_admitted({"op": _MEMBER_FOLDS[stage]}))
+        elif extension and ":" in stage and not records_only(name):
+            probe = _probe_after(held[1], lambda: held[0], members=held[2])(steps, None)
+            # The dtype the steps before it set, or the stored one, which only the run knows.
+            steps.append(_extension_step(name, params, probe, handed=_dtype_after(steps, None)))
+            moved = moved or name
         elif not records_only(name):
             refuse_a_stage_konfai_does_not_carry(name, EvaluatorError)
             if stage not in _CHAIN_OPS:
@@ -231,7 +251,7 @@ def _group_steps(
                     f"Transform '{name}' of group '{group_dest}' has no portable runtime op.",
                     f"Portable stages are: {', '.join(sorted(_CHAIN_OPS))}. {_or_konfai('Run it', _EVALUATE)}",
                 )
-            refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE)
+            refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE, params)
             step = _admitted(_CHAIN_OPS[stage](params))
             moved = moved or (name if moves_the_volume(step) else None)
             steps.append(step)
@@ -268,20 +288,37 @@ def _inference(
     return step | ({"per_channel": True} if clean(params.get("per_channel")) else {})
 
 
+def _first_case(dataset: Any, group: str) -> tuple[int, int, int | None]:
+    """What the first case holds in ``group``, read off its header: its channels, spatial rank and the members its
+    header counts in its stack (``None``: konfai counts one a channel of what a fold of them is handed); one channel
+    of a 3D volume where no dataset of the run holds it (a group a nested model makes)."""
+    from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE
+
+    name = next(iter(dataset.case_names), None)
+    holder = next((held for held in dataset.datasets.values() if held.is_dataset_exist(group, name)), None)
+    if name is None or holder is None:
+        return 1, 3, None
+    shape, attribute = holder.get_infos(group, name)
+    members = int(float(attribute[MEMBERS_ATTRIBUTE])) if MEMBERS_ATTRIBUTE in attribute else None
+    return int(shape[0]), len(shape) - 1, members
+
+
 def compile_evaluation(
     evaluation_file: str | Path = Path("./Evaluation.yml"),
     evaluations_dir: str | Path = Path("./Evaluations"),
     output: str | Path = Path("./evaluation.json"),
     nested_exporter: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
+    extension: str | Path | None = None,
 ) -> dict[str, Any]:
     """Compile an ``Evaluation.yml`` into the program the portable runtime executes, written to ``output`` with
     the ONNX of every network it runs beside it. The workflow is built first, so KonfAI's own refusals come
-    before a program is written, and the criteria are read as it binds them."""
+    before a program is written, and the criteria are read as it binds them. ``extension`` is the app's extension
+    of KonfAI Edge, the WebAssembly module that measures a criterion and runs a voxel-local transform of the app's
+    own; it is copied beside the program."""
     from konfai.evaluator import Evaluator, build_evaluate
     from konfai.network.network.measure import criterion_keys
 
-    output = Path(output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output, extension = compile_destinations(output, extension)
     root = "Evaluator"
     with _built(
         evaluation_file, lambda file: build_evaluate(evaluations_file=file, evaluations_dir=Path(evaluations_dir))
@@ -307,7 +344,13 @@ def compile_evaluation(
             for group_dest, spec in ((node or {}).get("groups_dest") or {}).items():
                 if group_dest in read:
                     steps = _group_steps(
-                        group_dest, (spec or {}).get("transforms"), output.parent, nested, nested_exporter
+                        group_dest,
+                        (spec or {}).get("transforms"),
+                        output.parent,
+                        nested,
+                        nested_exporter,
+                        extension is not None,
+                        _first_case(evaluator.dataset, group_src),
                     )
                     groups.append({"group_src": group_src, "group_dest": group_dest, "steps": steps})
         dests = {group["group_dest"] for group in groups}
@@ -315,13 +358,23 @@ def compile_evaluation(
         for output_group, targets in evaluator.metrics.items():
             for target_group, criteria in targets.items():
                 keys = criterion_keys(output_group, target_group, (criterion.get_name() for criterion in criteria))
+                # The classpath and the keys the config binds each criterion with, in the order konfai binds them.
+                bound = (resolved[root]["metrics"][output_group]["targets_criterions"][target_group])[
+                    "criterions_loader"
+                ]
+                owned = [
+                    (name.split("#", 1)[0], {key: clean(value) for key, value in (params or {}).items()})
+                    if extension is not None and own_class(name)
+                    else None
+                    for name, params in bound.items()
+                ]
                 metrics.append(
                     {
                         "output": output_group,
                         "targets": [group for group in target_group.split(";") if group in dests],
                         "criteria": [
-                            _criterion(criterion, key, output_group, output.parent)
-                            for criterion, key in zip(criteria, keys, strict=True)
+                            _criterion(criterion, key, output_group, output.parent, own)
+                            for criterion, key, own in zip(criteria, keys, owned, strict=True)
                         ],
                     }
                 )
@@ -343,7 +396,11 @@ def compile_evaluation(
             "models": models,
             "metrics": metrics,
         }
-    output.write_text(json.dumps(program, indent=2))
+    if extension is not None:
+        carry_extension(extension, program, output)
+    from konfai.utils.utils import owned_destination
+
+    owned_destination(output).write_text(json.dumps(program, indent=2))
     return program
 
 
