@@ -1465,6 +1465,11 @@ class LocalAppRepository(AppRepositoryInfo):
 
         return models_path, inference_file_path, codes_path
 
+    def install_requirements(self) -> None:
+        """Install the app's requirements as resolving it does (``_install_requirements``), for a caller that runs
+        the app's code in its own process rather than through an inference."""
+        self._install_requirements(self._all_repo_filenames())
+
     def _install_requirements(self, filenames: list[str]) -> None:
         """Install missing/outdated packages listed in the app's requirements.txt, and those its ``app.json`` lists
         under ``requirements_no_deps`` without their dependencies (a package whose own pins cannot be met, such as a

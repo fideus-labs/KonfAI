@@ -38,7 +38,7 @@ from pathlib import Path
 # argparse only: --help and --version stay free of torch and KonfAI.
 from konfai_apps.options import add_device, add_run_options, add_tmp_dir, at_least, local_path
 
-from impact_reg_konfai import PRESETS_REPO
+from impact_reg_konfai import PRESETS_REPO, ROUTES
 
 
 def _stop_on_sigterm() -> None:
@@ -194,26 +194,17 @@ convention): resampling the moving image through it gives Moved.""",
         "e.g. --set FireANTs#syn:tile:deformable_iterations=[100,50,25].",
     )
     reg.add_argument(
-        "--max-voxels",
-        "--max_voxels",
-        dest="max_voxels",
-        type=at_least(1),
-        default=None,
-        help="Register whole a pair of at most this many voxels, overriding what the device holds when the run "
-        "starts at the costs the preset declares. A larger pair runs whole on a coarser grid, resampled by KonfAI, "
-        "and a preset that declares a tile pass then refines it on native tiles sized in proportion.",
-    )
-    reg.add_argument(
         "--out-of-core",
         "--out_of_core",
         dest="out_of_core",
-        choices=("auto", "sampled"),
+        choices=ROUTES,
         default="auto",
-        help="How a pair larger than the device registers. auto (default): resampled to fit, then its deformable "
-        "stage on native tiles where the preset declares a tile pass. sampled: the preset in one pass on the native "
-        "pair, never resampled and never held whole in host memory: the images are read from files, by boxes, and "
-        "the device takes what it holds of the work. With --samples, every iteration draws that many samples anew "
-        "and steps on them, as elastix does on its points.",
+        help="How a pair registers. auto (default): whole where it fits the device, sampled where it does not. "
+        "whole: in one piece on its native grid, refused if it does not fit. tiled: the preset on the pair resampled "
+        "to fit, then its deformable stage on native tiles (presets that declare a tile pass). sampled: the preset "
+        "in one pass on the native pair, never resampled and never held whole in host memory: the images are read "
+        "from files, by boxes, and the device takes what it holds of the work. With --samples, every iteration "
+        "draws that many samples anew and steps on them, as elastix does on its points.",
     )
     reg.add_argument(
         "--region-size",
@@ -485,7 +476,8 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             config_overrides=args.config_overrides,
             tmp_dir=args.tmp_dir,
             fields_only=args.fields_only,
-            max_voxels=args.max_voxels,
+            # The device's budget, which a benchmark may pin to stand a small pair in for a large one.
+            max_voxels=int(os.environ.get("IMPACT_REG_MAX_VOXELS") or 0) or None,
             output_format=args.output_format,
             seed=args.seed,
             out_of_core=args.out_of_core,

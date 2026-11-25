@@ -26,4 +26,9 @@ PRESETS_REVISION = "7d0971d48946106f5b907312d209632ef0f2fcba"
 #: Where the presets are resolved from: ``KONFAI_IMPACTREG_REPO`` when set (a local directory of preset folders,
 #: for development and offline use, or a Hugging Face ``<repo>[@<revision>]``), else ``PRESETS_REVISION`` of
 #: ``VBoussot/ImpactReg``. Here rather than in ``impact_reg`` so that reading it imports no torch.
+#: How a case registers (``--out-of-core``): auto, whole where it fits the device and sampled where it does not;
+#: whole, in one piece on its native grid; tiled, a global pass on the pair resampled to fit, then the deformable
+#: stage on native tiles; sampled, at native resolution, by boxes.
+ROUTES = ("auto", "whole", "tiled", "sampled")
+
 PRESETS_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", f"VBoussot/ImpactReg@{PRESETS_REVISION}")

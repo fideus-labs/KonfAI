@@ -64,6 +64,8 @@ def presets(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Monkey
     for name, classpath in (("Convex", CONVEXADAM), ("Other", OTHER), ("Elx", ELASTIX)):
         (repo / name).mkdir()
         manifest = {"task": "registration", "vram_bytes_per_voxel": 100, "ram_bytes_per_voxel": 100}
+        # What konfai-apps reads of an app it resolves, as the sampled route resolves it for its requirements.
+        manifest.update(description=name, short_description=name, display_name=name, tta=0, mc_dropout=0)
         if name == "Convex":
             manifest["tiling"] = {"global": "Prediction.yml", "tile": "Prediction_tile.yml"}
         (repo / name / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -463,7 +465,7 @@ def test_sampled_mode_runs_the_region_stage_on_a_pair_over_the_budget(presets: P
     assert (tmp_path / "out" / "P000" / "DVF.mha").exists()
 
 
-def test_sampled_mode_registers_whole_a_pair_the_device_holds(presets: Path, tmp_path: Path) -> None:
+def test_auto_registers_whole_a_pair_the_device_holds(presets: Path, tmp_path: Path) -> None:
     fixed, moving = _pair(tmp_path)
     app = reg.ImpactRegKonfAIApp()
     app._register_sampled = lambda *args, **kwargs: pytest.fail("the region stage ran")  # type: ignore[method-assign]
@@ -478,11 +480,11 @@ def test_sampled_mode_registers_whole_a_pair_the_device_holds(presets: Path, tmp
         return "DVF", {"P000": out / "DVF.mha"}
 
     app._infer_preset = whole  # type: ignore[method-assign]
-    app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", fields_only=True)
+    app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="auto", fields_only=True)
     assert (tmp_path / "out" / "P000" / "DVF.mha").exists()
 
 
-def test_sampled_mode_registers_whole_the_cases_the_device_holds(presets: Path, tmp_path: Path) -> None:
+def test_auto_registers_whole_the_cases_the_device_holds(presets: Path, tmp_path: Path) -> None:
     """A cohort is routed case by case: a pair over the budget registers sampled, a smaller one whole as it would
     alone (an oblique one included, which the sampled route refuses for features), each under its own case ID, and
     the moved image of each comes through its own form of transform (a dense field, a native affine)."""
@@ -525,7 +527,7 @@ def test_sampled_mode_registers_whole_the_cases_the_device_holds(presets: Path, 
         [paths["large", "fixed"], paths["small", "fixed"]],
         [paths["large", "moving"], paths["small", "moving"]],
         output=tmp_path / "out",
-        out_of_core="sampled",
+        out_of_core="auto",
         max_voxels=1000,
     )
     assert seen == {"sampled": (["P000"], [paths["large", "fixed"]]), "whole": [paths["small", "fixed"]]}

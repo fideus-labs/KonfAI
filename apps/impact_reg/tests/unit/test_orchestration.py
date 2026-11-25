@@ -1097,6 +1097,7 @@ def test_register_records_the_overrides_each_pass_took(tmp_path: Path, monkeypat
         output=tmp_path / "Output",
         config_overrides=overrides,
         max_voxels=1000,
+        out_of_core="tiled",
         quiet=True,
         fields_only=True,
     )
@@ -1225,7 +1226,7 @@ def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and
     )
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = preset  # type: ignore[method-assign]
-    app.register(["P"], [fixed], [moving], output=tmp_path / "Output", max_voxels=1000, quiet=True)
+    app.register(["P"], [fixed], [moving], output=tmp_path / "Output", max_voxels=1000, out_of_core="tiled", quiet=True)
 
     # Both passes get the native pair: KonfAI resamples the global one (mode: resample) and cuts the tiles (mode: tile)
     # to the voxels the card holds.
@@ -1276,30 +1277,25 @@ def test_the_tiles_get_a_fixed_mask_on_the_fixed_grid(tmp_path: Path, monkeypatc
         fixed_masks=[tmp_path / "mask.mha"],
         output=tmp_path / "Output",
         max_voxels=1000,
+        out_of_core="tiled",
         quiet=True,
         fields_only=True,
     )
     assert seen["mask"].GetSize() == (16, 16, 16) and seen["mask"].GetSpacing() == (1.0, 1.0, 1.0)
 
 
-def test_a_preset_that_declares_no_tiling_registers_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_tiled_route_refuses_a_preset_that_declares_no_tile_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixed = tmp_path / "fixed.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.float32)), str(fixed))
-    moving = _ramp(tmp_path / "moving.mha", 16)
     monkeypatch.setattr(reg, "_manifest", lambda preset: {})
-    calls: list = []
-
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
-        calls.append(kwargs.get("prediction_file"))
-        out = Path(work) / name / "P000"
-        out.mkdir(parents=True, exist_ok=True)
-        return "DVF", {"P000": _write_dvf(out / "DVF.mha", (0.0, 0.0, 0.0), sitk.ReadImage(str(fixed)))}
-
     app = reg.ImpactRegKonfAIApp()
-    app._infer_preset = preset  # type: ignore[method-assign]
-    app.register(["P"], [fixed], [moving], output=tmp_path / "Output", max_voxels=1000, quiet=True)
-
-    assert calls == [None]  # its own Prediction.yml, whole
+    app._infer_preset = lambda *args, **kwargs: pytest.fail("a refused route ran a pass")  # type: ignore[method-assign]
+    with pytest.raises(KonfAIError, match="declares no tile pass"):
+        app.register(
+            ["P"], [fixed], [_ramp(tmp_path / "moving.mha", 16)], output=tmp_path / "Output", out_of_core="tiled"
+        )
 
 
 # --------------------------------------------------------------------------- one grid where KonfAI patches or flips
@@ -1310,9 +1306,17 @@ def test_a_preset_that_declares_no_tiling_registers_whole(tmp_path: Path, monkey
     [
         (None, {}, False),  # registered whole: the moving as it came, its field of view and resolution kept
         (None, {"tta": 2}, True),  # test-time flips
-        ({"tile": "Prediction_tile.yml"}, {"max_voxels": 500}, True),  # tiles with no global pass before them
+        (
+            {"tile": "Prediction_tile.yml"},
+            {"max_voxels": 500, "out_of_core": "tiled"},
+            True,
+        ),  # tiles with no global pass before them
         # the global pass on the pair as it came, coarse; its tiles on the moving it pre-warped onto the fixed grid
-        ({"global": "Prediction.yml", "tile": "Prediction_tile.yml"}, {"max_voxels": 500}, False),
+        (
+            {"global": "Prediction.yml", "tile": "Prediction_tile.yml"},
+            {"max_voxels": 500, "out_of_core": "tiled"},
+            False,
+        ),
     ],
 )
 def test_a_pair_on_two_grids_is_patched_or_flipped_only_on_the_fixed_grid(
@@ -1480,8 +1484,50 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = preset  # type: ignore[method-assign]
     with pytest.raises(reg._OutOfMemory):
-        app.register(["P"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
+        app.register(
+            ["P"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True, out_of_core="tiled"
+        )
     assert calls == ["Prediction_global.yml", "Prediction_tile.yml"]
+
+
+@pytest.mark.parametrize(
+    ("choice", "flat", "sampled", "tiled"),
+    [
+        ("auto", False, [1], False),  # the case over the budget sampled, the other whole
+        ("auto", True, [], True),  # a 2-D pair over the budget in two passes: the sampled route takes volumes
+        ("whole", False, [], False),
+        ("tiled", False, [], True),
+        ("sampled", False, [0, 1], False),  # the case that fits too
+        ("auto", None, [], True),  # an engine the sampled route does not drive: two passes
+    ],
+)
+def test_each_route_places_every_case(monkeypatch: pytest.MonkeyPatch, choice, flat, sampled, tiled) -> None:
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {"tiling": {"tile": "Prediction_tile.yml"}})
+    monkeypatch.setattr(reg, "_sampled_engine", lambda preset: None if flat is None else "fireants")
+    route = reg._route(choice, "P", [10, 1000], bool(flat), (100, 50))
+    assert (route.sampled, route.tiled, route.budget, route.tile_budget) == (sampled, tiled, 100, 50)
+
+
+def test_the_whole_route_refuses_a_pass_konfai_resampled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.float32)), str(fixed))
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1})
+    app = reg.ImpactRegKonfAIApp()
+    caps: list = []
+
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
+        caps.append(kwargs.get("max_voxels"))
+        app._ran[name] = [{"rank": 0, "mode": "resample", "resample_voxels": 512}]  # an out-of-memory coarsened it
+        out = Path(work) / name / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        return "DVF", {"P000": _write_dvf(out / "DVF.mha", (0.0, 0.0, 0.0), sitk.ReadImage(str(fixed_images[0])))}
+
+    app._infer_preset = preset  # type: ignore[method-assign]
+    with pytest.raises(KonfAIError, match="does not fit the device whole"):
+        app.register(
+            ["P"], [fixed], [_ramp(tmp_path / "moving.mha", 16)], output=tmp_path / "Output", out_of_core="whole"
+        )
+    assert caps == [16**3]  # held on its native grid
 
 
 def test_a_pair_that_fits_is_registered_whole_under_its_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

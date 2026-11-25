@@ -70,7 +70,7 @@ from konfai_apps.ensemble import STACK, combine, stack_file
 from konfai_apps.ensemble import _token as member_token
 from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
-from impact_reg_konfai import PRESETS_REPO
+from impact_reg_konfai import PRESETS_REPO, ROUTES
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 
 # Preset apps live on this Hugging Face repo, at the revision this release pins; KONFAI_IMPACTREG_REPO points
@@ -420,6 +420,38 @@ def _plan(
     return voxels_on(whole.get("vram"), whole.get("ram"), at, remote_server), voxels_on(
         tile.get("vram"), tile.get("ram"), at, remote_server
     ) if tile else None
+
+
+@dataclass(frozen=True)
+class _Route:
+    """Where the cases of one preset register: those of ``sampled`` (by index) sampled, the others whole, or in two
+    passes with ``tiled``; ``budget`` and ``tile_budget`` are the preset's plan (``_plan``)."""
+
+    budget: int | None
+    tile_budget: int | None
+    sampled: list[int]
+    tiled: bool
+
+
+def _route(choice: str, preset: str, voxels: list[int], flat: bool, plan: tuple[int | None, int | None]) -> _Route:
+    """Each case's route under ``choice`` (``ROUTES``), from ``voxels``, the largest image of each case, and the
+    preset's ``plan``. Under auto, a case over the budget goes where the preset can take it: sampled for a volume of an
+    engine the sampled route drives, else in two passes where the preset declares them, else whole on a grid KonfAI
+    resamples to fit. tiled refuses a preset with no tile pass or no declared cost to size it by."""
+    budget, tile_budget = plan
+    tiles = bool((_manifest(preset).get("tiling") or {}).get("tile")) and bool(budget and tile_budget)
+    if choice == "tiled" and not tiles:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset} declares no tile pass, or no memory cost to size one by, which --out-of-core tiled needs.",
+            "Choose --out-of-core auto, whole or sampled.",
+        )
+    over = [index for index, size in enumerate(voxels) if budget and size > budget]
+    if choice == "sampled":
+        return _Route(budget, tile_budget, list(range(len(voxels))), False)
+    if choice == "auto" and over and not flat and _sampled_engine(preset):
+        return _Route(budget, tile_budget, over, False)
+    return _Route(budget, tile_budget, [], choice == "tiled" or (choice == "auto" and bool(over) and tiles))
 
 
 def _find_output_group(root: Path) -> str:
@@ -982,6 +1014,14 @@ def _run_transform(
 _SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
 
 
+def _sampled_engine(preset: str) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``, from its config's classpath;
+    None for any other class."""
+    config = _preset_config(preset, "Prediction.yml")
+    classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
+    return next((m for m in _SAMPLED_ENGINES if classpath == f"{__package__}.models.{m}:RegistrationNet"), None)
+
+
 @dataclass
 class _SampledRun:
     """What one preset's sampled run is given (``_register_sampled``)."""
@@ -1281,9 +1321,11 @@ class ImpactRegKonfAIApp:
             inputs["MovingMask"] = _units(list(moving_masks))
         _check_inputs(inputs, output)
         _check_presets(presets)
-        if out_of_core not in ("auto", "sampled"):
-            raise KonfAIError("ImpactReg", f"--out-of-core {out_of_core} is not a mode.", "Use auto or sampled.")
-        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core == "sampled")
+        if out_of_core not in ROUTES:
+            raise KonfAIError(
+                "ImpactReg", f"--out-of-core {out_of_core} is not a route.", f"Use one of {', '.join(ROUTES)}."
+            )
+        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core != "tiled")
         self._run_args = ["--seed", str(seed)] if seed is not None else []
         self._moved_format = None
         for spec in output_format or []:
@@ -1299,22 +1341,6 @@ class ImpactRegKonfAIApp:
                 self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
             if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
                 self._run_args += ["--output-format", spec]
-        for refused, what, drop in (
-            (self._remote is not None, "runs the preset's engine in this process, not on a server.", "--host"),
-            (tta, "registers the pair once, with no test-time augmentation.", "--tta"),
-            (
-                self._run_args,
-                "draws with its own seed and writes its field as a MetaImage: --seed and --output-format reach no"
-                " part of it but the moved image (Moved=FORMAT).",
-                "them",
-            ),
-        ):
-            if out_of_core == "sampled" and refused:
-                raise KonfAIError(
-                    "ImpactReg",
-                    f"--out-of-core sampled {what}",
-                    f"Drop {drop}, or register without --out-of-core sampled.",
-                )
         # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
         # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
         self._dense = len(presets) > 1 or bool(tta)
@@ -1330,14 +1356,11 @@ class ImpactRegKonfAIApp:
             _check_volumes(inputs, headers)
             lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
             if flat and out_of_core == "sampled":  # before the planes are lifted, which reads a plane whole
-                for preset in presets:
-                    budget = _plan(_manifest(preset), gpu, max_voxels, self._remote)[0]
-                    if budget and any(max(math.prod(h[0][1:]) for h in case.values()) > budget for case in headers):
-                        raise KonfAIError(
-                            "ImpactReg",
-                            f"{preset}: --out-of-core sampled registers volumes, and this pair is 2-D.",
-                            "Register it without --out-of-core sampled.",
-                        )
+                raise KonfAIError(
+                    "ImpactReg",
+                    "--out-of-core sampled registers volumes, and this pair is 2-D.",
+                    "Register it with --out-of-core auto, whole or tiled.",
+                )
             if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
                 lifted = {
                     group: [
@@ -1347,23 +1370,41 @@ class ImpactRegKonfAIApp:
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
-            _check_space(work, headers, presets, out_of_core == "sampled")
+            voxels = [max(math.prod(header[0][-3:]) for header in case.values()) for case in headers]
+            routes = {
+                preset: _route(
+                    out_of_core, preset, voxels, flat, _plan(_manifest(preset), gpu, max_voxels, self._remote)
+                )
+                for preset in presets
+            }
+            sampled_presets = [preset for preset, route in routes.items() if route.sampled]
+            for refused, what, drop in (
+                (self._remote is not None, "runs the preset's engine in this process, not on a server.", "--host"),
+                (tta, "registers the pair once, with no test-time augmentation.", "--tta"),
+                (
+                    self._run_args,
+                    "draws with its own seed and writes its field as a MetaImage: --seed and --output-format reach no"
+                    " part of it but the moved image (Moved=FORMAT).",
+                    "them",
+                ),
+            ):
+                if sampled_presets and refused:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"{', '.join(sampled_presets)}: the sampled route {what}",
+                        f"Drop {drop}, or choose --out-of-core whole or tiled.",
+                    )
+            _check_space(work, headers, presets, bool(sampled_presets))
             on_grid = None
             fields_by_preset = {}
             for index, preset in enumerate(presets, 1):
                 if len(presets) > 1 and not quiet:
                     print(f"[ImpactReg] preset {index}/{len(presets)}: {preset}", flush=True)
-                manifest = _manifest(preset)
-                tiling = manifest.get("tiling") or {}
-                budget, tile_budget = _plan(manifest, gpu, max_voxels, self._remote)
-                self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
-                voxels = [max(math.prod(header[0][-3:]) for header in case.values()) for case in headers]
-                # The cases the strategy registers sampled: those over the budget, each keeping its case ID; the
-                # others register whole, as they would alone.
-                rest = list(range(len(headers)))
-                over = (
-                    [index for index in rest if budget and voxels[index] > budget] if out_of_core == "sampled" else []
-                )
+                tiling, route = _manifest(preset).get("tiling") or {}, routes[preset]
+                self._plans[preset] = {"whole_voxels": route.budget, "tile_voxels": route.tile_budget}
+                # The cases registered sampled keep their case ID; the others register as they would alone.
+                over = route.sampled
+                rest = [index for index in range(len(headers)) if index not in over]
                 if over:
                     fields_by_preset[preset] = sampled = self._register_sampled(
                         preset,
@@ -1382,11 +1423,13 @@ class ImpactRegKonfAIApp:
                     rest = [index for index in rest if index not in over]
                     if not rest:
                         continue
-                if out_of_core == "sampled" and not quiet:
-                    fits = "the pair fits" if not over else f"{', '.join(f'P{index:03d}' for index in rest)} fit"
-                    print(f"[ImpactReg] {preset}: {fits} the device; registered whole.", flush=True)
-                largest_voxels = max(voxels[index] for index in rest)
-                tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
+                if over and not quiet:
+                    print(
+                        f"[ImpactReg] {preset}: {', '.join(f'P{index:03d}' for index in rest)} fit the device;"
+                        " registered whole.",
+                        flush=True,
+                    )
+                tiled = route.tiled
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
@@ -1401,8 +1444,8 @@ class ImpactRegKonfAIApp:
                         preset,
                         tiling,
                         *pair,
-                        budget,
-                        tile_budget,
+                        route.budget,
+                        route.tile_budget,
                         work,
                         gpu,
                         cpu,
@@ -1412,7 +1455,9 @@ class ImpactRegKonfAIApp:
                     )
                     continue
                 # Registered whole: KonfAI resamples a pair over the budget onto a coarser grid and its field back
-                # onto the native fixed grid (the preset's patch ``mode: resample``).
+                # onto the native fixed grid (the preset's patch ``mode: resample``); --out-of-core whole holds it
+                # on its native grid, and refuses a pass KonfAI had to resample once it ran out of memory.
+                native = out_of_core == "whole"
                 fields_by_preset[preset] = self._infer_preset(
                     preset,
                     *(pair[0].get(group, []) for group in ("Fixed", "Moving", "FixedMask", "MovingMask")),
@@ -1422,9 +1467,19 @@ class ImpactRegKonfAIApp:
                     quiet,
                     tta,
                     overrides[preset]["global"],
-                    max_voxels=budget,
+                    max_voxels=max(voxels[index] for index in rest) if native else route.budget,
                     uncertainty=uncertainty and bool(tta) and not flat,
                 )
+                resampled = [
+                    plan["resample_voxels"] for plan in self._ran.get(preset, []) if plan.get("resample_voxels")
+                ]
+                if native and resampled:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"{preset}: the pair does not fit the device whole; KonfAI resampled it to"
+                        f" {min(resampled):,} voxels once it ran out of memory.",
+                        "Choose --out-of-core auto or sampled, which register it at native resolution by boxes.",
+                    )
                 if over:
                     (sampled_group, sampled_fields), (group, whole_fields) = sampled, fields_by_preset[preset]
                     if group != sampled_group:
@@ -1738,29 +1793,29 @@ class ImpactRegKonfAIApp:
         """
         import importlib
 
-        from konfai_apps.app_repository import apply_overrides
+        from konfai_apps.app_repository import apply_overrides, get_app_repository_info
 
         from .models.intensity import world_transform
         from .native import to_millimetres
 
         config = _preset_config(preset, "Prediction.yml")
-        classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
-        module = classpath.removeprefix(f"{__package__}.models.").removesuffix(":RegistrationNet")
-        if module not in _SAMPLED_ENGINES:
+        module = _sampled_engine(preset)
+        if module is None:
             raise KonfAIError(
                 "ImpactReg",
-                f"{preset} cannot run --out-of-core sampled: its engine ({classpath or 'unnamed'}) has no"
-                " stage that runs on a subset of the pair.",
-                "Register it without --out-of-core sampled: the pair resampled to fit, then its deformable stage on"
-                " native tiles where the preset declares a tile pass.",
+                f"{preset} cannot run --out-of-core sampled: its engine has no stage that runs on a subset of the"
+                " pair.",
+                "Choose --out-of-core auto, whole or tiled.",
             )
-        try:  # the engine runs here, with its own requirements
+        # The engine runs here: its requirements are installed as resolving the app installs them.
+        get_app_repository_info(app_id(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0]), False).install_requirements()
+        try:
             network = importlib.import_module(f".models.{module}", __package__).RegistrationNet
         except ModuleNotFoundError as error:
             raise KonfAIError(
                 "ImpactReg",
                 f"--out-of-core sampled runs the preset's engine in this process, which needs {error.name}.",
-                "pip install the preset's requirements.txt.",
+                "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
             ) from error
         apply_overrides(config, config_overrides["global"], lambda: network)
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])

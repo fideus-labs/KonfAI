@@ -43,8 +43,8 @@ The names below are those of the shipped presets; `show NAME` gives each preset'
 | Random draws | `seed` | `seed` | `seed` |
 | Escape hatch | `parameter_overrides` (any elastix parameter) | | |
 
-Memory is not a preset parameter: runs are sized automatically, and `--max-voxels` overrides it (see
-[Large images](large-images.md)). The device is `--gpu` or `--cpu`.
+Memory is not a preset parameter: runs are sized automatically, and `--out-of-core` chooses how a pair registers
+(see [Large images](large-images.md)). The device is `--gpu` or `--cpu`.
 
 ## Feature layers
 

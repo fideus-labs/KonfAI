@@ -1,7 +1,7 @@
 # Large images
 
-IMPACT-Reg registers a pair of any size with nothing to set: the whole pair on a grid sized to the memory, then, for
-the presets that declare it, a refinement on native tiles. The outputs are on the native fixed grid. The same command
+IMPACT-Reg registers a pair of any size with nothing to set: whole where it fits the device, at native resolution by
+boxes where it does not. The outputs are on the native fixed grid. The same command
 works for a brain MRI and for a light-sheet volume of a billion voxels:
 
 ```bash
@@ -21,10 +21,19 @@ KonfAI turns that cost into the number of voxels it can register in one piece:
 
 Every published preset declares its cost, so every run is sized. A preset that declares none gets the pair whole.
 
-## Whole or in two passes
+## Routes
 
-- **The pair fits:** the preset registers it in one piece.
-- **It does not:** the preset registers it in two passes.
+`--out-of-core` chooses how a pair registers:
+
+| Route | What it does |
+|---|---|
+| `auto` (default) | whole where the pair fits the device, sampled where it does not; a 2-D pair that does not fit goes in two passes |
+| `whole` | the preset in one piece on the native pair, whatever the plan; refused if KonfAI had to resample it to fit |
+| `tiled` | two passes (below), for the presets that declare a tile pass |
+| `sampled` | at native resolution, by boxes (below), even a pair that fits |
+
+## Two passes (`--out-of-core tiled`)
+
   1. **Global pass.** The whole preset (rigid, affine, deformable) runs once on the pair, resampled by KonfAI onto a
      grid just coarse enough to fit. Its field comes back onto the native fixed grid.
   2. **Tile pass.** The moving image is warped through that first result, then the preset's deformable stage refines
@@ -49,7 +58,7 @@ is sized from the RAM before it starts.
 
 ## Sampled, at native resolution
 
-`--out-of-core sampled` is the second strategy: a pair over the budget registers at native resolution in one pass,
+The sampled route registers a pair at native resolution in one pass,
 never resampled, never held whole. The image never changes; what an iteration looks at is the engine's: every box
 of the pair, or with `--samples` a random subset drawn anew at each one (elastix draws its own points either way). The
 inputs are first read once, by bands, and
@@ -129,16 +138,15 @@ it first, or register it without `--out-of-core sampled`, which reorients it.
 
 | Option | Effect |
 |---|---|
-| `--max-voxels N` | register whole a pair of at most `N` voxels, whatever the device holds; the tiles are sized in proportion |
 | `--tmp-dir DIR` | where the intermediates go (default: a hidden directory beside `--output`) |
 | `--fields-only` | write the transform only, skip the moved image |
-| `--out-of-core sampled` | register a pair over the budget at native resolution in one pass, an iteration on every box of the pair, or on a random draw with `--samples` |
+| `--out-of-core ROUTE` | `auto`, `whole`, `tiled` or `sampled` (see *Routes*) |
 | `--region-size N` | side of a box of the sampled mode, in voxels (default 64; ConvexAdam, FireANTs). Without `--samples`, FireANTs' deformable stage takes larger ones when the GPU has room: the result does not depend on them |
 | `--samples N` | samples an iteration draws, anew at each one: the work of an iteration follows them, not the image, while the warps and what the stages keep per box (their steps, their loss) follow the image. A sample is a centre, read with what the loss or the model reads around it (its field of view). elastix draws that many points; ConvexAdam and FireANTs that many voxels in whole random boxes (one box at least, 8 voxels a side at least), whose centres share what they read. Default: what the device holds (ConvexAdam and FireANTs then step every box at every iteration, as on the whole pair), the preset's count for elastix |
 | `--epochs E` | steps a box takes on average in the deformable stages (default: the stage's own iterations; ConvexAdam, FireANTs) |
 
-The plan follows the memory free when the run starts, so a busy GPU can change it, and with it the result, slightly.
-For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset started with (`plans`) and, per rank, the final plan it ran on after
+A tiled run is sized from the memory free when it starts, so a busy GPU can change its plan, and with it the result,
+slightly; so can it the blocks a sampled FireANTs run extracts its Static features by, at their faces. `register.json` records the plan every preset started with (`plans`) and, per rank, the final plan it ran on after
 any out-of-memory re-plan (`ran`); the cases a rank finished before a restart ran on the plan before.
 
 ## Disk and RAM
