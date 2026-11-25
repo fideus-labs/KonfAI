@@ -1303,3 +1303,64 @@ def test_the_whole_syn_field_takes_the_inverse_onto_the_fixed_grid(monkeypatch):
     found = _inverse_on((20, 44))(None, None)
     expected = torch.nn.functional.interpolate(inverse.movedim(-1, 1), (20, 44), mode="bilinear", align_corners=True)
     assert torch.equal(found, expected.movedim(1, -1))
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_a_jacobian_strided_layer_by_aligned_boxes_has_the_level_s_gradient(tmp_path, masked):
+    """A Jacobian layer at half the image's resolution, anchored at the end of an axis its network flips (as
+    TotalSegmentator's), evaluated on boxes that start on its stride and end as far from the level's end as a whole
+    number of it, each box's mean brought to its cells' share of the level's, has the whole level's gradient, the
+    level's last axis odd."""
+    from impact_reg_konfai.models import fireants as engine
+    from konfai.metric.measure.impact import block_region
+
+    path = tmp_path / "strided.pt"
+    torch.jit.script(_Strided(flipped=True)).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), layers_mask="01", distance="L2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False, masked=masked)
+    loss._level = 0
+    assert loss.stride("cpu") == 2
+    generator = torch.Generator().manual_seed(5)
+    shape = (20, 24, 27)
+    moved, fixed = (torch.rand((1, 2, *shape), generator=generator) for _ in range(2))
+    for volume, cut in ((moved, 9), (fixed, 13)):
+        volume[:, -1] = 0.0
+        volume[:, -1, :, :cut] = 1.0
+    if not masked:
+        moved, fixed = moved[:, :1], fixed[:, :1]
+    loss.draw()
+    whole = moved.clone().requires_grad_()
+    (expected,) = torch.autograd.grad(loss(whole, fixed), whole)
+    boxes = []
+    for start, stop in tiles(shape, 8):
+        low, high, core = block_region(start, stop, [4] * 3, shape, 2)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        boxes.append((low, high, core, crop, region))
+
+    def pieces():
+        for low, high, _, crop, region in boxes:
+            loss.place(low, high, shape)
+            yield moved[crop], fixed[crop], region
+
+    loss.pool(pieces)
+    support = sum(
+        float(((moved[crop][:, -1:] * fixed[crop][:, -1:] >= 0.5) * region).sum()) for *_, crop, region in boxes
+    )
+    gathered = torch.zeros_like(moved)
+    for low, high, core, crop, _ in boxes:
+        loss.place(low, high, shape)
+        box = moved[crop].clone().requires_grad_()
+        value = loss(box, fixed[crop])
+        weight = (
+            (box[:, -1:] * fixed[crop][:, -1:] >= 0.5).sum() / support
+            if masked
+            else box[0, 0].numel() / whole[0, 0].numel()
+        )
+        if weight == 0:
+            continue
+        (gradient,) = torch.autograd.grad(value * weight, box)
+        own = tuple(slice(lo + c.start, lo + c.stop) for lo, c in zip(low, core, strict=True))
+        gathered[(slice(None), slice(None), *own)] = gradient[(slice(None), slice(None), *core)]
+    assert torch.allclose(gathered[:, :1], expected[:, :1], atol=1e-7)

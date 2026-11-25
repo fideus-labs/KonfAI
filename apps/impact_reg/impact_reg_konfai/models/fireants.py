@@ -326,6 +326,7 @@ class _ImpactCore(torch.nn.Module):
         self.kept = self.model.kept
         # The tile each pyramid level is scored in once its whole image has run out of the card's memory.
         self._tiles: dict[tuple[int, ...], list[int]] = {}
+        self._layer_rules: list[list[tuple[int, bool]]] | None = None  # each kept layer's stride and rounding
         self._last_shape: tuple[int, ...] | None = None  # the level scored last, for narrow()
 
     def _pca_project(
@@ -438,6 +439,34 @@ class _ImpactCore(torch.nn.Module):
             )
             sums[index] = ncc_sums(moved_features, fixed_features, layer_weight).cpu()
         return sums
+
+    def layer_cells(self, weight: torch.Tensor) -> list[float]:
+        """Each kept layer's cells over a piece ``weight`` ``[1, 1, *spatial]`` covers as the network reads it (after
+        ``_prepared``): the cells its nearest voxel puts in, counted on the layer's own grid (``layer_shapes``)."""
+        return [
+            float(torch.nn.functional.interpolate(weight.float(), size=shape, mode="nearest").sum())
+            for shape in self.layer_shapes(tuple(weight.shape[2:]), weight.device)
+        ]
+
+    def layer_shapes(self, shape: tuple[int, ...], device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each kept layer's grid for an input of ``shape``: its stride along each axis, and whether it rounds a
+        remainder up, read once off a probe of an odd side."""
+        if self._layer_rules is None:
+            side = 2 * max(1, int(self.model.multiple), self.model.block_stride(device)) + 1
+            probe = torch.rand((1, self.model.in_channels, *[side] * len(shape)), device=device)
+            with torch.no_grad(), no_texpr_fuser():
+                outputs = self.model.network(probe.device)(*self.model.inputs(probe, _statistics(probe)[0]))
+            self._layer_rules = []
+            for layer in self.kept:
+                rule = []
+                for cells in outputs[layer].shape[2:]:
+                    stride = 2 ** round(math.log2(side / max(int(cells), 1)))
+                    rule.append((stride, int(cells) * stride >= side))
+                self._layer_rules.append(rule)
+        return [
+            tuple(-(-n // stride) if up else max(1, n // stride) for n, (stride, up) in zip(shape, rule, strict=True))
+            for rule in self._layer_rules
+        ]
 
     def model_size(self, level: tuple[int, ...], seed: int) -> tuple[int, ...] | None:
         """The grid a model with a voxel_size reads a level of ``level`` voxels on (None without one): the level's
@@ -603,7 +632,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None  # NCC layers' level sums (``pool``)
         # Jacobian: each model's intensities over the level, the cells it weighs, and where a piece lies (``pool``)
         self._statistics: dict[int, tuple[Attribute, Attribute]] = {}
-        self._cells: dict[int, float] = {}
+        self._cells: dict[int, list[float]] = {}  # each model's kept layers' cells the level weighs
         self._place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
         # Jacobian: each model's NCC layers' derivative and value from the level's sums, and the level's weight
         self._layer_sums: dict[int, dict[int, tuple[torch.Tensor, float]]] = {}
@@ -788,6 +817,19 @@ class ImpactFeatureLoss(torch.nn.Module):
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         return any(name == "NCC" for index in level for name, _ in self._terms(index))
 
+    def stride(self, device: torch.device | str) -> int:
+        """The stride a piece of the level must start on, and end as far from its end as a whole number of, for every
+        network run on it to meet the whole level's cells (``ImpactFeatureModel.block_stride``, the input multiple):
+        Jacobian mode on whole pieces; 1 otherwise, and for a model read on its own grid (a voxel_size)."""
+        if self._mode != "Jacobian" or self._sampling < 1:
+            return 1
+        strides = [
+            max(int(core.model.multiple), core.model.block_stride(device))
+            for core in self.cores
+            if core.model.voxel_size is None
+        ]
+        return max([1, *strides])
+
     def place(self, low: Sequence[int], high: Sequence[int], grid: Sequence[int]) -> None:
         """Where the next piece lies: ``[low, high)`` of a level of ``grid`` voxels (a registration by boxes says so
         before each), for a model that reads the level on its own grid (``_ImpactCore._prepared``)."""
@@ -837,7 +879,8 @@ class ImpactFeatureLoss(torch.nn.Module):
         assert self._draw is not None
         sized = [index for index in level if self.cores[index].model.voxel_size is not None]
         intensities = {index: (_Intensities(), _Intensities()) for index in [None, *sized]}
-        self._cells, self._level_weight = dict.fromkeys(sized, 0.0), 0.0
+        self._cells = {index: [0.0] * len(self.cores[index].kept) for index in level}
+        self._level_weight = 0.0
         with torch.no_grad():
             for moved, fixed, region in read():
                 weight = region
@@ -847,13 +890,17 @@ class ImpactFeatureLoss(torch.nn.Module):
                 self._level_weight += float(weight.sum())  # as the stage weighs a piece: its voxels, or its support
                 intensities[None][0].add(moved, region)
                 intensities[None][1].add(fixed, region)
-                for index in sized:
+                for index in level:
                     seed = self._draw + 1000 * index
                     core = self.cores[index]
-                    on_grid, fixed_on_grid, own = core._prepared(moved, fixed, region, seed, self._place)
-                    intensities[index][0].add(on_grid, own)
-                    intensities[index][1].add(fixed_on_grid, own)
-                    self._cells[index] += float(core._prepared(weight, weight, weight, seed, self._place)[2].sum())
+                    if index in sized:
+                        on_grid, fixed_on_grid, own = core._prepared(moved, fixed, region, seed, self._place)
+                        intensities[index][0].add(on_grid, own)
+                        intensities[index][1].add(fixed_on_grid, own)
+                    # The cells of each layer the piece owns (those both masks keep), on the layer's own grid.
+                    own_weight = core._prepared(weight, weight, weight, seed, self._place)[2]
+                    for layer, cells in enumerate(core.layer_cells(own_weight)):
+                        self._cells[index][layer] += cells
         self._statistics = {}
         for index in level:
             moved_side, fixed_side = intensities[index if index in sized else None]
@@ -943,14 +990,17 @@ class ImpactFeatureLoss(torch.nn.Module):
                     {layer: (d, v, scale) for layer, (d, v) in pooled.items()} or None,
                     self._place,
                 )
-                if index in self._cells and self._place is not None:
-                    # A mean over the piece's cells of the model's grid, weighed as the stage weighs the piece (its
-                    # voxels of the level): brought to its cells' share of the level's, which the whole level averages.
+                if index in self._cells:
+                    # A layer's mean over the piece's cells, weighed as the stage weighs the piece (its voxels of the
+                    # level, or its support): brought to the cells' share of the level's, which the whole level
+                    # averages, on the layer's own grid (strided, or a model's at its voxel_size).
                     cells = mask if mask is not None else torch.ones_like(moved[:, :1])
-                    own = float(core._prepared(cells, cells, cells, seed + 1000 * index, self._place)[2].sum())
-                    share = own / max(self._cells[index], 1e-8) * scale
+                    held = core.layer_cells(core._prepared(cells, cells, cells, seed + 1000 * index, self._place)[2])
                     distances = torch.stack(
-                        [value if layer in pooled else value * share for layer, value in enumerate(distances)]
+                        [
+                            value if layer in pooled else value * held[layer] / max(total, 1e-8) * scale
+                            for layer, (value, total) in enumerate(zip(distances, self._cells[index], strict=True))
+                        ]
                     )
                 values += list(distances)
         else:

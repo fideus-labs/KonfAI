@@ -1090,7 +1090,11 @@ def sampled_deformable_class():
             # What the two halves of a step read around a voxel: the loss and the smoothing of its gradient; then the
             # smoothing of the warp, and for the composition how far a step moves a voxel, half the rate in voxels at
             # most (``_step``).
-            self._halo = int(loss_halo) + grad_tail
+            # A Jacobian IMPACT loss runs its networks on the boxes: they start, and end as far from the level's end,
+            # on a whole number of the networks' stride, so that a strided layer meets the whole level's cells.
+            stride = getattr(custom_loss, "stride", None)
+            self._stride = int(stride(device)) if callable(stride) else 1
+            self._halo = -(-(int(loss_halo) + grad_tail) // self._stride) * self._stride
             self._step_halo = warp_tail + max(1, math.ceil(float(optimizer_lr) / 2))
             affine = (
                 torch.eye(self.dims + 1, device=device)
@@ -1164,9 +1168,13 @@ def sampled_deformable_class():
 
         # ------------------------------------------------------------------ one iteration
 
-        def _region(self, tile, grid, halo: int):
-            """A box with ``halo`` around, at least the patch a sampled Jacobian loss runs its network on."""
-            return box_region(tile, halo, grid, self._least)
+        def _region(self, tile, grid, halo: int, aligned: bool = True):
+            """A box with ``halo`` around, at least the patch a sampled Jacobian loss runs its network on; ``aligned``,
+            ending as far from the level's end as a whole number of the loss's stride (``block_region``)."""
+            low, high, core = box_region(tile, halo, grid, self._least)
+            if aligned and self._stride > 1:
+                high = [end + (extent - end) % self._stride for end, extent in zip(high, grid, strict=True)]
+            return low, high, core
 
         def _warped(self, low, high, identity, levels, warps) -> tuple[torch.Tensor, torch.Tensor]:
             """The two images the loss compares over a box of coordinates ``identity``: the moving one through the
@@ -1344,7 +1352,7 @@ def sampled_deformable_class():
             reads the update around the box: each voxel's direction is its box's, after the steps that box has taken
             (``steps``, one count per box of ``side`` voxels)."""
             half_resolution = 1.0 / (max(grid) - 1)
-            low, high, core = self._region(tile, grid, self._step_halo)
+            low, high, core = self._region(tile, grid, self._step_halo, aligned=False)
             identity = _box_coordinates(low, high, grid, self.device, self.dtype)
             counts = steps[np.ix_(*[np.arange(a, b) // side for a, b in zip(low, high, strict=True)])]
             # A box that has not stepped holds no moment: one step's correction leaves its direction at zero.
@@ -1381,10 +1389,12 @@ def sampled_deformable_class():
                     # Not told how many samples an iteration draws, it takes what the device holds: every box, as
                     # large as its memory takes them, which is FireANTs' iteration on the whole grid.
                     side = self._fitting_box(grid, levels)
+                    side = max(self._stride, side - side % self._stride)
                     boxes = tiles(grid, side)
                     count = len(boxes)
                 else:
                     side = min(self._box, max(8, round(self._samples ** (1 / len(grid)))))
+                    side = max(self._stride, side - side % self._stride)
                     boxes = tiles(grid, side)
                     count = min(len(boxes), max(1, self._samples // side ** len(grid)))
                 self.boxes_per_scale.append(len(boxes))
