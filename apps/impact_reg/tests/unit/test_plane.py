@@ -189,6 +189,38 @@ def test_a_2d_field_goes_one_plane_thick_for_the_later_steps(tmp_path: Path) -> 
         lift_field(spline, tmp_path / "planes")
 
 
+def test_a_2d_field_stored_as_an_image_warps_and_evaluates_as_its_transform_file(tmp_path: Path) -> None:
+    """A 2-D field written as an image (a sampled 2-D run's under --output-format mha) is the same registration as
+    that field in an ITK transform file, for apply and for eval."""
+    from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
+
+    y, x = np.mgrid[0:32, 0:40]
+    sitk.WriteImage(_flat(x * 10.0 + y, (1.0, 1.0), (0.0, 0.0)), str(tmp_path / "moving.mha"))
+    sitk.WriteImage(_flat(np.zeros((32, 40)), (1.0, 1.0), (0.0, 0.0)), str(tmp_path / "fixed.mha"))
+    field = sitk.GetImageFromArray(np.stack([np.full((32, 40), 3.0), np.zeros((32, 40))], axis=-1), isVector=True)
+    sitk.WriteImage(sitk.Cast(field, sitk.sitkVectorFloat32), str(tmp_path / "field.mha"))
+    sitk.WriteTransform(sitk.DisplacementFieldTransform(field), str(tmp_path / "field.h5"))
+    moved, summaries = [], []
+    for name in ("field.h5", "field.mha"):
+        app, out = ImpactRegKonfAIApp(), tmp_path / name.replace(".", "_")
+        (written,) = app.apply(
+            tmp_path / name, tmp_path / "fixed.mha", [tmp_path / "moving.mha"], out, cpu=1, quiet=True
+        )
+        moved.append(sitk.GetArrayFromImage(sitk.ReadImage(str(written))))
+        app.evaluate(
+            fixed_images=[tmp_path / "fixed.mha"],
+            moving_images=[tmp_path / "moving.mha"],
+            transforms=[tmp_path / name],
+            output=out / "eval",
+            cpu=1,
+            quiet=True,
+        )
+        summaries.append(json.loads((out / "eval" / "Evaluation_summary.json").read_text())["case"])
+    np.testing.assert_array_equal(moved[0], moved[1])
+    np.testing.assert_allclose(moved[1][:, :30], (x * 10.0 + y)[:, 3:33])
+    assert summaries[0] == summaries[1]
+
+
 def test_a_one_plane_store_comes_back_as_a_2d_rfc5_field_and_goes_one_plane_thick_again(tmp_path: Path) -> None:
     ngff_zarr = pytest.importorskip("ngff_zarr")
     # KonfAI hands a field in millimetres, (dx, dy, dz): 1.5 and -2 mm, on a grid in micrometres.

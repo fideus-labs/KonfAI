@@ -168,14 +168,19 @@ def _transform_kinds(path: Path) -> list[str]:
 
 
 def _is_flat_field(path: Path) -> bool:
-    """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
+    """Whether a stored registration, a transform file, an OME-Zarr store or a field stored as an image, is 2-D, read
+    off its header alone."""
     if _backend(path) == "omezarr":
         from konfai.utils.ome_zarr import get_ome_zarr_info, is_affine_store, read_ome_zarr_affine
 
         if is_affine_store(path):
             return read_ome_zarr_affine(path).GetDimension() == 2
         return "z" not in get_ome_zarr_info(path)["axes"]
-    return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
+    if _is_transform_file(path):
+        return _transform_kinds(path)[0].endswith("_2_2")
+    from .native import read_information
+
+    return read_information(path).GetDimension() == 2
 
 
 def _is_field(path: Path) -> bool:
