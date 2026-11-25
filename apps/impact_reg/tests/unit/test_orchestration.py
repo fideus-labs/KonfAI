@@ -1502,7 +1502,7 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
 )
 def test_each_route_places_every_case(monkeypatch: pytest.MonkeyPatch, choice, engine, sampled, tiled) -> None:
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"tiling": {"tile": "Prediction_tile.yml"}})
-    monkeypatch.setattr(reg, "_sampled_engine", lambda preset: engine)
+    monkeypatch.setattr(reg, "_sampled_engine", lambda preset, overrides=(): engine)
     route = reg._route(choice, "P", [10, 1000], (100, 50))
     assert (route.sampled, route.tiled, route.budget, route.tile_budget) == (sampled, tiled, 100, 50)
 

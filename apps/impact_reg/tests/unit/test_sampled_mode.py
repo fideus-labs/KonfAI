@@ -129,6 +129,35 @@ def test_sampled_mode_refuses_a_preset_of_an_engine_it_does_not_know(
         app.register(["Other"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", max_voxels=100)
 
 
+def test_sampled_mode_runs_the_engine_a_set_of_the_classpath_names(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An elastix preset whose --set names ConvexAdam's class registers with ConvexAdam, its other --set checked
+    # against that class.
+    fixed, moving = _pair(tmp_path)
+    ran = []
+
+    def convexadam(self, run):
+        ran.append(run.config["Predictor"]["Model"]["RegistrationNet"]["grid_spacing"])
+        raise KonfAIError("ImpactReg", "stop", "")
+
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: json.loads(json.dumps(config)))
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_sampled_convexadam", convexadam)
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_sampled_elastix", lambda self, run: pytest.fail("elastix ran"))
+    with pytest.raises(KonfAIError, match="stop"):
+        reg.ImpactRegKonfAIApp().register(
+            ["Elx"],
+            [fixed],
+            [moving],
+            output=tmp_path / "out",
+            out_of_core="sampled",
+            config_overrides=[f"Predictor.Model.classpath={CONVEXADAM}", "grid_spacing=5"],
+        )
+    assert ran == [5]
+
+
 @pytest.mark.parametrize(
     ("direction", "spacing", "form"),
     [

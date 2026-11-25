@@ -454,16 +454,17 @@ def check_overrides(data: Any, overrides: list[str]) -> None:
     """Refuse, before the config ``data`` runs elsewhere, the ``--set`` overrides its run would refuse: they are applied
     to a copy, the model class imported from the installed module its ``classpath`` names (not importable: only the
     config's own keys are known)."""
-    root = (data or {}).get("Predictor") or (data or {}).get("Trainer") or {}
-    module, _, name = str((root.get("Model") or {}).get("classpath", "")).partition(":")
+    checked = copy.deepcopy(data)
 
     def model_class() -> type | None:
+        root = (checked or {}).get("Predictor") or (checked or {}).get("Trainer") or {}
+        module, _, name = str((root.get("Model") or {}).get("classpath", "")).partition(":")
         try:
             return getattr(importlib.import_module(module), name)
         except Exception:
             return None
 
-    apply_overrides(copy.deepcopy(data), overrides, model_class)
+    apply_overrides(checked, overrides, model_class)
 
 
 def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], type | None]) -> None:
@@ -475,10 +476,12 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
     (``models.0.feature_normalization``), a new entry (``models.2={ref: ..}``); its value is checked against the
     declared type (``_check_value``). Any other key must exist. ``model_class`` returns the class the ``classpath``
     names, or None when it names none or does not import (then only the config's own keys are known); it is called
-    once, and only when a path enters the model block. ``check_overrides`` applies them to a copy, to refuse before a run
-    what the run would refuse.
+    once, and only when a path enters the model block, after any ``--set`` of the classpath, which apply first.
+    ``check_overrides`` applies them to a copy, to refuse before a run what the run would refuse.
     """
     value_parser = YAML(typ="safe")
+    # A --set of the classpath first: the class it names is the one the model's other --set are checked against.
+    overrides = sorted(overrides, key=lambda entry: not entry.partition("=")[0].strip().endswith("classpath"))
     class_name, model_params = LocalAppRepository._model_param_block(data)
     model_path = ["Predictor" if (data or {}).get("Predictor") else "Trainer", "Model", class_name or ""]
     resolved = functools.cache(model_class)

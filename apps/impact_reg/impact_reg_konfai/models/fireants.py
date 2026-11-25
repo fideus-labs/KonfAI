@@ -1289,15 +1289,6 @@ class FireANTsEngine:
                 "a model's voxel_size is read against the whole image, where the deformable stage reads its boxes or"
                 " its blocks: by boxes the models see the image at its own resolution."
             )
-        if (
-            self._deformable_metric == "impact"
-            and self._mode == "Static"
-            and any(core.dimension < len(fixed_shape) for core in self._impact_loss().cores)
-        ):
-            raise NotImplementedError(
-                "Static mode by blocks takes feature models of the image's dimension at its own resolution: a 2D"
-                " network on a volume and a voxel_size both lay their features out over the whole image."
-            )
         if min(fixed_shape) < MIN_IMG_SIZE:
             raise NotImplementedError(
                 f"FireANTs resamples an axis under {MIN_IMG_SIZE} voxels to that many at every scale, where the"
@@ -1431,15 +1422,14 @@ class FireANTsEngine:
                 loss_halo = 2 * ((self._lncc_kernel - 1) // 2)
             else:
                 # A network's feature at a voxel reads its receptive field around it, and so does the feature's
-                # gradient: twice its radius, at most half a box (which a model that cannot size its field gets too).
+                # gradient: twice its radius; half a box for a model that sees whole images, as patches overlap.
                 # ponytail: in the model's own voxels; a voxel_size coarser than the image's reads wider.
-                widest = 1
+                loss_halo = 0
                 for core in custom_loss.cores:
                     try:
-                        widest = max(widest, core.model.receptive_field)
+                        loss_halo = max(loss_halo, core.model.receptive_field - 1)
                     except MeasureError:
-                        widest = box
-                loss_halo = min(widest - 1, box // 2)
+                        loss_halo = max(loss_halo, box // 2)
         else:
             loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
         deformable_started = time.perf_counter()

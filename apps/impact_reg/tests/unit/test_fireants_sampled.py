@@ -511,6 +511,49 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers
         assert torch.allclose(found * signs, reference, atol=1e-5)
 
 
+class _Dilated(torch.nn.Module):
+    """A convolution dilated by 6: a receptive field of 13 voxels, wider than half a block of 8."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 4, 3, padding=6, dilation=6)
+        for parameter in self.conv.parameters():
+            torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(1))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layer: torch.Tensor,
+        stats: torch.Tensor | None = None,
+        direction: torch.Tensor | None = None,
+    ) -> list[torch.Tensor]:
+        return [self.conv(x)]
+
+
+def test_static_blocks_read_the_whole_receptive_field_around_them(tmp_path):
+    # A layer reads half its receptive field around a voxel, here wider than half a block: blocks read all of it, so
+    # their features are the whole image's.
+    from impact_reg_konfai.models import fireants as engine
+    from impact_reg_konfai.models.fireants_sampled import static_feature_sources
+
+    path = tmp_path / "dilated.pt"
+    torch.jit.script(_Dilated()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), layers_mask="1", pca=0, distance="LNCC", feature_normalization="l2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
+    loss.cores[0].model.fov = [13]
+    fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:21, :25, :27]
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    sources = static_feature_sources(
+        loss,
+        ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
+        ArraySource(np.ascontiguousarray(moving)[None], "cpu"),
+        tmp_path,
+        block=8,
+    )
+    for reference, source in zip(whole, sources, strict=True):
+        assert torch.allclose(torch.from_numpy(np.asarray(source.array))[None], reference, atol=1e-5)
+
+
 class _Convolved(torch.nn.Module):
     """A convolution of 3 voxels a side, 3-D or 2-D: a layer at the image's resolution."""
 
@@ -557,6 +600,33 @@ def test_static_features_of_a_plane_by_blocks_are_the_whole_plane_s(tmp_path, di
     )
     blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
     signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3))).view(1, -1, 1, 1)
+    for reference, found in zip(whole, blocks, strict=True):
+        assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
+
+
+def test_static_features_of_a_volume_swept_by_a_2d_network_are_the_whole_volume_s(tmp_path):
+    """A 2-D network on a volume reads each slice alone, as the whole run sweeps them: predicted by slabs of whole
+    slices, it gives the whole volume's features."""
+    from impact_reg_konfai.models import fireants as engine
+    from impact_reg_konfai.models.fireants_sampled import static_feature_sources
+
+    path = tmp_path / "convolved.pt"
+    torch.jit.script(_Convolved()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), layers_mask="1", pca=2, distance="LNCC", feature_normalization="l2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
+    core = loss.cores[0]  # a local file is a 3-D model to the registry: the 2-D network handed in
+    core.model.model, core.model.dim, core.dimension, core.model.fov = torch.jit.script(_Convolved(2)), 2, 2, [3]
+    fixed, moving = texture()[:21, :25, :27], texture((1.5, -1.0, 0.5))[:21, :25, :27]
+    whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
+    sources = static_feature_sources(
+        loss,
+        ArraySource(np.ascontiguousarray(fixed)[None], "cpu"),
+        ArraySource(np.ascontiguousarray(moving)[None], "cpu"),
+        tmp_path,
+        block=8,
+    )
+    blocks = [torch.from_numpy(np.asarray(source.array))[None] for source in sources]
+    signs = torch.sign((whole[0] * blocks[0]).sum((0, 2, 3, 4))).view(1, -1, 1, 1, 1)
     for reference, found in zip(whole, blocks, strict=True):
         assert found.shape == reference.shape and torch.allclose(found * signs, reference, atol=1e-5)
 
@@ -834,24 +904,3 @@ def test_an_unknown_deformable_method_is_refused_before_any_stage():
     settings |= {"deformable_metric": "cc", "deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0}
     with pytest.raises(ValueError, match="deformable_method"):  # by boxes it would have run greedy
         FireANTsEngine(**settings, deformable_method="syyn", seed=0, impact_levels=[])
-
-
-def test_a_static_model_of_two_dimensions_is_refused_before_the_pair_is_read(tmp_path, monkeypatch):
-    import json
-
-    from impact_reg_konfai.models.fireants import FireANTsEngine, ModelSpec
-
-    path = tmp_path / "planes.pt"
-    torch.jit.script(_Pointwise()).save(str(path))
-    registry = tmp_path / "models.json"
-    registry.write_text(json.dumps({str(path): {"dimension": 2, "numberofchannels": 1}}), encoding="utf-8")
-    monkeypatch.setenv("KONFAI_IMPACT_MODELS_REGISTRY", str(registry))
-    settings = {"scales": [2, 1], "affine_iterations": [2, 2], "deformable_iterations": [2, 2], "cc_kernel": 5}
-    settings |= {"affine_metric": "mi", "affine_lr": 0.03, "moments_init": "cof", "linear_method": "rigid_affine"}
-    settings |= {"deformable_lr": 0.25, "smooth_warp_sigma": 0.5, "smooth_grad_sigma": 1.0, "mode": "Static"}
-    spec = ModelSpec(ref=str(path), distance="L2")
-    engine = FireANTsEngine(
-        **settings, deformable_method="syn", deformable_metric="impact", seed=0, impact_levels=[[spec], [spec]]
-    )
-    with pytest.raises(NotImplementedError, match="Static mode by blocks takes feature models of the image"):
-        engine.check_sampled((40, 40, 40), (40, 40, 40))

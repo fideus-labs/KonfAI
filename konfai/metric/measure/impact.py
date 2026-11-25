@@ -514,12 +514,16 @@ def pca_project(
     return torch.stack(projected[0]), torch.stack(projected[1])
 
 
+#: The slices a 2-D network swept over a volume runs on at once (``_SliceSweep``).
+SWEEP_BATCH = 8
+
+
 class _SliceSweep(torch.nn.Module):
     """A 2-D network swept over a volume ``[B, C, D, H, W]`` slice by slice along its first spatial axis, as itk-impact
     sweeps it for its feature maps, each slice told the plane's own axes. Each output layer comes back as a volume
     ``[B, C_l, D, H_l, W_l]``, like a 3-D network's."""
 
-    def __init__(self, network: torch.nn.Module, batch: int = 8) -> None:
+    def __init__(self, network: torch.nn.Module, batch: int = SWEEP_BATCH) -> None:
         super().__init__()
         self.network, self.batch = network, batch
 

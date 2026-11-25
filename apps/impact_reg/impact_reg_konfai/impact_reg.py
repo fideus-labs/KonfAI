@@ -43,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -73,7 +73,14 @@ from konfai.utils.utils import (
     storage_form,
 )
 from konfai_apps import KonfAIApp
-from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
+from konfai_apps.app_repository import (
+    AppRepositoryError,
+    LocalAppRepository,
+    apply_overrides,
+    check_overrides,
+    did_you_mean,
+    pass_cost,
+)
 from konfai_apps.cli import app_file, app_id, app_names
 from konfai_apps.ensemble import STACK, combine, stack_file
 from konfai_apps.ensemble import _token as member_token
@@ -470,7 +477,9 @@ class _Route:
     tiled: bool
 
 
-def _route(choice: str, preset: str, voxels: list[int], plan: tuple[int | None, int | None]) -> _Route:
+def _route(
+    choice: str, preset: str, voxels: list[int], plan: tuple[int | None, int | None], overrides: Sequence[str] = ()
+) -> _Route:
     """Each case's route under ``choice`` (``ROUTES``), from ``voxels``, the largest image of each case, and the
     preset's ``plan``. Under auto, a case over the budget goes where the preset can take it: sampled for an engine the
     sampled route drives, else in two passes where the preset declares them, else whole on a grid KonfAI resamples to
@@ -486,7 +495,7 @@ def _route(choice: str, preset: str, voxels: list[int], plan: tuple[int | None, 
     over = [index for index, size in enumerate(voxels) if budget and size > budget]
     if choice == "sampled":
         return _Route(budget, tile_budget, list(range(len(voxels))), False)
-    if choice == "auto" and over and _sampled_engine(preset):
+    if choice == "auto" and over and _sampled_engine(preset, overrides):
         return _Route(budget, tile_budget, over, False)
     return _Route(budget, tile_budget, [], choice == "tiled" or (choice == "auto" and bool(over) and tiles))
 
@@ -1057,9 +1066,13 @@ def _config_engine(config: dict) -> str | None:
     return next((m for m in _SAMPLED_ENGINES if classpath == f"{__package__}.models.{m}:RegistrationNet"), None)
 
 
-def _sampled_engine(preset: str) -> str | None:
-    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``; None for any other class."""
-    return _config_engine(_preset_config(preset, "Prediction.yml"))
+def _sampled_engine(preset: str, overrides: Sequence[str] = ()) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``: the classpath of its config, or the
+    one a --set of ``overrides`` gives it; None for any other class."""
+    config = _preset_config(preset, "Prediction.yml")
+    classpaths = [entry for entry in overrides if entry.partition("=")[0].strip().endswith("classpath")]
+    apply_overrides(config, classpaths, lambda: None)
+    return _config_engine(config)
 
 
 @dataclass
@@ -1393,13 +1406,23 @@ class ImpactRegKonfAIApp:
             flat = is_flat(headers[0]["Fixed"][0])
             voxels = [max(math.prod(header[0][1:]) for header in case.values()) for case in headers]
             routes = {
-                preset: _route(out_of_core, preset, voxels, _plan(_manifest(preset), gpu, max_voxels, self._remote))
+                preset: _route(
+                    out_of_core,
+                    preset,
+                    voxels,
+                    _plan(_manifest(preset), gpu, max_voxels, self._remote),
+                    overrides[preset]["global"],
+                )
                 for preset in presets
             }
             if flat:  # a case of a 2-D pair is on its own grid for every preset of an ensemble, or one plane thick
                 sampled = sorted({index for route in routes.values() for index in route.sampled})
                 for preset, route in routes.items():
-                    if sampled and route.sampled != sampled and _sampled_engine(preset) is None:
+                    if (
+                        sampled
+                        and route.sampled != sampled
+                        and _sampled_engine(preset, overrides[preset]["global"]) is None
+                    ):
                         raise KonfAIError(
                             "ImpactReg",
                             f"{preset} has no sampled route, which the other presets of this 2-D ensemble take.",
@@ -1852,13 +1875,14 @@ class ImpactRegKonfAIApp:
         """
         import importlib
 
-        from konfai_apps.app_repository import apply_overrides, get_app_repository_info
+        from konfai_apps.app_repository import get_app_repository_info
 
         from .models.intensity import world_transform
         from .native import AxisMap, remap, to_millimetres
 
         config = _preset_config(preset, "Prediction.yml")
-        module = _sampled_engine(preset)
+        # A --set of the classpath may name another of ImpactReg's engines, whose class then checks the other --set.
+        module = _sampled_engine(preset, config_overrides["global"])
         if module is None:
             raise KonfAIError(
                 "ImpactReg",
@@ -1877,13 +1901,6 @@ class ImpactRegKonfAIApp:
                 "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
             ) from error
         apply_overrides(config, config_overrides["global"], lambda: network)
-        if _config_engine(config) != module:
-            raise KonfAIError(
-                "ImpactReg",
-                f"{preset}: --set changed the classpath of its engine, which --out-of-core sampled runs as the preset"
-                " names it.",
-                "Register a preset of that engine, or choose --out-of-core whole or tiled.",
-            )
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.
@@ -2016,8 +2033,6 @@ class ImpactRegKonfAIApp:
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
         engine.check_gradients()
         require_regions()  # before any twin is written
-        for stage in engine._stages:  # a model that sees whole images only is refused before any twin, too
-            engine.region_halo(stage)
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
         visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
         # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.

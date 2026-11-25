@@ -662,14 +662,14 @@ def static_feature_sources(
     """Static mode's feature volumes of ``loss`` (the engine's ``ImpactFeatureLoss``), predicted by blocks as a
     segmentation is into memmaps of ``directory``: every model's kept layers over the fixed and the moving image,
     concatenated along the channels as ``ImpactFeatureLoss.extract`` lays them out. Each block is read with half the
-    model's receptive field around it, half a block at most, and run through the network, which normalises it by the
-    whole image's statistics (its intensities', its normalisations'); each layer keeps the cells of its own grid the
+    model's receptive field around it (as much of it as the device holds with a block) and run through the network,
+    which normalises it by the whole image's statistics (its intensities', its normalisations'); each layer keeps the cells of its own grid the
     block owns, assembled on that grid as the whole image's layer. A PCA is then fitted on the fixed image's layer and
     each image centred by its own mean, and every layer brought onto the image's voxels, block by block, as the whole
     image's is (``onto_image_grid``). On a GPU the network runs in float16 (TS/M730's last layer, l2-normalised,
     within 4e-3 of float32's at half its memory) and the blocks are as large as half the free memory holds them with
     their halos, ``block`` voxels a side at least: halved, and the side done again, when one does not fit."""
-    from konfai.metric.measure.impact import block_region, layer_window, onto_image_grid, own_cells
+    from konfai.metric.measure.impact import SWEEP_BATCH, block_region, layer_window, onto_image_grid, own_cells
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
@@ -683,19 +683,32 @@ def static_feature_sources(
         found = _finalize_running_statistics(state)
         return Attribute({f"Image{key.capitalize()}": found[key] for key in ("min", "max", "mean", "std")})
 
-    def read_block(source: RegionSource, tile, blocks: list[int], halo: int, stride: int):
+    def read_block(source: RegionSource, tile, blocks: list[int], halo: int, stride: int, slabs: bool):
         """The block ``tile`` read with ``halo`` around it (``block_region``), and the slices of its own voxels in it.
         The last block of an axis, short of ``blocks[0]``, is read back to a whole one, as a prediction's last patch
-        is, its start kept on ``stride``."""
+        is, its start kept on ``stride``; a slab of slices (``slabs``) is read as it is."""
         start, stop = tile
-        halos = [halo + -(-(blocks[0] - (b - a)) // stride) * stride for a, b in zip(start, stop, strict=True)]
+        halos = [
+            0 if slabs else halo + -(-(blocks[0] - (b - a)) // stride) * stride
+            for a, b in zip(start, stop, strict=True)
+        ]
         low, high, own = block_region(start, stop, halos, source.shape, stride)
         return source.read(low, high)[:, :1], own
 
-    def blocks_of(source: RegionSource, boxes, blocks: list[int], halo: int, stride: int):
+    def boxes_of(core, shape: Sequence[int], blocks: list[int]) -> list:
+        """The blocks a source of ``shape`` is predicted by: cubes of ``blocks[0]`` voxels a side, or, for a 2-D network
+        swept over a volume's slices, which reads each slice alone, slabs of whole slices as many as a block holds,
+        a whole number of the sweep's batches (whose slices a network may normalise together)."""
+        if core.dimension >= len(shape):
+            return tiles(shape, blocks[0])
+        plane = math.prod(shape[1:])
+        thick = max(SWEEP_BATCH, blocks[0] ** len(shape) // plane // SWEEP_BATCH * SWEEP_BATCH)
+        return [((z, *[0] * len(shape[1:])), (min(z + thick, shape[0]), *shape[1:])) for z in range(0, shape[0], thick)]
+
+    def blocks_of(source: RegionSource, boxes, blocks: list[int], halo: int, stride: int, slabs: bool):
         """Each block of ``boxes`` read (``read_block``), and the slices of its own voxels in it."""
         for tile in boxes:
-            yield read_block(source, tile, blocks, halo, stride)
+            yield read_block(source, tile, blocks, halo, stride, slabs)
 
     def owned_layers(
         core, box: torch.Tensor, own, statistics: Attribute, norms
@@ -735,13 +748,16 @@ def static_feature_sources(
     def extract(core, index: int, side: str, source: RegionSource, blocks: list[int], halo: int, stride: int, bases):
         """``source``'s features of ``core`` by blocks of ``blocks[0]`` voxels a side, written to memmaps of
         ``directory``, and the PCA bases that project both sides, fitted on the fixed one's (``bases`` otherwise)."""
-        boxes = tiles(source.shape, blocks[0])
+        boxes = boxes_of(core, source.shape, blocks)
+        slabs = core.dimension < len(source.shape)  # a 2-D network swept over a volume's slices
         # The network's normalisations by the whole image's statistics, one pass over the blocks each.
-        norms = core.model.norms(functools.partial(blocks_of, source, boxes, blocks, halo, stride), statistics[side])
+        norms = core.model.norms(
+            functools.partial(blocks_of, source, boxes, blocks, halo, stride, slabs), statistics[side]
+        )
         cells: list[np.ndarray] = []  # each layer on its own grid, as a prediction's output is assembled
         ends: list[list[int]] = []  # how far along each axis its blocks reached: the whole image's layer
         for start, stop in boxes:
-            box, own = read_block(source, (start, stop), blocks, halo, stride)
+            box, own = read_block(source, (start, stop), blocks, halo, stride, slabs)
             for layer, (strides, features) in enumerate(owned_layers(core, box, own, statistics[side], norms)):
                 at = [a // k for a, k in zip(start, strides, strict=True)]
                 if layer == len(cells):
@@ -810,10 +826,10 @@ def static_feature_sources(
     loss._channels = []
     with torch.no_grad():
         for index, core in enumerate(loss.cores):
-            if core.dimension < len(fixed.shape) or core.model.voxel_size is not None:
+            if core.model.voxel_size is not None:
                 raise NotImplementedError(
-                    "Static mode by blocks takes feature models of the image's dimension at its own resolution: a 2D"
-                    " network on a volume and a voxel_size both lay their features out over the whole image."
+                    "Static mode by blocks takes feature models at the image's own resolution: a voxel_size lays the"
+                    " features out over the whole image."
                 )
             # A side at a time, the fixed one first: its features' basis projects both.
             bases: list[torch.Tensor] = []
@@ -824,17 +840,25 @@ def static_feature_sources(
                 # over them, so that a block owns whole cells of each.
                 stride = max(1, int(core.model.multiple), core.model.block_stride(fixed.device))
                 blocks = [math.ceil(block / stride) * stride]
-                try:
-                    halo = min((core.model.receptive_field - 1) // 2, blocks[0] // 2)
+                try:  # half the receptive field around a block: its layers are then the whole image's
+                    halo = (core.model.receptive_field - 1) // 2
                 except MeasureError:  # a model that sees whole images: a quarter of a block around each
                     halo = blocks[0] // 4
-                halo = math.ceil(halo / stride) * stride
+                halo = math.ceil(halo / stride) * stride if core.dimension >= len(fixed.shape) else 0  # slabs: none
                 # The larger the blocks, the less of the network's work goes to their halos; a probe the device does
                 # not hold leaves them at ``block``, which the extraction halves while they do not fit.
                 with contextlib.suppress(torch.cuda.OutOfMemoryError), out_of_memory_as_torch(cuda):
                     if cuda:
                         cost = block_cost(core, statistics["fixed"])
                         widest = int((free_bytes(fixed.device) / 2 / cost) ** (1 / len(fixed.shape)))
+                        held = max(0, (widest - stride) // 2 // stride * stride)
+                        if held < halo:  # no block with the whole field around it fits: the widest halo that does
+                            print(
+                                f"[FireANTs] a block with half the receptive field around it ({halo} voxels) does"
+                                f" not fit the device: its features read {held} voxels around it.",
+                                flush=True,
+                            )
+                            halo = held
                         blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
                 for side, source in sources.items():
                     arrays, bases = halve_on_oom(

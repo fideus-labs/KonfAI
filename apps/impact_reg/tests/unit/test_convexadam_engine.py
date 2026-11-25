@@ -574,11 +574,15 @@ def test_the_region_route_starts_from_the_translation_between_the_centres_too(tm
 
 @pytest.mark.slow  # itk-impact runs the coarse stage by regions on the CPU
 @pytest.mark.parametrize("plane", [False, True], ids=["volume", "plane"])
-@pytest.mark.parametrize(("build", "fov"), [(_intensity_model, 1), (_box_model, 3)], ids=["point-wise", "3 voxels"])
+@pytest.mark.parametrize(
+    ("build", "fov"),
+    [(_intensity_model, 1), (_box_model, 3), (_box_model, None)],
+    ids=["point-wise", "3 voxels", "whole image"],
+)
 def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path, build, fov, plane) -> None:
     # A preset with the coarse stage alone (ConvexAdam#coarse, #impact_mrct) runs by regions too: its field,
     # interpolated from its grid for each region the writer asks, is the whole run's, a model's regions read with
-    # half its receptive field around them.
+    # half its receptive field around them, a quarter of a region for a model said to see whole images.
     import itk
     from impact_reg_konfai import impact_reg as reg
     from impact_reg_konfai.native import write_twin
@@ -596,7 +600,7 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
     engine = engine["Registration"]._engine
     for stage_models in engine._feature_models.values():
         for model in stage_models:
-            model.fov = [fov]
+            model.fov = None if fov is None else [fov]
     twins = []
     for name, image in (("Fixed", fixed), ("Moving", moving)):
         sitk.WriteImage(image, str(tmp_path / f"{name}.mha"))
