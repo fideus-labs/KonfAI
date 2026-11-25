@@ -1739,6 +1739,11 @@ def test_a_test_time_copy_runs_nothing_on_a_group_a_stage_alone_reads() -> None:
     identity, copy = _copies(both)
     assert [step["op"] for step in identity["reads"][0]["preprocessing"]] == ["clip"]
     assert [step["op"] for step in copy["reads"][0]["preprocessing"]] == ["clip", "flip"]
+    # A group the model reads as stored that a stage reads too is one entry the program cannot tell apart: refused.
+    stored = _two_groups(None)
+    stored["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = masked
+    with pytest.raises(ConfigError, match="as stored and a stage reads it beside the case too"):
+        transform_manifest(stored, "Predictor")
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])

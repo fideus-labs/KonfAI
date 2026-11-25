@@ -2353,6 +2353,14 @@ def _reads_of(
         else:
             # A displacement field holds one component per spatial axis of the case the patch cuts.
             companions.setdefault(beside, len(inference_patch(config, root).get("patch_size") or [0, 0, 0]))
+    # The program lists a group once: one the model reads through no chain could not be told from one a stage alone
+    # reads, which is listed the same way, and a test-time copy draws the first and not the second.
+    if group := next((read["group"] for read in reads if _a_stages_alone(read, companions)), None):
+        raise ConfigError(
+            f"the model reads the group '{group}' as stored and a stage reads it beside the case too, which the program"
+            " lists the same way.",
+            _or_konfai("Give the stage a group of its own", _PREDICT),
+        )
     return reads + [
         {"group": group, "channels": channels, "preprocessing": []}
         for group, channels in companions.items()
