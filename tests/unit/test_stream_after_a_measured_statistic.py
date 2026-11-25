@@ -704,13 +704,14 @@ def test_a_case_statistic_whose_shortest_block_and_fold_exceed_the_budget_is_ref
         set_per_rank_budget(None)
 
 
-@pytest.mark.parametrize(("dtype", "budget"), [(np.float32, 200_000), (np.float64, 400_000)])
+@pytest.mark.parametrize(("dtype", "budget"), [(np.float32, 200_000), (np.float64, 500_000)])
 def test_a_case_statistic_of_a_store_read_whole_holds_the_volume_within_the_budget(
     tmp_path, monkeypatch, dtype, budget
 ):
     # Read whole, the store holds the volume (163,840 B in float32) beside the shortest block and its fold (152,592 B):
     # over 200,000 B together, the scan is refused, though the block alone fits. A float64 store holds twice as much,
-    # and its blocks in flight too: over 400,000 B, which the float32 pricing fits.
+    # and its blocks in flight too: 327,680 B and 194,208 B, over 500,000 B, which a float32 pricing of its blocks
+    # (152,592 B) would fit.
     import konfai.utils.dataset.statistics as statistics
     from konfai.utils.budget import set_per_rank_budget
     from konfai.utils.errors import DatasetManagerError
@@ -742,6 +743,36 @@ def test_a_store_read_whole_over_the_budget_at_a_byte_an_element_is_refused_befo
             CaseStatistic("oracle_support:Roughness")._measure(dataset, "CT", CASE_NAME)
     finally:
         set_per_rank_budget(None)
+
+
+class Total:
+    """A ``CaseStatistic`` class reading no voxel past its own: the mean of the volume, with no halo."""
+
+    halo = 0
+
+    def partial(self, block: torch.Tensor) -> torch.Tensor:
+        return torch.stack([block.sum(), torch.ones_like(block).sum()])
+
+    def finish(self, total: torch.Tensor) -> torch.Tensor:
+        return total[0] / total[1]
+
+
+def test_a_store_read_whole_is_scanned_by_views_of_the_volume_it_holds(tmp_path, monkeypatch):
+    # With no halo, a store read whole hands its blocks as views of the volume (327,680 B in float64): the scan holds it
+    # and the fold (32,768 B a row), not three blocks of its own more (24,576 B), and fits 370,000 B.
+    import konfai.utils.dataset.statistics as statistics
+    from konfai.utils.budget import set_per_rank_budget
+
+    monkeypatch.setattr(statistics, "_STATISTICS_UPDATE_ELEMENTS", 32 * 32)
+    volume = np.random.default_rng(0).normal(size=(1, 40, 32, 32))
+    dataset = Dataset(tmp_path / "src", "gipl")
+    dataset.write("CT", CASE_NAME, volume, geometry())
+    set_per_rank_budget(370_000)
+    try:
+        measured = CaseStatistic("test_stream_after_a_measured_statistic:Total")._measure(dataset, "CT", CASE_NAME)
+    finally:
+        set_per_rank_budget(None)
+    assert float(measured) == pytest.approx(volume.mean())
 
 
 class AlongX:

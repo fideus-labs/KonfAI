@@ -149,12 +149,14 @@ def _block_rows(
         return _scan_rows(entries, name, shape, piece, halo, fold_bytes)
     padded = _padded(shape, halo)
     # A fold's scan holds the volume read whole beside its blocks, and is refused as a scan by regions is where the
-    # shortest block does not fit beside it; ordinary scans keep their rule.
+    # shortest block does not fit beside it; ordinary scans keep their rule. With no halo to pad them, its blocks are
+    # views of that volume: they hold nothing of their own beside the fold.
     resident = int(np.prod(shape, dtype=np.int64)) * element_bytes if fold_bytes else 0
-    elements = _statistics_block_elements(element_bytes, fold_bytes, resident)
+    blocks = 0 if resident and not halo else element_bytes
+    elements = _statistics_block_elements(blocks, fold_bytes, resident)
     rows = max(piece, (_statistics_chunk_length(padded, 1, elements) - 2 * halo) // piece * piece)
     held = (rows + 2 * halo) * _statistics_plane_elements(padded, 1)
-    held = held * (_STATISTICS_BLOCKS_IN_FLIGHT * element_bytes + fold_bytes) + resident
+    held = held * (_STATISTICS_BLOCKS_IN_FLIGHT * blocks + fold_bytes) + resident
     budget = per_rank_budget_bytes()
     if fold_bytes and budget is not None and held > budget:
         raise DatasetManagerError(
