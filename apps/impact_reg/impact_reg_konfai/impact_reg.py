@@ -1336,7 +1336,6 @@ class ImpactRegKonfAIApp:
                 if over:
                     fields_by_preset[preset] = sampled = self._register_sampled(
                         preset,
-                        manifest,
                         _some_cases(inputs, over),
                         [headers[index] for index in over],
                         [f"P{index:03d}" for index in over],
@@ -1670,7 +1669,6 @@ class ImpactRegKonfAIApp:
     def _register_sampled(
         self,
         preset: str,
-        manifest: dict,
         inputs: dict[str, list[Path]],
         headers: "list[dict[str, _Header]]",
         cases: list[str],
@@ -1684,10 +1682,10 @@ class ImpactRegKonfAIApp:
         epochs: int | None,
     ) -> tuple[str, dict[str, Path]]:
         """One preset on pairs too large for the device by the second out-of-core strategy (``--out-of-core
-        sampled``): the preset whole (its global config) on the native pair of each of ``cases`` (their IDs in the
-        cohort; ``inputs`` and ``headers`` are theirs), never resampled and never held whole, each engine evaluating
-        its loss on a random subset of the pair at every iteration, as its own algorithm allows. ``config_overrides``
-        holds the ``--set`` share of each pass.
+        sampled``): the preset whole (the config a pair that fits registers with) on the native pair of each of
+        ``cases`` (their IDs in the cohort; ``inputs`` and ``headers`` are theirs), never resampled and never held
+        whole, each engine evaluating its loss on a random subset of the pair at every iteration, as its own algorithm
+        allows. ``config_overrides`` holds the ``--set`` share of each pass; ``applied`` records the one it takes.
 
         The native pair is first written as twins, from one read of each input by bands (``_native_twins``). Then:
 
@@ -1707,8 +1705,7 @@ class ImpactRegKonfAIApp:
         from .models.intensity import world_transform
         from .native import to_millimetres
 
-        tiling = manifest.get("tiling") or {}
-        config = _preset_config(preset, tiling.get("global") or "Prediction.yml")
+        config = _preset_config(preset, "Prediction.yml")
         classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
         module = classpath.partition(":")[0].rsplit(".", 1)[-1]
         if module not in _SAMPLED_ENGINES:
@@ -1728,6 +1725,7 @@ class ImpactRegKonfAIApp:
                 "pip install the preset's requirements.txt.",
             ) from error
         apply_overrides(config, config_overrides["global"], lambda: network)
+        self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.
         apply_cpu_thread_budget(1)

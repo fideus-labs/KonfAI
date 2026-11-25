@@ -341,7 +341,7 @@ def test_sampled_mode_runs_the_region_stage_on_a_pair_over_the_budget(presets: P
     app = reg.ImpactRegKonfAIApp()
     seen = {}
 
-    def sampled(preset, manifest, inputs, headers, cases, work, gpu, cpu, quiet, overrides, region, samples, epochs):
+    def sampled(preset, inputs, headers, cases, work, gpu, cpu, quiet, overrides, region, samples, epochs):
         seen.update(preset=preset, region=region, samples=samples, epochs=epochs, gpu=gpu)
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True)
@@ -410,7 +410,7 @@ def test_sampled_mode_registers_whole_the_cases_the_device_holds(presets: Path, 
         sitk.WriteImage(vectors, str(path))
         return path
 
-    def sampled(preset, manifest, inputs, headers, cases, work, *args):
+    def sampled(preset, inputs, headers, cases, work, *args):
         seen["sampled"] = (cases, inputs["Fixed"])
         return "DVF", {
             case: field(work, "sampled", case, fixed) for case, fixed in zip(cases, inputs["Fixed"], strict=True)
