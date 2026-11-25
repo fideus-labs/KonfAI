@@ -475,6 +475,26 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
         assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
 
 
+@pytest.mark.parametrize(
+    "forward",
+    [{"reference": {"group": "REF"}}, {"spacing": [1.5, 1.5]}, {"spacing": [1.5, 1.5], "align": "extent"}],
+    ids=["by-a-reference", "by-a-spacing", "by-its-extent"],
+)
+def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict) -> None:
+    # konfai's inverse fills what it reads outside what it holds with the fill its stage states (its inverse_fill),
+    # whatever places the grid: the resample hoisted past the reduction carries it as each model's inverse does.
+    manifest = {
+        "input": {"channels": 1},
+        "output": {"channels": 2},
+        "patch": {"size": [4, 4]},
+        "preprocessing": [{"op": "resample", "id": "r", "interpolation": "linear", **forward}],
+        "postprocessing": [{"op": "inverse", "of": "r", "interpolation": "linear", "fill": -1000.0}],
+    }
+    program = assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
+    (resample,) = [step for step in program["steps"] if str(step.get("op", "")).startswith("resample_")]
+    assert resample["fill"] == -1000.0
+
+
 def test_an_own_class_undone_past_the_reduction_is_replayed_with_every_inverse_there() -> None:
     # The app's own class fitted the grid before the resample: its inverse, and the resample's, land where they read,
     # which past the class is not the caller's grid, so both replay what the models' chain recorded.

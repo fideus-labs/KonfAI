@@ -2442,8 +2442,8 @@ def hoist_ensemble_tail(
                     "lands on the grid the caller gave."
                 )
             # The resample undone placed the buffer's grid against the input's: off the default align, the
-            # op carries that align and the spacing it named, which an extent alone does not give back, and
-            # the fill the input's voxels past the buffer's far face read, which an extent never leaves.
+            # op carries that align and the spacing it named, which an extent alone does not give back. On every
+            # form it carries the fill konfai's inverse gives what it reads outside what it holds.
             forward = undone[of]
             if "grid" in forward:
                 raise ConfigError(
@@ -2452,8 +2452,7 @@ def hoist_ensemble_tail(
                     _or_konfai("Undo that Resample in each model (no ensemble), or use grid: konfai", _PREDICT),
                 )
             placed = {key: forward[key] for key in ("align", "spacing") if "align" in forward and key in forward}
-            if "align" in forward and "fill" in step:
-                placed["fill"] = step["fill"]
+            placed |= {"fill": step["fill"]} if "fill" in step else {}
             resample = _body_resample(step["interpolation"], f"the inverse of '{of}'")
             tail.append({"op": resample, **placed, "extra": ["input"]})
             continue
