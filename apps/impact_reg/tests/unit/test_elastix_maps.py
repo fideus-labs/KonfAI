@@ -55,7 +55,7 @@ IMPACT = """(MaximumNumberOfIterations 400 300)
 
 # As models.json on VBoussot/impact-torchscript-models spells them.
 REGISTRY = {
-    "MIND/R1D2_3D.pt": {"dimension": "3", "numberofchannels": "1", "fov": [5]},
+    "MIND/R1D2_3D.pt": {"dimension": "3", "numberofchannels": "1", "fov": [7]},
     "TS/M730.pt": {"dimension": "3", "numberofchannels": "1", "fov": [5, 11, 23, 47, 95, 191, 191, 191]},
 }
 
