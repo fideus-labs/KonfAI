@@ -127,18 +127,24 @@ def test_sampled_mode_refuses_a_preset_of_an_engine_it_does_not_know(
         app.register(["Other"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", max_voxels=100)
 
 
+@pytest.mark.parametrize(
+    ("direction", "spacing"),
+    [((1, 0, 0, 0, 1, 0, 0, 0, 1), (1.0, 2.0, 3.0)), ((0, -1, 0, 0, 0, -1, -1, 0, 0), (2.0, 3.0, 1.0))],
+    ids=["lps", "permuted and flipped"],
+)
 def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction, spacing
 ) -> None:
     """The elastix route hands the engine the twins and the workspace, the pair measured in the fixed image's finest
-    voxel as a run on the whole pair is, and writes the transform it returns, in millimetres, as the field on the
-    fixed grid and beside it."""
+    voxel and its voxel axes along LPS as a run on the whole pair is, and writes the transform it returns, in
+    millimetres, as the field on the fixed image's own grid and beside it."""
     from impact_reg_konfai.models import intensity
 
     paths = []
     for name in ("fixed", "moving"):
         image = sitk.GetImageFromArray(np.random.default_rng(0).random((8, 9, 10)).astype(np.float32))
         image.SetSpacing((2.0, 4.0, 6.0))
+        image.SetDirection(direction)
         paths.append(tmp_path / f"{name}.mha")
         sitk.WriteImage(image, str(paths[-1]))
     seen = {}
@@ -153,6 +159,7 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
 
         def register_mapped(self, fixed, moving, fixed_mask, moving_mask, device_index, work, spacing, voxels):
             seen.update(fixed=fixed, masks=(fixed_mask, moving_mask), spacing=spacing, voxels=voxels)
+            seen["direction"] = sitk.ReadImage(str(fixed)).GetDirection()
             return sitk.TranslationTransform(3, (1.0, -2.0, 0.5))
 
     monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
@@ -172,9 +179,11 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
         fields_only=True,
     )
     assert seen["fixed"].name == "Fixed.mha" and seen["masks"] == (None, None)
-    assert seen["spacing"] == (1.0, 2.0, 3.0) and seen["voxels"] == 720  # in voxels of 2 mm
+    assert seen["spacing"] == spacing and seen["voxels"] == 720  # in voxels of 2 mm, LPS's axes
+    assert np.allclose(seen["direction"], np.eye(3).ravel())
     field = sitk.ReadImage(str(next((tmp_path / "out" / "P000").glob("*.mha"))))
     assert field.GetSize() == (10, 9, 8) and field.GetSpacing() == (2.0, 4.0, 6.0)
+    assert np.allclose(field.GetDirection(), direction) and np.allclose(field.GetOrigin(), (0.0, 0.0, 0.0))
     assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.0))
     transform = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Elx_Transform.h5"))
     assert np.allclose(transform.TransformPoint((0.0, 0.0, 0.0)), (2.0, -4.0, 1.0))
@@ -326,6 +335,40 @@ def test_sampled_convexadam_probes_its_jacobian_networks_before_the_twins(
     app._native_twins = lambda *args, **kwargs: pytest.fail("the twins were written")  # type: ignore[method-assign]
     with pytest.raises(MeasureError, match="no gradient"):
         app.register(["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", max_voxels=100)
+
+
+@pytest.mark.parametrize(
+    "direction",
+    [(-1, 0, 0, 0, -1, 0, 0, 0, 1), (0, 0, 1, 1, 0, 0, 0, -1, 0), (0, -1, 0, 0, 0, -1, -1, 0, 0)],
+    ids=["flipped", "permuted", "permuted and flipped"],
+)
+@pytest.mark.parametrize("suffix", [".mha", ".h5"])
+def test_a_twin_is_the_pair_a_whole_run_reorients_and_its_field_goes_back(tmp_path: Path, direction, suffix) -> None:
+    """A twin written through ``AxisMap.to_lps`` holds the voxels and the geometry SimpleITK's DICOMOrient gives a run
+    on the whole pair, and ``remap`` through the inverse puts an image of it back on the input's grid."""
+    from impact_reg_konfai.native import AxisMap, remap, write_twin
+
+    rng = np.random.default_rng(0)
+    image = sitk.GetImageFromArray(rng.random((5, 6, 7)).astype(np.float32))
+    image.SetSpacing((0.5, 0.75, 1.25))
+    image.SetOrigin((3.0, -2.0, 7.0))
+    image.SetDirection(direction)
+    sitk.WriteImage(image, str(tmp_path / "image.mha"))
+    root, _, backend = reg._stage_group(tmp_path / "stage", "Fixed", {"P000": tmp_path / "image.mha"}).rpartition(":")
+    axis_map = AxisMap.to_lps(direction)
+    twin = write_twin(
+        Dataset(root, backend), "Fixed", "P000", tmp_path / f"twin{suffix}", dtype="float32", axis_map=axis_map
+    )
+    oriented, written = sitk.DICOMOrient(image, "LPS"), sitk.ReadImage(str(twin))
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(written), sitk.GetArrayFromImage(oriented))
+    for key in ("GetSpacing", "GetOrigin", "GetDirection"):
+        np.testing.assert_allclose(getattr(written, key)(), getattr(oriented, key)(), atol=1e-6)
+    if suffix == ".mha":
+        remap(twin, axis_map.inverse())
+        back = sitk.ReadImage(str(twin))
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(back), sitk.GetArrayFromImage(image))
+        for key in ("GetSpacing", "GetOrigin", "GetDirection"):
+            np.testing.assert_allclose(getattr(back, key)(), getattr(image, key)(), atol=1e-6)
 
 
 def test_a_mask_twin_keeps_what_its_engine_reads_of_the_mask(tmp_path: Path) -> None:

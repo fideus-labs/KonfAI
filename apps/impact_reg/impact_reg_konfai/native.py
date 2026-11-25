@@ -22,6 +22,7 @@ dense field written band by band. Nothing here reads an image whole."""
 from __future__ import annotations
 
 import contextlib
+import itertools
 import math
 import os
 import tempfile
@@ -59,6 +60,71 @@ def _slabs(shape: Sequence[int], itemsize: int, most: int | None = None) -> Iter
             yield slice(depth, depth + 1), slice(row, min(row + rows, shape[1]))
 
 
+@dataclass(frozen=True)
+class AxisMap:
+    """A grid's voxels seen with its axes permuted and read backwards, in NumPy order (z, y, x): axis ``k`` of the view
+    is axis ``axes[k]`` of the grid, reversed where ``flips[k]``. ``to_lps`` is the view SimpleITK's DICOMOrient gives
+    a run on the whole pair: each voxel axis along the LPS axis nearest to it and pointing its way, nothing resampled
+    (an oblique grid keeps the rotation left)."""
+
+    axes: tuple[int, ...] = (0, 1, 2)
+    flips: tuple[bool, ...] = (False, False, False)
+
+    @classmethod
+    def to_lps(cls, direction: Sequence[float]) -> AxisMap:
+        # Column j of an ITK direction (row-major) is voxel axis j, ITK order (x, y, z), in LPS; NumPy axis k is ITK
+        # axis 2 - k.
+        matrix = np.reshape(np.asarray(direction, dtype=float), (3, 3))
+        nearest = max(itertools.permutations(range(3)), key=lambda p: sum(abs(matrix[i, p[i]]) for i in range(3)))
+        return cls(
+            tuple(2 - nearest[2 - k] for k in range(3)),
+            tuple(bool(matrix[2 - k, nearest[2 - k]] < 0) for k in range(3)),
+        )
+
+    @property
+    def identity(self) -> bool:
+        return self.axes == (0, 1, 2) and not any(self.flips)
+
+    def inverse(self) -> AxisMap:
+        """The map from the view back to the grid."""
+        axes, flips = [0, 0, 0], [False, False, False]
+        for k, (axis, flip) in enumerate(zip(self.axes, self.flips, strict=True)):
+            axes[axis], flips[axis] = k, flip
+        return AxisMap(tuple(axes), tuple(flips))
+
+    def extents(self, extents: Sequence[int]) -> list[int]:
+        """The view's extents of a grid of ``extents``."""
+        return [int(extents[axis]) for axis in self.axes]
+
+    def box(self, low: Sequence[int], high: Sequence[int], extents: Sequence[int]) -> tuple[slice, ...]:
+        """The box ``[low, high)`` of a grid of ``extents``, where the view holds it."""
+        return tuple(
+            slice(extents[axis] - high[axis], extents[axis] - low[axis]) if flip else slice(low[axis], high[axis])
+            for axis, flip in zip(self.axes, self.flips, strict=True)
+        )
+
+    def view(self, values: np.ndarray) -> np.ndarray:
+        """``values``, a block of the grid ((z, y, x) first, any components after), laid out as the view lays it."""
+        values = values.transpose(*self.axes, *range(3, values.ndim))
+        flipped = [k for k, flip in enumerate(self.flips) if flip]
+        return np.ascontiguousarray(np.flip(values, flipped) if flipped else values)
+
+    def geometry(
+        self, spacing: Sequence[float], origin: Sequence[float], direction: Sequence[float], extents: Sequence[int]
+    ) -> tuple[list[float], list[float], list[float]]:
+        """The view's spacing, origin and direction (ITK order, the direction row-major) of a grid of ``extents`` and
+        that geometry: the same voxels at the same physical points."""
+        matrix = np.reshape(np.asarray(direction, dtype=float), (3, 3))
+        corner = [0, 0, 0]  # the grid's voxel the view starts at, NumPy order
+        for axis, flip in zip(self.axes, self.flips, strict=True):
+            corner[axis] = extents[axis] - 1 if flip else 0
+        start = np.asarray(origin, dtype=float) + matrix @ (np.asarray(spacing, dtype=float) * corner[::-1])
+        columns = [2 - self.axes[2 - i] for i in range(3)]  # view ITK axis i is the grid's ITK axis columns[i]
+        signs = [-1.0 if self.flips[2 - i] else 1.0 for i in range(3)]
+        view = np.stack([sign * matrix[:, column] for sign, column in zip(signs, columns, strict=True)], axis=1)
+        return [float(spacing[column]) for column in columns], start.tolist(), view.reshape(-1).tolist()
+
+
 def write_twin(
     dataset,
     group: str,
@@ -71,35 +137,38 @@ def write_twin(
     band: int | None = None,
     voxel: float = 1.0,
     positive: bool = False,
+    axis_map: AxisMap | None = None,
 ) -> Path:
     """The entry ``(group, name)`` written to ``target``: an HDF5 image in ITK's layout, its voxels chunked
     ``chunk``^3, where it ends in ``.h5``, an uncompressed MetaImage otherwise; from one read of the entry by bands
     through the dataset's region reads (``band`` planes at most, rows of one plane where a plane alone is larger than
     a band). ``clip`` winsorises it, as the whole-image run winsorises the images of the engine that reads it;
-    ``dtype`` "uint8" makes a mask (any non-zero voxel on, or with ``positive`` the positive ones). The geometry is measured in ``voxel`` (the fixed image's
-    finest, as the engines measure a pair). The headers are ITK's own, written by it for a one-voxel image of the same
-    geometry and voxel type."""
+    ``dtype`` "uint8" makes a mask (any non-zero voxel on, or with ``positive`` the positive ones). ``axis_map``
+    writes the entry as that view of it (``AxisMap``): a band of the entry lands in a band of the twin where the map
+    keeps the outer axis outer. The geometry is measured in ``voxel`` (the fixed image's finest, as the engines measure
+    a pair). The headers are ITK's own, written by it for a one-voxel image of the same geometry and voxel type."""
+    axis_map = axis_map or AxisMap()
     shape, attributes = dataset.get_infos(group, name)
     extents = [int(extent) for extent in shape[1:]]
+    geometry = axis_map.geometry(*(attributes.get_np_array(key) for key in ("Spacing", "Origin", "Direction")), extents)
+    view = axis_map.extents(extents)
     with contextlib.ExitStack() as stack:
         if target.suffix == ".h5":
             file = stack.enter_context(h5py.File(target, "w"))
-            for key, value in _hdf5_header(attributes, extents, dtype, voxel).items():
+            for key, value in _hdf5_header(geometry, view, dtype, voxel).items():
                 file[key] = value
-            file["ITKImage/0/Dimension"] = np.array(extents[::-1], dtype=np.uint64)
+            file["ITKImage/0/Dimension"] = np.array(view[::-1], dtype=np.uint64)
             file.create_group("ITKImage/0/MetaData")
             voxels = file.create_dataset(
-                "ITKImage/0/VoxelData",
-                shape=extents,
-                dtype=dtype,
-                chunks=tuple(min(chunk, extent) for extent in extents),
+                "ITKImage/0/VoxelData", shape=view, dtype=dtype, chunks=tuple(min(chunk, extent) for extent in view)
             )
-            pixels = None
         else:
-            pixels = stack.enter_context(open(target, "wb"))
-            pixels.write(_metaimage_header(_one_voxel(attributes, len(extents), dtype, voxel=voxel), extents))
+            start = _new_metaimage(
+                target, _one_voxel(geometry, len(view), dtype, voxel), view, np.dtype(dtype).itemsize
+            )
+            voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(view))
         for depth, rows in _slabs(extents, 4, band or chunk):  # read as float32
-            slices = (slice(0, 1), depth, rows, *(slice(None) for _ in extents[2:]))
+            slices = (slice(0, 1), depth, rows, slice(None))
             values = np.asarray(dataset.read_data_slice(group, name, slices)[0][0], dtype=np.float32)
             if dtype == "uint8":
                 values = ((values > 0) if positive else (values != 0)).astype(np.uint8)
@@ -107,21 +176,23 @@ def write_twin(
                 values = values.astype(dtype, copy=False)
             if clip is not None:
                 values = np.clip(values, clip[0], clip[1])
-            if pixels is None:
-                voxels[depth, rows] = values
-            else:
-                pixels.write(np.ascontiguousarray(values).data)  # the block's own buffer, not a copy of it
+            box = axis_map.box((depth.start, rows.start, 0), (depth.stop, rows.stop, extents[2]), extents)
+            voxels[box] = axis_map.view(values)
+        if isinstance(voxels, np.memmap):
+            voxels.flush()
     return target
 
 
-def _one_voxel(attributes, dim: int, dtype: str, voxel: float = 1.0):
-    """A one-voxel SimpleITK image carrying the entry's geometry measured in ``voxel``, of the twin's voxel type."""
+def _one_voxel(geometry, dim: int, dtype: str, voxel: float = 1.0):
+    """A one-voxel SimpleITK image carrying ``geometry`` (spacing, origin, direction) measured in ``voxel``, of the
+    twin's voxel type."""
     import SimpleITK as sitk
 
+    spacing, origin, direction = (np.asarray(value, dtype=float) for value in geometry)
     image = sitk.Image([1] * dim, {"uint8": sitk.sitkUInt8, "float32": sitk.sitkFloat32}[dtype])
-    image.SetSpacing((attributes.get_np_array("Spacing") / voxel).tolist())
-    image.SetOrigin((attributes.get_np_array("Origin") / voxel).tolist())
-    image.SetDirection(attributes.get_np_array("Direction").reshape(-1).tolist())
+    image.SetSpacing((spacing / voxel).tolist())
+    image.SetOrigin((origin / voxel).tolist())
+    image.SetDirection(direction.reshape(-1).tolist())
     return image
 
 
@@ -152,7 +223,7 @@ def _metaimage_header(geometry, extents: list[int], length: int | None = None) -
     return fields + comment[:-1] + b"-" * padding + b"\n" + last
 
 
-def _hdf5_header(attributes, extents: list[int], dtype: str, voxel: float = 1.0) -> dict[str, object]:
+def _hdf5_header(geometry, extents: list[int], dtype: str, voxel: float = 1.0) -> dict[str, object]:
     """The HDF5 header datasets ITK writes for a one-voxel image of this geometry and voxel type: the chunked twin
     follows the installed ITK's conventions, the direction matrix's layout among them."""
     import itk  # the engine's own dependency
@@ -161,9 +232,10 @@ def _hdf5_header(attributes, extents: list[int], dtype: str, voxel: float = 1.0)
     image = itk.Image[itk.UC if dtype == "uint8" else itk.F, dim].New()
     image.SetRegions([1] * dim)
     image.Allocate()
-    image.SetSpacing((attributes.get_np_array("Spacing") / voxel).tolist())
-    image.SetOrigin((attributes.get_np_array("Origin") / voxel).tolist())
-    image.SetDirection(itk.matrix_from_array(attributes.get_np_array("Direction").reshape(dim, dim)))
+    spacing, origin, direction = (np.asarray(value, dtype=float) for value in geometry)
+    image.SetSpacing((spacing / voxel).tolist())
+    image.SetOrigin((origin / voxel).tolist())
+    image.SetDirection(itk.matrix_from_array(direction.reshape(dim, dim)))
     keys = (
         "ITKVersion",
         "HDFVersion",
@@ -315,6 +387,29 @@ def _new_metaimage(path: Path, geometry, extents: list[int], itemsize: int) -> i
         file.write(header)
         file.truncate(len(header) + math.prod(extents) * itemsize)
     return len(header)
+
+
+def remap(path: Path, axis_map: AxisMap) -> None:
+    """The uncompressed MetaImage at ``path`` as ``axis_map``'s view of it, in place: written band by band into a file
+    beside it, its components as they are (a field's are physical), then put in its place."""
+    reader, dtype, shape, offset = _pixels(path)
+    source = np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=shape)
+    extents, view = list(shape[:3]), axis_map.extents(shape[:3])
+    spacing, origin, direction = axis_map.geometry(
+        reader.GetSpacing(), reader.GetOrigin(), reader.GetDirection(), extents
+    )
+    geometry = geometry_of(reader, origin)
+    geometry.SetSpacing(spacing)
+    geometry.SetDirection(direction)
+    staged = path.with_name(f".{path.name}.view")
+    start = _new_metaimage(staged, geometry, view, shape[3] * dtype.itemsize)
+    target = np.memmap(staged, dtype=dtype, mode="r+", offset=start, shape=(*view, shape[3]))
+    for depth, rows in _slabs(shape, dtype.itemsize):
+        box = axis_map.box((depth.start, rows.start, 0), (depth.stop, rows.stop, extents[2]), extents)
+        target[box] = axis_map.view(np.asarray(source[depth, rows]))
+    target.flush()
+    del source, target
+    os.replace(staged, path)
 
 
 def shift_origin(path: Path, shift) -> None:

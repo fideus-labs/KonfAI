@@ -130,9 +130,11 @@ writes them back to the disk.
 
 A level the samples hold whole is registered as FireANTs registers it: each stage is then FireANTs' on the whole
 image. `feature_map_update_interval` is not
-available by boxes. A preset on features (every ConvexAdam preset, an IMPACT preset of elastix or FireANTs) takes
-the pair with an identity direction, its voxel axes those of LPS, since the features are computed along them: reorient
-it first, or register it without `--out-of-core sampled`, which reorients it.
+available by boxes.
+
+The twins are written with their voxel axes along LPS, permuted and flipped as a run on the whole pair reorients its
+images (nothing resampled; an oblique image keeps the rotation left), since a feature network computes its channels
+along the voxel axes. The field comes back on the fixed image's own grid.
 
 ## Options
 

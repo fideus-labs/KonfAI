@@ -45,6 +45,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import SimpleITK as sitk
@@ -76,6 +77,9 @@ from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_fie
 # Preset apps live on this Hugging Face repo, at the revision this release pins; KONFAI_IMPACTREG_REPO points
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
 IMPACT_REG_KONFAI_REPO = PRESETS_REPO
+
+if TYPE_CHECKING:
+    from .native import AxisMap
 
 
 #: The app ``evaluate`` runs: the image, segmentation and landmark evaluation configs, as package data.
@@ -1039,6 +1043,9 @@ class _SampledRun:
     epochs: int | None
     output_group: str
     cases: list[str]
+    # Each case's view of its fixed and moving image (``native.AxisMap.to_lps``): the twins, and ``headers``, are the
+    # pair as a run on the whole pair reorients it.
+    maps: "list[dict[str, AxisMap]]"
 
     @property
     def device_index(self) -> int:
@@ -1071,22 +1078,11 @@ def _partial_masks(twins: dict[str, Path], case: str) -> tuple[list[Path | None]
     return masks, kept
 
 
-def _require_lps(run: _SampledRun) -> None:
-    """Refuse, before any twin is written, a pair whose voxel axes are not those of LPS for a run on features by the
-    sampled strategy: the features are computed along the voxel axes, and the pair is taken as it is (a run on the
-    whole pair reorients it)."""
-    for index, case in enumerate(run.cases):
-        for group in ("Fixed", "Moving"):
-            if not np.allclose(np.reshape(run.headers[index][group][3], (3, 3)), np.eye(3), atol=1e-6):
-                raise KonfAIError(
-                    "ImpactReg",
-                    f"{run.preset} {case}: the {group.lower()} image's voxel axes are not LPS's (its direction is not"
-                    " the identity), and the features are computed along them; --out-of-core sampled takes the pair"
-                    " as it is.",
-                    "Write the image with an identity direction first (SimpleITK's DICOMOrient to 'LPS' permutes and"
-                    " flips its axes; an oblique image needs resampling), or register it without --out-of-core"
-                    " sampled.",
-                )
+def _viewed(header: _Header, axis_map: "AxisMap") -> _Header:
+    """``header`` as ``axis_map`` (``native.AxisMap``) views its grid."""
+    shape, spacing, origin, direction = header
+    geometry = axis_map.geometry(spacing, origin, direction, shape[-3:])
+    return ([*shape[:-3], *axis_map.extents(shape[-3:])], *geometry)
 
 
 def _config_output_group(config: dict) -> str:
@@ -1796,7 +1792,7 @@ class ImpactRegKonfAIApp:
         from konfai_apps.app_repository import apply_overrides, get_app_repository_info
 
         from .models.intensity import world_transform
-        from .native import to_millimetres
+        from .native import AxisMap, remap, to_millimetres
 
         config = _preset_config(preset, "Prediction.yml")
         module = _sampled_engine(preset)
@@ -1822,11 +1818,17 @@ class ImpactRegKonfAIApp:
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.
         apply_cpu_thread_budget(1)
+        # The pair as a run on the whole pair reorients it: each image's voxel axes along LPS, nothing resampled.
+        maps = [{group: AxisMap.to_lps(case[group][3]) for group in ("Fixed", "Moving")} for case in headers]
+        views = [
+            {group: _viewed(header, case_maps[group.removesuffix("Mask")]) for group, header in case.items()}
+            for case, case_maps in zip(headers, maps, strict=True)
+        ]
         run = _SampledRun(
             preset,
             config,
             inputs,
-            headers,
+            views,
             work,
             gpu,
             cpu,
@@ -1836,14 +1838,17 @@ class ImpactRegKonfAIApp:
             epochs,
             _config_output_group(config),
             cases,
+            maps,
         )
         fields = getattr(self, f"_sampled_{module}")(run)
         shutil.rmtree(work / _workspace(f"{preset}_native"), ignore_errors=True)
         # The engines measured the pair in the fixed image's finest voxel: the fields and the compact transforms
-        # come back in millimetres.
+        # come back in millimetres, a field on the fixed image's own grid.
         for index, case in enumerate(run.cases):
             voxel = min(headers[index]["Fixed"][1])
             to_millimetres(fields[case], voxel)
+            if not maps[index]["Fixed"].identity:
+                remap(fields[case], maps[index]["Fixed"].inverse())
             for compact in self._compact.get(preset, {}).get(case, ()):
                 if compact.suffix == ".h5":
                     sitk.WriteTransform(world_transform(sitk.ReadTransform(str(compact)), voxel), str(compact))
@@ -1912,6 +1917,7 @@ class ImpactRegKonfAIApp:
                 clip=clip,
                 voxel=min(run.headers[index]["Fixed"][1]),
                 positive=positive,
+                axis_map=run.maps[index][image_group],
             )
 
         masks = {}
@@ -1938,7 +1944,6 @@ class ImpactRegKonfAIApp:
 
         refuse_linear_keys(LocalAppRepository._model_param_block(run.config)[1] or {})
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
-        _require_lps(run)  # ConvexAdam reads features (MIND, IMPACT's models), which a run on the whole pair reorients
         engine.check_gradients()
         require_regions()  # before any twin is written
         # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
@@ -2074,8 +2079,6 @@ class ImpactRegKonfAIApp:
                 "Point KONFAI_ELASTIX_DIR at an elastix-IMPACT build that has it.",
             )
         impact = bool(engine._feature_models)
-        if impact:
-            _require_lps(run)
         fields_root = run.work / _workspace(f"{run.preset}_fields")
         fields: dict[str, Path] = {}
         compact: dict[str, list[Path]] = {}
@@ -2138,8 +2141,6 @@ class ImpactRegKonfAIApp:
         from .models.intensity import engine_of
 
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
-        if engine._deformable_metric == "impact" and engine._deformable_method != "none":
-            _require_lps(run)
         for index in range(len(run.cases)):
             engine.check_sampled(*(run.headers[index][group][0][-3:] for group in ("Fixed", "Moving")))
         fields: dict[str, Path] = {}
