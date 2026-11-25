@@ -1107,6 +1107,60 @@ def test_register_records_the_overrides_each_pass_took(tmp_path: Path, monkeypat
     assert record["applied"] == {"P_global": overrides, "P_tiles": ["seed=3"]}
 
 
+@pytest.mark.parametrize("route", ["auto", "whole"])
+def test_the_global_share_is_checked_against_the_config_the_routed_pass_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """A pair over the budget that auto routes into two passes reads the global share with the global pass's config
+    (tiling['global']): a key that config alone holds is taken there, and refused where the pair runs whole on
+    Prediction.yml."""
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.float32)), str(fixed))
+    moving = _ramp(tmp_path / "moving.mha", 16)
+    tiling = {"global": "Global.yml", "tile": "Prediction_tile.yml"}
+    config = "Predictor:\n  Model:\n    classpath: other:Net\n    Net: {}\n  Dataset:\n    batch_size: 1\n"
+    folder = Path(reg.IMPACT_REG_KONFAI_REPO) / "P"
+    for name, text in (("Prediction.yml", config), ("Prediction_tile.yml", config)):
+        (folder / name).write_text(text, encoding="utf-8")
+    (folder / "Global.yml").write_text(config + "    num_workers: 0\n", encoding="utf-8")
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": tiling})
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
+    )
+
+    def fake_run(command, **kwargs):
+        out = Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000"
+        out.mkdir(parents=True)
+        _write_dvf(out / "DVF.mha", (0.0, 0.0, 0.0), sitk.ReadImage(command[command.index("-i") + 1]))
+
+    monkeypatch.setattr(reg.subprocess, "run", fake_run)
+
+    def register() -> None:
+        reg.ImpactRegKonfAIApp().register(
+            ["P"],
+            [fixed],
+            [moving],
+            output=tmp_path / "Output",
+            config_overrides=["Predictor.Dataset.num_workers=2"],
+            max_voxels=1000,
+            out_of_core=route,
+            quiet=True,
+            fields_only=True,
+        )
+
+    if route == "auto":
+        register()
+        assert json.loads((tmp_path / "Output" / "register.json").read_text())["applied"]["P_global"] == [
+            "Predictor.Dataset.num_workers=2"
+        ]
+    else:
+        with pytest.raises(KonfAIError, match=r"P \(Prediction\.yml\): .*num_workers"):
+            register()
+
+
 def test_a_scope_comes_before_the_name_and_the_colon_of_a_value_is_none() -> None:
     name = "Predictor.Model.RegistrationNet.models.0.ref=VBoussot/impact-torchscript-models:TS/M730.pt"
     assert reg._scopes(f"A:tile:{name}", ["A"]) == ("A", "tile", name)

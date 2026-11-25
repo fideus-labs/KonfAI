@@ -341,8 +341,8 @@ def _preset_overrides(
     presets: list[str],
     overrides: list[str] | None,
     quiet: bool = False,
-    sampled: bool = False,
     seed: int | None = None,
+    routed: bool = False,
 ) -> dict[str, dict[str, list[str]]]:
     """Each preset's share of the ``--set`` overrides, per pass, checked against the configs they run before anything
     runs.
@@ -363,8 +363,8 @@ def _preset_overrides(
 
     Each pass's share is applied to a copy of its config by konfai-apps' own resolver, so a name, a value or a range
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
-    nothing cached) leaves its share to that resolver, in the preset's own process. With ``sampled``, the global share
-    is checked against ``Prediction.yml``, which every case of a sampled run reads.
+    nothing cached) leaves its share to that resolver, in the preset's own process. With ``routed``, the global share
+    is left to ``_check_routed_shares``, once the cases are routed: the configs it is read with depend on the route.
     """
     shares: dict[str, list[tuple[str | None, str]]] = {
         preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
@@ -378,7 +378,7 @@ def _preset_overrides(
         if not share and seed is None:
             continue
         tiling = _manifest(preset).get("tiling") or {}
-        files = {"global": "Prediction.yml" if sampled else tiling.get("global") or "Prediction.yml"}
+        files = {"global": tiling.get("global") or "Prediction.yml"}
         files["tile"] = tiling.get("tile")
         configs = {}
         for stage, filename in files.items():
@@ -431,17 +431,40 @@ def _preset_overrides(
             for target in targets:
                 passes[preset][target].append(override)
         for stage, config in configs.items():
-            try:
-                check_overrides(config, passes[preset][stage])
-            except AppRepositoryError as error:
-                raise KonfAIError(
-                    "ImpactReg",
-                    f"{preset} ({files[stage]}): {error.args[0]}",
-                    f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
-                    f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
-                    " for this preset alone.",
-                ) from None
+            if stage == "tile" or not routed:
+                _check_share(preset, files[stage], config, passes[preset][stage])
     return passes
+
+
+def _check_share(preset: str, filename: str, config: dict, share: list[str]) -> None:
+    """Refuse the ``--set`` of ``share`` the preset's config ``filename`` would refuse."""
+    try:
+        check_overrides(config, share)
+    except AppRepositoryError as error:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset} ({filename}): {error.args[0]}",
+            f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
+            f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
+            " for this preset alone.",
+        ) from None
+
+
+def _check_routed_shares(passes: dict[str, dict[str, list[str]]], routes: dict[str, "_Route"]) -> None:
+    """Each preset's global share checked against every config its route reads it with, once a config:
+    ``Prediction.yml`` for the cases registered whole or sampled, the global pass's own (``tiling["global"]``) for
+    those tiled. A config that cannot be read leaves the share to konfai-apps, in the preset's own process."""
+    for preset, route in routes.items():
+        tiling = _manifest(preset).get("tiling") or {}
+        files = {"Prediction.yml"} if route.sampled or not route.tiled else set()
+        if route.tiled and tiling.get("global"):
+            files.add(tiling["global"])
+        for filename in sorted(files):
+            try:
+                config = _preset_config(preset, filename)
+            except Exception:  # offline, nothing cached
+                continue
+            _check_share(preset, filename, config, passes[preset]["global"])
 
 
 def _plan(
@@ -1381,7 +1404,7 @@ class ImpactRegKonfAIApp:
             raise KonfAIError(
                 "ImpactReg", f"--out-of-core {out_of_core} is not a route.", f"Use one of {', '.join(ROUTES)}."
             )
-        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core != "tiled", seed)
+        overrides = _preset_overrides(presets, config_overrides, quiet, seed, routed=True)
         self._run_args = ["--seed", str(seed)] if seed is not None else []
         self._moved_format = None
         # The form each output is asked in (None: every output), for a field this layer writes itself (sampled).
@@ -1441,6 +1464,7 @@ class ImpactRegKonfAIApp:
                             "Register the presets apart, or choose --out-of-core whole or tiled.",
                         )
                     routes[preset] = dataclasses.replace(route, sampled=sampled, tiled=route.tiled and not sampled)
+            _check_routed_shares(overrides, routes)
             sampled_presets = [preset for preset, route in routes.items() if route.sampled]
             sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
             # The sampled route registers a case on its own grid, of any dimension; the presets a case of a 2-D pair
