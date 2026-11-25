@@ -1888,6 +1888,17 @@ def test_the_dtype_integer_copies_fold_into_is_cast_where_they_fold(
     ]
 
 
+@pytest.mark.parametrize("members", ["float16", "float64"])
+def test_a_mean_stack_of_float_members_is_averaged_in_float32_as_konfai_s(members: str) -> None:
+    # konfai's stack averages its members in float32 and rounds the mean back to theirs: each copy is widened before
+    # the copies fold, and their mean cast back past it.
+    before = {"before_reduction_transforms": {"TensorCast": {"dtype": members}}}
+    config = _prediction({}, {**before, "after_reduction_transforms": _STACK, "reduction": "Concat"}, "Concat", 1)
+    manifest, _, per_copy = transform_manifest(config, "Predictor")
+    post = manifest["postprocessing"]
+    assert post[per_copy - 1 : per_copy + 1] == [{"op": "cast", "dtype": "float32"}, {"op": "cast", "dtype": members}]
+
+
 @pytest.mark.parametrize(
     ("combine", "copies", "flips"),
     [
@@ -3545,7 +3556,8 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
     [
         ("mean", "reduction:Mean"),
         ("median", "reduction:Median"),
-        ("median_lower", "reduction:Median"),
+        # Emitted for an InferenceStack of mode median alone, which takes torch's lower middle.
+        ("median_lower", "stack:median"),
         ("std", "reduction:Std"),
         ("variance", "ensemble:Variance"),
         ("standard_deviation", "ensemble:StandardDeviation"),
@@ -3553,7 +3565,8 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
     ],
 )
 def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op: str, fold: str) -> None:
-    # Three copies of each dtype, folded by konfai's reduction, or a stack of three members by its ensemble stage.
+    # Three copies of each dtype, folded by konfai's reduction, or a stack of three members by its ensemble stage or
+    # by the InferenceStack the op is emitted for.
     import torch
     from konfai.data import reduction
     from konfai.data.transform import ensemble
@@ -3561,11 +3574,13 @@ def test_every_fold_of_copies_or_members_hands_on_the_dtype_konfai_s_returns(op:
     from konfai.utils.dataset import Attribute
 
     module, name = fold.split(":")
-    cls = getattr({"reduction": reduction, "ensemble": ensemble}[module], name)
+    cls = getattr({"reduction": reduction, "ensemble": ensemble}.get(module, ensemble), name, None)
     for dtype in _DTYPES:
         values = (torch.arange(3 * 6 * 7).reshape(3, 1, 6, 7) % 3).to(getattr(torch, dtype))
         if module == "reduction":
             returned = cls()([copy[None] for copy in values])
+        elif module == "stack":
+            returned = ensemble.InferenceStack(mode=name)._reduce(values)
         else:
             returned = cls()("probe", values[:, 0], Attribute())
         _tabled({"op": op}, dtype, str(returned.dtype).removeprefix("torch."))

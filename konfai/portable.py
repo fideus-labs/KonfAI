@@ -620,7 +620,8 @@ def _result_dtype(step: dict[str, Any], dtype: str | None) -> str | None:
     if op == "histogram_match":
         return "float32" if dtype == "float16" else dtype
     # On an integer volume float32, a floating one kept.
-    over_integers = ("percentage", "mean", "median", "median_lower", "normalize", "unnormalize", "softmax")
+    # A median_lower, an InferenceStack's median, selects a member: it keeps their dtype.
+    over_integers = ("percentage", "mean", "median", "normalize", "unnormalize", "softmax")
     if (op in over_integers or (op == "gradient" and not step.get("per_dim"))) and dtype is not None:
         return dtype if dtype.startswith("float") else "float32"
     return dtype
@@ -2286,6 +2287,12 @@ def _post_chain(
     mean_stack = stack is not None and stack.get("mode") != "median"
     if not dtype.startswith("float") and (folded != dtype or mean_stack):
         post.insert(split_post(post, pre, len(before)), {"op": "cast", "dtype": folded})
+    elif mean_stack and dtype != "float32":
+        # A mean stack of floating members averages them in float32 and rounds the mean back to theirs: each copy is
+        # widened before they fold.
+        post.insert(len(before), {"op": "cast", "dtype": "float32"})
+        post.insert(split_post(post, pre, len(before) + 1), {"op": "cast", "dtype": dtype})
+        return post, len(before) + 1
     return post, len(before)
 
 
