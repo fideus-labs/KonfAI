@@ -65,7 +65,9 @@ inputs are first read once, by bands, and
 written as uncompressed twins the engines map or read by boxes, measured in the fixed image's finest voxel as a run on
 the whole pair is (a preset's lengths are voxels); the fields and transforms come back in millimetres. A mask lying
 on another grid than its image goes onto it first, streamed. The strategy registers a plane as it registers a
-volume, on its own grid, once, in this process: `--host` is refused. `--tta` runs the copies the app allows (`app.json`'s `tta`, none for the shipped
+volume, on its own grid, once. With `--host` it runs on the konfai-apps server (the runner `impact_reg_sampled`, which
+the server's IMPACT-Reg installs): the images go up in a stream, the fields and compact transforms come back, and the
+moved images are derived here. `--tta` runs the copies the app allows (`app.json`'s `tta`, none for the shipped
 presets), as on the other routes. `--seed` seeds its draws, as it seeds the engine's on every route, and
 `--output-format` is the form its field is written in.
 

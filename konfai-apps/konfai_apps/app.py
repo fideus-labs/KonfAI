@@ -852,6 +852,20 @@ class KonfAIAppClient(AbstractKonfAIApp):
         pass
 
     @run_remote_job
+    def run(
+        self,
+        runner: str,
+        inputs: list[list[Path | str]],
+        output: Path = Path("./Output/"),
+        runner_args: list[str] | None = None,
+        gpu: list[int] = [],
+        cpu: int | None = None,
+        quiet: bool = False,
+    ) -> None:
+        """Run the server's installed ``runner`` on this app and ``inputs`` (``POST /apps/{app}/run``), its output
+        downloaded into ``output``; ``runner_args`` are NAME=VALUE strings the runner reads."""
+
+    @run_remote_job
     def fine_tune(
         self,
         dataset: Path,

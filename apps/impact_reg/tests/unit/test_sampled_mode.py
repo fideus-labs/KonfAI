@@ -912,3 +912,61 @@ def test_a_plane_larger_than_a_band_is_read_and_written_by_rows(tmp_path: Path, 
     assert np.array_equal(
         *(sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / f"{name}.mha"))) for name in ("bands", "rows"))
     )
+
+
+def test_with_a_host_the_server_registers_the_sampled_cases_and_their_fields_come_back(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--host with --out-of-core sampled: the server's runner (``remote.main``) registers the cases as this machine
+    would, and the client gets each case's field and compact transform back as a local run leaves them."""
+    import konfai_apps.app
+    from impact_reg_konfai import remote
+    from konfai import RemoteServer
+
+    fixed, moving = _pair(tmp_path)
+
+    def sampled(self, preset, inputs, headers, cases, work, *args):
+        fields, compacts = {}, {}
+        for number, case in enumerate(cases, 1):
+            field, compact = Path(work) / case / "DVF.mha", Path(work) / case / "Transform.h5"
+            field.parent.mkdir(parents=True, exist_ok=True)
+            vectors = np.full((8, 8, 8, 3), float(number), dtype=np.float32)
+            sitk.WriteImage(sitk.GetImageFromArray(vectors, isVector=True), str(field))
+            sitk.WriteTransform(sitk.TranslationTransform(3, (float(number), 0.0, 0.0)), str(compact))
+            fields[case], compacts[case] = field, [compact]
+        self._compact[preset] = compacts
+        return "DVF", fields
+
+    sent: list[list[str]] = []
+
+    class Server:
+        """The server's side of ``KonfAIAppClient.run``: its runner, on the files the client sends."""
+
+        def __init__(self, app: str, remote_server) -> None:
+            self.app = app
+
+        def run(self, runner, inputs, output, runner_args, gpu, cpu, quiet) -> None:
+            assert runner == "impact_reg_sampled"
+            sent.append(runner_args)
+            argv = [self.app, *(arg for group in inputs for arg in ("--inputs", *group)), "--output", str(output)]
+            remote.main([*argv, *(arg for value in runner_args for arg in ("--arg", value)), "--quiet"])
+
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_register_sampled", sampled)
+    monkeypatch.setattr(reg, "_config_output_group", lambda config: "DVF")
+    monkeypatch.setattr(konfai_apps.app, "KonfAIAppClient", Server)
+    import konfai.utils.vram
+
+    monkeypatch.setattr(konfai.utils.vram, "max_voxels", lambda *args, **kwargs: 10**12)  # no server to ask
+    outputs = {}
+    for name, server in (("local", None), ("remote", RemoteServer("localhost", 8000, None))):
+        outputs[name] = tmp_path / name
+        reg.ImpactRegKonfAIApp(remote_server=server).register(
+            ["Elx"], [fixed, fixed], [moving, moving], output=outputs[name], fields_only=True, out_of_core="sampled",
+            samples=4096, config_overrides=["iterations=3"],
+        )  # fmt: skip
+    assert sent and "samples=4096" in sent[0] and "set=iterations=3" in sent[0]
+    for case in ("P000", "P001"):
+        local, there = (outputs[name] / case for name in ("local", "remote"))
+        assert sorted(path.name for path in there.iterdir()) == sorted(path.name for path in local.iterdir())
+        for name in ("DVF.mha", "Elx_Transform.h5"):
+            assert (there / name).read_bytes() == (local / name).read_bytes()

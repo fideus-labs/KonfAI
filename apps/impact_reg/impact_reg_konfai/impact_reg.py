@@ -1446,13 +1446,6 @@ class ImpactRegKonfAIApp:
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
-            if sampled_presets and self._remote is not None:
-                raise KonfAIError(
-                    "ImpactReg",
-                    f"{', '.join(sampled_presets)}: the sampled route runs the preset's engine in this process, not on"
-                    " a server.",
-                    "Drop --host, or choose --out-of-core whole or tiled.",
-                )
             for preset in sampled_presets if tta else []:
                 # --tta as konfai-apps takes it on the other routes: up to the copies the app allows (app.json 'tta').
                 allowed = int(_manifest(preset).get("tta") or 0)
@@ -1468,7 +1461,8 @@ class ImpactRegKonfAIApp:
                         f"{preset}: the sampled route registers a pair once, with no test-time augmentation.",
                         "Drop --tta, or choose --out-of-core whole or tiled.",
                     )
-            _check_space(work, headers, presets, bool(sampled_presets))
+            # The twins of a sampled run are written where it runs: on the server, with --host.
+            _check_space(work, headers, presets, bool(sampled_presets) and self._remote is None)
             on_grid = None
             fields_by_preset = {}
             for index, preset in enumerate(presets, 1):
@@ -1480,7 +1474,8 @@ class ImpactRegKonfAIApp:
                 over = route.sampled
                 rest = [index for index in range(len(headers)) if index not in over]
                 if over:
-                    fields_by_preset[preset] = sampled = self._register_sampled(
+                    sampled_run = self._register_sampled if self._remote is None else self._register_sampled_remote
+                    fields_by_preset[preset] = sampled = sampled_run(
                         preset,
                         _some_cases(inputs, over),
                         [native_headers[index] for index in over],
@@ -1942,6 +1937,57 @@ class ImpactRegKonfAIApp:
                 else:
                     to_millimetres(compact, voxel)
         return run.output_group, fields
+
+    def _register_sampled_remote(
+        self,
+        preset: str,
+        inputs: dict[str, list[Path]],
+        headers: "list[dict[str, _Header]]",
+        cases: list[str],
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        config_overrides: dict[str, list[str]],
+        region_size: int,
+        samples: int | None,
+        epochs: int | None,
+    ) -> tuple[str, dict[str, Path]]:
+        """``_register_sampled`` on the konfai-apps server ``--host`` names, by its runner ``impact_reg_sampled``
+        (``remote.py``): the cases' images go up in a stream, the server registers them as this machine would, and
+        their fields and compact transforms come back; the moved images are derived here, as after a local run."""
+        from konfai_apps.app import KonfAIAppClient
+
+        assert self._remote is not None
+        app = split_preset(preset)[0]  # its own --set are in this pass's share (see _preset_overrides)
+        names = [group for group in ("Fixed", "Moving", "FixedMask", "MovingMask") if inputs.get(group)]
+        args = [f"groups={','.join(names)}", f"region_size={region_size}"]
+        args += [f"set={override}" for override in config_overrides["global"]]
+        args += [f"{name}={value}" for name, value in (("samples", samples), ("epochs", epochs)) if value is not None]
+        out = work / _workspace(f"{preset}_remote")
+        KonfAIAppClient(app_id(IMPACT_REG_KONFAI_REPO, app), self._remote).run(
+            "impact_reg_sampled",
+            [[str(path) for path in inputs[group]] for group in names],
+            output=out,
+            runner_args=args,
+            gpu=gpu,
+            cpu=cpu,
+            quiet=quiet,
+        )
+        self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
+        group = _config_output_group(_preset_config(preset, "Prediction.yml"))
+        # The server named the cases it was sent P000, P001, ... in their order; its compact transforms carry its
+        # preset's name, which publishing here gives them again.
+        recorded, prefix = _recorded_compacts(out), f"{_workspace(app)}_"
+        fields, compacts = {}, {}
+        for index, case in enumerate(cases):
+            sent = out / f"P{index:03d}"
+            fields[case] = _the_output(sent, group)
+            compacts[case] = []
+            for name in recorded.get(sent.name, []):
+                compacts[case].append((sent / name).rename(sent / name.removeprefix(prefix)))
+        self._compact[preset] = compacts
+        return group, fields
 
     def _native_twins(
         self, run: "_SampledRun", *, chunked: bool, clipped: bool, positive: bool = False

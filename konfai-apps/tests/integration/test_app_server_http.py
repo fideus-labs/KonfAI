@@ -160,6 +160,43 @@ def _post(client: TestClient, endpoint: str, **fields: str):  # type: ignore[no-
     return client.post(f"/apps/demo/{endpoint}", files=files, data={**groups, **fields})
 
 
+def test_a_run_job_runs_the_runner_an_installed_package_registers(submit, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A client names a runner; the server runs the module:function its environment registers under that name, and
+    # nothing else: an unknown name is 404, an argument that would be an option of the job 422.
+    import importlib.metadata
+    import os
+    import subprocess
+    import sys
+
+    client, scheduled = submit
+    installed = [importlib.metadata.EntryPoint("sampled", "pkg.remote:main", "konfai_apps.runners")]
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda group: installed if group == "konfai_apps.runners" else []
+    )
+    files = [("inputs", ("a.mha", b"v")), ("inputs", ("b.mha", b"v"))]
+    fields = {"inputs_groups": "1,1", "runner": "sampled", "runner_args": ["samples=2", "set=iterations=3"]}
+
+    assert client.post("/apps/demo/run", files=files, data=fields).status_code == 200
+    cmd = scheduled[-1][1]
+    assert cmd[:5] == [sys.executable, "-m", "konfai_apps.runner", "pkg.remote:main", "demo"]
+    assert cmd[5:9] == ["--arg", "samples=2", "--arg", "set=iterations=3"]
+    assert cmd.count("--inputs") == 2 and "--output" in cmd
+    assert client.post("/apps/demo/run", files=files, data={**fields, "runner": "other"}).status_code == 404
+    assert (
+        client.post("/apps/demo/run", files=files, data={**fields, "runner_args": ["--output=/etc"]}).status_code == 422
+    )
+    # The job's interpreter imports the konfai_apps under test.
+    root = str(Path(app_server.__file__).parents[1])
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([root, os.environ.get("PYTHONPATH", "")])}
+    called = subprocess.run(
+        [sys.executable, "-m", "konfai_apps.runner", "builtins:print", "a", "b"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert called.stdout.strip() == "['a', 'b']", called.stderr
+
+
 @pytest.mark.parametrize(
     ("endpoint", "field"), [("infer", "ensemble_models"), ("pipeline", "ensemble_models"), ("fine_tune", "models")]
 )

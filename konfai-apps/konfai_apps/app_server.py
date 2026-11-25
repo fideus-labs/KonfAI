@@ -1419,6 +1419,46 @@ async def pipeline(
     return cmd
 
 
+def _runner(name: str) -> str:
+    """The ``module:function`` an installed package registers as runner ``name`` (entry point group
+    ``konfai_apps.runners``): an app's own job that is no KonfAI workflow, such as IMPACT-Reg's sampled registration.
+    Only what this server's environment installed runs, never a module a client names."""
+    from importlib.metadata import entry_points
+
+    found = {entry.name: entry.value for entry in entry_points(group="konfai_apps.runners")}
+    if name not in found:
+        raise HTTPException(404, f"No runner '{name}' is installed on this server.")
+    return found[name]
+
+
+@protected.post("/apps/{app_name:path}/run")
+@submit_job()
+async def run(
+    app_name: str,
+    runner: Annotated[str, Form()],
+    inputs: Annotated[list[UploadFile], File(...)],
+    inputs_groups: Annotated[str | None, Form()] = None,
+    runner_args: Annotated[list[str] | None, Form()] = None,  # NAME=VALUE each, which the runner checks
+    options: Annotated[str, Form()] = "{}",
+    gpu: Annotated[str | None, Form()] = "",
+    cpu: Annotated[int, Form()] = 1,
+    quiet: Annotated[bool, Form()] = False,
+):
+    """Run the installed runner ``runner`` (``_runner``) on ``app_name`` and the uploaded ``inputs``: a job like the
+    others, its output directory sent back as its result. ``runner_args`` reach it as ``--arg NAME=VALUE``."""
+    import sys
+
+    from .remote_options import _is_override
+
+    malformed = [arg for arg in runner_args or [] if not _is_override(arg)]
+    if malformed:
+        raise HTTPException(422, f"runner_args must be NAME=VALUE: {', '.join(malformed)}")
+    cmd = [sys.executable, "-m", "konfai_apps.runner", _runner(runner), app_name]
+    for arg in runner_args or []:
+        cmd += ["--arg", arg]
+    return cmd
+
+
 @protected.post("/apps/{app_name:path}/fine_tune")
 @submit_job()
 async def fine_tune(
