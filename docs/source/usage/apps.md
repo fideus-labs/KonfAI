@@ -49,6 +49,7 @@ The {doc}`gallery <../examples/visual-gallery>` shows other completed app runs.
 | App reference | Input | Output |
 | --- | --- | --- |
 | `VBoussot/ImpactSeg:body` | CT, MR or CBCT | 11-label segmentation |
+| `HCedric/IMPACTSeg:fine-3d` | CT, MR or CBCT | 126-label segmentation |
 | `VBoussot/ImpactSynth:MR` | MR | Synthetic CT |
 | `VBoussot/ImpactSynth:CBCT` | CBCT | Synthetic CT |
 | `VBoussot/MRSegmentator-KonfAI:MRSegmentator` | MR | 40-label segmentation |

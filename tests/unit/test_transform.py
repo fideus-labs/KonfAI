@@ -1074,6 +1074,15 @@ def test_canonical_is_the_exact_index_remap_bit_for_bit(direction: np.ndarray, e
     assert torch.equal(out, expected(volume)), "an orthogonal reorientation must be the remap, not near it"
 
 
+@pytest.mark.parametrize("dtype", [np.uint16, np.uint32, np.uint64])
+def test_an_unsigned_volume_is_reoriented_and_flipped_bit_for_bit(dtype: type) -> None:
+    """torch flips no uint16, uint32 or uint64 tensor on the CPU, the types an MR is often stored in."""
+    array = (np.iinfo(dtype).max - np.arange(2 * 3 * 4, dtype=dtype)).reshape(1, 2, 3, 4)  # the high bit set
+    for stage, attributes in ((Canonical(), lambda: _canonical_attributes(_RAS)), (Flip("1|2"), Attribute)):
+        out = stage("case", torch.from_numpy(array.copy()), attributes())
+        assert np.array_equal(out.numpy(), np.flip(array, (2, 3))) and out.numpy().dtype == dtype  # both mirror y, x
+
+
 def test_an_oblique_canonical_keeps_an_int64_label_past_float32() -> None:
     # A nearest pick copies the voxel: a float32 trip would round 2**24 + 1 down to 2**24 in silence.
     volume = torch.full((1, *_CANONICAL_SPATIAL), 2**24 + 1, dtype=torch.int64)

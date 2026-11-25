@@ -18,12 +18,12 @@
 It provides a simple way to perform **anatomical segmentation inference**, **evaluation**, **ensembling**, and
 **uncertainty estimation** on medical image volumes.
 
-The underlying **IMPACT-Seg** models are **multimodal anatomical segmentation** networks built around a **2.5D U-Net
-with a residual encoder**. A single model segments **CBCT, MR, and CT** scans into a **consistent label space**,
+The underlying **IMPACT-Seg** models are **multimodal anatomical segmentation** networks: **residual-encoder
+U-Nets, 2.5D or 3D**. A single model segments **CBCT, MR, and CT** scans into a **consistent label space**,
 enabling cross-modality workflows without per-modality retraining.
 
 Pretrained models are automatically downloaded from
-[Hugging Face Hub](https://huggingface.co/VBoussot/ImpactSeg).
+[Hugging Face Hub](https://huggingface.co/HCedric/IMPACTSeg).
 
 ---
 
@@ -39,14 +39,27 @@ Pretrained models are automatically downloaded from
 
 ## 🗂️ Available models
 
-Model identifiers are resolved dynamically from the [`VBoussot/ImpactSeg`](https://huggingface.co/VBoussot/ImpactSeg)
+Model identifiers are resolved dynamically from the [`HCedric/IMPACTSeg`](https://huggingface.co/HCedric/IMPACTSeg)
 repository and passed as the first positional argument.
 
-| Model | Modalities | Labels | Training cohort |
-|-------|------------|--------|-----------------|
-| `body` | CBCT · MR · CT | 11 | 232 CBCT + 282 MR + 955 CT |
+| Model | Modalities | Labels | Network | Weights |
+|-------|------------|--------|---------|---------|
+| `fine-3d` | CBCT · MR · CT | 126 | 3D, patch 128 × 128 × 128 at 1.5 × 1.5 × 2 mm | 5 folds |
+| `fine-2.5d` | CBCT · MR · CT | 126 | 2.5D, 5 slices of 288 × 288 at 1.5 × 1.5 × 2 mm | 5 folds |
+| `coarse` | CBCT · MR · CT | 11 | 3D, patch 128 × 128 × 128 at 3 mm | 1 model |
 
-The **`body`** model predicts **11 anatomical labels** spanning soft tissues, cavities, bones, and central structures:
+The models are [IMPACT-Seg](https://github.com/HEMONCedric/IMPACTSeg)'s, with its network and preprocessing; its
+patch fusion, the label of the surest patch at each voxel, is the apps' own `patch_combine`, a class of their bundle for
+KonfAI and an extension for KonfAI Edge.
+
+The **fine** models predict **126 structures**: abdominal and thoracic organs, the five lung lobes, heart chambers and
+great vessels, every vertebra and rib by level, pelvic and limb bones, trunk muscles and head-and-neck organs at risk.
+`fine-3d` is the more accurate of the two, `fine-2.5d` the lighter. Both run their five folds as an ensemble;
+`--ensemble 1` runs a single fold, five times faster. The label names are in the `terminology` of each app's
+`app.json`.
+
+The **`coarse`** model predicts **11 anatomical labels** spanning soft tissues, cavities, bones, and central
+structures:
 
 | # | Label | # | Label |
 |---|-------|---|-------|
@@ -93,21 +106,23 @@ The CLI is organised into sub-commands, mirroring the KonfAI Apps operations:
 Run anatomical segmentation on an input volume:
 
 ```bash
-impact-seg-konfai segment body -i path/to/image.nii.gz -o ./Output/
+impact-seg-konfai segment fine-3d -i path/to/image.nii.gz -o ./Output/ --gpu 0
+impact-seg-konfai segment fine-3d -i path/to/image.nii.gz -o ./Output/ --gpu 0 --ensemble 1   # one fold
+impact-seg-konfai segment coarse -i path/to/image.nii.gz -o ./Output/
 ```
 
 Evaluate against a reference, or run everything at once:
 
 ```bash
-impact-seg-konfai eval body -i image.nii.gz --gt reference_mask.nii.gz -o ./Output/
-impact-seg-konfai pipeline body -i image.nii.gz --gt reference_mask.nii.gz --mask eval_mask.nii.gz --gpu 0 --tta 2 -uncertainty
+impact-seg-konfai eval coarse -i image.nii.gz --gt reference_mask.nii.gz -o ./Output/
+impact-seg-konfai pipeline fine-3d -i image.nii.gz --gt reference_mask.nii.gz --mask eval_mask.nii.gz --gpu 0 -uncertainty
 ```
 
 ### Arguments
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `MODEL` | Model name on `VBoussot/ImpactSeg` (e.g. `body`), which determines what is predicted | *required* |
+| `MODEL` | Model name on `HCedric/IMPACTSeg` (e.g. `fine-3d`), which determines what is predicted | *required* |
 | `-i`, `--inputs` | Input file(s) or a dataset directory | *required* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`segment` / `pipeline`) | `0` |
@@ -120,6 +135,8 @@ impact-seg-konfai pipeline body -i image.nii.gz --gt reference_mask.nii.gz --mas
 | `-q`, `--quiet` | Suppress console output | `False` |
 
 > When `--ensemble` and `--tta` are left at `0`, the values declared in the app bundle (`app.json`) are used.
+> The models take no `--tta`: their labels are sided (left and right kidney, ribs), which a
+> mirrored copy swaps.
 
 See the full help of any sub-command with:
 
@@ -142,29 +159,21 @@ the model release you use.
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body CT (295 × 259 × 219, 2 mm), patch `[1, 192, 192]`, single model. The app **measures its batch size on your GPU** (a forward of one patch, then of two, then the largest power of two that fits half of the free VRAM); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+The models on a whole-body CT (512 × 512 × 531, 1.5 × 1.5 × 2 mm), single
+**NVIDIA RTX PRO 5000 (24 GB)** (2026-11-20). Their batch size is the one each app's `Prediction.yml` sets.
 
-| Free VRAM | Batch (auto) | Peak VRAM | Time / case |
-|:--|:--|:--|:--|
-| 8 GB  | 160 | ~7 GB  | n/a |
-| 16 GB | 320 | ~14 GB | n/a |
-| 24 GB | 512 | ~10 GB | **~7 s** |
-
-Single-model body segmentation keeps **system RAM ~1.6 GB**. The thin 2-D patches never fill the card, so inference stays compute-bound (~7 s, largely batch-independent). Inference scales with the case size.
-
-Measured on the S/M/L cases of `benchmarks/perf/bench_apps.py` (2026-09-09, `body`, default
-ensemble, same GPU). Peak RAM = process-tree resident set; peak VRAM = over baseline.
-
-| Case (voxels) | Time | Peak RAM | Peak VRAM |
-|---|---|---|---|
-| **S** (240 × 220 × 200) | **2.9 s** | 1.6 GB | 1.6 GB |
-| **M** (249 × 246 × 246) | **3.3 s** | 1.7 GB | 3.9 GB |
-| **L** (512 × 512 × 531) | **7.8 s** | 2.2 GB | 18.9 GB |
+| Model | Folds | Time | Peak RAM | Peak VRAM |
+|:--|:--:|:--|:--|:--|
+| `coarse` | 1 | **6 s** | 2.6 GB | 1.7 GB |
+| `fine-2.5d` | 1 | **26 s** | 3.0 GB | 4.6 GB |
+| `fine-2.5d` | 5 | **123 s** | 3.8 GB | 5.5 GB |
+| `fine-3d` | 1 | **48 s** | 4.0 GB | 5.7 GB |
+| `fine-3d` | 5 | **212 s** | 4.0 GB | 8.6 GB |
 
 ---
 
 ## 🔗 Links
 
-- 🤗 **Model Hub:** [huggingface.co/VBoussot/ImpactSeg](https://huggingface.co/VBoussot/ImpactSeg)
+- 🤗 **Model Hub:** [huggingface.co/HCedric/IMPACTSeg](https://huggingface.co/HCedric/IMPACTSeg)
 - 📦 **PyPI Package:** [pypi.org/project/impact_seg_konfai](https://pypi.org/project/impact_seg_konfai)
 - 🧠 **KonfAI Repository:** [github.com/fideus-labs/KonfAI](https://github.com/fideus-labs/KonfAI)
