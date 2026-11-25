@@ -1061,19 +1061,24 @@ def sampled_deformable_class():
             identity = _box_coordinates(low, high, grid, self.device, self.dtype)
             moved, target = self._warped(low, high, identity, levels, dict(zip(self._warps, warps, strict=True)))
             value = self.loss_fn(moved, target)
+            # The loss reported counts the box's own voxels alone, its halo being another box's: summed over the
+            # boxes, the grid's.
+            owned = (slice(None), slice(None), *core)
             if totals is None:
                 # The loss is a mean over the box: weighed as the box's share of the grid, its gradient is the whole
                 # grid's wherever the box holds what the loss reads.
-                loss = reported = value * (math.prod(moved.shape[2:]) / math.prod(grid))
+                loss = value * (math.prod(moved.shape[2:]) / math.prod(grid))
+                reported = value * (math.prod(moved[owned].shape[2:]) / math.prod(grid))
             else:
                 # A masked mean over the box is its sum over the box's support S_b. Against the level's support S
                 # and mean c, the box adds S_b (d_b - c) / S, whose gradient is the level's masked mean's wherever the
                 # box holds what the loss reads, the support moving with the warp as it does on the whole grid.
                 support, mean = totals
+                mask = self._support(moved, target)
                 # A draw the masks miss (its boxes outside them) holds no voxel of the loss: no gradient.
-                weight = self._support(moved, target).sum() if support > 0 else value * 0.0
+                weight = mask.sum() if support > 0 else value * 0.0
                 support = support if support > 0 else 1.0
-                loss, reported = weight * (value - mean) / support, value * weight.detach() / support
+                loss, reported = weight * (value - mean) / support, value * mask[owned].sum().detach() / support
             inner = (slice(None), *core)
             # A box the warp sends wholly outside an image reads zeros there, which hold no gradient.
             raw = torch.autograd.grad(loss, warps, allow_unused=True) if loss.requires_grad else [None] * len(warps)
