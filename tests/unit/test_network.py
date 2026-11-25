@@ -346,6 +346,27 @@ def test_torch_protocol_signatures_are_honoured_and_state_dict_skips_nested_netw
     ]
 
 
+def test_a_network_a_plain_module_holds_loads_with_its_parent() -> None:
+    """A network inside a plain module is no checkpoint entry of its own: state_dict keeps its weights in its
+    parent's, and the load must put them back, not leave it at its initialisation."""
+
+    class Sub(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Session", torch.nn.ModuleDict({"sub": Sub()}))
+
+    saved = Root().state_dict()
+    assert set(saved) == {"Session.sub.Conv.weight", "Session.sub.Conv.bias"}
+    loaded = Root()
+    loaded.load_state_dict(saved)
+    assert torch.equal(loaded["Session"]["sub"]["Conv"].weight, saved["Session.sub.Conv.weight"])
+
+
 # --------------------------------------------------------------------------------------
 # Alias remapping (Network.load) and positional alias pairing (get_mapping)
 # --------------------------------------------------------------------------------------

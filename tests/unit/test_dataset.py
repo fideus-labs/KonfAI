@@ -432,7 +432,7 @@ def test_read_landmarks_returns_lps_points(
 ) -> None:
     """KonfAI's physical space is LPS: an RAS point has its x and y negated. '0' is ambiguous (RAS
     in 3D Slicer before 4.11, LPS in KonfAI up to 1.5.3) and stays LPS."""
-    points = read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
+    points, _ = read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
 
     np.testing.assert_array_equal(points, [expected])
 

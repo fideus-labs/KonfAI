@@ -27,12 +27,13 @@ annotations (``get_origin``); PEP 563 stringized annotations break binding.
 
 import gc
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 import torch
 
 from konfai.network import network
-from konfai.utils.dataset import Attribute, data_to_image
+from konfai.utils.dataset import Attribute, data_to_image, is_an_image
 from konfai.utils.errors import KonfAIError
 from konfai.utils.vram import out_of_memory_as_torch
 
@@ -63,6 +64,11 @@ class ExternalTool(torch.nn.Module):
         self._engine = engine
         self._masks = set(masks)
 
+    def handed(self, data: np.ndarray, attribute: Attribute) -> Any:
+        """What the engine gets for one branch of a sample: an image with its geometry, or the array itself for a
+        branch that has none (a set of points)."""
+        return data_to_image(data, attribute) if is_an_image(attribute) else data
+
     def call(self, images: list["sitk.Image | None"], device_index: int, header: Attribute) -> np.ndarray:
         """The engine on one sample: its images in branch order, then the device index. ``header`` is the first
         branch's attributes, which the output carries: what a subclass records there reaches the output's file."""
@@ -76,7 +82,7 @@ class ExternalTool(torch.nn.Module):
                 images: list[sitk.Image | None] = [
                     None
                     if i in self._masks and bool((tensor[b] == 1).all())
-                    else data_to_image(tensor[b].detach().cpu().numpy(), branch[b])
+                    else self.handed(tensor[b].detach().cpu().numpy(), branch[b])
                     for i, (tensor, branch) in enumerate(zip(tensors, attributes, strict=True))
                 ]
                 try:
@@ -97,6 +103,8 @@ class ExternalNet(network.Network):
 
     #: The tools write their results at full precision: KonfAI blends them in float32, not float16.
     full_precision_outputs = True
+    #: The graph module that hands the branches to the engine.
+    tool_class: type[ExternalTool] = ExternalTool
 
     def __init__(
         self,
@@ -112,4 +120,4 @@ class ExternalNet(network.Network):
         super().__init__(
             in_channels=1, optimizer=optimizer, schedulers=schedulers, outputs_criterions=outputs_criterions, dim=dim
         )
-        self.add_module(output, ExternalTool(engine, masks), in_branch=list(range(branches)), out_branch=["out"])
+        self.add_module(output, self.tool_class(engine, masks), in_branch=list(range(branches)), out_branch=["out"])

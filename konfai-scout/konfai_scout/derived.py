@@ -129,8 +129,7 @@ class Derived:
             return None
         self.ensure()
         path = self.root / "Dataset" / self.case.slug / f"{MOVED_LANDMARKS}.fcsv"
-        points = read_landmarks(path)
-        return None if points is None else np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        return np.asarray(read_landmarks(path)[0], dtype=np.float64).reshape(-1, 3)
 
     def field(self) -> Volume:
         """The displacement field on the fixed grid: the given one, or the transform file sampled on it once."""

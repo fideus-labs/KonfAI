@@ -123,6 +123,22 @@ start with `-`. Either mistake is rejected with **422** naming the field.
 sent every 15 s of silence. Terminal markers are `__DONE__` and `__ERROR__ <msg>`.
 Admission control: at most one stream per job (else 429), and a global cap of 200.
 
+### Interactive sessions
+
+A session keeps one app's model loaded between predictions, for a front end that predicts after each prompt
+(3D Slicer's interactive mode). The image is sent once; each prediction sends only the app's other inputs.
+
+| Method | Path | Request → Response |
+| --- | --- | --- |
+| `POST` | `/apps/{app}/sessions` | multipart `image` (the image the session predicts on), `gpu` (one GPU id; empty: the first, or the CPU) → `{"session_id"}`. 404 unknown app, 400 unknown GPU, 422 not an image, **429** past the session limit. |
+| `POST` | `/sessions/{id}/predict` | multipart `inputs` (the app's other inputs in its order, e.g. the prompts `.fcsv` and the last mask) → the prediction, a compressed MetaImage. **422** with the message when the app refuses; **410** when the session's worker stopped (open a new one). |
+| `DELETE` | `/sessions/{id}` | `{"session_id","status"}`: the worker and its process group killed, the model's memory freed, the files removed. |
+
+A prediction holds its GPU's semaphore only while it runs, so an open session does not block the jobs on that GPU.
+A session nothing asks of for 15 minutes is closed. From a terminal, `python -m konfai_apps.interactive <app>
+--host <server>` holds a session and answers one JSON request a line on its standard input; without `--host`, the
+app runs in that process with its model kept.
+
 ## Server limits & lifecycle
 
 | Limit | Value | Effect |
@@ -134,6 +150,7 @@ Admission control: at most one stream per job (else 429), and a global cap of 20
 | Total upload | 6 GB | **413** on overflow |
 | Fine-tune `dataset` zip | 64 GiB, set `KONFAI_APPS_MAX_DATASET_BYTES` (bytes) to change it | the archive, each member and the total extracted bytes are counted while written: **413** naming the variable on overflow |
 | GPU scheduling | one semaphore per visible GPU | auto mode waits for any free GPU; explicit mode acquires all requested (400 unknown id, 503 if none) |
+| Interactive sessions | 4 open at once, set `KONFAI_APPS_MAX_SESSIONS` to change it; closed after 900 s without a request, set `KONFAI_APPS_SESSION_IDLE_SECONDS` | **429** beyond the limit |
 | Result retention | 600 s after completion, renewed by every download that starts; set `KONFAI_APPS_RESULT_RETENTION` (seconds) to change it | workspace and job are then removed: **download promptly** |
 
 Jobs run in an isolated temp workspace; the command is built as an argv list and
