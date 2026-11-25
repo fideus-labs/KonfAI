@@ -284,6 +284,7 @@ ONNX export has no subcommand: it is a Python function ({doc}`../usage/python-ap
 | `KONFAI_STREAM_WORTH_THRESHOLD` | The output size above which prediction streams, as a share of the budget (`0` always streams). |
 | `KONFAI_ASYNC_WRITES` | Turns the background writer on or off. |
 | `KONFAI_INLINE_SINGLE_RANK` | `0` runs a single process through the multi-process path, for a host that keeps its own CUDA context. |
+| `KONFAI_KEEP_MODEL` | `1` keeps the last prediction's model loaded in the process, for a session that predicts again with the same config and weights (one correction after another). A kept model is matched on its config, its source and its declared checkpoints: an engine that loads weights of its own, outside `checkpoints`, is not told apart from another with the same code. Keep one app per process. |
 
 Hugging Face's own variables (`HF_TOKEN`, `HF_HUB_OFFLINE`, …) apply to app downloads.
 

@@ -246,10 +246,10 @@ class InspectionCase:
         if role not in self.inputs:
             return None
         try:
-            points = read_landmarks(self.inputs[role])
+            points = read_landmarks(self.inputs[role])[0]
         except (KonfAIError, ValueError, OSError) as error:
             raise CaseError(f"{role}: {error}") from error
-        return None if points is None else np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        return np.asarray(points, dtype=np.float64).reshape(-1, 3)
 
     def fingerprint(self) -> dict[str, dict[str, object]]:
         out: dict[str, dict[str, object]] = {}

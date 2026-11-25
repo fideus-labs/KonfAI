@@ -29,9 +29,9 @@ _RAS = {"RAS"}
 _LPS = {"0", "1", "LPS"}
 
 
-def read_landmarks(filename: Path) -> np.ndarray | None:
-    """Read Slicer-style fiducial landmarks from disk, in LPS. A file without a
-    ``# CoordinateSystem`` line is LPS, as 3D Slicer reads it."""
+def read_landmarks(filename: Path) -> tuple[np.ndarray, list[str]]:
+    """Read Slicer-style fiducial landmarks from disk, in LPS, with the label of each in the file's order ('' for a
+    row that has none). A file without a ``# CoordinateSystem`` line is LPS, as 3D Slicer reads it."""
     coordinate_system = "LPS"
     with open(filename, newline="") as csvfile:
         lines = csvfile.readlines()
@@ -51,27 +51,25 @@ def read_landmarks(filename: Path) -> np.ndarray | None:
         data[i] = np.array(row[1:4], dtype=np.double)
     if coordinate_system.upper() in _RAS:
         data[:, :2] *= -1
-    return data
+    return data, [row[11] if len(row) > 11 else "" for row in rows]
 
 
-def write_landmarks(data: np.ndarray, filename: Path) -> None:
-    """Write landmarks to the Slicer Markups fiducial CSV-like format."""
+def write_landmarks(data: np.ndarray, filename: Path, labels: list[str] | None = None) -> None:
+    """Write landmarks to the Slicer Markups fiducial CSV-like format, each named by its label (``F-<n>`` without)."""
+    # Checked before the file is opened: a refused write leaves the landmarks already there.
+    if labels is not None and len(labels) != len(data):
+        raise ValueError(f"{len(labels)} labels for {len(data)} landmarks: one label per landmark.")
+    if labels is not None and any("\n" in label or "\r" in label for label in labels):
+        raise ValueError("A landmark's label is one line: a line of its own would be read as a row or a comment.")
     with open(filename, "w") as f:
         f.write(
             "# Markups fiducial file version = 4.6\n# CoordinateSystem = LPS\n#"
             " columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n",
         )
-        for i in range(data.shape[0]):
-            f.write(
-                "vtkMRMLMarkupsFiducialNode_"
-                + str(i + 1)
-                + ","
-                + str(data[i, 0])
-                + ","
-                + str(data[i, 1])
-                + ","
-                + str(data[i, 2])
-                + ",0,0,0,1,1,1,0,F-"
-                + str(i + 1)
-                + ",,vtkMRMLScalarVolumeNode1\n"
+        rows = csv.writer(f, lineterminator="\n")
+        for i, point in enumerate(data):
+            label = f"F-{i + 1}" if labels is None else labels[i]
+            node = f"vtkMRMLMarkupsFiducialNode_{i + 1}"
+            rows.writerow(
+                [node, *(str(v) for v in point[:3]), 0, 0, 0, 1, 1, 1, 0, label, "", "vtkMRMLScalarVolumeNode1"]
             )

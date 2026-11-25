@@ -35,4 +35,4 @@ def _fcsv(path: Path, system: str | None, points: np.ndarray, trailer: str = "")
 
 
 def test_blank_lines_are_skipped(tmp_path: Path) -> None:
-    np.testing.assert_array_equal(read_landmarks(_fcsv(tmp_path / "p.fcsv", "LPS", _POINTS, "\n\n")), _POINTS)
+    np.testing.assert_array_equal(read_landmarks(_fcsv(tmp_path / "p.fcsv", "LPS", _POINTS, "\n\n"))[0], _POINTS)
