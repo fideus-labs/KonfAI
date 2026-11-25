@@ -260,8 +260,15 @@ def ncc_of_sums(sums: torch.Tensor) -> torch.Tensor:
     count, moved, fixed, moved_moved, fixed_fixed, moved_fixed = sums
     count = count.clamp_min(1.0)
     covariance = moved_fixed - moved * fixed / count
-    variances = ((moved_moved - moved * moved / count) * (fixed_fixed - fixed * fixed / count)).clamp_min(0.0)
-    return 1.0 - (covariance / (variances.sqrt() + _EPS)).mean()
+    variances = (moved_moved - moved * moved / count) * (fixed_fixed - fixed * fixed / count)
+    return 1.0 - _correlation(covariance, variances).mean()
+
+
+def _correlation(covariance: torch.Tensor, variances: torch.Tensor) -> torch.Tensor:
+    """Each channel's ``covariance`` over the square root of the product of its two ``variances``; 0 where that
+    product is not positive (a constant channel), where the square root has no gradient."""
+    held = variances > 0
+    return torch.where(held, covariance / (torch.where(held, variances, 1.0).sqrt() + _EPS), 0.0)
 
 
 def distance(
@@ -302,8 +309,8 @@ def distance(
         count = weight.sum(axes, keepdim=True).clamp_min(1.0)
         moved_c = moved - (moved * weight).sum(axes, keepdim=True) / count
         fixed_c = fixed - (fixed * weight).sum(axes, keepdim=True) / count
-        norms = ((moved_c * moved_c * weight).sum(axes) * (fixed_c * fixed_c * weight).sum(axes)).sqrt()
-        return 1.0 - ((moved_c * fixed_c * weight).sum(axes) / (norms + _EPS)).mean()
+        variances = (moved_c * moved_c * weight).sum(axes) * (fixed_c * fixed_c * weight).sum(axes)
+        return 1.0 - _correlation((moved_c * fixed_c * weight).sum(axes), variances).mean()
     if name == "LNCC":
         return _lncc(moved, fixed, mask, kernel, chunk)
     raise MeasureError(f"Unknown IMPACT distance '{name}'.", f"Choose one of {', '.join(DISTANCES)}.")

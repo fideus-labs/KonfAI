@@ -140,6 +140,24 @@ def test_cosine_l1cosine_and_ncc_follow_itk_impact() -> None:
     assert distance("NCC", moved, fixed, None, 3, 0).item() == pytest.approx(1 - ncc.mean(), abs=1e-5)
 
 
+def test_an_ncc_with_a_constant_channel_is_finite_whole_and_pooled_and_they_agree() -> None:
+    # A constant channel correlates with nothing: the square root of its variance at 0 gave NaN gradients, and by
+    # pieces (the level's sums) a NaN value.
+    generator = torch.Generator().manual_seed(0)
+    moved = torch.rand((1, 2, 6, 7, 8), generator=generator, dtype=torch.float64).requires_grad_()
+    fixed = torch.rand((1, 2, 6, 7, 8), generator=generator, dtype=torch.float64)
+    fixed[:, 1] = 0.5
+    whole = distance("NCC", moved, fixed)
+    ones = torch.ones_like(fixed[:, :1, ..., :4])
+    pooled = impact.ncc_of_sums(
+        sum(impact.ncc_sums(moved[..., part], fixed[..., part], ones) for part in (slice(0, 4), slice(4, 8)))
+    )
+    (whole_gradient,), (pooled_gradient,) = (torch.autograd.grad(value, moved) for value in (whole, pooled))
+    assert torch.isfinite(whole) and torch.isfinite(whole_gradient).all() and torch.isfinite(pooled_gradient).all()
+    torch.testing.assert_close(pooled, whole)
+    torch.testing.assert_close(pooled_gradient, whole_gradient)
+
+
 @pytest.mark.parametrize(("name", "formula"), [("L1", lambda d: d.abs()), ("L2", lambda d: d.pow(2))])
 def test_l1_and_l2_are_the_mean_of_their_terms_for_both_maps_and_in_half_precision(name: str, formula) -> None:
     # Unmasked, they run through torch.dist and mse_loss, which keep less memory: the same value and gradients, the
