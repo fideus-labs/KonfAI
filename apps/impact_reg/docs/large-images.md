@@ -100,10 +100,15 @@ elastix draws the samples of its metric at every iteration: it is a sampled regi
 large pair out of its reach is that it holds every image whole, with a copy for each pyramid level and each
 interpolator. With `-out-of-core`, elastix maps the pixels of the pair from the files themselves and the system pages
 them in as the samples of an iteration read them. It keeps no copy of a full-size image: the finest pyramid level is
-the image, and an interpolation of order 1 reads it directly. The preset runs as it is. At order 1 the transform is
-the one of a run in memory, bit for bit, given the same images and the preset's own samples (no `--samples`); at a
-higher order the interpolation coefficients
-are kept in single precision. It needs an elastix-IMPACT build that has `-out-of-core` (`KONFAI_ELASTIX_DIR`). The
+the image, and an interpolation of order 1 reads it directly. The preset runs as it is, and the transform is the one
+of a run in memory, bit for bit, given the same images and the preset's own samples (no `--samples`), at every
+interpolation order. At order 3 the coefficients are kept in double precision, twice the image's bytes to page; single
+precision halves them and runs out of core 1.3 to 1.8 times faster, no longer bit for bit at order 3, whole and
+sampled alike:
+
+    --set "parameter_overrides=['Interpolator=\"BSplineInterpolatorFloat\"']"
+
+It needs an elastix-IMPACT build that has `-out-of-core` (`KONFAI_ELASTIX_DIR`). The
 dense field is the transform sampled on the fixed grid band by band; the transform itself is written beside it as
 `<preset>_Transform.h5`.
 
