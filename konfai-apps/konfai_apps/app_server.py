@@ -1598,6 +1598,13 @@ def _held_image(upload: Path, target: Path) -> None:
         raise HTTPException(422, f"The session's image cannot be read: {upload.name}")
 
 
+def _worker_app(app_name: str) -> str:
+    """``app_name`` for the session's worker, which runs in the session's folder: a local app named by a path relative
+    to the server's, made absolute; any other name as it is."""
+    base, mark, preset = app_name.partition("#")
+    return f"{Path(base).resolve()}{mark}{preset}" if Path(base).exists() else app_name
+
+
 @protected.post("/apps/{app_name:path}/sessions")
 async def open_session(
     app_name: str,
@@ -1633,7 +1640,7 @@ async def _open_session(app_name: str, image: UploadFile, device: int | None) ->
         if not saved:
             raise HTTPException(422, "The session needs its image.")
         await asyncio.to_thread(_held_image, saved[0], run_dir / "image.mha")
-        cmd = [sys.executable, "-m", "konfai_apps.interactive", app_name]
+        cmd = [sys.executable, "-m", "konfai_apps.interactive", _worker_app(app_name)]
         if device is not None:
             cmd += ["--gpu", str(device)]
         proc = subprocess.Popen(
@@ -1698,7 +1705,12 @@ async def session_predict(session_id: str, inputs: Annotated[list[UploadFile] | 
                     await _drop_session(session)
                     raise HTTPException(410, "The session's worker stopped; open a new session.") from error
                 dispatched = True
-                word, detail = await asyncio.to_thread(_read_answer, session, str(number))
+                try:
+                    word, detail = await asyncio.to_thread(_read_answer, session, str(number))
+                except asyncio.CancelledError:
+                    # Past the deadline, its worker still computes on the device: stopped before the device is freed.
+                    await asyncio.shield(asyncio.to_thread(_stop_session, session))
+                    raise
             session.last_used = time.monotonic()
             if word != "done":
                 if session.proc.poll() is not None:

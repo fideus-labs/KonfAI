@@ -315,3 +315,13 @@ def test_a_prediction_past_its_deadline_closes_its_session(monkeypatch: pytest.M
         assert response.status_code == 504
         assert "stuck" not in app_server.SERVER_STATE.sessions
         assert worker.poll() is not None
+
+
+def test_a_local_app_named_relatively_reaches_the_session_worker_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The worker runs in the session's folder: a path relative to the server's would name nothing there.
+    (tmp_path / "models" / "demo").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    assert app_server._worker_app("./models/demo#fast") == f"{tmp_path / 'models' / 'demo'}#fast"
+    assert app_server._worker_app("VBoussot/ImpactSynth:MR") == "VBoussot/ImpactSynth:MR"
