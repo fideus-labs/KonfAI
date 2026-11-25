@@ -248,13 +248,16 @@ class SampledLinearMixin:
 
     def _level_sources(self, scale: int) -> tuple[RegionSource, RegionSource]:
         fixed, moving = self._sources
-        if scale == 1 or not self.blur:
+        if scale == 1:
             return self._sources
         if scale not in self._levels:
             fixed_size = fireants_level_sizes(fixed.shape, scale)
             moving_size = fireants_level_sizes(moving.shape, scale)
-            gaussians = fireants_gaussians(fixed.shape, fixed_size, fixed.device)  # FireANTs smooths both with these
             settings = {"mask_channel": self.masked, "directory": self._scratch}
+            if not self.blur:  # FireANTs interpolates the fixed image onto the level, unsmoothed, and keeps the moving
+                self._levels[scale] = (on_device(build_level(fixed, fixed_size, None, **settings)), moving)
+                return self._levels[scale]
+            gaussians = fireants_gaussians(fixed.shape, fixed_size, fixed.device)  # FireANTs smooths both with these
             moving_level = build_level(moving, moving_size, gaussians, **settings)
             if self._extra_moving_blur():
                 moving_level = blur_level(moving_level, gaussians, **settings)

@@ -199,12 +199,13 @@ OFF_GRID = torch.tensor([[0.3, -0.2, 0.1]])
 
 
 @SHAPES
-@pytest.mark.parametrize("scales,iterations", [([1], [6]), ([2, 1], [4, 3])])
-def test_every_box_reproduces_the_whole_image_rigid(scales, iterations, size):
+@pytest.mark.parametrize("scales,iterations,blur", [([1], [6], True), ([2, 1], [4, 3], True), ([2, 1], [4, 3], False)])
+def test_every_box_reproduces_the_whole_image_rigid(scales, iterations, blur, size):
     fixed, moving = texture(size=size), texture((1.5, -1.0, 0.5), size)
     settings = {
         "scales": scales,
         "iterations": iterations,
+        "blur": blur,  # unsmoothed, FireANTs interpolates the fixed image onto a coarse level and keeps the moving
         "loss_type": "mse",
         "optimizer": "Adam",
         "optimizer_lr": 0.02,
@@ -217,7 +218,9 @@ def test_every_box_reproduces_the_whole_image_rigid(scales, iterations, size):
     whole.optimize()
     sampled = sampled_registration(sampled_rigid_class(), fixed, moving, box=16, boxes=10_000, **settings)
     sampled.optimize()
-    assert torch.allclose(whole.get_rigid_matrix(), sampled.get_rigid_matrix(), atol=1e-5)
+    # Unsmoothed, a level is FireANTs' interpolation of the image, whose coordinates F.interpolate rounds in float32:
+    # 2e-5 apart after the iterations, where another pyramid moves the matrix by 1e-2.
+    assert torch.allclose(whole.get_rigid_matrix(), sampled.get_rigid_matrix(), atol=1e-5 if blur else 5e-5)
 
 
 @SHAPES
