@@ -300,7 +300,7 @@ def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) ->
     # No key declared -> "auto": the tiny dataset fits the detected memory, so training caches; on
     # a node too small for it, the same absent key streams instead of blowing past the RAM.
     roomy = _make_train(None)
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (_DATASET_BYTES * 10, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (_DATASET_BYTES * 10, "host"))
     roomy._resolve_cache_regime(world_size=1)
     assert roomy.use_cache is True
 
@@ -308,7 +308,7 @@ def test_none_budget_means_auto_for_training(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         budget,
         "available_memory_bytes",
-        lambda: (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
+        lambda held=None: (int(_DATASET_BYTES / AUTO_MEMORY_SAFETY_FRACTION) - 1, "cgroup limit"),
     )
     tight._resolve_cache_regime(world_size=1)
     assert tight.use_cache is False
@@ -351,7 +351,7 @@ def test_an_auto_budget_is_split_across_one_node_not_the_whole_cluster(monkeypat
     # A node that offers half the dataset: a rank's sixteenth fits its quarter of that four times
     # over, while a sixteenth of it would be half of what the rank has to hold.
     node = _DATASET_BYTES / (2 * AUTO_MEMORY_SAFETY_FRACTION)
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (node, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (node, "host"))
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "4")
 
     data = _make_train(None)
@@ -380,7 +380,7 @@ def _metric_sizing_budget(
     monkeypatch.setattr(
         DataMetric, "_resolve_dataset_sources", lambda self, requested=None: {"CT": [("f", False)]}, raising=False
     )
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (100 * 2**30, "host"))
     captured: dict[str, float] = {}
 
     def capture(template, shape, channels, element_bytes, budget, **kwargs):
@@ -504,7 +504,7 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
 
 
 def test_auto_budget_uses_detected_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_available() -> tuple[int, str]:
+    def fake_available(held: int | None = None) -> tuple[int, str]:
         return budget_source
 
     monkeypatch.setattr(budget, "available_memory_bytes", fake_available)
@@ -569,7 +569,7 @@ def test_an_undeclared_budget_leaves_the_chunk_cache_its_share_of_free_ram(
 ) -> None:
     from konfai.utils import ome_zarr
 
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (100 * 2**30, "host"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (100 * 2**30, "host"))
     set_per_rank_budget(None)
     assert ome_zarr.bound_chunk_cache() == 5 * 2**30
 
@@ -821,7 +821,7 @@ def test_a_machine_budget_is_charged_what_its_process_took_since_the_measure(
 ) -> None:
     """The measure is of what was free: the bytes the process held then are already off it (under a
     cgroup, a second charge left a 4 GiB machine with no budget once a workflow had run in the process)."""
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (4 << 30, "cgroup limit"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (4 << 30, "cgroup limit"))
     monkeypatch.setattr(budget, "held_bytes", lambda: 3 << 30)
     measured = budget.resolve_memory_budget("auto")
     whole = (4 << 30) * budget.AUTO_MEMORY_SAFETY_FRACTION
@@ -831,6 +831,21 @@ def test_a_machine_budget_is_charged_what_its_process_took_since_the_measure(
     # A rank spawned after the measure holds none of what was counted then.
     monkeypatch.setattr(budget.os, "getpid", lambda: -1)
     assert measured.work_bytes(1) == max(0.0, whole - (3 << 30) - (200 << 20))
+
+
+def test_an_auto_budget_reads_what_the_process_holds_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """What a SLURM grant leaves the process and what its work is charged from are one reading of what it holds:
+    two, taken apart, charged the growth between them twice or not at all."""
+    monkeypatch.setattr(budget, "_PROC_SELF_CGROUP", str(tmp_path / "nonexistent"))
+    monkeypatch.setenv("SLURM_MEM_PER_NODE", "32000")  # MB
+    monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
+    _fake_host_available(monkeypatch, 512 * 2**30)
+    readings = iter(range(1 << 30, 100 << 30, 1 << 30))  # the process grows between two readings
+    taken = []
+    monkeypatch.setattr(budget, "held_bytes", lambda: taken.append(next(readings)) or taken[-1])
+    measured = budget.resolve_memory_budget("auto")
+    assert taken == [1 << 30] and measured.measured_in == (os.getpid(), 1 << 30)
+    assert measured.total_bytes == (32000 * 2**20 - (1 << 30)) * budget.AUTO_MEMORY_SAFETY_FRACTION
 
 
 def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(

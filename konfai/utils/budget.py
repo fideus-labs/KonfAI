@@ -451,18 +451,20 @@ def _slurm_memory_grant() -> int | None:
     return None
 
 
-def available_memory_bytes() -> tuple[int, str]:
+def available_memory_bytes(held: int | None = None) -> tuple[int, str]:
     """Return ``(bytes a process may safely allocate, source label)``: the tightest of the cgroup's
     remaining room (its ceiling minus what it already holds), what this process has left of a SLURM memory
-    grant and the host's free RAM. The label names which bound won."""
+    grant (``held``: what it holds, ``held_bytes`` when not given) and the host's free RAM. The label names
+    which bound won."""
     candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
     cgroup = _read_cgroup_memory_limit()
     if cgroup is not None:
-        limit, held = cgroup
-        candidates.append((max(0, limit - held), "cgroup limit"))
+        limit, in_cgroup = cgroup
+        candidates.append((max(0, limit - in_cgroup), "cgroup limit"))
     slurm = _slurm_memory_grant()
     if slurm is not None:
-        candidates.append((max(0, slurm - (held_bytes() or 0)), "SLURM memory grant"))
+        held = (held_bytes() or 0) if held is None else held
+        candidates.append((max(0, slurm - held), "SLURM memory grant"))
     return min(candidates, key=lambda candidate: candidate[0])
 
 
@@ -507,12 +509,14 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
     ``AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable memory, a NODE budget which the ranks
     sharing the node split, where an explicit budget is per rank as declared."""
     if memory_budget is None or (isinstance(memory_budget, str) and memory_budget.strip().lower() == "auto"):
-        node_bytes, source = available_memory_bytes()
+        # One reading of what the process holds: the one the headroom leaves out is the one the work is charged from.
+        held = held_bytes() or 0
+        node_bytes, source = available_memory_bytes(held)
         return MemoryBudget(
             node_bytes * AUTO_MEMORY_SAFETY_FRACTION,
             f"auto: {format_bytes(node_bytes)} {source} x {AUTO_MEMORY_SAFETY_FRACTION:.0%}",
             shared_across_ranks=True,
-            measured_in=(os.getpid(), held_bytes() or 0),
+            measured_in=(os.getpid(), held),
         )
     declared = parse_memory_budget_bytes(memory_budget)
     if declared < MINIMUM_DECLARED_BUDGET_BYTES:

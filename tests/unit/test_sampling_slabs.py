@@ -230,7 +230,7 @@ def test_the_default_budget_is_probed_once_per_second_not_per_call(monkeypatch: 
 
     probes: list[int] = []
     probe = budget_module.available_memory_bytes
-    monkeypatch.setattr(budget_module, "available_memory_bytes", lambda: probes.append(1) or probe())
+    monkeypatch.setattr(budget_module, "available_memory_bytes", lambda held=None: probes.append(1) or probe())
     clock = [1000.0]
     monkeypatch.setattr(sampling, "_now", lambda: clock[0])
     sampling._default_budgets.clear()
