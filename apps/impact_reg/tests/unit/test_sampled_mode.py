@@ -1076,6 +1076,46 @@ def test_with_a_host_the_server_registers_the_sampled_cases_and_their_fields_com
             assert (there / name).read_bytes() == (local / name).read_bytes()
 
 
+def test_a_run_that_fails_while_publishing_its_compacts_leaves_none_it_did_not_record(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compact transform stands beside a field only as register.json records it: a run that fails while
+    publishing them takes back those it had published."""
+    fixed, moving = _pair(tmp_path)
+
+    def sampled(self, preset, inputs, headers, cases, work, *args):
+        fields, compacts = {}, {}
+        for case in cases:
+            field, compact = Path(work) / case / "DVF.mha", Path(work) / case / "Transform.h5"
+            field.parent.mkdir(parents=True, exist_ok=True)
+            sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8, 3), np.float32), isVector=True), str(field))
+            sitk.WriteTransform(sitk.TranslationTransform(3, (1.0, 0.0, 0.0)), str(compact))
+            fields[case], compacts[case] = field, [compact]
+        self._compact[preset] = compacts
+        return "DVF", fields
+
+    published = reg._publish_output
+
+    def fails_on_the_second_compact(src: Path, dest: Path, move: bool = False) -> Path:
+        if dest.name.endswith("_Transform.h5") and any(tmp_path.glob("out/*/*_Transform.h5")):
+            raise OSError("disk full")
+        return published(src, dest, move)
+
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_register_sampled", sampled)
+    monkeypatch.setattr(reg, "_config_output_group", lambda config: "DVF")
+    monkeypatch.setattr(reg, "_publish_output", fails_on_the_second_compact)
+    import konfai.utils.vram
+
+    monkeypatch.setattr(konfai.utils.vram, "max_voxels", lambda *args, **kwargs: 10**12)
+    with pytest.raises(OSError, match="disk full"):
+        reg.ImpactRegKonfAIApp().register(
+            ["Elx"], [fixed, fixed], [moving, moving], output=tmp_path / "out", fields_only=True, out_of_core="sampled"
+        )
+    recorded = reg._recorded_compacts(tmp_path / "out")
+    for compact in (tmp_path / "out").glob("*/*_Transform.h5"):
+        assert compact.name in recorded.get(compact.parent.name, [])
+
+
 def test_a_sampled_field_is_published_in_the_preset_s_own_form(monkeypatch: pytest.MonkeyPatch) -> None:
     # SlicerImpactReg loads <output>/P000/Transform.h5: a field the sampled route writes goes out in the form the
     # preset's config gives its output (Transform:itktransform, an .h5), as the whole run publishes it.

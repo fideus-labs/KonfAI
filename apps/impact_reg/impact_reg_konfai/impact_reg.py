@@ -1407,6 +1407,7 @@ class ImpactRegKonfAIApp:
         self._applied, self._plans, self._ran, self._compact = {}, {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
+        published: list[Path] = []  # this run's compacts, gone again if the run fails before they are recorded
         try:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
@@ -1683,8 +1684,11 @@ class ImpactRegKonfAIApp:
                 for preset in presets:
                     for compact in self._compact.get(preset, {}).get(case, ()):
                         dest = output / case / f"{_workspace(preset)}_{compact.name}"
-                        compacts.setdefault(case, []).append(_publish_output(compact, dest, move=True).name)
+                        published.append(_publish_output(compact, dest, move=True))
+                        compacts.setdefault(case, []).append(dest.name)
         except BaseException as error:
+            for dest in published:
+                dest.unlink(missing_ok=True)
             _leave(work, error)
             raise
         _leave(work, None)
