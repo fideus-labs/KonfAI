@@ -322,6 +322,20 @@ def test_sampled_mode_refuses_the_options_it_does_not_take(presets: Path, tmp_pa
         )
 
 
+def test_sampled_mode_refuses_a_plane_over_the_budget_before_lifting_it(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = []
+    for name in ("fixed", "moving"):
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(sitk.GetImageFromArray(np.zeros((16, 16), dtype=np.float32)), str(paths[-1]))
+    monkeypatch.setattr(reg, "lift_plane", lambda *args: pytest.fail("the plane was lifted"))
+    with pytest.raises(KonfAIError, match="this pair is 2-D"):
+        reg.ImpactRegKonfAIApp().register(
+            ["Convex"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", max_voxels=100
+        )
+
+
 def test_sampled_mode_runs_the_region_stage_on_a_pair_over_the_budget(presets: Path, tmp_path: Path) -> None:
     fixed, moving = _pair(tmp_path)
     app = reg.ImpactRegKonfAIApp()

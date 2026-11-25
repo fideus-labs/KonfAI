@@ -1298,6 +1298,15 @@ class ImpactRegKonfAIApp:
             _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
             lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
+            if flat and out_of_core == "sampled":  # before the planes are lifted, which reads a plane whole
+                for preset in presets:
+                    budget = _plan(_manifest(preset), gpu, max_voxels, self._remote)[0]
+                    if budget and any(max(math.prod(h[0][1:]) for h in case.values()) > budget for case in headers):
+                        raise KonfAIError(
+                            "ImpactReg",
+                            f"{preset}: --out-of-core sampled registers volumes, and this pair is 2-D.",
+                            "Register it without --out-of-core sampled.",
+                        )
             if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
                 lifted = {
                     group: [
@@ -1325,12 +1334,6 @@ class ImpactRegKonfAIApp:
                     [index for index in rest if budget and voxels[index] > budget] if out_of_core == "sampled" else []
                 )
                 if over:
-                    if flat:
-                        raise KonfAIError(
-                            "ImpactReg",
-                            f"{preset}: --out-of-core sampled registers volumes, and this pair is 2-D.",
-                            "Register it without --out-of-core sampled.",
-                        )
                     fields_by_preset[preset] = sampled = self._register_sampled(
                         preset,
                         manifest,
