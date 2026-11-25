@@ -356,15 +356,6 @@ def assemble_bundle(
                         break
         _replace_bundle(staging, update, metadata["models"])
         finish(update)
-        # What finish wrote (a graph, a program) beside what the update keeps, in one spelling each.
-        spellings: dict[str, str] = {}
-        for path in sorted(update.rglob("*")):
-            name = path.relative_to(update).as_posix()
-            if (first := spellings.setdefault(name.lower(), name)) != name:
-                raise AppMetadataError(
-                    f"Bundle paths collide: {first!r} and {name!r} are one file on a file system telling no case apart.",
-                    "Spell it as the bundle does, or remove the kept one.",
-                )
         if bundle.exists():
             bundle.rename(previous)
             try:
@@ -515,7 +506,8 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
     removable = set(obsolete)
     # A name telling apart from a kept one by case alone is one file on a file system telling no case apart, and the
     # kept one is the one konfai reads by its name on the others.
-    kept = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.resolve() not in removable}
+    dropped = {target.relative_to(bundle).as_posix() for target in obsolete.values()}
+    kept = {name for path in bundle.rglob("*") if (name := path.relative_to(bundle).as_posix()) not in dropped}
     folded = {name.lower(): name for name in kept}
     for staged in staged_files:
         brought = PurePosixPath(staged.relative_to(staging).as_posix())
@@ -765,7 +757,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             }
             drafted[:] = derive_requirements([update / "Model.py"], local)
         if drafted:
-            (update / "requirements.txt").write_text("\n".join(drafted) + "\n")
+            owned_destination(update / "requirements.txt").write_text("\n".join(drafted) + "\n")
 
     def export_and_check(update: Path) -> None:
         """The portable program and the extension's check, on the bundle the update makes, in an interpreter of their

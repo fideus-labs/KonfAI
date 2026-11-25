@@ -1450,9 +1450,10 @@ def test_every_file_a_bundle_s_update_writes_lands_on_nothing_but_a_file_of_its_
             _cli(root, model_py=str(root / "Model.py"))
     elif planted == "a graph kept in another case":
         (bundle / "MODEL.onnx").write_bytes(b"the bundle's")
-        with pytest.raises(AppMetadataError, match=r"'MODEL\.onnx' and 'model\.onnx' are one file"):
+        with pytest.raises(AppMetadataError, match=r"model\.onnx' is named 'MODEL\.onnx' in another case"):
             _cli(root, **exporting)
-        assert not (bundle / "model.onnx").exists()
+        assert [path.name for path in bundle.iterdir() if path.suffix.lower() == ".onnx"] == ["MODEL.onnx"]
+        assert (bundle / "MODEL.onnx").read_bytes() == b"the bundle's"
     else:
         # The requirements the bundle holds are its author's: no draft is written over them, nor through them.
         (root / "Model.py").write_text("import einops\n")
@@ -1710,6 +1711,15 @@ def test_a_file_the_bundle_keeps_is_its_own_while_the_update_is_checked(tmp_path
     with pytest.raises(AppMetadataError, match="'Model:Scale' does not transform a volume"):
         _cli(root, model_py=str(root / "Model.py"), extension=str(root / "own.wasm"))
     assert (bundle / kept).read_text() == "the bundle's"
+
+
+def test_a_link_to_itself_the_bundle_keeps_is_no_name_the_update_reads(tmp_path):
+    # The names a repack compares are the bundle's entries as named, none followed: a link to itself is one.
+    root = _support_workspace(tmp_path)
+    bundle = _cli(root)
+    (bundle / "loop").symlink_to("loop")
+    _cli(root)
+    assert (bundle / "loop").is_symlink()
 
 
 def test_a_config_spelled_as_a_kept_one_in_another_case_is_refused(tmp_path):
