@@ -483,6 +483,41 @@ def plane_of(mapped: Mapped, axis: int) -> Mapped:
     return Mapped(mapped.array[(slice(None),) * axis + (0,)], geometry_of(PlaneHeader(mapped.geometry, axis)))
 
 
+def write_plane(twin: Path, axis: int, target: Path, scale: float = 1.0, rows: int = 256) -> Path:
+    """The first slice along numpy axis ``axis`` of a twin (``write_twin``) as a 2-D twin of the same form at
+    ``target``: the plane's geometry (``PlaneHeader``), its spacing and origin times ``scale``, written by rows."""
+    source = open_twin(twin)
+    plane = PlaneHeader(source.geometry, axis)
+    geometry = (
+        np.asarray(plane.GetSpacing()) * scale,
+        np.asarray(plane.GetOrigin()) * scale,
+        np.asarray(plane.GetDirection()),
+    )
+    shape = [extent for index, extent in enumerate(source.array.shape) if index != axis]
+    dtype = np.dtype(source.array.dtype).name
+    with contextlib.ExitStack() as stack:
+        if target.suffix == ".h5":
+            file = stack.enter_context(h5py.File(target, "w"))
+            for key, value in _hdf5_header(geometry, shape, dtype).items():
+                file[key] = value
+            file["ITKImage/0/Dimension"] = np.array(shape[::-1], dtype=np.uint64)
+            file.create_group("ITKImage/0/MetaData")
+            voxels = file.create_dataset(
+                "ITKImage/0/VoxelData", shape=shape, dtype=dtype, chunks=tuple(min(CHUNK, extent) for extent in shape)
+            )
+        else:
+            start = _new_metaimage(target, _one_voxel(geometry, 2, dtype), shape, np.dtype(dtype).itemsize)
+            voxels = np.memmap(target, dtype=dtype, mode="r+", offset=start, shape=tuple(shape))
+        index: list = [slice(None)] * 3
+        index[axis] = 0
+        for begin in range(0, shape[0], rows):
+            index[1 if axis == 0 else 0] = slice(begin, begin + rows)
+            voxels[begin : begin + rows] = source.array[tuple(index)]
+        if isinstance(voxels, np.memmap):
+            voxels.flush()
+    return target
+
+
 def lift_plane_field(plane: Path, path: Path, fixed: Mapped, moving: Mapped, axis: int, rows: int = 256) -> Path:
     """The field of a plane (``plane``, ``[y, x, 2]``) as the field of the volume one voxel thick it was taken from,
     at ``path`` on the fixed twin's grid: its two components on the plane's axes and, along the dropped one, the shift

@@ -2063,6 +2063,49 @@ class ImpactRegKonfAIApp:
             yield index, case, twins, partial, kept
             shutil.rmtree(native_root / case, ignore_errors=True)
 
+    @staticmethod
+    def _plane_twins(
+        twins: dict[str, Path], masks: list[Path | None]
+    ) -> tuple[int, float, dict[str, Path], list[Path | None]] | None:
+        """A fixed twin one voxel thick along one axis is registered as its plane, as ``EngineRegistration`` registers
+        such a volume whole: the axis, the plane's finest voxel in the twins' voxels, and 2-D twins of the fixed plane
+        and of the moving image's first slice along it (their masks likewise), measured in that voxel as a plane
+        registered whole is. None for any other pair."""
+        from .native import PlaneHeader, open_twin, write_plane
+
+        fixed = open_twin(twins["Fixed"])
+        shape = list(fixed.array.shape)
+        if len(shape) != 3 or shape.count(1) != 1:
+            return None
+        axis = shape.index(1)
+        factor = min(PlaneHeader(fixed.geometry, axis).GetSpacing())
+        root = twins["Fixed"].parent / "plane"
+        root.mkdir(exist_ok=True)
+        planes: dict[Path, Path] = {}
+
+        def plane(path: Path) -> Path:
+            if path not in planes:
+                planes[path] = write_plane(path, axis, root / path.name, 1 / factor)
+            return planes[path]
+
+        return (
+            axis,
+            factor,
+            {group: plane(path) for group, path in twins.items()},
+            [None if mask is None else plane(mask) for mask in masks],
+        )
+
+    @staticmethod
+    def _lift_plane(plane_field: Path, field: Path, twins: dict[str, Path], axis: int, factor: float) -> Path:
+        """The field of a plane ``_plane_twins`` registered as the field of the volume one voxel thick, on the fixed
+        twin's grid in the twins' voxels: along the dropped axis the shift from one plane to the other."""
+        from .native import lift_plane_field, open_twin, to_millimetres
+
+        to_millimetres(plane_field, factor)  # from the plane's voxels to the twins'
+        lift_plane_field(plane_field, field, open_twin(twins["Fixed"]), open_twin(twins["Moving"]), axis)
+        plane_field.unlink()
+        return field
+
     def _sampled_convexadam(self, run: "_SampledRun") -> dict[str, Path]:
         """The ConvexAdam preset by regions (itk-impact's ``RegionSize``). The coarse stage, when the preset has one:
         one pass over the boxes pools the native features to its coarse grid, its cost volume is built by boxes of
@@ -2074,6 +2117,7 @@ class ImpactRegKonfAIApp:
         the control grid is kept beside it."""
         from .models.convexadam import LevelSpec, RegistrationNet, refuse_linear_keys, region_geometry, require_regions
         from .models.intensity import engine_of
+        from .native import open_twin
 
         refuse_linear_keys(LocalAppRepository._model_param_block(run.config)[1] or {})
         engine = engine_of(run.config, RegistrationNet, LevelSpec)
@@ -2089,6 +2133,10 @@ class ImpactRegKonfAIApp:
         # The stages read the images as they are, as ConvexAdam does.
         for index, case, native, masks, _ in self._native_twins(run, chunked=True, clipped=False):
             size = [int(extent) for extent in run.headers[index]["Fixed"][0][1:]][::-1]
+            volume, plane = native, self._plane_twins(native, masks)
+            if plane is not None:
+                _, _, native, masks = plane
+                size = [int(extent) for extent in open_twin(native["Fixed"]).array.shape][::-1]
             region_size = run.region_size
             if samples is not None:  # boxes that hold no more than an iteration draws, in the pair's dimension
                 region_size = min(region_size, max(8, round(samples ** (1 / len(size)))))
@@ -2138,10 +2186,13 @@ class ImpactRegKonfAIApp:
                 run.device_index,
                 region_size,
                 visits,
-                fields[case],
+                fields[case] if plane is None else fields[case].with_name("plane.mha"),
                 samples=samples,
             )
             compact[case] = [result.control_grid]
+            if plane is not None:  # a plane's transform is written as its field, as a plane registered whole
+                compact[case] = []
+                self._lift_plane(fields[case].with_name("plane.mha"), fields[case], volume, plane[0], plane[1])
             self._ran[f"{run.preset}_regions_{case}"] = {
                 "resident_features": result.resident,
                 "iterations": result.iterations,
@@ -2218,6 +2269,9 @@ class ImpactRegKonfAIApp:
         compact: dict[str, list[Path]] = {}
         # Grey values alone are winsorised, as the engine does; IMPACT's models read the intensities they know.
         for index, case, raw, masks, inside in self._native_twins(run, chunked=False, clipped=not impact):
+            volume, plane = raw, self._plane_twins(raw, masks)
+            if plane is not None:
+                _, _, raw, masks = plane
             fixed = mmap_image(raw["Fixed"])
             shift = None
             if engine._moments_init == "com":
@@ -2248,14 +2302,21 @@ class ImpactRegKonfAIApp:
                 masks[1],
                 run.device_index,
                 out / "elastix",
-                tuple(v / min(run.headers[index]["Fixed"][1]) for v in run.headers[index]["Fixed"][1]),
+                tuple(fixed.geometry.GetSpacing())
+                if plane is not None
+                else tuple(v / min(run.headers[index]["Fixed"][1]) for v in run.headers[index]["Fixed"][1]),
                 voxels,
             )
             transform = with_shift(transform, None if shift is None else shift.tolist())
             seconds = time.perf_counter() - start
-            compact[case] = [out / "Transform.h5"]
-            sitk.WriteTransform(transform, str(compact[case][0]))
-            fields[case] = write_field(out / f"{run.output_group}.mha", fixed, transform)
+            if plane is None:
+                compact[case] = [out / "Transform.h5"]
+                sitk.WriteTransform(transform, str(compact[case][0]))
+                fields[case] = write_field(out / f"{run.output_group}.mha", fixed, transform)
+            else:  # a plane's transform is written as its field, as a plane registered whole
+                compact[case] = []
+                flat = write_field(out / "plane.mha", fixed, transform)
+                fields[case] = self._lift_plane(flat, out / f"{run.output_group}.mha", volume, plane[0], plane[1])
             shutil.rmtree(out / "elastix", ignore_errors=True)
             self._ran[f"{run.preset}_mapped_{case}"] = {"seconds": round(seconds, 1), "sampled_voxels": voxels}
             if not run.quiet:

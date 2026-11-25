@@ -223,6 +223,110 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
     assert np.allclose(transform.TransformPoint((0.0, 0.0, 0.0)), (2.0, -4.0, 1.0))
 
 
+def test_sampled_elastix_registers_a_volume_one_voxel_thick_as_its_plane(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fixed volume one voxel thick is registered as its plane, as a run on the whole pair registers it: elastix
+    gets the 2-D twins of the fixed plane and of the moving image's first slice, measured in the plane's finest voxel,
+    and the field comes back one voxel thick, along the dropped axis the shift from one plane to the other."""
+    from impact_reg_konfai.models import intensity
+
+    rng = np.random.default_rng(0)
+    arrays = {"fixed": rng.random((1, 9, 10)).astype(np.float32), "moving": rng.random((3, 9, 10)).astype(np.float32)}
+    paths = []
+    for name, array in arrays.items():
+        image = sitk.GetImageFromArray(array)
+        image.SetSpacing((2.0, 4.0, 0.5))  # the dropped axis has the finest voxel: the plane is measured in 2 mm
+        image.SetOrigin((0.0, 0.0, 1.5 if name == "moving" else 0.0))
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    seen = {}
+
+    class Engine:
+        _feature_models = ()
+        _elastix_bin = "elastix"
+        _moments_init = "none"
+
+        def supports_mapped_images(self) -> bool:
+            return True
+
+        def register_mapped(self, fixed, moving, fixed_mask, moving_mask, device_index, work, spacing, voxels):
+            fixed_twin, moving_twin = sitk.ReadImage(str(fixed)), sitk.ReadImage(str(moving))
+            seen.update(size=fixed_twin.GetSize(), spacing=spacing, voxels=voxels)
+            seen["moving"] = sitk.GetArrayFromImage(moving_twin)
+            return sitk.TranslationTransform(2, (1.0, -2.0))
+
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ["Elx"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", fields_only=True
+    )
+    assert seen["size"] == (10, 9) and seen["spacing"] == (1.0, 2.0) and seen["voxels"] == 90
+    assert np.allclose(seen["moving"], arrays["moving"][0])  # the moving image's first slice
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha"))
+    assert field.GetSize() == (10, 9, 1) and field.GetSpacing() == (2.0, 4.0, 0.5)
+    assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.5))  # the plane's (dx, dy), then the z shift
+    assert not (tmp_path / "out" / "P000" / "Elx_Transform.h5").exists()  # a plane's transform is its field
+
+
+def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ConvexAdam by regions takes a fixed volume one voxel thick as its plane too: chunked 2-D twins of the fixed
+    plane and of the moving image's first slice, in the plane's finest voxel, and the field lifted one voxel thick."""
+    from types import SimpleNamespace
+
+    from impact_reg_konfai.models import intensity
+    from impact_reg_konfai.native import field_map, open_twin
+
+    rng = np.random.default_rng(0)
+    paths = []
+    for name, depth in (("fixed", 1), ("moving", 3)):
+        image = sitk.GetImageFromArray(rng.random((depth, 9, 10)).astype(np.float32))
+        image.SetSpacing((2.0, 4.0, 0.5))
+        image.SetOrigin((0.0, 0.0, 1.5 if name == "moving" else 0.0))
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    seen = {}
+
+    class Engine:
+        _iterations, _grid_shrink, _stages, _moments_init = 3, 2, ("fine",), "none"
+
+        def check_gradients(self) -> None:
+            pass
+
+        def refine_by_regions(self, fixed, moving, fixed_mask, moving_mask, device, region_size, visits, field, **_):
+            seen.update(
+                fixed=fixed.suffix, size=open_twin(fixed).array.shape, spacing=open_twin(fixed).geometry.GetSpacing()
+            )
+            target = field_map(field, open_twin(fixed))
+            target[:] = (1.0, -2.0)
+            target.flush()
+            grid = field.with_name("grid.mha")
+            grid.write_bytes(b"")
+            return SimpleNamespace(
+                control_grid=grid, resident=True, iterations=visits, regions=1, bytes_read=0, streamed=(True, True),
+                seconds=0.0, device_peak_bytes=0, metric_values=[], coarse=None,
+            )  # fmt: skip
+
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
+    monkeypatch.setattr(convexadam, "require_regions", lambda: None)
+    config = json.loads((presets / "Convex" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ["Convex"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", fields_only=True
+    )
+    assert seen["fixed"] == ".h5" and seen["size"] == (9, 10) and seen["spacing"] == (1.0, 2.0)
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha"))
+    assert field.GetSize() == (10, 9, 1) and np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.5))
+    assert not list((tmp_path / "out" / "P000").glob("*ControlGrid*"))  # a plane's transform is its field
+
+
 @pytest.mark.parametrize("side", ["fixed", "moving"])
 def test_sampled_mode_refuses_an_empty_mask_of_any_case_before_an_image_is_written(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, side: str
