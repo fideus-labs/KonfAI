@@ -596,7 +596,10 @@ class ConvexAdamEngine:
             fixed_mask = moving_mask = None
 
         def halo_of(stage: str) -> int:
-            return max([model.receptive_field for model in self._feature_models[stage]], default=0)
+            # A feature reads one radius of its field around it; its gradient through the network (the fine stage in
+            # Jacobian mode) reads one more.
+            radius = max([(model.receptive_field - 1) // 2 for model in self._feature_models[stage]], default=0)
+            return 2 * radius if stage == "fine" and self._mode == "Jacobian" else radius
 
         require_regions()
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"

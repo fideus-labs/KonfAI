@@ -294,6 +294,19 @@ def _intensity_model(tmp_path: Path) -> str:
     return str(model)
 
 
+def _box_model(tmp_path: Path) -> str:
+    """A TorchScript feature model with a receptive field of 3 voxels: the image's mean over 3^3, scaled as
+    ``_intensity_model``'s."""
+
+    class Box(torch.nn.Module):
+        def forward(self, image: torch.Tensor) -> list[torch.Tensor]:
+            return [10.0 * torch.nn.functional.avg_pool3d(image, 3, stride=1, padding=1, count_include_pad=True)]
+
+    model = tmp_path / "box.pt"
+    torch.jit.script(Box()).save(str(model))
+    return str(model)
+
+
 def _body(image: sitk.Image) -> sitk.Image:
     """The phantom's body (over 500 once 1000 is added, air at 0), as the label 3: a label map, not a 0/1 mask."""
     return sitk.Cast(image > 500, sitk.sitkUInt8) * 3
@@ -554,9 +567,11 @@ def test_the_region_route_starts_from_the_translation_between_the_centres_too(tm
 
 
 @pytest.mark.slow  # itk-impact runs the coarse stage by regions on the CPU
-def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("build", "fov"), [(_intensity_model, 1), (_box_model, 3)], ids=["point-wise", "3 voxels"])
+def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp_path: Path, build, fov) -> None:
     # A preset with the coarse stage alone (ConvexAdam#coarse, #impact_mrct) runs by regions too: its field,
-    # interpolated from its grid for each region the writer asks, is the whole run's.
+    # interpolated from its grid for each region the writer asks, is the whole run's, a model's regions read with
+    # half its receptive field around them.
     import itk
     from impact_reg_konfai import impact_reg as reg
     from impact_reg_konfai.native import write_twin
@@ -567,12 +582,12 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
     ):
         pytest.skip("itk-impact 0.2 is not installed")
     fixed, moving = _ct_phantom() + 1000.0, _ct_phantom((4.0, -3.0, 5.0)) + 1000.0
-    models = {"0": convexadam.ModelSpec(ref=_intensity_model(tmp_path), distance="L1")}
+    models = {"0": convexadam.ModelSpec(ref=build(tmp_path), distance="L1")}
     engine = _net(tmp_path, models=models, grid_spacing=2, displacement_half_width=2, stages=["coarse"])
     engine = engine["Registration"]._engine
     for stage_models in engine._feature_models.values():
         for model in stage_models:
-            model.fov = [1]  # voxel by voxel: no halo around a box
+            model.fov = [fov]
     twins = []
     for name, image in (("Fixed", fixed), ("Moving", moving)):
         sitk.WriteImage(image, str(tmp_path / f"{name}.mha"))
