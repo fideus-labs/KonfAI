@@ -881,35 +881,62 @@ def warp_gap(sampled, whole_warps, size=SIZE) -> float:
 def test_every_box_reproduces_the_whole_image_deformable(tmp_path, symmetric, loss, size):
     whole, whole_warps, sampled = deformable_pair(tmp_path, symmetric, loss, size=size)
     assert warp_gap(sampled, whole_warps, size) < 1e-3
-    # The field FireANTs writes: SyN's reads the forward warp through FireANTs' own inverse of the reverse one, which
-    # the boxes compute as it does.
-
-    def written(name: str) -> np.ndarray:
-        with mock.patch.object(sitk, "GetImageFromArray", functools.partial(sitk.GetImageFromArray, isVector=True)):
-            whole.save_as_ants_transforms(str(tmp_path / name))  # a plane's (H, W, 2) read as vectors
-        return sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / name)))
-
-    tolerance = 1e-3
-    if symmetric:
-        # FireANTs' field of the boxes' own warps, the inverse being an optimisation that moves by thousandths of a
-        # voxel when its input moves by 1e-7 of it: the boxes are held to twice that.
-        for name, warp in (("fwd", whole.fwd_warp), ("rev", whole.rev_warp)):
-            warp.warp.data.copy_(torch.from_numpy(np.asarray(sampled._warps[name].arrays["warp"])).movedim(0, -1)[None])
-        reverse = whole.rev_warp.warp.data
-        noise = torch.randn(reverse.shape, generator=torch.Generator().manual_seed(0)) * 1e-7 * reverse.abs().max()
-        reverse += noise
-        moved = written("moved.nii")
-        reverse -= noise
-        tolerance = max(tolerance, 2 * float(np.abs(moved - written("whole.nii")).max()))
-    expected = written("whole.nii")
-    field = np.zeros((*size, len(size)), dtype=np.float32)
-    sampled.write_field(field, block=20)
-    assert np.abs(field - expected).max() < tolerance
+    if symmetric:  # SyN's reads the forward warp through FireANTs' own inverse of the reverse one
+        gap, tolerance = syn_field_gap(tmp_path, whole, sampled, size)
+        assert gap < tolerance
+    else:  # the field FireANTs writes
+        field = np.zeros((*size, len(size)), dtype=np.float32)
+        sampled.write_field(field, block=20)
+        assert np.abs(field - written_field(tmp_path, whole, "whole.nii")).max() < 1e-3
     sampled.close()
     assert not list(tmp_path.glob("*.npy"))
 
 
+def written_field(tmp_path, whole, name: str) -> np.ndarray:
+    """The field FireANTs writes for ``whole``, as the whole route has it written: SyN's inverse brought onto the
+    fixed grid (``_inverse_on``)."""
+    from fireants.registration import syn
+    from impact_reg_konfai.models.fireants import _inverse_on
+
+    vectors = functools.partial(sitk.GetImageFromArray, isVector=True)  # a plane's (H, W, 2) read as vectors
+    inverse = _inverse_on(tuple(whole.fixed_images.shape[2:]))
+    with (
+        mock.patch.object(sitk, "GetImageFromArray", vectors),
+        mock.patch.object(syn, "compositive_warp_inverse", inverse),
+    ):
+        whole.save_as_ants_transforms(str(tmp_path / name))
+    return sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / name)))
+
+
+def syn_field_gap(tmp_path, whole, sampled, size) -> tuple[float, float]:
+    """How far the boxes' SyN field lies from FireANTs' field of the same warps, and how far it may: twice what
+    FireANTs' own field moves when its reverse warp moves by 1e-7 of it, its inverse being an optimisation (a
+    thousandth of a voxel at least)."""
+    for name, warp in (("fwd", whole.fwd_warp), ("rev", whole.rev_warp)):
+        warp.warp.data.copy_(torch.from_numpy(np.asarray(sampled._warps[name].arrays["warp"])).movedim(0, -1)[None])
+    reverse = whole.rev_warp.warp.data
+    noise = torch.randn(reverse.shape, generator=torch.Generator().manual_seed(0)) * 1e-7 * reverse.abs().max()
+    reverse += noise
+    moved = written_field(tmp_path, whole, "moved.nii")
+    reverse -= noise
+    expected = written_field(tmp_path, whole, "whole.nii")
+    field = np.zeros((*size, len(size)), dtype=np.float32)
+    sampled.write_field(field, block=20)
+    return float(np.abs(field - expected).max()), max(1e-3, 2 * float(np.abs(moved - expected).max()))
+
+
 THIN = (20, 40, 44)  # z under FireANTs' MIN_IMG_SIZE: its grid has 32 nodes along it
+
+
+@pytest.mark.parametrize("size, scales", [(THIN, [2, 1]), (SIZE, [4, 2])], ids=["thin", "last-scale-coarse"])
+def test_the_syn_field_inverts_the_reverse_warp_on_its_own_grid(tmp_path, size, scales):
+    """SyN's inverse reads the reverse warp on its own grid, the last scale's, as compositive_warp_inverse does: an
+    axis under 32 voxels or a last scale above 1 keeps it off the fixed grid. The field is the whole run's."""
+    with mock.patch.dict(DEFORMABLE, {"scales": scales}):
+        whole, _, sampled = deformable_pair(tmp_path, True, "cc", size=size)
+    gap, tolerance = syn_field_gap(tmp_path, whole, sampled, size)
+    assert gap < tolerance
+    sampled.close()
 
 
 @pytest.mark.parametrize("loss", ["cc", "mi"])

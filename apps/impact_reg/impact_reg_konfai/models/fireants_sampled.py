@@ -1525,9 +1525,12 @@ def sampled_deformable_class():
             (``_consistency``): an iteration over every box is the whole grid's."""
             fixed, _ = self._sources
             full, dims = list(fixed.shape), len(fixed.shape)
-            reverse = self._warps["rev"]  # on the fixed grid: write_field sets it
-            inverse = _Warp(self._scratch, "inv", full, self.device, *self._placement(full, 1))
-            for start, stop in tiles(full, block):
+            # On its own grid, the last scale's, as SyN hands it over (``rev_warp.get_warp()``): an axis under 32
+            # voxels, or a last scale above 1, keeps it off the fixed grid.
+            reverse = self._warps["rev"]
+            last = list(reverse.grid)
+            inverse = _Warp(self._scratch, "inv", last, self.device, *self._placement(last, 1))
+            for start, stop in tiles(last, block):
                 inverse.write("warp", start, -reverse.read("warp", start, stop))
             peaks = [reverse.peak(channel) for channel in range(dims)]  # r at a scale, interpolated, is no larger
             saved = (self._warps, self._lr, self._warp_gaussians, self._step_halo)
@@ -1537,10 +1540,11 @@ def sampled_deformable_class():
                     self.convergence_monitor.reset()
                     grid = fireants_level_sizes(full, scale)
                     inverse.resize(grid, *self._placement(grid, 1))
-                    # The reference as the operator reads it: scaled down by the largest ratio of the image to u's grid.
+                    # The reference as the operator reads it: its own grid scaled down by the largest ratio of the
+                    # image to u's grid.
                     ratio = max(n / g for n, g in zip(full, grid, strict=True))
                     reference = (
-                        self._scaled(reverse, [math.floor(float(n) * (1.0 / ratio)) for n in full])
+                        self._scaled(reverse, [math.floor(float(n) * (1.0 / ratio)) for n in last])
                         if ratio > 1
                         else reverse.source()
                     )
@@ -1577,12 +1581,12 @@ def sampled_deformable_class():
             whole-image run."""
             fixed, _ = self._sources
             grid = list(fixed.shape)
-            self._set_grid(grid)
             fixed_t2p = self.fixed_images.get_torch2phy().to(self.dtype)[0]
             moving_t2p = self.moving_images.get_torch2phy().to(self.dtype)[0]
             linear = moving_t2p @ self._matrix() - fixed_t2p
-            with torch.enable_grad():
+            with torch.enable_grad():  # the reverse warp on its own grid, before the forward one goes to the fixed grid
                 inverse = self._inverse(block) if self._symmetric else None
+            self._set_grid(grid)
             forward = self._warps["fwd"].source()
             try:
                 for start, stop in tiles(grid, block):
