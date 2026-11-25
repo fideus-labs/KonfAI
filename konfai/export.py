@@ -256,6 +256,7 @@ def _write_onnx(
                 output_names=output_names,
                 dynamo=True,
                 dynamic_shapes=free if dynamic else None,
+                verbose=False,  # its progress, ✅ and ❌ that no code page holds, not one of konfai's lines
                 custom_translation_table={torch.ops.aten.scalar_tensor.default: _scalar_tensor},
             ),
         )

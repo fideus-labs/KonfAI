@@ -278,6 +278,19 @@ def test_a_graph_refused_leaves_the_one_it_would_replace(tmp_path):
     assert path.read_bytes() == kept and sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json", "model.onnx"]
 
 
+def test_an_export_prints_nothing_a_code_page_cannot_hold(tmp_path, monkeypatch):
+    # torch.onnx prints its progress with ✅, which no ANSI code page holds: on Windows an export whose output is no
+    # console died on it.
+    import io
+
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    from konfai.export import export_to_onnx
+
+    monkeypatch.setattr("sys.stdout", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+    export_to_onnx(_Conv().eval(), tmp_path, torch.randn(1, 1, 8, 10, 12), "head")
+
+
 def test_two_exports_to_one_destination_stage_their_graphs_apart(tmp_path, monkeypatch):
     # A second export to the bundle while the first checks its graph stages its own: neither takes the other's.
     pytest.importorskip("onnx")
