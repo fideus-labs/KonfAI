@@ -118,7 +118,9 @@ criterion runs its network on the whole volume, as `IMPACTReg` does).
 Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per
 channel, with test-time copies or with config overrides, a `Crop` without `handed` after a stage that
 moved the grid or the values (as in a transform chain: KonfAI finds the box in the
-group as stored, the runtime in the volume it is handed), and an output and a target
+group as stored, the runtime in the volume it is handed), a stage of the prompts
+(`PointsOnGrid`, `DrawPrompts`, a `Crop` with `points` or `onto`: the runtime hands an
+evaluation chain the group it prepares and no other), and an output and a target
 on two pixel grids (KonfAI's `Dice` puts a target of another shape on the output's
 grid; the runtime does not).
 
@@ -166,8 +168,9 @@ refused by name. The tables list every stage konfai ships.
 | `Canonical` | `canonical`, onto the nearest axes with `resample: false`; undone after the forward when `inverse` |
 | `CaseStatistic` | `case_statistic`, in the chain of a group the model reads past its first: `halo`, and its class's `partial` (float64 `block` `[C, *spatial]` to `[K]`) and `finish` (`total` `[K]` to a 0-d `statistic`) as two float64 graphs beside the model |
 | `Clip` | `clip`; a data-dependent bound reads the `mask` group beside the case |
-| `Crop` | `crop`, its `source` group read beside the case; refused after a stage that moves the grid or the values, unless `handed` |
+| `Crop` | `crop`, its `source`, `points` and `onto` groups read beside the case; refused after a stage that moves the grid or the values, unless `handed` or to a `shape` |
 | `Dilate` | `dilate` in a TRANSFORM chain or on a nested model's group; refused elsewhere in a prediction |
+| `DrawPrompts` | `draw_prompts`, its `points` and `previous` groups read beside the case; the runtime computes the ball from its `radius`. In a prediction, in the chain of the first group the model reads: the graph takes every other group with the channels it is stored with |
 | `Expand` | The chain's structure: the steps each copy runs, the copies' entry names and the seed |
 | `FlatLabel` | `relabel` |
 | `Flatten` | Refused by name |
@@ -186,6 +189,7 @@ refused by name. The tables list every stage konfai ships.
 | `Padding` | `pad`; constant modes only; undone after the forward when `inverse` |
 | `Percentage` | `percentage` |
 | `Permute` | `permute`; undone after the forward when `inverse` |
+| `PointsOnGrid` | `points_on_grid`, its `reference` group read beside the case |
 | `Reduce` | The chain's structure: the fold between the steps each case runs and the steps run once |
 | `Resample` | `resample` onto a spacing (placed by konfai or by a `grid` rule), a shape or, in a TRANSFORM, a reference image; undone after the forward when `inverse` |
 | `Save` | `save`, naming its destination; in a prediction, no step (see below) |

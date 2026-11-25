@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from konfai.data.transform.prompts import KINDS, MAX_RADIUS, ROUNDINGS
 from konfai.data.transform.resample import GRID_RULES, INTERPOLATIONS
 from konfai.export import FLOAT16_BLEND_VERSION, MANIFEST_VERSION
 from konfai.portable import PREDICTION_PROGRAM_VERSION, TRANSFORM_PROGRAM_VERSION
@@ -127,9 +128,34 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
             "fill": _NUMBER,
             # A case with no foreground keeps its near corner pixel, and the inverse writes fill everywhere.
             "empty": {"const": "fill"},
+            # With shape: the window centred on the last interaction of the prompts this group holds.
+            "points_group": _STRING,
+            # What the inverse pastes the window onto, read beside the case, in place of fill.
+            "onto_group": _STRING,
             **_ID,
         },
         [],
+    ),
+    # The points of the group in hand on the voxels of another group's grid, rounded (absent, rint).
+    "points_on_grid": (
+        {"reference_group": _STRING, "rounding": {"enum": list(ROUNDINGS), "default": "rint"}},
+        ["reference_group"],
+    ),
+    # The prompts of a group drawn as channels after the volume's own: a ball of radius pixels per click (absent, 0),
+    # the box filled, one channel per kind of kinds, each kind once ("" for none, as often as wanted), the last mask
+    # first; growth weighs each interaction 1/0.98 the one before, in float16.
+    "draw_prompts": (
+        {
+            "points_group": _STRING,
+            "previous_group": _STRING,
+            "kinds": {
+                **_array({"enum": [*KINDS, ""]}),
+                "allOf": [{"contains": {"const": kind}, "minContains": 0, "maxContains": 1} for kind in KINDS],
+            },
+            "radius": {"type": "integer", "minimum": 0, "maximum": MAX_RADIUS, "default": 0},
+            "growth": _BOOLEAN,
+        },
+        ["points_group", "kinds"],
     ),
     "gradient": ({"per_dim": _BOOLEAN}, ["per_dim"]),
     "norm": ({}, []),
@@ -278,7 +304,10 @@ CRITERIA: dict[str, tuple[dict[str, Any], list[str]]] = {
 
 def _step(op: str, spec: tuple[dict[str, Any], list[str]], fixed: dict[str, Any]) -> dict[str, Any]:
     properties, required = spec
-    return _object({"op": {"const": op}, **fixed, **properties}, ["op", *fixed, *required])
+    step = _object({"op": {"const": op}, **fixed, **properties}, ["op", *fixed, *required])
+    if op == "crop":  # a window around the prompts names its shape
+        step["dependentRequired"] = {"points_group": ["shape"]}
+    return step
 
 
 def program_schema() -> dict[str, Any]:

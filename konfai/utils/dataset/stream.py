@@ -76,6 +76,8 @@ class DataStream(ABC):
     _file: File | None = None
     #: Called once the stream is closed or aborted: the dataset that opened it drops its memoised paths.
     _on_finish: Callable[[], None] | None = None
+    #: Called before a closed stream publishes its entry: a refusal raised here removes the partial entry.
+    _before_publish: Callable[[], None] | None = None
     _finished: bool = False
 
     def __enter__(self) -> DataStream:
@@ -115,6 +117,12 @@ class DataStream(ABC):
             return
         self._finished = True
         try:
+            if success and self._before_publish is not None:
+                try:
+                    self._before_publish()
+                except BaseException:
+                    self._close(False)
+                    raise
             self._close(success)
             if success and (published := self.published_path) is not None:
                 with contextlib.suppress(Exception):

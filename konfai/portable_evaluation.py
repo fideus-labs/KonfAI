@@ -205,6 +205,20 @@ def _criterion(
     return recorded | CRITERIA[name](criterion, output_group, out)
 
 
+def _refuse_a_prompt_stage(name: str, group_dest: str, step: dict[str, Any]) -> None:
+    """A stage of the prompts (a ``PointsOnGrid``, a ``DrawPrompts``, a ``Crop`` around ``points`` or pasted ``onto``
+    a group) reads groups beside the case, and the runtime hands an evaluation chain the group it prepares alone."""
+    if step["op"] != "points_on_grid" and not step.keys() & {"points_group", "onto_group"}:
+        return
+    keys = ("reference_group", "points_group", "previous_group", "onto_group")
+    groups = " and ".join(f"'{step[key]}'" for key in keys if key in step)
+    raise EvaluatorError(
+        f"Transform '{name}' of group '{group_dest}' reads {groups} beside the case, and the portable runtime hands"
+        " an evaluation chain no group but the one it prepares.",
+        _or_konfai("Prepare the group with a TRANSFORM first", _EVALUATE),
+    )
+
+
 def _group_steps(
     group_dest: str,
     chain: Any,
@@ -253,6 +267,7 @@ def _group_steps(
                 )
             refuse_a_late_crop(name, moved, EvaluatorError, _EVALUATE, params)
             step = _admitted(_CHAIN_OPS[stage](params))
+            _refuse_a_prompt_stage(name, group_dest, step)
             moved = moved or (name if moves_the_volume(step) else None)
             steps.append(step)
     return steps

@@ -64,6 +64,8 @@ from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
 from konfai.data.transform.labels import ThresholdLabels as ThresholdLabels
+from konfai.data.transform.prompts import DrawPrompts as DrawPrompts
+from konfai.data.transform.prompts import PointsOnGrid as PointsOnGrid
 from konfai.data.transform.resample import Displace as Displace
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
@@ -86,6 +88,7 @@ __all__ = [
     "Crop",
     "Dilate",
     "Displace",
+    "DrawPrompts",
     "Expand",
     "Fill",
     "FlatLabel",
@@ -109,6 +112,7 @@ __all__ = [
     "PatchLocality",
     "Percentage",
     "Permute",
+    "PointsOnGrid",
     "Reduce",
     "RegionContext",
     "Resample",

@@ -230,6 +230,35 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
 _WHOLE_BY_STREAM = ("mha", "nrrd")
 #: The ':mha.gz' tokens, each to the suffix the compressed file carries.
 _COMPRESSED_FORMS = {f"{extension}.gz": extension for extension in COMPRESSED_IN_FILE}
+#: The forms an entry is stored under beside a fiducial file's own, in the order they are looked for: every
+#: supported extension, then the store's dotted spelling, which no token carries.
+_BESIDE_A_FIDUCIAL_FILE = (*(extension for extension in SUPPORTED_EXTENSIONS if extension != "fcsv"), "ome.zarr")
+
+
+def _refuse_a_shared_entry(base: str, publishing: str | None = None) -> None:
+    """Refuse the entry ``base`` where a fiducial file lies beside another of the forms an entry is stored under
+    (:data:`_BESIDE_A_FIDUCIAL_FILE`), ``publishing`` being the form a write is about to leave there: looked for
+    first, the points would stand in for the entry stored beside them, in silence. Each form is asked of the file
+    system as written, which is how ``is_exist`` counts an entry: a suffix in another case is that entry only where
+    the file system says so."""
+
+    def there(form: str) -> bool:
+        return form == publishing or os.path.exists(f"{base}.{form}")
+
+    other = next((form for form in _BESIDE_A_FIDUCIAL_FILE if there(form)), None) if there("fcsv") else None
+    if other is None:
+        return
+    fiducials, beside = f"{base}.fcsv", f"{base}.{other}"
+    if publishing is None:
+        raise DatasetManagerError(
+            f"'{fiducials}' and '{beside}' are stored under the same entry.",
+            "Store the fiducial file under a group of its own (rename one of the two), or remove one.",
+        )
+    kept = beside if publishing == "fcsv" else fiducials
+    raise DatasetManagerError(
+        f"'{fiducials}' and '{beside}' would be stored under the same entry.",
+        f"Write the fiducial file under a group of its own, or remove '{kept}' first.",
+    )
 
 
 class SitkFile(AbstractFile):
@@ -351,6 +380,7 @@ class SitkFile(AbstractFile):
         return path
 
     def _probe_data_path(self, base: str) -> str | None:
+        _refuse_a_shared_entry(base)
         for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
             candidate = f"{base}{suffix}"
             if os.path.exists(candidate):
@@ -557,6 +587,7 @@ class SitkFile(AbstractFile):
             attributes = Attribute()
         os.makedirs(self.filename, exist_ok=True)
         if sitk is not None and isinstance(data, sitk.Image):
+            _refuse_a_shared_entry(f"{self.filename}{name}", self.file_format)
             for k, v in attributes.items():
                 if v and len(v):
                     data.SetMetaData(k, v)
@@ -610,10 +641,12 @@ class SitkFile(AbstractFile):
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
         elif sitk is not None and isinstance(data, sitk.Transform):
+            _refuse_a_shared_entry(f"{self.filename}{name}", "itk.txt")
             sitk.WriteTransform(data, f"{self.filename}{name}.itk.txt")
         elif self.is_vtk_polydata(data):
             import vtk
 
+            _refuse_a_shared_entry(f"{self.filename}{name}", "vtk")
             vtk_writer = vtk.vtkPolyDataWriter()
             vtk_writer.SetFileName(f"{self.filename}{name}.vtk")
             vtk_writer.SetInputData(data)
@@ -633,10 +666,12 @@ class SitkFile(AbstractFile):
                 with stream:
                     stream.write_slice(tuple(slice(0, extent) for extent in data.shape), data)
         elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
+            _refuse_a_shared_entry(f"{self.filename}{name}", "fcsv")
             data = np.round(data, 4)
             labels = json.loads(attributes["Labels"]) if "Labels" in attributes else None
             write_landmarks(data, Path(f"{self.filename}{name}.fcsv"), labels)  # a label per point, or refused
         elif "path" in attributes:
+            _refuse_a_shared_entry(f"{self.filename}{name}", "xml")
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
                     root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
@@ -663,6 +698,7 @@ class SitkFile(AbstractFile):
                 ET.indent(root)
                 f.write(ET.tostring(root, encoding="utf-8"))
         else:
+            _refuse_a_shared_entry(f"{self.filename}{name}", "npy")
             np.save(f"{self.filename}{name}.npy", data)
 
     def open_data_stream(
@@ -688,8 +724,13 @@ class SitkFile(AbstractFile):
         stream, types = _STREAMS[self.file_format]
         if element_dtype.name not in types or (stream is not _MhaDataStream and dimension not in (2, 3)):
             return None
+        base, form = f"{self.filename}{name}", self.file_format
+        _refuse_a_shared_entry(base, form)
         os.makedirs(self.filename, exist_ok=True)
-        return stream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
+        opened = stream(f"{base}.{form}", shape, element_dtype, attributes)
+        # Asked again where the entry lands: a fiducial file written while the stream was open did not see it.
+        opened._before_publish = lambda: _refuse_a_shared_entry(base, form)
+        return opened
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
         base = f"{self.filename}{group}"

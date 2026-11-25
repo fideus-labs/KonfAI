@@ -540,6 +540,40 @@ def test_an_own_class_undone_past_the_reduction_is_replayed_with_every_inverse_t
     assert ops[2]["of"] == "fit"
 
 
+def test_a_crop_pasted_onto_a_group_is_not_undone_past_the_reduction() -> None:
+    # A Crop with onto pastes its window back onto a group of the case, which the model that read the group holds: a
+    # program's own inverse, replayed past the reduction with the app's class, is handed none. Undone first, the crop
+    # stays in each model, as every inverse that only moves rows.
+    fit = {"op": "extension", "id": "fit", "class": "app:FitBox", "params": {}, "whole": True}
+    crop = {"op": "crop", "shape": [8, 8], "id": "c"}
+    pasted = {**crop, "onto_group": "Last"}
+    resample = {"op": "resample", "spacing": [1.5, 1.5], "id": "r", "interpolation": "linear"}
+    undo = {name: {"op": "inverse", "of": name} for name in ("r", "c", "fit")}
+    undo["r"]["interpolation"] = "linear"
+
+    def program(pre: list[dict], post: list[dict]) -> list[dict]:
+        manifest = {
+            "input": {"channels": 1},
+            "output": {"channels": 2},
+            "patch": {"size": [4, 4]},
+            "preprocessing": pre,
+            "postprocessing": post,
+        }
+        models = [{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}]
+        return assemble_program(models, reduce="mean")["steps"]
+
+    # Cut before the resample, the crop is undone after it: past the reduction.
+    late = [undo["r"], undo["c"], undo["fit"]]
+    steps_ = program([fit, crop, resample], late)
+    assert [step["op"] for step in steps_ if "op" in step] == ["mean", "inverse", "inverse", "inverse"]
+    with pytest.raises(ConfigError, match="the inverse of 'c' pastes its crop back onto the case's group 'Last'"):
+        program([fit, pasted, resample], late)
+    # Cut last, it is undone first: in each model.
+    steps_ = program([fit, resample, pasted], [undo["c"], undo["r"], undo["fit"]])
+    assert [step["of"] for step in steps_ if step.get("op") == "inverse"] == ["r", "fit"]
+    assert steps_[0]["manifest"]["postprocessing"] == [undo["c"]]
+
+
 def test_a_padding_the_runtime_cannot_fill_is_refused() -> None:
     with pytest.raises(TransformError, match="reflect"):
         OP_MAP["Padding"]({"padding": [1, 1], "mode": "reflect"})
@@ -843,6 +877,81 @@ def test_a_prediction_output_written_by_another_sink_is_refused_by_name(sink: st
     transform_manifest(_prediction({}, {"name_class": "OutputDataset"}), "Predictor")
 
 
+def test_a_crop_around_the_prompts_compiles_the_groups_it_reads() -> None:
+    # The window around the last interaction reads the prompts beside the case, its inverse the group it pastes onto.
+    step = OP_MAP["Crop"]({"shape": [8, 8, 8], "points": "PROMPTS", "onto": "LAST"})
+    assert step == {"op": "crop", "shape": [8, 8, 8], "points_group": "PROMPTS", "onto_group": "LAST"}
+
+
+@pytest.mark.parametrize(
+    "prompted",
+    [
+        {"DrawPrompts": {"points": "PROMPTS", "channels": ["positive"]}},
+        {"Crop": {"shape": [4, 4, 4], "points": "PROMPTS"}},
+    ],
+)
+def test_a_prompt_stage_after_a_crop_that_measures_its_box_is_refused_by_both_compilers(prompted: dict) -> None:
+    # The runtime plans a chain from the headers, which hold the grid a Crop to the box it measures starts from: the
+    # prompts are put on the one it leaves, which only the case's values settle.
+    (stage,) = prompted
+    measured = {"Crop": {"nonzero": True}}
+    later = "Crop#2" if stage == "Crop" else stage  # a repeated stage is bound under an occurrence key
+    refused = f"'{later}' follows 'Crop' and puts the prompts on the grid it leaves"
+    with pytest.raises(TransformError, match=refused):
+        steps([measured, prompted, _WRITE], "CT")
+    with pytest.raises(ConfigError, match=refused):
+        transform_manifest(_prediction({**measured, later: prompted[stage]}, {}), "Predictor")
+    # First in its chain, the prompts lie on the grid the case's header gives.
+    ops, _ = steps([prompted, _WRITE], "CT")
+    assert [op["op"] for op in ops] == [stage.lower().replace("drawprompts", "draw_prompts")]
+    manifest, _folds, _per_copy = transform_manifest(_prediction(prompted, {}), "Predictor")
+    assert manifest["preprocessing"][-1]["points_group"] == "PROMPTS"
+
+
+def test_a_draw_after_a_crop_to_a_shape_compiles() -> None:
+    # A Crop to a shape measures nothing: its grid is the header's, cut at its centre.
+    ops, _ = steps(
+        [{"Crop": {"shape": [8, 8, 8]}}, {"DrawPrompts": {"points": "P", "channels": ["box"]}}, _WRITE], "CT"
+    )
+    assert [op["op"] for op in ops] == ["crop", "draw_prompts"]
+
+
+def test_a_prompt_stage_after_an_apps_class_reading_the_whole_volume_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A class of the app's handed the whole volume may write another grid than the one it states, from what it
+    # measures on the case: the prompts after it lie on a grid no header gives, as after a Crop that measures its box.
+    from konfai.portable import compile_pipeline
+
+    (tmp_path / "WholeBody.py").write_text(
+        "from konfai.data.transform import LocalityKind, Transform\n\n"
+        "class Body(Transform):\n"
+        "    locality = LocalityKind.WHOLE_VOLUME\n\n"
+        "    def __call__(self, name, tensor, cache_attribute):\n"
+        "        return tensor\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    draw = {"DrawPrompts": {"points": "PROMPTS", "channels": ["positive"]}}
+    with pytest.raises(ConfigError, match="'DrawPrompts' follows 'WholeBody:Body' and puts the prompts"):
+        compile_pipeline({"WholeBody:Body": {}, **draw}, extension=True)
+    steps_, _, _ = compile_pipeline({**draw, "WholeBody:Body": {}}, extension=True)
+    assert [step["op"] for step in steps_] == ["draw_prompts", "extension"] and steps_[1]["whole"] is True
+    # A Crop the predictor undoes onto a group is pasted index for index: the group lies on the grid the Crop cuts,
+    # which the runtime's plan holds no better after such a class, or after a Crop that measures its box. One nothing
+    # undoes reads no group, and compiles; so does the pasted one before the class.
+    pasted = {"Crop": {"shape": [4, 4, 4], "onto": "LAST"}}
+    refused = "'Crop' follows 'WholeBody:Body' and is pasted back onto 'LAST' on the grid it leaves"
+    with pytest.raises(ConfigError, match=refused):
+        compile_pipeline({"WholeBody:Body": {}, **pasted}, extension=True, invertible=True)
+    with pytest.raises(ConfigError, match="'Crop#2' follows 'Crop' and is pasted back onto 'LAST'"):
+        transform_manifest(_prediction({"Crop": {"nonzero": True}, "Crop#2": pasted["Crop"]}, {}), "Predictor")
+    for undone, crop in [(False, pasted), (True, {"Crop": {**pasted["Crop"], "inverse": False}})]:
+        steps_, _, _ = compile_pipeline({"WholeBody:Body": {}, **crop}, extension=True, invertible=undone)
+        assert steps_[1]["onto_group"] == "LAST" and "id" not in steps_[1]
+    steps_, _, _ = compile_pipeline({**pasted, "WholeBody:Body": {}}, extension=True, invertible=True)
+    assert (steps_[0]["id"], steps_[0]["onto_group"]) == ("Crop", "LAST")
+
+
 @pytest.mark.parametrize(
     ("stage", "params"),
     [("Clip", {"min_value": "min", "max_value": 1.0}), ("Standardize", {"std": 1.0, "inverse": False})],
@@ -1072,7 +1181,11 @@ CARRIED_PARAMETERS: dict[str, dict[str, object]] = {
         "nonzero": True,
         "shape": [4, 4, 4],
         "handed": test_a_prediction_crop_after_a_stage_that_moved_the_volume_is_refused_by_name,
+        "points": test_a_crop_around_the_prompts_compiles_the_groups_it_reads,
+        "onto": test_a_crop_around_the_prompts_compiles_the_groups_it_reads,
     },
+    "PointsOnGrid": {"reference": "OTHER", "rounding": "trunc"},
+    "DrawPrompts": {"points": "OTHER", "channels": ["positive"], "previous": "LAST", "radius": 2, "growth": True},
     "Clip": {"min_value": 3.0, "max_value": "max", "mask": "MASK"},
     "TensorCast": {"dtype": "int16", "inverse": False, "round": True},
     "Resample": {
@@ -1744,6 +1857,16 @@ def test_a_test_time_copy_runs_nothing_on_a_group_a_stage_alone_reads() -> None:
     stored["Predictor"]["Dataset"]["groups_src"]["MR"]["groups_dest"]["MR"]["transforms"] = masked
     with pytest.raises(ConfigError, match="as stored and a stage reads it beside the case too"):
         transform_manifest(stored, "Predictor")
+
+
+def test_a_test_time_copy_runs_nothing_on_the_prompts_a_draw_reads() -> None:
+    # The points and the last mask are the draw's alone, read as stored: it puts them on the grid before the copy is
+    # made, and the copy flips what it drew.
+    drawn = {"DrawPrompts": {"points": "PROMPTS", "previous": "LAST", "channels": ["positive"]}}
+    identity, copy = _copies(_prediction(drawn, {}, flips=1))
+    assert [step["op"] for step in copy["preprocessing"][-2:]] == ["draw_prompts", "flip"]
+    assert copy["reads"] == identity["reads"]
+    assert [(read["group"], read["preprocessing"]) for read in copy["reads"]] == [("PROMPTS", []), ("LAST", [])]
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
@@ -3670,6 +3793,8 @@ _LEAST = {
     "Percentage": {"baseline": 1.0},
     "Mask": {"path": "BODY"},
     "Brightness": {"b_std": 0.1},
+    "PointsOnGrid": {"reference": "REF"},
+    "DrawPrompts": {"points": "PROMPTS", "channels": ["positive"]},
 }
 
 
@@ -3705,6 +3830,7 @@ _REFUSED: dict[Any, tuple[str, ...]] = {
     "HistogramMatching": tuple(dtype for dtype in _DTYPES if dtype not in ("float16", "float32")),
     "Mask": ("uint16", "uint32", "uint64"),
     "Normalize": ("bool", "uint16", "uint32", "uint64", "bfloat16"),
+    "PointsOnGrid": ("bfloat16",),  # numpy, which places the points, holds none
     "SelectLabel": ("uint16", "uint32", "uint64"),
     "Standardize": ("bool",),
     ("Standardize", '{"inverse": false, "nonzero": true}'): (),  # a mask of the nonzero voxels takes bool
@@ -3733,10 +3859,13 @@ def test_every_op_hands_on_the_dtype_its_konfai_stage_returns(stage: str, tmp_pa
     companions = Dataset(str(tmp_path / "Companions"), "mha")
     for group in ("REF", "BODY"):
         companions.write(group, "probe", np.ones((1, 6, 7, 8), np.float32), Attribute(_probe_attribute(3)))
+    companions.write("PROMPTS", "probe", np.array([[1.0, 2.0, 3.0]]), Attribute({"Labels": '["positive"]'}))
     for params in _DTYPE_VARIANTS.get(stage, [_LEAST.get(stage, {})]):
         step, ran, refused, rows = _CHAIN_OPS[stage](dict(params)), [], [], []
         for dtype in _DTYPES:
             volume = (torch.arange(6 * 7 * 8).reshape(1, 6, 7, 8) % 2).to(getattr(torch, dtype))
+            if stage == "PointsOnGrid":  # the group in hand is the points themselves, [N, 3]
+                volume = volume.reshape(-1, 3)
             try:
                 if stage == "Brightness":  # a draw: run as konfai draws a copy of the case
                     draw = Brightness(**params)
