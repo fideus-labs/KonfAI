@@ -64,9 +64,9 @@ of the pair, or with `--samples` a random subset drawn anew at each one (elastix
 inputs are first read once, by bands, and
 written as uncompressed twins the engines map or read by boxes, measured in the fixed image's finest voxel as a run on
 the whole pair is (a preset's lengths are voxels); the fields and transforms come back in millimetres. A mask lying
-on another grid than its image goes onto it first, streamed. The strategy registers 3-D pairs, once, with its own
-seed, in this process, and writes its field as a MetaImage: `--host`, `--tta`, `--seed` and `--output-format` (but
-`Moved=FORMAT`) are refused.
+on another grid than its image goes onto it first, streamed. The strategy registers 3-D pairs, once, in this
+process: `--host` and `--tta` are refused. `--seed` seeds its draws, as it seeds the engine's on every route, and
+`--output-format` is the form its field is written in.
 
 ### ConvexAdam
 

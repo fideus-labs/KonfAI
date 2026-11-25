@@ -128,12 +128,15 @@ def test_sampled_mode_refuses_a_preset_of_an_engine_it_does_not_know(
 
 
 @pytest.mark.parametrize(
-    ("direction", "spacing"),
-    [((1, 0, 0, 0, 1, 0, 0, 0, 1), (1.0, 2.0, 3.0)), ((0, -1, 0, 0, 0, -1, -1, 0, 0), (2.0, 3.0, 1.0))],
+    ("direction", "spacing", "form"),
+    [
+        ((1, 0, 0, 0, 1, 0, 0, 0, 1), (1.0, 2.0, 3.0), ".mha"),
+        ((0, -1, 0, 0, 0, -1, -1, 0, 0), (2.0, 3.0, 1.0), ".nii.gz"),  # and written in the form asked for
+    ],
     ids=["lps", "permuted and flipped"],
 )
 def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction, spacing
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direction, spacing, form
 ) -> None:
     """The elastix route hands the engine the twins and the workspace, the pair measured in the fixed image's finest
     voxel and its voxel axes along LPS as a run on the whole pair is, and writes the transform it returns, in
@@ -175,13 +178,13 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
         [paths[1]],
         output=tmp_path / "out",
         out_of_core="sampled",
-        max_voxels=100,
         fields_only=True,
+        output_format=[] if form == ".mha" else [form[1:]],
     )
     assert seen["fixed"].name == "Fixed.mha" and seen["masks"] == (None, None)
     assert seen["spacing"] == spacing and seen["voxels"] == 720  # in voxels of 2 mm, LPS's axes
     assert np.allclose(seen["direction"], np.eye(3).ravel())
-    field = sitk.ReadImage(str(next((tmp_path / "out" / "P000").glob("*.mha"))))
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / f"DVF{form}"))
     assert field.GetSize() == (10, 9, 8) and field.GetSpacing() == (2.0, 4.0, 6.0)
     assert np.allclose(field.GetDirection(), direction) and np.allclose(field.GetOrigin(), (0.0, 0.0, 0.0))
     assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.0))
@@ -450,15 +453,26 @@ def test_a_compact_transform_never_outlives_its_field(
     assert not compact.exists() and (out / "P000" / "DVF.mha").exists() and own.exists()
 
 
-@pytest.mark.parametrize("option", [{"seed": 3}, {"output_format": ["mha"]}])
-def test_sampled_mode_refuses_the_options_it_does_not_take(presets: Path, tmp_path: Path, option: dict) -> None:
-    fixed, moving = _pair(tmp_path)
-    app = reg.ImpactRegKonfAIApp()
-    app._register_sampled = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
-    with pytest.raises(KonfAIError, match="--seed and --output-format"):
-        app.register(
-            ["Convex"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", max_voxels=100, **option
-        )
+@pytest.mark.parametrize(
+    ("kind", "published"),
+    [("itktransform", (".h5", "itktransform")), ("mha.gz", (".mha", "mha.gz")), ("zarr", (".ome.zarr", "omezarr"))],
+)
+def test_an_asked_form_is_the_file_its_writer_publishes(kind, published) -> None:
+    assert reg._asked_form(kind) == published
+
+
+@pytest.mark.parametrize(("seeds", "share"), [((7, 8), ["seed=3"]), ((None, None), [])])
+def test_seed_seeds_each_pass_whose_engine_draws_with_one(monkeypatch: pytest.MonkeyPatch, seeds, share) -> None:
+    """The global and the tile pass each take --seed where their engine has a seed, whatever its default there."""
+
+    def config(preset, name):
+        seed = seeds[name == "Prediction_tile.yml"]
+        return {"Predictor": {"Model": {"RegistrationNet": {} if seed is None else {"seed": seed}}}}
+
+    monkeypatch.setattr(reg, "_preset_config", config)
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {"tiling": {"tile": "Prediction_tile.yml"}})
+    shares = reg._preset_overrides(["P"], [], quiet=True, seed=3)
+    assert shares["P"]["global"] == share and shares["P"]["tile"] == share
 
 
 def test_sampled_mode_refuses_a_plane_over_the_budget_before_lifting_it(

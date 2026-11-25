@@ -63,7 +63,14 @@ from konfai.utils.dataset import (
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import field_reach
 from konfai.utils.runtime import apply_cpu_thread_budget
-from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
+from konfai.utils.utils import (
+    SUPPORTED_BACKEND_FORMATS,
+    SUPPORTED_FORMATS,
+    format_token,
+    path_format_token,
+    split_format_level,
+    storage_form,
+)
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
@@ -105,6 +112,16 @@ def _form(path: Path) -> str:
     if not form and path.is_dir() and path_format_token(path) == "omezarr":
         return ".ome.zarr"
     return form
+
+
+def _asked_form(kind: str) -> tuple[str, str]:
+    """The suffix an output asked in the format ``kind`` (``--output-format``) is published under and the token it
+    is written through: a backend token names its file (``itktransform`` an ``.h5``, ``mha.gz`` a compressed
+    ``.mha``), an OME-Zarr store is ``.ome.zarr``."""
+    if kind in SUPPORTED_BACKEND_FORMATS:
+        return (".h5" if kind == "itktransform" else f".{kind.removesuffix('.gz')}"), kind
+    token = format_token(f".{kind}")
+    return (".ome.zarr" if token == "omezarr" else f".{kind}"), token
 
 
 def _format_token(form: str) -> str:
@@ -237,6 +254,12 @@ def _preset_config(preset: str, filename: str) -> dict:
     return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, app, filename).read_text(encoding="utf-8")) or {}
 
 
+def _draws_with_seed(config: dict) -> bool:
+    """Whether the engine of a preset's ``config`` draws with a seed of its own (its ``seed`` parameter)."""
+    network = ((config.get("Predictor") or {}).get("Model") or {}).get("RegistrationNet")
+    return isinstance(network, dict) and "seed" in network
+
+
 def _app_preset_sets(preset: str) -> list[str]:
     """The ``--set`` of the app preset ``APP#PRESET`` names (none for a bare app): they go first in its share, split
     between its passes as any ``--set`` is, so the app is then run bare and nothing applies them twice."""
@@ -306,7 +329,11 @@ def _scopes(override: str, presets: list[str]) -> tuple[str | None, str | None, 
 
 
 def _preset_overrides(
-    presets: list[str], overrides: list[str] | None, quiet: bool = False, sampled: bool = False
+    presets: list[str],
+    overrides: list[str] | None,
+    quiet: bool = False,
+    sampled: bool = False,
+    seed: int | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     """Each preset's share of the ``--set`` overrides, per pass, checked against the configs they run before anything
     runs.
@@ -339,7 +366,7 @@ def _preset_overrides(
             shares[member].append((stage, rest))
     passes: dict[str, dict[str, list[str]]] = {preset: {stage: [] for stage in _PASSES} for preset in presets}
     for preset, share in shares.items():
-        if not share:
+        if not share and seed is None:
             continue
         tiling = _manifest(preset).get("tiling") or {}
         files = {"global": "Prediction.yml" if sampled else tiling.get("global") or "Prediction.yml"}
@@ -351,6 +378,10 @@ def _preset_overrides(
                     configs[stage] = _preset_config(preset, filename)
             except Exception:  # offline, nothing cached: konfai-apps checks this share in the preset's own process
                 continue
+        # --seed: the seed of each pass whose engine draws with one of its own, before any --set of it.
+        for stage, config in configs.items():
+            if seed is not None and _draws_with_seed(config):
+                passes[preset][stage].append(f"seed={seed}")
         where = {
             ("global", "tile"): "the preset and its tiles",
             ("global",): "the preset, not its tiles" if files["tile"] else files["global"],
@@ -1321,11 +1352,15 @@ class ImpactRegKonfAIApp:
             raise KonfAIError(
                 "ImpactReg", f"--out-of-core {out_of_core} is not a route.", f"Use one of {', '.join(ROUTES)}."
             )
-        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core != "tiled")
+        overrides = _preset_overrides(presets, config_overrides, quiet, out_of_core != "tiled", seed)
         self._run_args = ["--seed", str(seed)] if seed is not None else []
         self._moved_format = None
+        # The form each output is asked in (None: every output), for a field this layer writes itself (sampled).
+        self._forms: dict[str | None, tuple[str, str]] = {}
         for spec in output_format or []:
             name, assigned, file_format = spec.rpartition("=")
+            if name != "Moved":
+                self._forms[name if assigned else None] = _asked_form(split_format_level(file_format)[0])
             if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
                 if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
                     raise KonfAIError(
@@ -1374,15 +1409,10 @@ class ImpactRegKonfAIApp:
                 for preset in presets
             }
             sampled_presets = [preset for preset, route in routes.items() if route.sampled]
+            sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
             for refused, what, drop in (
                 (self._remote is not None, "runs the preset's engine in this process, not on a server.", "--host"),
                 (tta, "registers the pair once, with no test-time augmentation.", "--tta"),
-                (
-                    self._run_args,
-                    "draws with its own seed and writes its field as a MetaImage: --seed and --output-format reach no"
-                    " part of it but the moved image (Moved=FORMAT).",
-                    "them",
-                ),
             ):
                 if sampled_presets and refused:
                     raise KonfAIError(
@@ -1533,15 +1563,17 @@ class ImpactRegKonfAIApp:
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
                 stack = None
-                if sources == members and len(presets) == 1:
+                # A sampled field (a MetaImage) is written here in the form asked for it; a preset wrote its own.
+                asked = (self._forms.get(group) or self._forms.get(None)) if case in sampled_cases else None
+                form, token = asked or (_form(members[0]), member_token(members[0]))
+                if sources == members and len(presets) == 1 and _form(members[0]) == form:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
                     # An ensemble is konfai-apps' (konfai_apps/ensemble.py): every member reduced into the field,
-                    # slab by slab, the members on one grid. With --uncertainty their stack is kept beside it, built
-                    # here, or for a 2-D pair once its members are planes again (below).
-                    form = _form(members[0])
+                    # slab by slab, the members on one grid, in ``form``. With --uncertainty their stack is kept
+                    # beside it, built here, or for a 2-D pair once its members are planes again (below).
                     stack = case_out / stack_file(form) if uncertainty and not flat else None
-                    combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
+                    combine(sources, "Mean", case_out / f"{group}{form}", token, stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                 # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
                 _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
