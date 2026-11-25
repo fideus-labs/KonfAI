@@ -123,6 +123,21 @@ def test_a_box_s_region_holds_the_patch_its_points_read():
     assert core == (slice(19, 23), slice(0, 16), slice(13, 23))
 
 
+def test_a_source_far_finer_than_its_coordinates_is_read_by_parts_as_it_is_whole():
+    """Coordinates of a few voxels over a whole finer source are read in parts, each a box of its own: the values
+    and the gradient of one read of the whole source."""
+    from impact_reg_konfai.models.fireants_sampled import _interpolate, _sample_region
+
+    source = ArraySource(texture()[None], "cpu")
+    grid = torch.stack(torch.meshgrid(*(torch.linspace(-0.95, 0.9, n) for n in (3, 4, 5)), indexing="ij"), -1)
+    coordinates = grid.flip(-1)[None].requires_grad_()  # (x, y, z) last
+    parts = _sample_region(source, coordinates)
+    whole = _interpolate(source.read([0, 0, 0], list(SIZE)), [0, 0, 0], list(SIZE), SIZE, coordinates)
+    assert torch.allclose(parts, whole, atol=1e-6)
+    gradients = [torch.autograd.grad(values.sum(), coordinates)[0] for values in (parts, whole)]
+    assert torch.allclose(*gradients, atol=1e-5)
+
+
 def test_level_equals_fireants_downsample():
     from fireants.losses.cc import separable_filtering
     from fireants.utils.imageutils import downsample

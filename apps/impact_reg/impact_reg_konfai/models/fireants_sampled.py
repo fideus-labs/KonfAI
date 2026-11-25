@@ -603,9 +603,16 @@ def _interpolate(box: torch.Tensor, low, high, shape, coordinates: torch.Tensor)
     return F.grid_sample(box, coordinates * scale + offset, mode="bilinear", padding_mode="zeros", align_corners=True)
 
 
+#: The most voxels of a source one read takes per coordinate it samples: SyN's moving level stays at the image's own
+#: resolution, 64 times the coordinates of a box at scale 4.
+_FOOTPRINT = 512
+
+
 def _sample_region(source: RegionSource, coordinates: torch.Tensor) -> torch.Tensor:
     """``source`` read by trilinear interpolation at ``coordinates`` (``[1, *size, 3]``, normalized to the source's
-    grid, (x, y, z) last), zero outside it: the voxels under the coordinates are read as one box."""
+    grid, (x, y, z) last), zero outside it: the voxels under the coordinates are read as one box, or, where it would
+    hold over ``_FOOTPRINT`` of them a coordinate (a source far finer than the grid of the coordinates), the
+    coordinates halved along their longest axis, each half by itself."""
     dims = len(source.shape)
     # The voxels under the coordinates, (x, y, z) last; their bounds on every axis come back in one trip.
     extents = torch.tensor([extent - 1 for extent in reversed(source.shape)], device=coordinates.device)
@@ -624,6 +631,11 @@ def _sample_region(source: RegionSource, coordinates: torch.Tensor) -> torch.Ten
             low[axis], high[axis] = (
                 (low[axis] - 1, high[axis]) if low[axis] > 0 else (low[axis], min(extent, high[axis] + 1))
             )
+    size = coordinates.shape[1:-1]
+    if math.prod(b - a for a, b in zip(low, high, strict=True)) > _FOOTPRINT * math.prod(size) and max(size) > 1:
+        axis = max(range(len(size)), key=size.__getitem__)  # of the coordinates' grid: 1 + axis in them, 2 + in out
+        halves = coordinates.split([size[axis] // 2, size[axis] - size[axis] // 2], dim=1 + axis)
+        return torch.cat([_sample_region(source, half) for half in halves], dim=2 + axis)
     return _interpolate(source.read(low, high), low, high, source.shape, coordinates)
 
 
