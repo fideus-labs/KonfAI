@@ -40,6 +40,7 @@ an epoch, a few at a time: with every box in one iteration the stage is FireANTs
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import math
 import random
@@ -671,7 +672,7 @@ def static_feature_sources(
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
-    from konfai.utils.vram import halve_on_oom, peak_bytes
+    from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
     def statistics_of(source: RegionSource) -> Attribute:
         """The image's ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` (unbiased), by one pass over its blocks."""
@@ -806,9 +807,13 @@ def static_feature_sources(
             widths: list[int] = []
             half, core.model.half = core.model.half, True  # float16 on a GPU only, for this extraction
             try:
-                if cuda:  # the larger the blocks, the less of the network's work goes to their halos
-                    widest = int((free_bytes(fixed.device) / 2 / block_cost(core, statistics["fixed"])) ** (1 / 3))
-                    blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
+                # The larger the blocks, the less of the network's work goes to their halos; a probe the device does
+                # not hold leaves them at ``block``, which the extraction halves while they do not fit.
+                with contextlib.suppress(torch.cuda.OutOfMemoryError), out_of_memory_as_torch(cuda):
+                    if cuda:
+                        cost = block_cost(core, statistics["fixed"])
+                        widest = int((free_bytes(fixed.device) / 2 / cost) ** (1 / 3))
+                        blocks[0] = max(blocks[0], (widest - 2 * halo) // stride * stride)
                 for side, source in sources.items():
                     arrays, bases = halve_on_oom(
                         functools.partial(extract, core, index, side, source, blocks, halo, bases),
