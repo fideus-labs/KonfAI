@@ -1181,6 +1181,51 @@ def test_a_run_that_fails_while_publishing_its_compacts_leaves_none_it_did_not_r
         assert compact.name in recorded.get(compact.parent.name, [])
 
 
+def test_with_a_host_a_set_of_the_output_group_brings_the_field_back_under_it(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server applies --set before its run names its output: the field comes back under the group the run
+    gave it, as a local run publishes it."""
+    import konfai_apps.app
+    from impact_reg_konfai import remote
+    from konfai import RemoteServer
+
+    fixed, moving = _pair(tmp_path)
+    config = _prediction(ELASTIX, presets / "model.pt")
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    (presets / "Elx" / "Prediction.yml").write_text(json.dumps(config), encoding="utf-8")
+
+    def sampled(self, preset, inputs, headers, cases, work, gpu, cpu, quiet, overrides, *args):
+        config = reg._preset_config(preset, "Prediction.yml")
+        reg.apply_overrides(config, overrides["global"], lambda *config: None)
+        group, fields = reg._config_output_group(config), {}
+        for case in cases:
+            fields[case] = Path(work) / case / f"{group}.mha"
+            fields[case].parent.mkdir(parents=True, exist_ok=True)
+            vectors = np.ones((8, 8, 8, 3), dtype=np.float32)
+            sitk.WriteImage(sitk.GetImageFromArray(vectors, isVector=True), str(fields[case]))
+        return group, fields
+
+    class Server:
+        def __init__(self, app: str, remote_server) -> None:
+            self.app = app
+
+        def run(self, runner, inputs, output, runner_args, gpu, cpu, quiet) -> None:
+            argv = [self.app, *(arg for group in inputs for arg in ("--inputs", *group)), "--output", str(output)]
+            remote.main([*argv, *(arg for value in runner_args for arg in ("--arg", value)), "--quiet"])
+
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_register_sampled", sampled)
+    monkeypatch.setattr(konfai_apps.app, "KonfAIAppClient", Server)
+    import konfai.utils.vram
+
+    monkeypatch.setattr(konfai.utils.vram, "max_voxels", lambda *args, **kwargs: 10**12)
+    reg.ImpactRegKonfAIApp(remote_server=RemoteServer("localhost", 8000, None)).register(
+        ["Elx"], [fixed], [moving], output=tmp_path / "out", fields_only=True, out_of_core="sampled",
+        config_overrides=["Predictor.outputs_dataset.dvf.OutputDataset.group=Field"],
+    )  # fmt: skip
+    assert (tmp_path / "out" / "P000" / "Field.mha").is_file()
+
+
 def test_a_sampled_field_is_published_in_the_preset_s_own_form(monkeypatch: pytest.MonkeyPatch) -> None:
     # SlicerImpactReg loads <output>/P000/Transform.h5: a field the sampled route writes goes out in the form the
     # preset's config gives its output (Transform:itktransform, an .h5), as the whole run publishes it.

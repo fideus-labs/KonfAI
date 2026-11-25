@@ -2013,19 +2013,21 @@ class ImpactRegKonfAIApp:
             quiet=quiet,
         )
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
-        group = _config_output_group(_preset_config(preset, "Prediction.yml"))
-        # The server named the cases it was sent P000, P001, ... in their order; its compact transforms carry its
-        # preset's name, which publishing here gives them again.
-        recorded, prefix = _recorded_compacts(out), f"{_workspace(app)}_"
+        # The server named the cases it was sent P000, P001, ... in their order, and recorded each one's field as its
+        # run named it, the --set applied; its compact transforms carry its preset's name, which publishing here
+        # gives them again.
+        record, prefix = json.loads((out / "register.json").read_text(encoding="utf-8")), f"{_workspace(app)}_"
         fields, compacts = {}, {}
         for index, case in enumerate(cases):
             sent = out / f"P{index:03d}"
-            fields[case] = _the_output(sent, group)
-            compacts[case] = []
-            for name in recorded.get(sent.name, []):
-                compacts[case].append((sent / name).rename(sent / name.removeprefix(prefix)))
+            fields[case] = out / record["cases"][sent.name]["transform"]
+            compacts[case] = [
+                (sent / name).rename(sent / name.removeprefix(prefix))
+                for name in record.get("compacts", {}).get(sent.name, [])
+            ]
         self._compact[preset] = compacts
-        return group, fields
+        field = fields[cases[0]]
+        return field.name.removesuffix(_form(field)), fields
 
     def _native_twins(
         self, run: "_SampledRun", fields: dict[str, Path], *, chunked: bool, clipped: bool, positive: bool = False
