@@ -636,6 +636,23 @@ def _smooth(field: torch.Tensor, gaussians) -> torch.Tensor:
     return separable_filtering(field.movedim(-1, 1), gaussians).movedim(1, -1)
 
 
+def _onto_whole_grid(layer: torch.Tensor, low, own, shape, lattice) -> torch.Tensor:
+    """The voxels ``own`` (slices) of a block that starts at ``low`` in an image of ``shape``, read linearly from
+    ``layer``, the block's layer, where ``onto_image_grid`` places the whole image's layer of ``lattice`` cells a
+    side: voxel ``i`` at its cell ``i * lattice / extent``, the block's first cell being its cell ``low / stride``.
+    A block's own spacing differs wherever the extent is not a whole number of cells."""
+    for axis, (start, part, extent, cells) in enumerate(zip(low, own, shape, lattice, strict=True)):
+        size, stride = layer.shape[2 + axis], 2 ** round(math.log2(extent / cells))
+        at = torch.arange(start + part.start, start + part.stop, device=layer.device, dtype=torch.float64)
+        at = at * (cells / extent) - start // stride
+        first = at.floor()
+        below = first.long().clamp(0, size - 1)
+        weight = (at - first).to(layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
+        above = (below + 1).clamp(max=size - 1)
+        layer = torch.lerp(layer.index_select(2 + axis, below), layer.index_select(2 + axis, above), weight)
+    return layer
+
+
 def static_feature_sources(
     loss,
     fixed: RegionSource,
@@ -647,13 +664,13 @@ def static_feature_sources(
     """Static mode's feature volumes of ``loss`` (the engine's ``ImpactFeatureLoss``), extracted block by block into
     memmaps of ``directory``: every model's kept layers over the fixed and the moving image, concatenated along the
     channels as ``ImpactFeatureLoss.extract`` lays them out, the whole image's features. Each block is read with the
-    model's receptive field around it, run through the network, and its layers brought onto the block's voxels. The
-    network normalises every block by the whole image's statistics (its intensities', its normalisations'), and
-    blocks and halos are whole multiples of the network's coarsest stride, so that it meets the voxels as it does on
-    the whole image. A PCA is fitted on the fixed image's layers and each image centred by its own mean, on each
+    model's receptive field around it, run through the network, and its layers brought onto the block's voxels where
+    the whole image's lie. The network normalises every block by the whole image's statistics (its intensities', its
+    normalisations'), and blocks and halos are whole multiples of the network's coarsest stride, so that it meets the
+    voxels as it does on the whole image. A PCA is fitted on the fixed image's layers and each image centred by its own mean, on each
     layer's own grid, in a first pass over every block: the whole image's fit and means. On a GPU the blocks are as
     large as half its free memory holds them with their halos, ``block`` voxels a side at least."""
-    from konfai.metric.measure.impact import onto_image_grid, own_cells
+    from konfai.metric.measure.impact import own_cells
     from konfai.utils.dataset import Attribute
     from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
     from konfai.utils.errors import MeasureError
@@ -672,14 +689,28 @@ def static_feature_sources(
             low, high, own = box_region(tile, halo, source.shape)
             yield source.read(low, high)[:, :1], own
 
-    def layers_of(core, source: RegionSource, tile, halo: int, statistics: Attribute, norms):
-        """A block's layers: each on its own grid over the cells it owns, and brought onto its own voxels."""
+    def layers_of(core, source: RegionSource, tile, halo: int, statistics: Attribute, norms, lattices):
+        """A block's layers: each on its own grid over the cells it owns, and brought onto its own voxels where the
+        whole image's layer lies, ``lattices`` cells a side (``_onto_whole_grid``)."""
         low, high, own = box_region(tile, halo, source.shape)
         box = source.read(low, high)[:, :1]
         layers, _ = core.model.volume(box, core.normalization, 0, 0.0, statistics, norms)
         cells = [layer[own_cells(own, box.shape[2:], layer.shape[2:])] for layer in layers]
-        voxels = [onto_image_grid(layer, tuple(box.shape[2:]))[(slice(None), slice(None), *own)] for layer in layers]
+        voxels = [
+            _onto_whole_grid(layer, low, own, source.shape, lattice)
+            for layer, lattice in zip(layers, lattices, strict=True)
+        ]
         return cells, [layer.float() for layer in voxels]
+
+    def lattices_of(core, source: RegionSource, boxes, halo: int, statistics: Attribute, norms) -> list[list[int]]:
+        """Each layer's cells along each axis over the whole image, read off the block that ends every axis (the
+        last of ``boxes``, in C order): its own cells and those before its first, a whole number of strides in."""
+        low, high, _ = box_region(boxes[-1], halo, source.shape)
+        layers, _ = core.model.volume(source.read(low, high)[:, :1], core.normalization, 0, 0.0, statistics, norms)
+        return [
+            [a // 2 ** round(math.log2((b - a) / n)) + n for a, b, n in zip(low, high, layer.shape[2:], strict=True)]
+            for layer in layers
+        ]
 
     def probed(core, statistics: Attribute) -> tuple[int, int, int, float | None]:
         """The network on a probe of 64 voxels a side: its coarsest stride, its kept layers'; how far, in voxels, a
@@ -740,13 +771,14 @@ def static_feature_sources(
                 boxes = tiles(source.shape, side_of_block)
                 # The network's normalisations by the whole image's statistics, one pass over the blocks each.
                 norms = core.model.norms(functools.partial(blocks_of, source, boxes, halo), statistics[side])
+                lattices = lattices_of(core, source, boxes, halo, statistics[side], norms)
                 kept: dict[int, list[torch.Tensor]] = {}
                 means: list[torch.Tensor] = []
                 if core.pca > 0:
                     room = free_bytes(source.device) / 4
                     moments: list[list[torch.Tensor]] = []
                     for at, tile in enumerate(boxes):
-                        cells, layers = layers_of(core, source, tile, halo, statistics[side], norms)
+                        cells, layers = layers_of(core, source, tile, halo, statistics[side], norms, lattices)
                         for layer, features in enumerate(cells):
                             flat = features.flatten(2)[0].double()  # [C, N], as the whole image's layer is fitted
                             if layer == len(moments):
@@ -774,7 +806,8 @@ def static_feature_sources(
                 arrays: list[np.ndarray] = []
                 for at, (start, stop) in enumerate(boxes):
                     layers = (
-                        kept.pop(at, None) or layers_of(core, source, (start, stop), halo, statistics[side], norms)[1]
+                        kept.pop(at, None)
+                        or layers_of(core, source, (start, stop), halo, statistics[side], norms, lattices)[1]
                     )
                     for layer, features in enumerate(layers):
                         if core.pca > 0:

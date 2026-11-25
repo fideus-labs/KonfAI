@@ -448,7 +448,8 @@ class _Strided(torch.nn.Module):
         return [y, torch.nn.functional.avg_pool3d(y, 2)]
 
 
-def test_static_features_by_blocks_are_the_whole_image_s(tmp_path):
+@pytest.mark.parametrize("shape", [(20, 24, 28), (21, 25, 27)])  # the second not a whole number of cells long
+def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape):
     """Blocks read with the receptive field around them, on the network's stride, give the features of the whole
     image, and the PCA fitted on each layer's own grid its components."""
     from impact_reg_konfai.models import fireants as engine
@@ -459,7 +460,8 @@ def test_static_features_by_blocks_are_the_whole_image_s(tmp_path):
     spec = engine.ModelSpec(ref=str(path), layers_mask="01", pca=2, distance="LNCC", feature_normalization="l2")
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
     loss.cores[0].model.fov = [3, 4]
-    fixed, moving = texture()[:20, :24, :28], texture((1.5, -1.0, 0.5))[:20, :24, :28]
+    crop = tuple(slice(0, extent) for extent in shape)
+    fixed, moving = texture()[crop], texture((1.5, -1.0, 0.5))[crop]
     whole = loss.extract(*(torch.from_numpy(np.ascontiguousarray(a))[None, None] for a in (fixed, moving)), 0, 0.25)
     sources = static_feature_sources(
         loss,
