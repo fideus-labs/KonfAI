@@ -140,6 +140,32 @@ def test_cosine_l1cosine_and_ncc_follow_itk_impact() -> None:
     assert distance("NCC", moved, fixed, None, 3, 0).item() == pytest.approx(1 - ncc.mean(), abs=1e-5)
 
 
+class _Faint(torch.nn.Module):
+    """A layer of small features, as a deep layer's are: a mean loss over many of them hands each a gradient
+    float16 rounds to zero."""
+
+    def forward(self, x: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [x * 0.001 + x * x * 0.0005]
+
+
+def test_a_half_network_gives_the_input_the_float32_gradient(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "faint.pt"
+    torch.jit.script(_Faint()).save(str(path))
+    model = ImpactFeatureModel(str(path), 1, [1.0], None, 3)
+    image = torch.rand((1, 1, 64, 64, 64), generator=torch.Generator().manual_seed(0))
+    stats = impact._statistics(image)[0]
+    gradients = []
+    for half in (False, True):
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        moved = image.clone().requires_grad_()
+        (layer,) = model.network(moved.device)(*model.inputs(moved, stats))
+        (gradient,) = torch.autograd.grad(layer.float().pow(2).mean(), moved)
+        gradients.append(gradient)
+    assert gradients[1].dtype == torch.float32 and (gradients[1] == 0).float().mean() < 0.05
+    whole, half = (gradient.flatten().double() / gradient.abs().max() for gradient in gradients)  # above cosine's eps
+    assert torch.nn.functional.cosine_similarity(whole, half, dim=0) > 0.999
+
+
 def test_an_ncc_with_a_constant_channel_is_finite_whole_and_pooled_and_they_agree() -> None:
     # A constant channel correlates with nothing: the square root of its variance at 0 gave NaN gradients, and by
     # pieces (the level's sums) a NaN value.

@@ -568,6 +568,39 @@ class _SliceSweep(torch.nn.Module):
         return [layer.reshape(batch, depth, *layer.shape[1:]).movedim(1, 2) for layer in layers]
 
 
+class _GradientScale(torch.autograd.Function):
+    """The identity, its gradient multiplied by ``factor[0]`` on the way back (divided with ``inverse``), read then:
+    the forward that sets it runs after the input is scaled."""
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, factor: list[float], inverse: bool) -> torch.Tensor:
+        ctx.factor, ctx.inverse = factor, inverse
+        return tensor.view_as(tensor)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return (grad / ctx.factor[0] if ctx.inverse else grad * ctx.factor[0]), None, None
+
+
+class _HalfNetwork(torch.nn.Module):
+    """A network run in float16 on a float32 image. Differentiated, its layers come back in float32 with their gradient
+    multiplied by the element count of the largest weighted one, and the image's divided by it in float32: a mean
+    over that many elements hands each one a gradient float16 rounds to zero."""
+
+    def __init__(self, network: torch.nn.Module, weights: Sequence[float]) -> None:
+        super().__init__()
+        self.network, self.weights = network, list(weights)
+
+    def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
+        if not (torch.is_grad_enabled() and image.requires_grad):
+            return self.network(image.half(), *rest)
+        factor = [1.0]  # one per call
+        outputs = self.network(_GradientScale.apply(image.float(), factor, True).half(), *rest)
+        weighted = [output for output, weight in zip(outputs, self.weights, strict=False) if weight] or outputs
+        factor[0] = float(max(output.numel() for output in weighted))
+        return [_GradientScale.apply(output.float(), factor, False) for output in outputs]
+
+
 class _PlaneLift(torch.nn.Module):
     """A 3-D network handed a plane ``[B, C, H, W]``: the plane lifted to a volume one voxel thick, as a run on the
     whole pair lifts a 2-D pair, each output layer brought back to a plane; its normalisations (``norm_count``,
@@ -1106,8 +1139,10 @@ class ImpactFeatureModel:
         network = self._on(device)
         network = network.half() if self._half(device) else network.float()
         if self.dim == 2 and not self.planes:
-            return _SliceSweep(network)
-        return _PlaneLift(network) if self.dim == 3 and self.planes else network
+            network = _SliceSweep(network)
+        elif self.dim == 3 and self.planes:
+            network = _PlaneLift(network)
+        return _HalfNetwork(network, self.weights) if self._half(device) else network
 
     def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
         """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat
@@ -1118,8 +1153,6 @@ class ImpactFeatureModel:
             tensor = tensor.repeat(1, self.in_channels, *([1] * (tensor.dim() - 2)))
         if self.denormalize:
             tensor = _denormalized(tensor, [attribute])
-        if self._half(tensor.device):
-            tensor = tensor.half()
         stats = [float(attribute[key]) for key in ("ImageMin", "ImageMax", "ImageMean", "ImageStd")]
         direction = self.direction
         if direction is None and self.dim == 2 and self.planes:  # the plane's own axes, as the sweep tells a slice
