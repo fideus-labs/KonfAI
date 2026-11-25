@@ -473,17 +473,17 @@ class _ImpactCore(torch.nn.Module):
         """Each kept layer's grid for an input of ``shape``: its stride along each axis, and whether it rounds a
         remainder up, read once off a probe of an odd side."""
         if self._layer_rules is None:
-            side = 2 * max(1, int(self.model.multiple), self.model.block_stride(device)) + 1
+            side = 2 * math.lcm(max(1, int(self.model.multiple)), self.model.block_stride(device)) + 1
             probe = torch.rand((1, self.model.in_channels, *[side] * len(shape)), device=device)
             with torch.no_grad(), no_texpr_fuser():
                 outputs = self.model.network(probe.device)(*self.model.inputs(probe, _statistics(probe)[0]))
-            self._layer_rules = []
-            for layer in self.kept:
-                rule = []
-                for cells in outputs[layer].shape[2:]:
-                    stride = 2 ** round(math.log2(side / max(int(cells), 1)))
-                    rule.append((stride, int(cells) * stride >= side))
-                self._layer_rules.append(rule)
+            self._layer_rules = [
+                [
+                    (stride, int(cells) * stride >= side)
+                    for stride, cells in zip(strides, outputs[layer].shape[2:], strict=True)
+                ]
+                for layer, strides in zip(self.kept, self.model.layer_strides(device), strict=True)
+            ]
         return [
             tuple(-(-n // stride) if up else max(1, n // stride) for n, (stride, up) in zip(shape, rule, strict=True))
             for rule in self._layer_rules
@@ -858,7 +858,7 @@ class ImpactFeatureLoss(torch.nn.Module):
         if self._mode != "Jacobian" or self._sampling < 1:
             return 1
         strides = [
-            max(int(core.model.multiple), core.model.block_stride(device))
+            math.lcm(max(1, int(core.model.multiple)), core.model.block_stride(device))
             for core in self.cores
             if core.model.voxel_size is None
         ]

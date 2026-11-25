@@ -774,12 +774,9 @@ def static_feature_sources(
         """The layers of ``box``, each on its own grid, its stride along every axis and its cells covering ``own``
         (slices of the block's voxels)."""
         layers = core.model.volume(box, core.normalization, 0, 0.0, statistics, norms)
+        strides = core.model.layer_strides(box.device)
         return [
-            (
-                [2 ** round(math.log2(b / n)) for b, n in zip(box.shape[2:], layer.shape[2:], strict=True)],
-                layer[own_cells(own, box.shape[2:], layer.shape[2:])].float(),
-            )
-            for layer in layers
+            (list(stride), layer[own_cells(own, stride)].float()) for stride, layer in zip(strides, layers, strict=True)
         ]
 
     def block_cost(core, statistics: Attribute) -> float:
@@ -915,7 +912,7 @@ def static_feature_sources(
             try:
                 # Blocks and halos on the input multiple and on the stride of the layers and normalisations gathered
                 # over them, so that a block owns whole cells of each.
-                stride = max(1, int(core.model.multiple), core.model.block_stride(fixed.device))
+                stride = math.lcm(max(1, int(core.model.multiple)), core.model.block_stride(fixed.device))
                 blocks = [math.ceil(block / stride) * stride]
                 try:  # half the receptive field around a block: its layers are then the whole image's
                     halo = (core.model.receptive_field - 1) // 2

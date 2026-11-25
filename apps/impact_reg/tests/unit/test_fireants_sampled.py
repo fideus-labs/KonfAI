@@ -503,9 +503,9 @@ class _Strided(torch.nn.Module):
     ``flipped``, on the image read backwards along its last axis, as TotalSegmentator reorients what it is handed,
     so that the coarse layer's cells are anchored at the end of that axis."""
 
-    def __init__(self, flipped: bool = False) -> None:
+    def __init__(self, flipped: bool = False, pool: int = 2) -> None:
         super().__init__()
-        self.flipped = flipped
+        self.flipped, self.pool = flipped, pool
         self.conv = torch.nn.Conv3d(1, 4, 3, padding=1)
         for parameter in self.conv.parameters():
             torch.nn.init.normal_(parameter, generator=torch.Generator().manual_seed(1))
@@ -519,25 +519,26 @@ class _Strided(torch.nn.Module):
     ) -> list[torch.Tensor]:
         if self.flipped:
             y = self.conv(x.flip(-1))
-            return [y.flip(-1), torch.nn.functional.avg_pool3d(y, 2).flip(-1)]
+            return [y.flip(-1), torch.nn.functional.avg_pool3d(y, self.pool).flip(-1)]
         y = self.conv(x)
-        return [y, torch.nn.functional.avg_pool3d(y, 2)]
+        return [y, torch.nn.functional.avg_pool3d(y, self.pool)]
 
 
+@pytest.mark.parametrize("pool", [2, 3])
 @pytest.mark.parametrize("flipped", [False, True], ids=["as-is", "flipped"])
 @pytest.mark.parametrize("multiple", [0, 2], ids=["any-size", "multiple"])
 @pytest.mark.parametrize("layers", ["10", "01"], ids=["full", "strided"])
 @pytest.mark.parametrize("shape", [(20, 24, 28), (21, 25, 27)])
-def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers, multiple, flipped):
+def test_static_features_by_blocks_are_the_whole_image_s(tmp_path, shape, layers, multiple, flipped, pool):
     """Blocks read with half the receptive field around them, predicted as a segmentation is, give a layer as the
-    whole image does, at its resolution or at half of it, and the PCA fitted on it its components: an image that is
-    no whole number of the layer's cells, or of the input multiple the network pads it to, and a network that
-    anchors its cells at the end of an axis, included."""
+    whole image does, at its resolution or at a ``pool``-th of it (a power of two or not), and the PCA fitted on it
+    its components: an image that is no whole number of the layer's cells, or of the input multiple the network pads
+    it to, and a network that anchors its cells at the end of an axis, included."""
     from impact_reg_konfai.models import fireants as engine
     from impact_reg_konfai.models.fireants_sampled import static_feature_sources
 
     path = tmp_path / "strided.pt"
-    torch.jit.script(_Strided(flipped)).save(str(path))
+    torch.jit.script(_Strided(flipped, pool)).save(str(path))
     spec = engine.ModelSpec(ref=str(path), layers_mask=layers, pca=2, distance="LNCC", feature_normalization="l2")
     loss = engine.ImpactFeatureLoss([[spec]], "Static", True, 5, 0, 0, False)
     loss.cores[0].model.fov, loss.cores[0].model.multiple = [3, 4], multiple

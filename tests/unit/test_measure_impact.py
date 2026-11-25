@@ -420,16 +420,12 @@ class _Pooled(torch.nn.Module):
         return [tile, torch.nn.functional.avg_pool3d(tile, self.kernel)]
 
 
-@pytest.mark.parametrize(("kernel", "stride"), [(4, 4), (3, None)])
-def test_blocks_start_on_the_stride_of_the_weighted_layers(kernel: int, stride: int | None) -> None:
-    # A block owns whole cells of a layer pooled by a power of two; any other stride lies on no lattice of the
-    # image's voxels that blocks could start on, and is refused rather than read as the nearest power of two.
+@pytest.mark.parametrize("kernel", [4, 3])
+def test_blocks_start_on_the_stride_of_the_weighted_layers(kernel: int) -> None:
+    # A block owns whole cells of a layer pooled by any whole number of voxels, a power of two or not.
     model = _stub_model(_Pooled(kernel), [1.0, 1.0])
-    if stride is None:
-        with pytest.raises(MeasureError, match="no lattice of a power of two"):
-            model.block_stride("cpu")
-    else:
-        assert model.block_stride("cpu") == stride and model.norm_stride("cpu") == 1
+    assert model.layer_strides("cpu") == [(1, 1, 1), (kernel,) * 3]
+    assert model.block_stride("cpu") == kernel and model.norm_stride("cpu") == 1
 
 
 class _Smoothed(torch.nn.Module):

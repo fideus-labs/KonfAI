@@ -859,11 +859,10 @@ def _blocks(
         yield image[(slice(None), slice(None), *(slice(lo, hi) for lo, hi in zip(low, high, strict=True)))], own
 
 
-def own_cells(own: Sequence[slice], box: Sequence[int], layer: Sequence[int]) -> tuple[slice, ...]:
-    """The cells of a layer ``[B, C, *layer]`` a network computed on a block ``box`` voxels a side that cover the
-    block's own voxels ``own``: the layer's stride a power of two along each axis, a cell counted in the block that
-    holds its first voxel, so that blocks starting on a multiple of the stride count every cell of the image once."""
-    strides = [2 ** round(math.log2(b / n)) for b, n in zip(box, layer, strict=True)]
+def own_cells(own: Sequence[slice], strides: Sequence[int]) -> tuple[slice, ...]:
+    """The cells of a layer ``[B, C, *cells]`` of ``strides`` voxels along each axis (``ImpactFeatureModel.layer_strides``)
+    a network computed on a block that cover the block's own voxels ``own``: a cell counted in the block that holds its
+    first voxel, so that blocks starting on a multiple of the stride count every cell of the image once."""
     return (
         slice(None),
         slice(None),
@@ -1014,8 +1013,9 @@ class ImpactFeatureModel:
         self.batch = 0
         self.model: torch.nn.Module | None = None
         self._mapped: torch.device | None = None  # where _on mapped the file; None for a network handed in
-        self._norm_stride: int | None = None  # measured once (norm_stride)
-        self._block_stride: int | None = None  # measured once (block_stride)
+        # Each weighted layer's and normalisation's stride along every axis, measured once (``_measure_strides``).
+        self._layer_strides: list[tuple[int, ...]] | None = None
+        self._norm_strides: list[tuple[int, ...]] | None = None
 
     @classmethod
     def download(
@@ -1066,55 +1066,77 @@ class ImpactFeatureModel:
         multiple = max(1, self.multiple)
         return -(-64 // multiple) * multiple
 
-    def _stride_of(self, layer: torch.Tensor) -> int:
-        """The stride of ``layer``, computed on the probe (``_probe_side``) along every axis: a power of two of the
-        image's voxels, or refused, as itk-impact refuses such a layer by regions."""
-        side = self._probe_side()
-        ratios = {side // cells if cells and side % cells == 0 else 0 for cells in layer.shape[2:]}
-        if any(ratio & (ratio - 1) or not ratio for ratio in ratios):
-            raise MeasureError(
-                f"'{self.model_path}' gives a layer of {list(layer.shape[2:])} cells for {side} voxels a side, on no"
-                " lattice of a power of two of the image's voxels, which blocks need.",
-                "Weigh layers at the image's resolution, or at a power of two of it.",
-            )
-        return max(ratios)
-
-    def _probe(self, device: torch.device | str) -> list:
-        """The network's inputs for a probe of ``_probe_side`` voxels a side, of what it is handed."""
+    def _probe(self, device: torch.device | str, side: int) -> list:
+        """The network's inputs for a probe of ``side`` voxels a side, of what it is handed."""
         dims = 2 if self.planes else 3
-        probe = torch.rand((1, self.in_channels, *[self._probe_side()] * dims), device=device)  # a spread to normalise
+        probe = torch.rand((1, self.in_channels, *[side] * dims), device=device)  # a spread to normalise
         return self.inputs(probe, _statistics(probe)[0])
 
+    @torch.no_grad()
+    def _probed_layers(self, device: torch.device | str, side: int) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """The weighted layers and the normalisations' inputs (each fed the probe's own statistics of the ones before
+        it) of a probe of ``side`` voxels a side."""
+        inputs = self._probe(device, side)
+        network = self.network(inputs[0].device)
+        norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
+        norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
+        norms, gathered = [], cast(list[torch.Tensor], [])
+        if norm_count is not None:
+            tensor, _, stats, *direction = inputs
+            for _ in range(int(norm_count(len(self.weights)))):
+                layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
+                norms.append(layer)
+                axes = (0, *range(2, layer.dim()))
+                mean = layer.double().mean(axes)
+                gathered.append(torch.stack([mean, layer.double().var(axes, unbiased=False)]).float())
+        outputs = network(*inputs)
+        return [outputs[index] for index in self.kept], norms
+
+    def _measure_strides(self, device: torch.device | str) -> None:
+        """Each weighted layer's and each normalisation's stride along every axis, from its cells on two probes,
+        ``_probe_side`` and twice it a side: the voxels added over the cells added, whatever cells a layer's padding
+        or rounding adds or drops at its ends. Measured once."""
+        side = self._probe_side()
+        small, large = self._probed_layers(device, side), self._probed_layers(device, 2 * side)
+
+        def strides(layers: list[torch.Tensor], doubled: list[torch.Tensor]) -> list[tuple[int, ...]]:
+            measured = []
+            for layer, bigger in zip(layers, doubled, strict=True):
+                added = [b - a for a, b in zip(layer.shape[2:], bigger.shape[2:], strict=True)]
+                if any(cells <= 0 for cells in added):
+                    raise MeasureError(
+                        f"'{self.model_path}' gives a layer of {list(layer.shape[2:])} cells for {side} voxels a side"
+                        f" and {list(bigger.shape[2:])} for {2 * side}: no lattice of the image's voxels, which blocks"
+                        " need.",
+                        "Weigh layers whose cells follow the image's voxels.",
+                    )
+                measured.append(tuple(max(1, round(side / cells)) for cells in added))
+            return measured
+
+        self._layer_strides, self._norm_strides = strides(small[0], large[0]), strides(small[1], large[1])
+
+    def layer_strides(self, device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each weighted layer's stride along every axis, in the image's voxels (``_measure_strides``)."""
+        if self._layer_strides is None:
+            self._measure_strides(device)
+        return cast(list[tuple[int, ...]], self._layer_strides)
+
+    def norm_strides(self, device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each normalisation's stride along every axis, in the image's voxels (``_measure_strides``)."""
+        if self._norm_strides is None:
+            self._measure_strides(device)
+        return cast(list[tuple[int, ...]], self._norm_strides)
+
     def norm_stride(self, device: torch.device | str) -> int:
-        """The coarsest stride of the normalisations ``norms`` gathers (1 for a network with none): blocks whose
-        origins and halos are whole multiples of it meet their cells where the whole image does. Measured once, on a
-        probe, each normalisation fed the probe's own statistics of the ones before it."""
-        if self._norm_stride is None:
-            inputs = self._probe(device)
-            network = self.network(inputs[0].device)
-            norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
-            norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
-            strides, gathered = [1], cast(list[torch.Tensor], [])
-            if norm_count is not None:
-                tensor, _, stats, *direction = inputs
-                for _ in range(int(norm_count(len(self.weights)))):
-                    layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
-                    strides.append(self._stride_of(layer))
-                    axes = (0, *range(2, layer.dim()))
-                    mean = layer.double().mean(axes)
-                    gathered.append(torch.stack([mean, layer.double().var(axes, unbiased=False)]).float())
-            self._norm_stride = max(strides)
-        return self._norm_stride
+        """The stride every normalisation ``norms`` gathers meets the image's voxels on (1 for a network with none):
+        blocks whose origins and halos are whole multiples of it meet their cells where the whole image does."""
+        return math.lcm(1, *(stride for strides in self.norm_strides(device) for stride in strides))
 
     def block_stride(self, device: torch.device | str) -> int:
         """The stride a block of the image must start on to own whole cells of every weighted layer and of every
-        normalisation (``norm_stride``), as the whole image's. Measured once, on a probe."""
-        if self._block_stride is None:
-            inputs = self._probe(device)
-            with torch.no_grad():
-                outputs = self.network(inputs[0].device)(*inputs)
-            self._block_stride = max([self.norm_stride(device), *(self._stride_of(outputs[k]) for k in self.kept)])
-        return self._block_stride
+        normalisation (``norm_stride``), as the whole image's: the least common multiple of their strides."""
+        layers = (stride for strides in self.layer_strides(device) for stride in strides)
+        return math.lcm(self.norm_stride(device), *layers)
 
     def reload(self) -> None:
         """Forget the network loaded from its file, which its next use loads again: a float16 cast (``half``) rounds
@@ -1173,12 +1195,14 @@ class ImpactFeatureModel:
         of the block's own voxels in it, the blocks covering the image once. Empty for a network without them."""
         gathered: list[torch.Tensor] = []
         first = next(iter(boxes()), None)
-        network = None if first is None else self.network(first[0].device)
+        if first is None:
+            return gathered
+        network = self.network(first[0].device)
         norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
         norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
         if norm_count is None:
             return gathered
-        for _ in range(int(norm_count(len(self.weights)))):
+        for strides in self.norm_strides(first[0].device)[: int(norm_count(len(self.weights)))]:
             total: torch.Tensor | None = None
             count = 0
             for box, own in boxes():
@@ -1187,7 +1211,7 @@ class ImpactFeatureModel:
                 (box,) = next(iter(grid.disassemble(box)))
                 tensor, _, stats, *direction = self.inputs(box, statistics)
                 layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
-                part = layer[own_cells(own, box.shape[2:], layer.shape[2:])].double()
+                part = layer[own_cells(own, strides)].double()
                 axes = (0, *range(2, part.dim()))
                 sums = torch.stack([part.sum(axes), (part**2).sum(axes)])
                 total, count = (sums if total is None else total + sums), count + part[0, 0].numel()
@@ -1227,7 +1251,7 @@ class ImpactFeatureModel:
         if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
             # Blocks and halos (half the receptive field) on the normalisations' stride and the input multiple, so
             # that each meets their cells, and is padded at the image's end, as the whole image is.
-            stride = max(self.norm_stride(image.device), self.multiple, 1)
+            stride = math.lcm(self.norm_stride(image.device), max(self.multiple, 1))
             block = -(-patch // stride) * stride
             halo = -(-(self.receptive_field // 2) // stride) * stride
             norms = self.norms(lambda: _blocks(image, block, halo, stride), statistics)
