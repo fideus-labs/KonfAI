@@ -476,17 +476,20 @@ def test_a_hoisted_inverse_resamples_the_way_its_step_names_and_keeps_its_casts(
 
 
 @pytest.mark.parametrize(
-    "forward",
+    ("forward", "filled"),
     [
-        {"reference": {"entry": "c", "datasets": [{"root": "./References", "format": "mha", "group": "REF"}]}},
-        {"spacing": [1.5, 1.5]},
-        {"spacing": [1.5, 1.5], "align": "extent"},
+        ({"reference": {"entry": "c", "datasets": [{"root": "./References", "format": "mha", "group": "REF"}]}}, True),
+        ({"spacing": [1.5, 1.5], "field_group": "FIELD"}, True),
+        ({"spacing": [1.5, 1.5]}, False),
+        ({"shape": [6, 6]}, False),
     ],
-    ids=["by-a-reference", "by-a-spacing", "by-its-extent"],
+    ids=["by-a-reference", "by-a-map", "by-a-spacing-on-the-extent", "by-a-shape-on-the-extent"],
 )
-def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict) -> None:
-    # konfai's inverse fills what it reads outside what it holds with the fill its stage states (its inverse_fill),
-    # whatever places the grid: the resample hoisted past the reduction carries it as each model's inverse does.
+def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(forward: dict, filled: bool) -> None:
+    # konfai's inverse fills what it reads outside what it holds with the fill its stage states (its inverse_fill):
+    # the resample hoisted past the reduction carries it wherever the grid undone may not cover the input. A grid
+    # placed on the input's extent covers every voxel of it, and its op carries none (an origin alignment, which
+    # does not cover it, is test_a_hoisted_inverse_carries_the_fill_only_an_origin_alignment_reads).
     manifest = {
         "input": {"channels": 1},
         "output": {"channels": 2},
@@ -496,7 +499,7 @@ def test_a_hoisted_inverse_fills_what_it_reads_past_the_buffer_as_konfai_s_does(
     }
     program = assemble_program([{"id": "a", "manifest": manifest}, {"id": "b", "manifest": manifest}], reduce="mean")
     (resample,) = [step for step in program["steps"] if str(step.get("op", "")).startswith("resample_")]
-    assert resample["fill"] == -1000.0
+    assert resample.get("fill") == (-1000.0 if filled else None)
 
 
 def test_an_own_class_undone_past_the_reduction_is_replayed_with_every_inverse_there() -> None:
