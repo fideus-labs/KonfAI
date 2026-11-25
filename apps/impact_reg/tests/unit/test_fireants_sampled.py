@@ -925,6 +925,35 @@ def test_a_warp_held_on_the_device_is_resized_as_one_held_in_files(tmp_path, siz
     assert resized[0].shape == (len(size), *size) and torch.allclose(resized[0], resized[1], atol=1e-5)
 
 
+@pytest.mark.parametrize("nearest", [False, True], ids=["linear", "nearest"])
+@SHAPES
+def test_a_source_read_through_a_field_by_blocks_is_simpleitk_s_resampling(tmp_path, size, nearest):
+    """Read through a displacement field block by block, a source on its own grid gives SimpleITK's resampling of
+    it through that field onto the field's grid, linear for an image, at the nearest voxel for a mask."""
+    from impact_reg_konfai.models.fireants_sampled import read_through
+
+    dims = len(size)
+    source = sitk.GetImageFromArray(texture((0.7, -0.4, 0.3), size))
+    source.SetSpacing([0.9, 1.1, 1.3][:dims])
+    source.SetOrigin([-2.0, 1.5, 0.5][:dims])
+    grid = sitk.Image(list(reversed(size)), sitk.sitkFloat32)
+    angle = np.deg2rad(7.0)
+    rotation = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+    grid.SetDirection(np.asarray(rotation).ravel() if dims == 2 else sitk.VersorTransform((0, 0, 1), angle).GetMatrix())
+    grid.SetSpacing([1.0, 0.8, 1.2][:dims])
+    rng = np.random.default_rng(0)
+    field = (rng.random((*size, dims)) * 3.0 - 1.5).astype(np.float64)
+    displacement = sitk.GetImageFromArray(field, isVector=True)
+    displacement.CopyInformation(grid)
+    interpolator = sitk.sitkNearestNeighbor if nearest else sitk.sitkLinear
+    transform = sitk.DisplacementFieldTransform(sitk.Image(displacement))
+    expected = sitk.GetArrayFromImage(sitk.Resample(source, grid, transform, interpolator, 0.0))
+    out = np.zeros((1, *size), dtype=np.float32)
+    array = sitk.GetArrayFromImage(source)[None]
+    read_through(ArraySource(array, "cpu"), source, field.astype(np.float32), grid, out, block=16, nearest=nearest)
+    assert np.abs(out[0] - expected).max() < 1e-4
+
+
 def test_a_source_kept_on_its_device_reads_the_same_boxes_as_copies(monkeypatch):
     import impact_reg_konfai.ooc as ooc
 

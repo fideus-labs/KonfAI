@@ -1336,11 +1336,6 @@ class FireANTsEngine:
             )
         if self._deformable_method == "none":
             return
-        if self._deformable_metric == "impact" and self._update_interval > 0:
-            raise NotImplementedError(
-                "feature_map_update_interval restarts FireANTs' deformable stage on the moving image resampled whole"
-                " at every refresh: by boxes the Static features are extracted once."
-            )
         if self._deformable_metric == "impact" and any(
             spec.voxel_size is not None for specs in self._impact_levels for spec in specs
         ):
@@ -1383,9 +1378,10 @@ class FireANTsEngine:
         displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what the
         run measured."""
         from ..native import field_map, mapped_centre, mapped_window, mmap_image, read_information, write_field
-        from ..ooc import ArraySource, HeaderImages, OnesSource, RescaledSource, StackedSource
+        from ..ooc import ArraySource, HeaderImages, OnesSource, RegionSource, RescaledSource, StackedSource, tiles
         from .fireants_sampled import (
             _TOGETHER,
+            read_through,
             sampled_deformable_class,
             sampled_linear_alignment,
             static_feature_sources,
@@ -1492,46 +1488,125 @@ class FireANTsEngine:
         else:
             loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
         deformable_started = time.perf_counter()
-        pair = sources(self._deformable_metric, deformable_masked)
-        if custom_loss is not None and self._mode == "Static":
-            # Static: the feature volumes extracted once, by blocks, into files; the stage then registers them, with
-            # the mask channel beside them so that masked still means what it says.
-            features = static_feature_sources(custom_loss, *sources("impact", False), scratch, block=max(box, 64))
+        iterations = [int(epochs)] * len(self._scales) if epochs else list(self._deformable_iterations)
+
+        def stage(scales: list[int], counts: list[int], pair: list, moving_reader, init, out: Path, seed: int):
+            """The deformable stage over boxes of ``pair``, its field written to ``out`` on the fixed grid, its draws
+            from ``seed``."""
+            registration = sampled_deformable_class()(
+                scales,
+                counts,
+                HeaderImages(readers["fixed"], pair[0].channels, device),
+                HeaderImages(moving_reader, pair[0].channels, device),
+                *pair,
+                scratch=scratch,
+                symmetric=self._deformable_method == "syn",
+                loss_type=loss_type,
+                custom_loss=custom_loss,
+                cc_kernel_size=self._cc_kernel,
+                loss_halo=loss_halo,
+                smooth_warp_sigma=self._smooth_warp_sigma,
+                smooth_grad_sigma=self._smooth_grad_sigma,
+                optimizer_lr=self._deformable_lr,
+                init_affine=init,
+                box=box,
+                samples=samples,
+                seed=seed,
+                # The points of a sampled Jacobian loss read a patch of the receptive field around them, which a box
+                # at the image's edge, short and with no halo past it, would not hold.
+                least=max(getattr(custom_loss, "_patch", None) or [1]),
+            )
+            try:
+                registration.optimize()
+                written = field_map(out, mapped["fixed"])
+                registration.write_field(written)
+                written.flush()
+            finally:
+                registration.close()
+            return registration, written
+
+        def static_pair(moving_source: RegionSource, moving_mask: RegionSource) -> list:
+            """Static: the feature volumes extracted by blocks into files, with the mask channel beside them so that
+            masked still means what it says."""
+            features = static_feature_sources(
+                custom_loss, sources("impact", False)[0], moving_source, scratch, block=max(box, 64)
+            )
             custom_loss.release()
-            pair = [
-                StackedSource([volume, mask_source(side)]) if deformable_masked else volume
-                for volume, side in zip(features, ("fixed", "moving"), strict=True)
+            if not deformable_masked:
+                return list(features)
+            return [StackedSource([features[0], mask_source("fixed")]), StackedSource([features[1], moving_mask])]
+
+        refresh = custom_loss is not None and self._mode == "Static" and self._update_interval > 0
+        if not refresh:
+            pair = sources(self._deformable_metric, deformable_masked)
+            if custom_loss is not None and self._mode == "Static":
+                pair = static_pair(sources("impact", False)[1], mask_source("moving"))
+            registration, _ = stage(self._scales, iterations, pair, readers["moving"], affine_matrix, field, self._seed)
+        else:
+            # feature_map_update_interval, as a run on the whole pair (``_refreshed_stage``): runs of that many
+            # iterations at one scale, each from the identity on the moving image read through the field so far,
+            # its features extracted again, and the fields composed, the new run's first.
+            runs = [
+                (level, scale, min(self._update_interval, count - done))
+                for level, (scale, count) in enumerate(zip(self._scales, iterations, strict=True))
+                for done in range(0, count, self._update_interval)
             ]
-        registration = sampled_deformable_class()(
-            self._scales,
-            [int(epochs)] * len(self._scales) if epochs else self._deformable_iterations,
-            *(HeaderImages(readers[side], pair[0].channels, device) for side in ("fixed", "moving")),
-            *pair,
-            scratch=scratch,
-            symmetric=self._deformable_method == "syn",
-            loss_type=loss_type,
-            custom_loss=custom_loss,
-            cc_kernel_size=self._cc_kernel,
-            loss_halo=loss_halo,
-            smooth_warp_sigma=self._smooth_warp_sigma,
-            smooth_grad_sigma=self._smooth_grad_sigma,
-            optimizer_lr=self._deformable_lr,
-            init_affine=affine_matrix,
-            box=box,
-            samples=samples,
-            seed=self._seed,
-            # The points of a sampled Jacobian loss read a patch of the receptive field around them, which a box at
-            # the image's edge, short and with no halo past it, would not hold.
-            least=max(getattr(custom_loss, "_patch", None) or [1]),
-        )
-        try:
-            registration.optimize()
-            measured["deformable_seconds"] = time.perf_counter() - deformable_started
+            fixed_geometry, extents = mapped["fixed"].geometry, mapped["fixed"].array.shape
+            total: np.memmap | None = None
+            held_files: list[Path] = []  # what the field so far rests on, gone once the next one stands
+            for number, (level, scale, count) in enumerate(runs):
+                moving_source, moving_mask, moving_reader, init = (
+                    sources("impact", False)[1],
+                    mask_source("moving"),
+                    readers["moving"],
+                    affine_matrix,
+                )
+                if total is not None:
+                    warped = np.lib.format.open_memmap(
+                        str(scratch / f"moved_{number}.npy"), mode="w+", dtype=np.float32, shape=(1, *extents)
+                    )
+                    moving_array = ArraySource(mapped["moving"].array[None], device)
+                    read_through(moving_array, mapped["moving"].geometry, total, fixed_geometry, warped, block=box)
+                    moving_source, moving_reader, init = ArraySource(warped, device), readers["fixed"], None
+                    moving_mask = OnesSource(extents, device)
+                    if masks["moving"] is not None:
+                        held = np.lib.format.open_memmap(
+                            str(scratch / f"moved_mask_{number}.npy"), mode="w+", dtype=np.float32, shape=(1, *extents)
+                        )
+                        mask_array = ArraySource(masks["moving"].array[None], device)
+                        read_through(
+                            mask_array, masks["moving"].geometry, total, fixed_geometry, held, block=box, nearest=True
+                        )
+                        moving_mask = ArraySource(held, device)
+                custom_loss.start_at(level)
+                pair = static_pair(moving_source, moving_mask)
+                # Each run draws boxes of its own, as one stage's iterations draw anew.
+                step_path = scratch / f"run_{number}.mha"
+                registration, step = stage([scale], [count], pair, moving_reader, init, step_path, self._seed + number)
+                if total is None:
+                    total, held_files = step, [step_path]
+                    continue
+                composed = field_map(scratch / f"total_{number}.mha", mapped["fixed"])
+                previous = ArraySource(np.moveaxis(total, -1, 0), device)
+                read_through(previous, fixed_geometry, step, fixed_geometry, np.moveaxis(composed, -1, 0), block=box)
+                for start, stop in tiles(extents, box):
+                    region = tuple(slice(a, b) for a, b in zip(start, stop, strict=True))
+                    composed[region] += step[region]
+                composed.flush()
+                del total, step, moving_source, moving_mask
+                for path in [*held_files, step_path, *scratch.glob(f"moved*_{number}.npy")]:
+                    path.unlink(missing_ok=True)
+                total, held_files = composed, [scratch / f"total_{number}.mha"]
+            assert total is not None
             output = field_map(field, mapped["fixed"])
-            registration.write_field(output)
+            for start, stop in tiles(extents, box):
+                region = tuple(slice(a, b) for a, b in zip(start, stop, strict=True))
+                output[region] = total[region]
             output.flush()
-        finally:
-            registration.close()
+            del total
+            for path in held_files:
+                path.unlink(missing_ok=True)
+        measured["deformable_seconds"] = time.perf_counter() - deformable_started
         measured["bytes_read"] = measured.get("bytes_read", 0) + sum(source.bytes_read for source in pair)
         measured["loss"] = [registration.losses[0], registration.losses[-1]] if registration.losses else []
         measured["warps_resident"] = registration.resident

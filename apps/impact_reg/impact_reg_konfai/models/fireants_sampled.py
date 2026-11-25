@@ -666,6 +666,51 @@ def _smooth(field: torch.Tensor, gaussians) -> torch.Tensor:
     return separable_filtering(field.movedim(-1, 1), gaussians).movedim(1, -1)
 
 
+def _voxel_frame(geometry) -> tuple[np.ndarray, np.ndarray]:
+    """The affine map of a grid's voxel indices ((x, y, z) order) to physical points, ``p = A i + b``, from the
+    SimpleITK image ``geometry`` that carries it."""
+    dims = geometry.GetDimension()
+    direction = np.reshape(np.asarray(geometry.GetDirection(), dtype=np.float64), (dims, dims))
+    return direction * np.asarray(geometry.GetSpacing(), dtype=np.float64), np.asarray(geometry.GetOrigin())
+
+
+def read_through(
+    source: RegionSource,
+    source_geometry,
+    field: np.ndarray,
+    geometry,
+    out: np.ndarray,
+    *,
+    block: int = 64,
+    nearest: bool = False,
+) -> None:
+    """``source`` (its voxels on ``source_geometry``) read at ``x + u(x)`` for every voxel ``x`` of the grid of
+    ``geometry``, ``u`` the physical displacement ``field`` (``[*grid, dims]``, (x, y, z) components) on that grid,
+    zero outside the source, written block by block to ``out`` (``[C, *grid]``): linearly, as SimpleITK's resampler
+    reads an image, or at the nearest voxel, as it reads a mask (``nearest``); a point within half a voxel past the
+    source's last reads that voxel, as ITK's interpolators read the buffer's edge. The field is never held whole."""
+    grid = field.shape[:-1]
+    dims = len(grid)
+    to_world, origin = _voxel_frame(geometry)
+    source_matrix, source_origin = _voxel_frame(source_geometry)
+    to_source = np.linalg.inv(source_matrix)
+    extents = np.asarray(list(reversed(source.shape)), dtype=np.float64)  # (x, y, z)
+    for start, stop in tiles(grid, block):
+        box = tuple(slice(a, b) for a, b in zip(start, stop, strict=True))
+        index = np.stack(np.meshgrid(*(np.arange(a, b) for a, b in zip(start, stop, strict=True)), indexing="ij"))
+        index = index[::-1].reshape(dims, -1).astype(np.float64)  # (x, y, z) rows, one column a voxel
+        world = to_world @ index + origin[:, None] + np.asarray(field[box], dtype=np.float64).reshape(-1, dims).T
+        voxel = to_source @ (world - source_origin[:, None])
+        inside = ((voxel >= -0.5) & (voxel < extents[:, None] - 0.5)).all(0)
+        voxel = np.clip(np.floor(voxel + 0.5) if nearest else voxel, 0.0, extents[:, None] - 1.0)
+        normalized = -1.0 + 2.0 * voxel / np.maximum(extents[:, None] - 1.0, 1.0)
+        size = tuple(b - a for a, b in zip(start, stop, strict=True))
+        coordinates = torch.from_numpy(normalized.T.reshape(1, *size, dims)).to(source.device, torch.float32)
+        values = _sample_region(source, coordinates)
+        held = torch.from_numpy(inside.reshape(1, 1, *size)).to(values.device, values.dtype)
+        to_array(out[(slice(None), *box)], (values * held)[0])
+
+
 def static_feature_sources(
     loss,
     fixed: RegionSource,
