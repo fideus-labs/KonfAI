@@ -549,7 +549,7 @@ class _ImpactCore(torch.nn.Module):
         voxel_size = self.model.voxel_size
         if voxel_size is None:
             return None
-        if self.dimension == DIM:
+        if self.dimension in (DIM, len(level)):  # a network of the level's own dimension: no axis swept
             return grid_size(self.extent, voxel_size, level)
         order = swept_order(seed)
         # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
@@ -579,7 +579,7 @@ class _ImpactCore(torch.nn.Module):
             else:
                 stride = self.model.block_stride(moved.device)
                 moved, fixed, mask = _box_on_model_grid(moved, fixed, mask, place, size, stride)
-        if self.dimension < DIM:
+        if self.dimension < moved.dim() - 2:  # a 2-D network swept over a volume, not run on a plane
             order = swept_order(seed)
             moved, fixed, mask = (
                 moved.permute(order),

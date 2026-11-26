@@ -1547,3 +1547,44 @@ def test_a_level_of_several_jacobian_models_starts_its_boxes_on_all_their_stride
         specs.append(engine.ModelSpec(ref=str(path), layers_mask="01", distance="L2"))
     loss = engine.ImpactFeatureLoss([specs], "Jacobian", True, 5, 0, 0, False)
     assert loss.stride("cpu") == 6
+
+
+@pytest.mark.parametrize("voxel_size", [None, [1.5, 2.0]], ids=["native", "voxel_size"])
+def test_a_2d_jacobian_model_scores_a_plane_by_boxes_as_it_scores_it_whole(tmp_path, voxel_size):
+    """A 2-D network on a 2-D pair reads the plane as it is, no axis swept: by boxes, read with the receptive field
+    around them and weighed as the stage weighs them, it gives the level's value, at its voxel_size too."""
+    from impact_reg_konfai.models import fireants as engine
+
+    path = tmp_path / "convolved.pt"
+    torch.jit.script(_Convolved()).save(str(path))
+    spec = engine.ModelSpec(ref=str(path), distance="L2")
+    loss = engine.ImpactFeatureLoss([[spec]], "Jacobian", False, 5, 0, 0, False)
+    core = loss.cores[0]  # a local file is a 3-D model to the registry: the 2-D network handed in
+    core.model.model, core.model.dim, core.dimension = torch.jit.script(_Convolved(2)), 2, 2
+    core.model.fov, core.model.planes, core.model.voxel_size = [3], True, voxel_size
+    loss._level = 0
+    generator = torch.Generator().manual_seed(4)
+    shape = (40, 44)
+    moved, fixed = (torch.rand((1, 1, *shape), generator=generator) for _ in range(2))
+    loss.draw()
+    expected = float(loss(moved, fixed))
+    pieces = []
+    for tile in tiles(shape, 16):
+        low, high, core_slices = box_region(tile, 8, shape)
+        region = torch.zeros((1, 1, *(b - a for a, b in zip(low, high, strict=True))))
+        region[(slice(None), slice(None), *core_slices)] = 1
+        crop = (slice(None), slice(None), *(slice(a, b) for a, b in zip(low, high, strict=True)))
+        pieces.append((low, high, moved[crop], fixed[crop], region))
+
+    def read():
+        for low, high, box_moved, box_fixed, region in pieces:
+            loss.place(low, high, shape)
+            yield box_moved, box_fixed, region
+
+    loss.pool(read)
+    value = 0.0
+    for low, high, box_moved, box_fixed, region in pieces:
+        loss.place(low, high, shape)
+        # The box's own voxels' share, as the stage's normalisation latches it.
+        value += float(loss._values(box_moved, box_fixed, region)[1][0]) * float(region.sum()) / math.prod(shape)
+    assert math.isclose(value, expected, rel_tol=1e-4)
