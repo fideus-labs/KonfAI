@@ -531,7 +531,18 @@ class PlaneHeader:
 
     def __init__(self, header, axis: int, frame: PlaneFrame | None = None) -> None:
         self._header, self._keep = header, [a for a in range(3) if a != 2 - axis]
-        self.frame = frame or PlaneFrame.of(header.GetDirection(), axis)
+        own = PlaneFrame.of(header.GetDirection(), axis)
+        if frame is not None and abs(float(own.normal @ frame.normal)) < 1 - 1e-6:
+            from konfai.utils.errors import KonfAIError
+
+            # Its height over the fixed plane would vary along it, which a lift by one gap cannot follow.
+            raise KonfAIError(
+                "ImpactReg",
+                "the moving plane is tilted against the fixed one: a plane is registered in the fixed one's frame,"
+                " where they must be parallel.",
+                "Resample the moving image onto planes parallel to the fixed one, or register the pair as volumes.",
+            )
+        self.frame = frame or own
 
     def GetDimension(self) -> int:
         return 2

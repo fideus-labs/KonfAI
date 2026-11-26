@@ -75,6 +75,36 @@ def test_the_engine_registers_the_plane_of_a_volume_one_plane_thick() -> None:
     np.testing.assert_allclose(field.numpy()[0, 2], 1.5)
 
 
+def test_a_moving_plane_tilted_against_the_fixed_one_is_refused() -> None:
+    # Registered in the fixed plane's frame and lifted by one gap along its normal, a tilted moving plane's height,
+    # which varies along it, was dropped: a match at x = 4 landed at z = 0 instead of 3.
+    from impact_reg_konfai.native import PlaneFrame, PlaneHeader
+
+    fixed, tilted = sitk.Image([8, 6, 1], sitk.sitkFloat32), sitk.Image([8, 6, 1], sitk.sitkFloat32)
+    tilted.SetDirection((0.8, 0, -0.6, 0, 1, 0, 0.6, 0, 0.8))  # voxel x along (0.8, 0, 0.6)
+    frame = PlaneFrame.of(fixed.GetDirection(), 0)
+    with pytest.raises(KonfAIError, match="tilted"):
+        PlaneHeader(tilted, 0, frame)
+    shifted = sitk.Image(fixed)
+    shifted.SetOrigin((0.0, 0.0, 2.0))  # parallel with a gap: the plane route
+    assert PlaneHeader(shifted, 0, frame).GetDirection() == (1.0, 0.0, 0.0, 1.0)
+
+    geometry = []
+    for image in (fixed, tilted, fixed, tilted):
+        attribute = Attribute()
+        attribute["Origin"], attribute["Spacing"] = np.zeros(3), np.ones(3)
+        attribute["Direction"] = np.asarray(image.GetDirection())
+        geometry.append([attribute])
+    tensor = torch.zeros(1, 1, 1, 6, 8)
+
+    class Engine:
+        def register(self, *args):
+            pytest.fail("a tilted pair was registered")
+
+    with pytest.raises(KonfAIError, match="tilted"):
+        EngineRegistration(Engine())(tensor, tensor, tensor + 1, tensor + 1, attributes=geometry)
+
+
 def test_a_file_goes_through_one_plane_and_comes_back_in_its_form(tmp_path: Path) -> None:
     values = np.arange(20.0).reshape(4, 5)
     sitk.WriteImage(_flat(values), str(tmp_path / "image.nii.gz"))
