@@ -3484,6 +3484,22 @@ def models_fold_first(config: dict[str, Any], root: str, models: int, output: st
     return models > 1 and combine == "Mean" and steps and derive_reduction(config, root, output) is None
 
 
+def _portable_prediction_config(config: dict[str, Any], root: str) -> dict[str, Any]:
+    """Export the standard prediction of a config that stacks compact checkpoint labels natively."""
+    from konfai.data.transform.ensemble import disable_inference_stack
+
+    if any(
+        params.get("mode") == "labels"
+        for value in config[root].get("outputs_dataset", {}).values()
+        for stage, params in bound_chain(value.get("OutputDataset", {}).get("after_reduction_transforms")).items()
+        if base_name(stage) == "InferenceStack" and isinstance(params, dict)
+    ):
+        standard = deepcopy(config)
+        if disable_inference_stack(standard[root], labels_only=True):
+            return standard
+    return config
+
+
 def compile_output(
     config: dict[str, Any],
     root: str,
@@ -3504,6 +3520,7 @@ def compile_output(
     that runs them with the nested models of ``aux``. ``head`` is the module output the graph ends on and
     ``output`` the config output whose chains the program runs (``None``: the default, the only one). The
     konfai-apps bundle export reads it too, so a bundle carries the program a PREDICTION program does."""
+    config = _portable_prediction_config(config, root)
     masks = mask_specs(config, root, output) if aux else []
     models, written, per_copy = export_checkpoints(
         config,
@@ -3817,6 +3834,7 @@ def _compile_heads(
     destination. Returns every model exported and every output as its program and its write target."""
     from konfai.utils.utils import owned_destination
 
+    config = _portable_prediction_config(config, root)
     exported: list[dict[str, Any]] = []
     written: list[dict[str, Any]] = []
     named = {

@@ -100,10 +100,10 @@ of the folder is uploaded, whatever a `.gitignore` says: remove anything private
 Anyone who can read the repository runs it with
 `konfai-apps infer your-name/my-apps@main:CT_SEG -i ./Dataset/CASE_000/CT.mha`.
 
-An app can ship `Prediction_uncertainty.yml` alongside `Prediction.yml` when recording uncertainty needs a
-different prediction pipeline. `konfai-apps infer -uncertainty` uses that file when available. An explicit
-`--prediction-file` with a different filename takes precedence. `Uncertainty.yml` reads the resulting
-inference stack.
+Keep uncertainty in the app's `Prediction.yml` and `Uncertainty.yml`. For a patch fold that emits one
+label channel per checkpoint, use `combine: Concat`, `reduction: Concat` and `InferenceStack` with
+`mode: labels`. With `-uncertainty`, the native run saves the labels and votes on them. Standard inference
+and portable export average checkpoint scores before the patch fold.
 `@main` reads what you just published even where the repository carries a release tag,
 and `--force-update` fetches it again over an earlier download.
 

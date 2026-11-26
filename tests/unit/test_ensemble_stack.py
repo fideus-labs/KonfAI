@@ -62,6 +62,22 @@ def test_a_stack_of_fields_keeps_each_member_s_components(tmp_path: Path, fmt: s
     torch.testing.assert_close(stack_members(torch.from_numpy(data), header), members, rtol=0, atol=1e-6)
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+def test_folded_checkpoint_labels_are_saved_as_labels_and_voted(tmp_path: Path, streamed: bool) -> None:
+    labels = torch.tensor([[[[2, 5]]], [[[3, 5]]], [[[3, 2]]]], dtype=torch.uint8)
+    stack = InferenceStack(dataset=f"{tmp_path}:mha", mode="labels")
+    arguments = ("P000", labels.unsqueeze(0))
+    if streamed:
+        result = stack.stream_slab(*arguments, slice(0, 1), [1, 1, 2], _attributes())
+    else:
+        result = stack(*arguments, _attributes())
+
+    torch.testing.assert_close(result, torch.tensor([[[[3, 5]]]], dtype=torch.uint8))
+    data, header = Dataset(str(tmp_path), "mha").read_data("InferenceStack", "P000")
+    assert int(header[MEMBERS_ATTRIBUTE]) == 3
+    np.testing.assert_array_equal(data, labels.numpy())
+
+
 def test_the_spread_of_a_stack_of_fields_is_the_spread_of_its_vectors() -> None:
     """StandardDeviation then Magnitude: the per-component standard deviation across the members, then its norm, the
     root mean square distance of the members to their mean vector (N - 1). Two members that agree in length but not in

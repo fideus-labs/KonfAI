@@ -1936,6 +1936,26 @@ def _prediction(
     }
 
 
+def test_portable_export_uses_standard_prediction_for_compact_label_stacks() -> None:
+    from konfai.portable import _portable_prediction_config
+
+    output = {
+        "after_reduction_transforms": {"InferenceStack": {"mode": "labels"}},
+        "reduction": "Concat",
+        "Concat": {},
+    }
+    config = _prediction({}, output, combine="Concat")
+    standard = _portable_prediction_config(config, "Predictor")["Predictor"]
+    assert standard["combine"] == "Mean"
+    resolved = standard["outputs_dataset"]["H"]["OutputDataset"]
+    assert resolved["after_reduction_transforms"] == {} and resolved["reduction"] == "Mean"
+    assert "Concat" not in resolved
+    assert config["Predictor"]["combine"] == "Concat"
+
+    output["after_reduction_transforms"]["InferenceStack"]["mode"] = "Seg"
+    assert _portable_prediction_config(config, "Predictor") is config
+
+
 _MASK = {"Mask": {"path": "MASK", "value_outside": -1024}}
 _STACK = {"InferenceStack": {"mode": "mean"}}
 
