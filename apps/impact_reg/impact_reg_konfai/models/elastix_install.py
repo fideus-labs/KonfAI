@@ -58,16 +58,16 @@ ELX_ASSET_TEMPLATE = {
 #: The sha256 GitHub publishes for each asset of GITHUB_TAG, a prerelease: an archive that differs is refused rather
 #: than run.
 ASSET_SHA256 = {
-    "elastix-impact-linux-x86_64-cpu.zip": "9078f7b2e1ee073f45395df5e056ccce4138efbd1ee6bff38ab900f0066ab1a0",
-    "elastix-impact-linux-x86_64-cu128.zip": "0dd030f0c6b3cf06e6dfbeeeb9048d30d317287edc8b52d6e5ad69afe4b6be54",
-    "elastix-impact-linux-x86_64-cu130.zip": "81605bf0fd54d04830d260c1424b10d9c27aea267016fa1188b84c33db2fef8b",
-    "elastix-impact-windows-x86_64-cpu.zip": "b708906dd90c552423262c725f90bcdebb5b08d260c3b95914217ed6ba5d1743",
-    "elastix-impact-windows-x86_64-cu128.zip": "833b9df65dfb1ca90a109e4ef142d5be1fc6b59e577c548c0b39f45fc11abda7",
-    "elastix-impact-windows-x86_64-cu130.zip": "98d644927074bb3678a73cfd77d06a8a4d8a94f3bc88690594fcbfb5dd374c27",
-    "elastix-impact-macos-arm64-cpu.zip": "347866a8ea1756e04823bfb7ac4b023a2b3796fb51c23b9dd1f35b3ec91f89ce",
+    "elastix-impact-linux-x86_64-cpu.zip": "f60b02cd17282172a313a1bcb9c6f0a7662c3104bc7ea37d105398abc7d9ab52",
+    "elastix-impact-linux-x86_64-cu128.zip": "7b455ac8e202d96844d10c98918b94f0a53882fc89368ad0aec578c00bb17c46",
+    "elastix-impact-linux-x86_64-cu130.zip": "a6ab5a7910d599eddaa251b0f586a3884b550e60d6356353784cf197e0aa55c2",
+    "elastix-impact-windows-x86_64-cpu.zip": "284a38314dd3d65974559bc0e27751ff1fd67836f9cecd1ba1dacbc24a38a679",
+    "elastix-impact-windows-x86_64-cu128.zip": "2f8234f85a320d3875b51dfff5c5756861b49f9c98ed3413999e6725edd49fae",
+    "elastix-impact-windows-x86_64-cu130.zip": "ca9de2fe341767997085c7d55c4e685b21aad529764391cd85366e3d9e2b79c8",
+    "elastix-impact-macos-arm64-cpu.zip": "5dcbeeade06a14a60bcb8f16d85a4070da7d59820e1ae0ab4dfc4cbf7a7ee5e5",
 }
 
-#: The LibTorch each flavor of GITHUB_TAG was built against (the release notes of ImpactElastix 1.1.0). LibTorch
+#: The LibTorch each flavor of GITHUB_TAG was built against (the release notes of ImpactElastix 1.2.0). LibTorch
 #: keeps no ABI across minor versions, so a binary loads against the pip torch of that major.minor only.
 ASSET_LIBTORCH = {"cpu": "2.11.0", "cu128": "2.11.0", "cu130": "2.12.1"}
 
@@ -94,7 +94,7 @@ CUDA128_MIN_DRIVER_WINDOWS = CUDA_MIN_DRIVER["cu128"]["Windows"]
 
 GITHUB_OWNER = "vboussot"
 GITHUB_REPO = "ImpactElastix"
-GITHUB_TAG = "1.1.0"
+GITHUB_TAG = "1.2.0"
 
 
 DEFAULT_PREFIX = Path.cwd() / "elastix-impact"
