@@ -747,7 +747,9 @@ def _patches(image: torch.Tensor, centres: torch.Tensor, patch: int) -> torch.Te
 def _spacing(shape: tuple[int, ...], extent: list[float] | None) -> tuple[torch.Tensor, torch.Tensor]:
     """The voxels' count and side in mm along (L, P, S), a missing ``extent`` counting one mm a voxel."""
     size = torch.tensor(list(reversed(shape)), dtype=torch.float64)
-    return size, torch.tensor(extent, dtype=torch.float64) / size if extent is not None else torch.ones(3).double()
+    return size, torch.tensor(extent, dtype=torch.float64) / size if extent is not None else torch.ones(
+        len(shape)
+    ).double()
 
 
 def _plane_grids(
@@ -790,15 +792,16 @@ def _plane_grids(
 def _cube_grids(
     centres: torch.Tensor, patch: int, shape: tuple[int, ...], extent: list[float] | None, voxel_size: list[float]
 ) -> torch.Tensor:
-    """For a 3D network with a ``voxel_size``, the ``patch`` cube each of ``centres`` [n, 3] is cut on, one step that
-    voxel_size (mm, ITK order x y z) along each axis, as grid_sample coordinates [n, patch, patch, patch, 3]
-    (align_corners, ``x, y, z`` = L, P, S): elastix's patch at the model's resolution."""
+    """For a network with a ``voxel_size`` run on an image of its own dimension, the ``patch`` cube (a square on a
+    plane) each of ``centres`` [n, dims] is cut on, one step that voxel_size (mm, ITK order) along each axis, as
+    grid_sample coordinates [n, patch, ..., dims] (align_corners, ITK order): elastix's patch at the model's
+    resolution."""
     size, spacing = _spacing(shape, extent)
     ticks = torch.arange(patch, dtype=torch.float64) - (patch - 1) / 2
-    step = torch.tensor(voxel_size, dtype=torch.float64) / spacing  # voxels of the image per model voxel, (L, P, S)
-    along_s, along_p, along_l = torch.meshgrid(ticks * step[2], ticks * step[1], ticks * step[0], indexing="ij")
-    offsets = torch.stack([along_l, along_p, along_s], dim=-1)  # [patch, patch, patch, 3] in (L, P, S) voxels
-    index = centres.detach().cpu().flip(1).double()[:, None, None, None, :] + offsets[None]
+    step = torch.tensor(voxel_size, dtype=torch.float64) / spacing  # voxels of the image per model voxel, ITK order
+    along = torch.meshgrid(*(ticks * step[axis] for axis in reversed(range(len(shape)))), indexing="ij")
+    offsets = torch.stack(along[::-1], dim=-1)  # [patch, ..., dims] in voxels, ITK order
+    index = centres.detach().cpu().flip(1).double()[(slice(None), *[None] * len(shape))] + offsets[None]
     return (2 * index / (size - 1) - 1).float().to(centres.device)
 
 
@@ -807,7 +810,8 @@ def _grid_patches(image: torch.Tensor, grids: torch.Tensor) -> torch.Tensor:
     or [n, C, patch, patch, patch] for a cube (``_cube_grids``): trilinear, so the gradient flows back to the image;
     outside the image, zeros."""
     count, *sides = grids.shape[:-1]
-    flat = grids.reshape(1, count * sides[0], *sides[1:], 3) if len(sides) == 3 else grids[None]
+    cube = len(sides) == grids.shape[-1]  # a grid of the image's own dimension, else a plane's in a volume
+    flat = grids.reshape(1, count * sides[0], *sides[1:], grids.shape[-1]) if cube else grids[None]
     sampled = F.grid_sample(image, flat.to(image.dtype), mode="bilinear", padding_mode="zeros", align_corners=True)
     return sampled[0].reshape(image.shape[1], count, *sides).movedim(1, 0)
 

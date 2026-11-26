@@ -483,6 +483,18 @@ def test_a_2d_network_samples_its_points_in_float16_as_in_float32(monkeypatch: p
     assert torch.allclose(features[1], features[0], atol=1e-2)
 
 
+def test_a_2d_network_samples_a_plane_at_its_voxel_size() -> None:
+    # A 2-D pair's points went to the 3-D cube helper, which read a third voxel_size value a 2-D network has not.
+    model = _stub_model(_Planar(), [1.0])
+    model.dim, model.planes = 2, True
+    plane = torch.rand(1, 1, 20, 24, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6], [10, 12], [14, 3]])
+    ((native, _),) = model.sampled(plane, plane, centres, 5)
+    model.voxel_size = [1.0, 1.0]  # the image's own voxels: the same patches, read on a grid
+    ((sized, _),) = model.sampled(plane, plane, centres, 5)
+    assert torch.allclose(sized, native, atol=1e-5)
+
+
 def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
     # Padded up to its input multiple, the whole image is normalised over its own voxels, as its blocks are: the two
     # routes give the same features.
