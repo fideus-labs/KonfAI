@@ -213,7 +213,11 @@ def _box_on_model_grid(
         last = max(first, last - (cells - last) % stride)
         position = torch.arange(first, last, dtype=torch.float64) * voxels / cells
         axes.append(2 * (position - a) / max(b - a - 1, 1) - 1)
-        nearest.append((torch.floor(position + 0.5).long() - a).clamp(0, b - a))  # b - a: past the level's end
+        # The voxel the whole level's nearest resampling picks: its float32 grid coordinate brought back to an index
+        # as grid_sample does, and rounded half to even; b - a: past the level's end.
+        whole = (2 * position / max(voxels - 1, 1) - 1).float()
+        index = torch.round((whole + 1) / 2 * (voxels - 1)).long()
+        nearest.append((index - a).clamp(0, b - a))
     coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij")[::-1], dim=-1)[None]
 
     def sample(tensor: torch.Tensor) -> torch.Tensor:
