@@ -664,7 +664,9 @@ class ConvexAdamEngine:
             grid beside it, from where the filter keeps it (a mapped file past the device's budget), and the starting
             translation added to both."""
             _write_streamed(output, field, fixed_image)
-            control_grid = field.with_name("ControlGrid.mha")
+            # Apart from the field, whatever the field is named (an output group may be ControlGrid).
+            control_grid = field.parent / "control" / "ControlGrid.mha"
+            control_grid.parent.mkdir(exist_ok=True)
             itk.imwrite(grid, str(control_grid))
             if shift is not None:
                 from ..native import shift_field

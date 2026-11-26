@@ -1101,6 +1101,13 @@ def _numpy_axes(dims: Sequence[int], ndim: int) -> tuple[int, ...]:
     return tuple(dim - 1 - (3 - ndim) for dim in dims if dim - 1 - (3 - ndim) >= 0)
 
 
+def _plane_field(field: Path) -> Path:
+    """Where a plane's 2-D field is written before ``_lift_plane`` lifts it to ``field``: a folder of its own beside
+    it, whatever the output group names ``field``."""
+    (field.parent / "plane").mkdir(parents=True, exist_ok=True)
+    return field.parent / "plane" / "field.mha"
+
+
 def _mirrored_views(run: "_SampledRun", index: int, mirror: Sequence[int]) -> list[int]:
     """The axes of case ``index``'s twins (the fixed image's view, ``maps``) a test-time copy reverses: the fixed
     image's own axes the tensor dims ``mirror`` name, as the predictor flips a pair it holds on the fixed grid."""
@@ -2336,13 +2343,13 @@ class ImpactRegKonfAIApp:
                 run.device_index,
                 region_size,
                 visits,
-                fields[case] if plane is None else fields[case].with_name("plane.mha"),
+                fields[case] if plane is None else _plane_field(fields[case]),
                 samples=samples,
             )
             compact[case] = [result.control_grid]
             if plane is not None:  # a plane's transform is written as its field, as a plane registered whole
                 compact[case] = []
-                self._lift_plane(fields[case].with_name("plane.mha"), fields[case], volume, plane[0], plane[1])
+                self._lift_plane(_plane_field(fields[case]), fields[case], volume, plane[0], plane[1])
             self._ran[f"{run.preset}_regions_{case}"] = {
                 "resident_features": result.resident,
                 "iterations": result.iterations,
@@ -2465,7 +2472,7 @@ class ImpactRegKonfAIApp:
                 fields[case] = write_field(out / f"{run.output_group}.mha", fixed, transform)
             else:  # a plane's transform is written as its field, as a plane registered whole
                 compact[case] = []
-                flat = write_field(out / "plane.mha", fixed, transform)
+                flat = write_field(_plane_field(out / f"{run.output_group}.mha"), fixed, transform)
                 fields[case] = self._lift_plane(flat, out / f"{run.output_group}.mha", volume, plane[0], plane[1])
             shutil.rmtree(out / "elastix", ignore_errors=True)
             self._ran[f"{run.preset}_mapped_{case}"] = {"seconds": round(seconds, 1), "sampled_voxels": voxels}

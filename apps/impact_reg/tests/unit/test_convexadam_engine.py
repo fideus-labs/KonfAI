@@ -609,10 +609,11 @@ def test_the_coarse_stage_alone_writes_by_regions_the_field_of_the_whole_run(tmp
         )
         twins.append(write_twin(Dataset(root, backend), name, "P000", tmp_path / f"{name}.h5", dtype="float32"))
 
-    result = engine.refine_by_regions(*twins, None, None, -1, 16, 3, tmp_path / "DVF.mha")
+    # A field named as the control grid is (an output group may be ControlGrid) keeps its own file.
+    result = engine.refine_by_regions(*twins, None, None, -1, 16, 3, tmp_path / "ControlGrid.mha")
 
     by_regions = np.moveaxis(sitk.GetArrayFromImage(sitk.ReadImage(str(result.field))), -1, 0)
-    assert result.iterations == 0 and result.control_grid.exists()
+    assert result.iterations == 0 and result.control_grid.exists() and result.control_grid != result.field
     assert np.allclose(by_regions, engine.register(fixed, moving, -1), atol=1e-3)
 
 

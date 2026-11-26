@@ -223,8 +223,9 @@ def test_sampled_mode_runs_elastix_on_the_twins_with_its_images_mapped(
     assert np.allclose(transform.TransformPoint((0.0, 0.0, 0.0)), (2.0, -4.0, 1.0))
 
 
+@pytest.mark.parametrize("group", ["DVF", "plane"])  # "plane": the name of no intermediate
 def test_sampled_elastix_registers_a_volume_one_voxel_thick_as_its_plane(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, group: str
 ) -> None:
     """A fixed volume one voxel thick is registered as its plane, as a run on the whole pair registers it: elastix
     gets the 2-D twins of the fixed plane and of the moving image's first slice, measured in the plane's finest voxel,
@@ -260,14 +261,14 @@ def test_sampled_elastix_registers_a_volume_one_voxel_thick_as_its_plane(
     monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
     config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
     config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
-    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": group}}}
     monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
     reg.ImpactRegKonfAIApp().register(
         ["Elx"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", fields_only=True
     )
     assert seen["size"] == (10, 9) and seen["spacing"] == (1.0, 2.0) and seen["voxels"] == 90
     assert np.allclose(seen["moving"], arrays["moving"][0])  # the moving image's first slice
-    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha"))
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / f"{group}.mha"))
     assert field.GetSize() == (10, 9, 1) and field.GetSpacing() == (2.0, 4.0, 0.5)
     assert np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.5))  # the plane's (dx, dy), then the z shift
     assert not (tmp_path / "out" / "P000" / "Elx_Transform.h5").exists()  # a plane's transform is its field
@@ -352,8 +353,9 @@ def test_an_oblique_plane_registers_in_its_own_frame_whole_and_by_boxes(
     np.testing.assert_allclose(found.reshape(-1, 3).mean(0), expected, atol=1e-3)
 
 
+@pytest.mark.parametrize("group", ["DVF", "plane"])  # "plane": the name of no intermediate
 def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
-    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, group: str
 ) -> None:
     """ConvexAdam by regions takes a fixed volume one voxel thick as its plane too: chunked 2-D twins of the fixed
     plane and of the moving image's first slice, in the plane's finest voxel, and the field lifted one voxel thick."""
@@ -395,13 +397,13 @@ def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
     monkeypatch.setattr(intensity, "engine_of", lambda *args: Engine())
     monkeypatch.setattr(convexadam, "require_regions", lambda: None)
     config = json.loads((presets / "Convex" / "Prediction.yml").read_text(encoding="utf-8"))
-    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": group}}}
     monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
     reg.ImpactRegKonfAIApp().register(
         ["Convex"], [paths[0]], [paths[1]], output=tmp_path / "out", out_of_core="sampled", fields_only=True
     )
     assert seen["fixed"] == ".h5" and seen["size"] == (9, 10) and seen["spacing"] == (1.0, 2.0)
-    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha"))
+    field = sitk.ReadImage(str(tmp_path / "out" / "P000" / f"{group}.mha"))
     assert field.GetSize() == (10, 9, 1) and np.allclose(sitk.GetArrayFromImage(field), (2.0, -4.0, 1.5))
     assert not list((tmp_path / "out" / "P000").glob("*ControlGrid*"))  # a plane's transform is its field
 
