@@ -457,6 +457,32 @@ def test_a_plane_is_sampled_at_its_points_as_it_is_read_whole() -> None:
     assert torch.allclose(moved[0], expected, atol=1e-5) and torch.allclose(fixed[0], expected, atol=1e-5)
 
 
+class _Planar(torch.nn.Module):
+    """A 2-D convolution of 3 pixels a side, padded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def forward(self, tile, nb_layers, stats, direction=None) -> list[torch.Tensor]:
+        return [self.conv(tile)]
+
+
+def test_a_2d_network_samples_its_points_in_float16_as_in_float32(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Its patches went into the network cast to float16 as they came, in float32.
+    volume = torch.rand(1, 1, 12, 14, 16, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6, 7], [8, 4, 10]])
+    features = []
+    for half in (False, True):
+        model = _stub_model(_Planar(), [1.0])
+        model.dim = 2
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        ((moved, _),) = model.sampled(volume, volume, centres, 5, seed=3)
+        features.append(moved)
+    assert torch.allclose(features[1], features[0], atol=1e-2)
+
+
 def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
     # Padded up to its input multiple, the whole image is normalised over its own voxels, as its blocks are: the two
     # routes give the same features.

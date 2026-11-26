@@ -1315,6 +1315,7 @@ class ImpactFeatureModel:
         network, grids = self.network(moved.device), None
         if self.dim == 2 and not self.planes:
             network = cast(torch.nn.Module, self.model)  # the network itself: one plane per point, not a sweep
+            network = _HalfNetwork(network) if self._half(moved.device) else network
             grids = _plane_grids(centres, patch, tuple(moved.shape[2:]), extent, seed, self.voxel_size)
         elif self.voxel_size is not None:
             grids = _cube_grids(centres, patch, tuple(moved.shape[2:]), extent, self.voxel_size)
