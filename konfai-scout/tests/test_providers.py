@@ -4,7 +4,6 @@
 import base64
 import copy
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -49,16 +48,18 @@ class FakeAnthropic:
         return Response(self.responses.pop(0))
 
 
-def http_response(status: int) -> SimpleNamespace:
-    """What the SDKs' errors read of a response, whichever HTTP library the installed SDK uses."""
-    return SimpleNamespace(status_code=status, headers={}, request=SimpleNamespace(method="POST", url="http://api"))
+def http_response(sdk, status: int):
+    """A response of the HTTP library the installed SDK reads its errors from: httpx, or httpx2 from openai 3 and
+    anthropic 2 on."""
+    http = getattr(sdk._exceptions, "httpx2", None) or sdk._exceptions.httpx
+    return http.Response(status, request=http.Request("POST", "http://api"))
 
 
 def anthropic_error(status: int, type_: str = "api_error"):
     import anthropic
 
     cls = {429: anthropic.RateLimitError, 500: anthropic.InternalServerError, 400: anthropic.BadRequestError}[status]
-    return cls("boom", response=http_response(status), body={"error": {"type": type_}})
+    return cls("boom", response=http_response(anthropic, status), body={"error": {"type": type_}})
 
 
 def test_anthropic_request_shape_and_parsing():
@@ -190,7 +191,7 @@ def test_openai_request_shape_and_parsing():
 def test_openai_errors_and_locality():
     import openai
 
-    response = http_response(429)
+    response = http_response(openai, 429)
     provider = OpenAIProvider(
         "m", client=FakeOpenAI([], error=openai.RateLimitError("rl", response=response, body=None))
     )
@@ -230,7 +231,7 @@ def test_the_privacy_gate():
 def test_a_retried_turn_is_sent_once():
     import openai
 
-    rate_limited = openai.RateLimitError("rl", response=http_response(429), body=None)
+    rate_limited = openai.RateLimitError("rl", response=http_response(openai, 429), body=None)
     anthropic_ok = {"stop_reason": "end_turn", "content": [], "usage": {}}
     openai_ok = {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "x"}}], "usage": {}}
     for make, fake in (
