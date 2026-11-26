@@ -99,7 +99,7 @@ These work on a stack of ensemble members (prediction post-processing).
 
 | Name | Purpose | Key arguments | Shape | Stream |
 | --- | --- | --- | --- | --- |
-| `InferenceStack` | Write the stack of members. Modes `mean`, `median`, and `Seg` reduce scores. Mode `labels` takes one label channel per checkpoint and returns the majority label. | `dataset=None, name=None, mode="mean"` | no | no |
+| `InferenceStack` | Write the stack of members; return their mean or median (`mode`: `mean`, `median`, `Seg`). | `dataset=None, name=None, mode="mean"` | no | no |
 | `Variance`, `StandardDeviation` | Per-voxel variance or standard deviation over the members. | | no † | yes |
 | `SegmentationDisagreement` | Per-voxel disagreement between segmentations. | `ignore_background=False` | no † | yes |
 | `Magnitude` | Vector magnitude over the channels (a displacement field). | | no † | yes |

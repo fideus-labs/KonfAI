@@ -1053,15 +1053,50 @@ class LocalAppRepository(AppRepositoryInfo):
             yaml.dump(data, file)
 
     def _disable_uncertainty(self, inference_file_path: str) -> None:
-        from konfai.data.transform.ensemble import disable_inference_stack
+        from konfai.data.transform import InferenceStack
+        from konfai.utils.errors import KonfAIError
+        from konfai.utils.utils import get_module
 
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
 
-        if disable_inference_stack(data["Predictor"]):
-            with open(inference_file_path, "w") as file:
-                yaml.dump(data, file)
+        predictor = data["Predictor"]
+        outputs = predictor["outputs_dataset"]
+
+        # A chain is a mapping keyed by stage, a list of one-stage entries, or absent (null, "None"), as core
+        # reads it; a key names its class as core resolves it (`InferenceStack#2`, a module-qualified name).
+        def is_stack(entry: Any) -> bool:
+            try:
+                module, name = get_module(
+                    entry if isinstance(entry, str) else next(iter(entry)), "konfai.data.transform"
+                )
+            except (ImportError, KonfAIError):
+                return False  # a stage that does not import is not KonfAI's InferenceStack
+            return getattr(module, name, None) is InferenceStack
+
+        def without_stack(chain: Any) -> Any:
+            if isinstance(chain, list):
+                return [entry for entry in chain if not is_stack(entry)]
+            if isinstance(chain, dict):
+                return {name: kwargs for name, kwargs in chain.items() if not is_stack(name)}
+            return chain
+
+        chains = [value["OutputDataset"].get("after_reduction_transforms") for value in outputs.values()]
+        if all(without_stack(chain) == chain for chain in chains):
+            return
+
+        predictor["combine"] = "Mean"
+        for value in outputs.values():
+            output = value["OutputDataset"]
+            # The replaced operator's argument block would be a key nothing reads once Mean replaces it.
+            if output.get("reduction") != "Mean":
+                output.pop(output.get("reduction"), None)
+            output["reduction"] = "Mean"
+            output["after_reduction_transforms"] = without_stack(output.get("after_reduction_transforms"))
+
+        with open(inference_file_path, "w") as file:
+            yaml.dump(data, file)
 
     def _set_patch_size_and_batch_size(
         self,
@@ -1703,8 +1738,13 @@ class LocalAppRepository(AppRepositoryInfo):
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
 
+        source_config = prediction_file
+        if uncertainty and prediction_file == "Prediction.yml":
+            alternate = "Prediction_uncertainty.yml"
+            if self._find_repo_filename(alternate, self._all_repo_filenames()) is not None:
+                source_config = alternate
         models_path, inference_file_path, codes_path = self.download_inference(
-            number_of_model, name_of_models, prediction_file
+            number_of_model, name_of_models, source_config
         )
         # Copy every bundle asset into the workspace first, then write (and tweak) the prediction config
         # last so its modifications are never clobbered by a raw copy of the same file.

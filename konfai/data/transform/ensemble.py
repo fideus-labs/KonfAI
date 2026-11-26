@@ -24,7 +24,6 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from konfai.data.reduction import Vote
 from konfai.data.transform.base import _RANK_CHANGE, LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import (
     AFFINE_ATTRIBUTE,
@@ -34,8 +33,8 @@ from konfai.utils.dataset import (
     Dataset,
     DataStream,
 )
-from konfai.utils.errors import KonfAIError, TransformError
-from konfai.utils.utils import get_module, split_path_spec
+from konfai.utils.errors import TransformError
+from konfai.utils.utils import split_path_spec
 
 #: The header key of a stack: how many members it holds. A stack is one volume whose channels are its members'
 #: channels, member-major (``[M x C, *spatial]``), so one member of ``C`` channels is ``C`` consecutive channels.
@@ -302,9 +301,9 @@ class InferenceStack(Transform):
 
     def __init__(self, dataset: str | None = None, name: str | None = None, mode: str = "mean"):
         super().__init__()
-        if mode not in ("mean", "median", "Seg", "labels"):
+        if mode not in ("mean", "median", "Seg"):
             raise TransformError(
-                f"InferenceStack mode '{mode}' is unknown.", "Set mode to mean, median, Seg or labels."
+                f"InferenceStack mode '{mode}' is unknown.", "Set mode to 'mean', 'median' or 'Seg' (spelled so)."
             )
         self.dataset = None
         if dataset:
@@ -312,8 +311,6 @@ class InferenceStack(Transform):
             self.dataset = Dataset(filename, file_format)
         self.name = name
         self.mode = mode
-        if mode == "labels":
-            self.working_multiple = Vote.working_multiple
         self._stack_sinks: dict[str, DataStream] = {}
         self._stack_buffers: dict[str, list[np.ndarray]] = {}
 
@@ -332,15 +329,11 @@ class InferenceStack(Transform):
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         """The members ``[M, C, *spatial]`` as a stack: member-major channels ``[M x C, *spatial]``; a label map per
         member in ``Seg`` mode, kept integer: a reader tells a stack of labels from one of probabilities by its type."""
-        if self.mode == "labels":
-            return tensors[:, 0].cpu().numpy()
         if self.mode == "Seg":  # a softmax keeps the order it is taken of
             return torch.argmax(tensors, dim=1).to(torch.uint8).cpu().numpy()
         return tensors.reshape(tensors.shape[0] * tensors.shape[1], *tensors.shape[2:]).float().cpu().numpy()
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
-        if self.mode == "labels":
-            return Vote()(list(tensors.unbind(0)))
         if self.mode != "median":
             return tensors.mean(0, dtype=torch.float32).to(tensors.dtype)
         # A median selects, so the stack is widened only where torch has no median kernel.
@@ -349,12 +342,7 @@ class InferenceStack(Transform):
         except NotImplementedError:
             return torch.median(tensors.float(), dim=0).values.to(tensors.dtype)
 
-    def _members(self, tensors: torch.Tensor) -> torch.Tensor:
-        # A label-valued patch fold leaves one channel per checkpoint, under each test-time copy.
-        return tensors.flatten(0, 1).unsqueeze(1) if self.mode == "labels" else tensors
-
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        tensors = self._members(tensors)
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
         dataset = self._destination()
@@ -368,7 +356,7 @@ class InferenceStack(Transform):
     @property
     def folds_copies(self) -> bool:
         """Whether :meth:`fold_copies` can stand for the call: a median needs every member at once."""
-        return self.mode not in ("median", "labels")
+        return self.mode != "median"
 
     def fold_copies(
         self, name: str, copies: Iterable[torch.Tensor], count: int, cache_attribute: Attribute
@@ -425,7 +413,6 @@ class InferenceStack(Transform):
         """The whole-volume call, region by region: reduce the members per voxel and write the slab's
         rows of the per-member stack into a region sink opened at the first slab. A destination that
         cannot serve region writes buffers until the last slab."""
-        tensor = self._members(tensor)
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)
@@ -457,42 +444,3 @@ class InferenceStack(Transform):
         if sink is not None:
             # Abort, not close: finalizing would publish the partial stack under its final name.
             sink.abort()
-
-
-def disable_inference_stack(predictor: dict[str, Any], *, labels_only: bool = False) -> bool:
-    """Prepare an inference without a stack. The portable runtime uses this for compact label stacks."""
-    outputs = [value["OutputDataset"] for value in predictor.get("outputs_dataset", {}).values()]
-    found: list[str] = []
-
-    def is_stack(name: str, params: Any) -> bool:
-        try:
-            module, name = get_module(name, "konfai.data.transform")
-        except (ImportError, KonfAIError):
-            return False
-        if getattr(module, name, None) is not InferenceStack:
-            return False
-        found.append(params.get("mode", "mean") if isinstance(params, dict) else "mean")
-        return True
-
-    def without_stack(chain: Any) -> Any:
-        if isinstance(chain, list):
-            return [
-                entry
-                for entry in chain
-                if not (is_stack(entry, None) if isinstance(entry, str) else is_stack(*next(iter(entry.items()))))
-            ]
-        if isinstance(chain, dict):
-            return {name: params for name, params in chain.items() if not is_stack(name, params)}
-        return chain
-
-    chains = [without_stack(output.get("after_reduction_transforms")) for output in outputs]
-    if not found or (labels_only and any(mode != "labels" for mode in found)):
-        return False
-
-    predictor["combine"] = "Mean"
-    for output, chain in zip(outputs, chains, strict=True):
-        if output.get("reduction") != "Mean":
-            output.pop(output.get("reduction"), None)
-        output["reduction"] = "Mean"
-        output["after_reduction_transforms"] = chain
-    return True
