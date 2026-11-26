@@ -40,7 +40,8 @@ scale/translation stores still read.
 
 #### KonfAI Edge manifests at version 5
 
-An exported model's manifest is keyed `konfai_edge_manifest`, must be the current version, 5, and states
+An exported model's manifest is keyed `konfai_edge_manifest`, at version 5, or 6 for a model that blends by
+`GaussianFloat16` or by a patch combine of the app's extension (a runtime reading 5 alone refuses it), and states
 `patch.placement` (and `patch.stride` under `end` and `spread`). A manifest or a program exported before this
 version is refused: export the model again with this version (`konfai-apps bundle --onnx`).
 konfai-apps' `export_onnx_into_bundle` is replaced by `export_portable_into_bundle`. Studio's Deploy pane no longer
@@ -215,7 +216,7 @@ features unchanged.
   another machine of your network. konfai-mcp runs it (`konfai-mcp[scout]`, `run_scout_inspection(depth=...)`) and
   Studio shows its report. On 70 defects planted in held-out public images (ISLES 2022, Yale brain metastases, SynthRAD
   2023) and 22 clean controls, Scout at `standard` with Claude through Claude Code found 61 of 70 and called no clean
-  control defective, in 49 s and $0.19 a case; `examples/benchmark.py` reproduces it.
+  control defective, in 49 s and $0.19 a case.
 - scout: a view can be framed on a lead by its id: `zoom` and `box_mm` take it, and the view shows the lead with 1.3
   times its box around it, 100 mm at the least, the slice going through it. `--max-context-tokens`
   (`max_context_tokens`) gives a local model's window: the model is told to conclude before a request overflows it.
@@ -310,7 +311,8 @@ features unchanged.
   ConvexAdam through itk-impact 0.2.2, FireANTs box by box with its warps on the device, in host memory or in files.
   `--out-of-core auto`, the default, registers a pair whole where it fits and by boxes where it does not, case by
   case; `--samples`, `--region-size` and `--epochs` set the sampled mode. One-slice and oblique planes, `--seed`,
-  `--output-format`, `--host` and `--tta` work on every route.
+  `--output-format`, `--host` and `--tta` work on every route; by boxes, `--tta` refuses a moving image with no axis
+  along a mirrored axis of the fixed one.
 - measure: a network run in float16 with gradients scales them so they neither underflow nor overflow; the Static
   IMPACT presets run their networks in float16.
 - apps: `POST /apps/{app}/run` runs a runner an installed package declares (entry point `konfai_apps.runners`), as
