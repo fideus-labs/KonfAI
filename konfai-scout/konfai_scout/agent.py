@@ -86,6 +86,8 @@ class BudgetState:
     calls: int = 0
     images: int = 0
     tokens: int = 0
+    #: The tokens of the last request, its question and its answer: what the model's context holds.
+    context: int = 0
     usd: float = 0.0
     #: The cost of the request in flight, as a provider that runs the tool loop reports it message by message.
     running_usd: float = 0.0
@@ -98,6 +100,8 @@ class BudgetState:
             return f"{self.images} images (limit {budget.max_images})"
         if budget.max_seconds is not None and time.time() - self.started >= budget.max_seconds:
             return f"{time.time() - self.started:.0f} s (limit {budget.max_seconds:.0f} s)"
+        if budget.max_context_tokens is not None and self.context >= budget.max_context_tokens:
+            return f"{self.context} tokens of context (limit {budget.max_context_tokens})"
         if budget.max_usd is not None and self.usd + self.running_usd >= budget.max_usd:
             return f"${self.usd + self.running_usd:.3f} (limit ${budget.max_usd:.2f})"
         return None
@@ -168,7 +172,9 @@ class Inspector:
         # what the inspector looked at, before the second reader renders its own crops
         self.lead_views = {lead.id: self.toolbox.lead_views(lead) for lead in self.toolbox.leads}
         if self.config.second_reading and self.error is None:
+            context = self.budget.context  # the reader's fresh session is not the inspection's context
             self._second_reading()
+            self.budget.context = context
         return self._finish()
 
     def _start(self, card: str, images: list[ImageContent]) -> Turn:
@@ -253,6 +259,14 @@ class Inspector:
         self.usage.cache_read_tokens += turn.usage.cache_read_tokens
         self.usage.cache_write_tokens += turn.usage.cache_write_tokens
         self.budget.tokens = self.usage.input_tokens + self.usage.output_tokens
+        self.budget.context = sum(  # a prompt read from or written to a cache is in the context all the same
+            (
+                turn.usage.input_tokens,
+                turn.usage.cache_read_tokens,
+                turn.usage.cache_write_tokens,
+                turn.usage.output_tokens,
+            )
+        )
         cost = cost_usd(turn.usage, self.price)
         if cost is not None:
             self.budget.usd += cost

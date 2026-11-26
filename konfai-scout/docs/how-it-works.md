@@ -72,7 +72,7 @@ a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
 The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
 flagged box are the same at every depth.
 
-`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
+`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd`, `--max-context-tokens` bound an inspection; when a limit is reached the
 model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
 call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
 never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
