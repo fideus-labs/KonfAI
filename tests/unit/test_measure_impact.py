@@ -470,6 +470,20 @@ def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
     assert torch.allclose(whole, gathered, atol=1e-5)
 
 
+def test_a_half_network_s_blocks_are_normalised_as_the_whole_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    # In float16 the normalisations went unseen: every block was normalised by its own statistics, not the image's.
+    image = torch.rand(1, 1, 24, 20, 18, generator=torch.Generator().manual_seed(2)) * torch.linspace(1, 3, 18)
+    statistics = impact._statistics(image)[0]
+    blocks = []
+    for half in (False, True):
+        model = _stub_model(_InstanceNormed(), [1.0])
+        model.fov = [3]
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        assert len(model.norms(lambda model=model: impact._blocks(image, 8, 4), statistics)) == 1
+        blocks.append(model.volume(image, patch=12, statistics=statistics)[0])
+    assert torch.allclose(blocks[1], blocks[0], atol=1e-2)
+
+
 def test_the_normalisations_of_a_tiled_volume_are_gathered_on_their_stride(monkeypatch: pytest.MonkeyPatch) -> None:
     # Blocks of 9 would start the second one on an odd voxel, its cells of 2 then not the whole image's: the pass
     # that gathers the normalisations takes its blocks and halos on their stride.

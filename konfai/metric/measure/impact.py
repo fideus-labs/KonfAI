@@ -607,6 +607,10 @@ class _HalfNetwork(torch.nn.Module):
     def __init__(self, network: torch.nn.Module) -> None:
         super().__init__()
         self.network = network
+        if hasattr(network, "norm_count"):  # its normalisations, read in float16 as the network runs them
+            norm_input = cast(Callable[..., torch.Tensor], network.norm_input)
+            self.norm_count = network.norm_count
+            self.norm_input = lambda tensor, *rest: norm_input(tensor.half(), *rest).float()
 
     def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
         if not (torch.is_grad_enabled() and image.requires_grad):
