@@ -149,6 +149,10 @@ def _extent_hint(captured: list[str], maps: list[Path], image: sitk.Image) -> st
     )
 
 
+#: The elastix image samplers that draw ``NumberOfSpatialSamples`` points; Full and Grid read no count.
+_COUNTED_SAMPLERS = {"Random", "RandomCoordinate", "RandomSparseMask", "MultiInputRandomCoordinate"}
+
+
 class ElastixEngine:
     """Run the elastix-IMPACT binary on a fixed/moving pair; return the displacement field on the fixed grid.
 
@@ -308,6 +312,7 @@ class ElastixEngine:
         # An entry may be followed by a '// comment'.
         entry_pattern = re.compile(r"^(\s*)\((\S+)((?:\s+[^)]*)?)\)\s*(?://.*)?$")
         seen: set[str] = set()
+        samplers: set[str] = set()  # the ImageSampler of each resolution, as the map ends up naming it
         lines = []
         for line in text.splitlines():
             match = entry_pattern.match(line)
@@ -330,12 +335,21 @@ class ElastixEngine:
                             seen.add(key)
                             replaced = " ".join(per_token[key] for _ in values.split())
                             line = f"{indent}({key} {replaced})"
+                if key == "ImageSampler":
+                    samplers = set(re.findall(r'"([^"]+)"', line))
             lines.append(line)
         # A raw ``parameter_overrides`` entry is the escape hatch for ANY elastix parameter, including one
         # the preset's map never mentions (an ITK default such as RequiredRatioOfValidSamples): an absent exact
         # override is APPENDED. The named knobs (final_grid_spacing, spatial_samples, ...) keep replacing what exists and only
         # warn: injecting them into a map that does not use them is meaningless (e.g. a B-spline grid
         # spacing in a rigid-only preset).
+        # A sampler that draws a count of points reads it at every resolution, elastix's 5000 when the map leaves it
+        # out: spatial_samples is that count, which the map then takes.
+        count = per_token.get("NumberOfSpatialSamples")
+        if count is not None and "NumberOfSpatialSamples" not in seen and samplers & _COUNTED_SAMPLERS:
+            if "NumberOfSpatialSamples" not in {key for key, _ in exact}:
+                lines.append(f"(NumberOfSpatialSamples {count})")
+                seen.add("NumberOfSpatialSamples")
         missing_exact = [(key, value) for key, value in exact if key not in seen]
         if missing_exact:
             lines.append("// appended by impact_reg_konfai parameter_overrides")

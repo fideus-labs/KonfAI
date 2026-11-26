@@ -276,6 +276,28 @@ def test_an_exact_mixed_precision_override_stays_off_on_the_cpu() -> None:
     assert '(ImpactUseMixedPrecision "false")' in cpu
 
 
+@pytest.mark.parametrize(
+    ("sampler", "exact", "taken"),
+    [
+        ('"RandomCoordinate" "Random"', [], "(NumberOfSpatialSamples 3000)"),
+        ('"Full"', [], None),
+        ('"Grid"', [], None),
+        ('"RandomSparseMask"', [("NumberOfSpatialSamples", "2000 4000")], "(NumberOfSpatialSamples 2000 4000)"),
+    ],
+)
+def test_spatial_samples_reach_a_map_that_leaves_the_count_to_elastix(sampler, exact, taken) -> None:
+    # A map that left NumberOfSpatialSamples to elastix's default (5000) ignored spatial_samples and --samples: a
+    # sampler that draws a count takes it, Full and Grid draw none, and an exact override of the key wins.
+    text = f'(Metric "AdvancedMattesMutualInformation")\n(ImageSampler {sampler})'
+
+    found, seen = ElastixEngine._apply_map_overrides(text, {"NumberOfSpatialSamples": "3000"}, exact, -1)
+
+    if taken is None:
+        assert "NumberOfSpatialSamples" not in found and "NumberOfSpatialSamples" not in seen
+    else:
+        assert found.count("NumberOfSpatialSamples") == 1 and taken in found
+
+
 def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
     # Every shipped IMPACT preset turns half precision on; on the CPU the feature model's pooling has no
     # half-precision kernel, so a run placed there with --cpu died in the first layer.
