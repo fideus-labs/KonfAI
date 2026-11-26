@@ -508,6 +508,28 @@ def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
     assert torch.allclose(whole, gathered, atol=1e-5)
 
 
+class _Broadcast(torch.nn.Module):
+    """A layer that adds its input's mean over the whole tile: a reduction whose backward sums every element's
+    gradient into one."""
+
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [tile * 0.5 + tile.mean((2, 3, 4), keepdim=True)]
+
+
+def test_a_half_network_s_reductions_do_not_overflow_its_scaled_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each element's gradient scaled to 1, the mean's backward summed 64^3 of them past float16's largest: inf.
+    image = torch.rand(1, 1, 64, 64, 64, generator=torch.Generator().manual_seed(0))
+    gradients = []
+    for half in (False, True):
+        model = _stub_model(_Broadcast(), [1.0])
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        moved = image.clone().requires_grad_()
+        (layer,) = model.network(moved.device)(*model.inputs(moved, impact._statistics(image)[0]))
+        gradients.append(torch.autograd.grad(layer.float().mean(), moved)[0])
+    assert torch.isfinite(gradients[1]).all()
+    torch.testing.assert_close(gradients[1], gradients[0], rtol=1e-2, atol=1e-8)
+
+
 def test_a_half_network_s_blocks_are_normalised_as_the_whole_image(monkeypatch: pytest.MonkeyPatch) -> None:
     # In float16 the normalisations went unseen: every block was normalised by its own statistics, not the image's.
     image = torch.rand(1, 1, 24, 20, 18, generator=torch.Generator().manual_seed(2)) * torch.linspace(1, 3, 18)

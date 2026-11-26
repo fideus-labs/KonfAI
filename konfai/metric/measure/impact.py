@@ -568,10 +568,16 @@ class _SliceSweep(torch.nn.Module):
         return [layer.reshape(batch, depth, *layer.shape[1:]).movedim(1, 2) for layer in layers]
 
 
+#: What the layers' gradients add up to once scaled (``_ScaledLayers``): a sum of them, a reduction's backward (a
+#: mean broadcast over the layer), stays under float16's largest (65504) with room for the weights it goes through.
+_SCALED_GRADIENT_TOTAL = 2.0**12
+
+
 class _ScaledLayers(torch.autograd.Function):
     """The identity on a network's layers; on the way back their gradients are multiplied by one power of two that
-    brings the largest to 1, kept in ``factor`` for ``_UnscaledImage``: float16 holds a gradient that large, and a
-    loss's per-element one, a mean's, far under its range, is lifted back into it."""
+    brings their absolute sum to ``_SCALED_GRADIENT_TOTAL``, kept in ``factor`` for ``_UnscaledImage``: a loss's
+    per-element gradient, a mean's, far under float16's range, is lifted back into it, and no sum of them overflows
+    it."""
 
     @staticmethod
     def forward(ctx, factor: list[float], *layers: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -580,8 +586,8 @@ class _ScaledLayers(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads: torch.Tensor | None):
-        largest = max((float(grad.abs().max()) for grad in grads if grad is not None), default=0.0)
-        ctx.factor[0] = 2.0 ** -math.floor(math.log2(largest)) if 0 < largest < math.inf else 1.0
+        total = sum(float(grad.abs().sum(dtype=torch.float64)) for grad in grads if grad is not None)
+        ctx.factor[0] = 2.0 ** math.floor(math.log2(_SCALED_GRADIENT_TOTAL / total)) if 0 < total < math.inf else 1.0
         return (None, *(None if grad is None else grad * ctx.factor[0] for grad in grads))
 
 
