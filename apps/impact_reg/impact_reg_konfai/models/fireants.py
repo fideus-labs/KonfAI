@@ -918,7 +918,7 @@ class ImpactFeatureLoss(torch.nn.Module):
             for core in self.cores
             if core.model.voxel_size is None
         ]
-        return max([1, *strides])
+        return math.lcm(1, *strides)  # every network's
 
     def place(self, low: Sequence[int], high: Sequence[int], grid: Sequence[int]) -> None:
         """Where the next piece lies: ``[low, high)`` of a level of ``grid`` voxels (a registration by boxes says so

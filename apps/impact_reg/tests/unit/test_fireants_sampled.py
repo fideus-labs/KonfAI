@@ -1533,3 +1533,17 @@ def test_a_jacobian_level_s_normalisation_is_the_whole_level_s_whatever_the_box(
         return loss._factors
 
     assert np.allclose(latched(9), latched(64), rtol=1e-5)
+
+
+def test_a_level_of_several_jacobian_models_starts_its_boxes_on_all_their_strides(tmp_path):
+    """Boxes of a level whose networks pool by 2 and by 3 start on 6: on the larger stride alone, every other box
+    starts off the first network's cells."""
+    from impact_reg_konfai.models import fireants as engine
+
+    specs = []
+    for pool in (2, 3):
+        path = tmp_path / f"strided{pool}.pt"
+        torch.jit.script(_Strided(pool=pool)).save(str(path))
+        specs.append(engine.ModelSpec(ref=str(path), layers_mask="01", distance="L2"))
+    loss = engine.ImpactFeatureLoss([specs], "Jacobian", True, 5, 0, 0, False)
+    assert loss.stride("cpu") == 6
