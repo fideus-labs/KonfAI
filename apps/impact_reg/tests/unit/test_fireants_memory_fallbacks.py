@@ -207,6 +207,29 @@ def test_a_static_extraction_by_blocks_maps_no_file_its_directory_removes(
     )
 
 
+def test_a_patch_extracts_by_blocks_with_no_whole_image_resampled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model at a finer voxel_size had both whole images resampled before the patch sent it by blocks, which read
+    # regions of their own; the whole resampling alone could run the device out.
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1", voxel_size=[0.5, 0.5, 0.5])
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    loss.cores[0].model.fov = [3, 3]
+    resampled = []
+    original = fireants.resampled
+    monkeypatch.setattr(
+        fireants,
+        "resampled",
+        lambda image, *args, **kwargs: (resampled.append(tuple(image.shape)), original(image, *args, **kwargs))[1],
+    )
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 20, 18, 16, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    volumes = loss.extract(fixed, moving, 16, ([16.0, 18.0, 20.0], [10.0, 12.0, 14.0]))
+    assert not resampled and volumes[0].shape[2:] == fixed.shape[2:]
+
+
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:
     # Each kept layer is projected on its own, onto principal components fitted on the fixed image, as the other
     # engines fit their PCA per layer on the reference side.

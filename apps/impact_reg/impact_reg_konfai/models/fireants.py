@@ -774,6 +774,29 @@ class ImpactFeatureLoss(torch.nn.Module):
         A model with a ``voxel_size`` extracts on the image resampled at that resolution (``extents``: each image's
         size in mm along L, P, S) and its features are brought back onto the image's grid, as elastix interpolates
         its feature maps at its points: FireANTs registers them at the image's resolution."""
+        # One pass over each image, or, where a model does not fit one (or the preset gives a patch), every model by
+        # blocks as a segmentation is predicted, which gives the one pass's features whatever each image's extent.
+        tiles = [patch]
+        if not patch:
+            try:
+                with out_of_memory_as_torch(fixed.is_cuda):
+                    found = self._whole(fixed, moving, extents)
+                if isinstance(found, tuple):
+                    return found
+                tiles = found
+            except torch.cuda.OutOfMemoryError:
+                tiles = [64]  # the probe's side: the blocks halve from it while one does not fit
+            # Out of the handler, the tensors its traceback held are released.
+            gc.collect()
+            torch.cuda.empty_cache()
+        print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
+        return self._by_blocks(fixed, moving, max(tiles), extents)
+
+    def _whole(
+        self, fixed: torch.Tensor, moving: torch.Tensor, extents: tuple[list[float] | None, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor] | list[int]:
+        """``extract`` in one pass where every model fits it (``_fitting_tile``), each image resampled at a model's
+        voxel_size first; else each model's tile, the resampled images let go."""
         resampled_images = []
         for core in self.cores:
             images = {"fixed": fixed, "moving": moving}
@@ -783,23 +806,8 @@ class ImpactFeatureLoss(torch.nn.Module):
                     for (side, image), extent in zip(images.items(), extents, strict=True)
                 }
             resampled_images.append(images)
-        # One pass over each image, or, where a model does not fit one (or the preset gives a patch), every model by
-        # blocks as a segmentation is predicted, which gives the one pass's features whatever each image's extent.
-        try:
-            with out_of_memory_as_torch(fixed.is_cuda):
-                tiles = [
-                    patch or _fitting_tile(core, images)
-                    for core, images in zip(self.cores, resampled_images, strict=True)
-                ]
-                if not any(tiles):
-                    return self._one_pass(fixed, moving, resampled_images)
-        except torch.cuda.OutOfMemoryError:
-            tiles = [64]  # the probe's side: the blocks halve from it while one does not fit
-        # Out of the handler, the tensors its traceback held are released.
-        gc.collect()
-        torch.cuda.empty_cache()
-        print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
-        return self._by_blocks(fixed, moving, max(tiles), extents)
+        tiles = [_fitting_tile(core, images) for core, images in zip(self.cores, resampled_images, strict=True)]
+        return tiles if any(tiles) else self._one_pass(fixed, moving, resampled_images)
 
     def _one_pass(
         self, fixed: torch.Tensor, moving: torch.Tensor, resampled_images: list[dict[str, torch.Tensor]]
