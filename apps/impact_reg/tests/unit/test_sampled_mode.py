@@ -273,6 +273,85 @@ def test_sampled_elastix_registers_a_volume_one_voxel_thick_as_its_plane(
     assert not (tmp_path / "out" / "P000" / "Elx_Transform.h5").exists()  # a plane's transform is its field
 
 
+def test_an_oblique_plane_registers_in_its_own_frame_whole_and_by_boxes(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-slice volume oblique about an in-plane axis registers in its plane's own frame, and its displacement is
+    lifted back through the volume's direction: a shift along the slice's own x axis is that axis's world direction,
+    out-of-plane component included, whole and by boxes."""
+    import math
+
+    import torch
+    from impact_reg_konfai.models import intensity
+    from impact_reg_konfai.models.intensity import EngineRegistration
+    from konfai.utils.dataset import Attribute
+
+    angle = math.radians(30)
+    direction = (math.cos(angle), 0, math.sin(angle), 0, 1, 0, -math.sin(angle), 0, math.cos(angle))
+
+    def slab(centre_x: float) -> sitk.Image:
+        y, x = np.mgrid[:30, :40].astype(np.float32)
+        image = sitk.GetImageFromArray(np.exp(-((x - centre_x) ** 2 + (y - 15) ** 2) / 8.0).astype(np.float32)[None])
+        image.SetSpacing((1.0, 1.0, 5.0))
+        image.SetOrigin((2.0, -1.0, 3.0))
+        image.SetDirection(direction)
+        return image
+
+    def shift_of(fixed: sitk.Image, moving: sitk.Image) -> sitk.Transform:
+        def centre(image: sitk.Image) -> np.ndarray:
+            array = sitk.GetArrayFromImage(image)
+            indices = np.stack(np.meshgrid(*(np.arange(n) for n in array.shape), indexing="ij"), -1)[..., ::-1]
+            mean = (indices * array[..., None]).reshape(-1, array.ndim).sum(0) / array.sum()
+            return np.asarray(image.TransformContinuousIndexToPhysicalPoint(mean.tolist()))
+
+        return sitk.TranslationTransform(fixed.GetDimension(), (centre(moving) - centre(fixed)).tolist())
+
+    fixed, moving = slab(12.0), slab(22.0)  # the moving blob 10 voxels along the slice's own x axis
+    expected = 10 * np.asarray(direction).reshape(3, 3)[:, 0]
+
+    class Whole:
+        def register(self, fixed, moving, device_index, fixed_mask, moving_mask):
+            return shift_of(fixed, moving)
+
+    attributes = []
+    for image in (fixed, moving, fixed, moving):
+        attribute = Attribute()
+        for key, value in (("Origin", image.GetOrigin()), ("Spacing", image.GetSpacing())):
+            attribute[key] = np.asarray(value)
+        attribute["Direction"] = np.asarray(image.GetDirection())
+        attributes.append([attribute])
+    tensors = [torch.from_numpy(sitk.GetArrayFromImage(image))[None, None] for image in (fixed, moving)]
+    field = EngineRegistration(Whole())(*tensors, *(torch.ones_like(t) for t in tensors), attributes=attributes)
+    np.testing.assert_allclose(field.numpy()[0, :, 0].reshape(3, -1).mean(1), expected, atol=1e-3)
+
+    class ByBoxes:
+        _feature_models = ()
+        _elastix_bin = "elastix"
+        _moments_init = "cof"
+
+        def supports_mapped_images(self) -> bool:
+            return True
+
+        def register_mapped(self, fixed, moving, *args) -> sitk.Transform:
+            return shift_of(sitk.ReadImage(str(fixed)), sitk.ReadImage(str(moving)))
+
+    paths = {}
+    for name, image in (("fixed", fixed), ("moving", moving)):
+        paths[name] = tmp_path / f"{name}.mha"
+        sitk.WriteImage(image, str(paths[name]))
+    monkeypatch.setattr(intensity, "engine_of", lambda *args: ByBoxes())
+    monkeypatch.setattr(reg, "app_file", lambda repo, preset, name: tmp_path / name)
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["Model"]["RegistrationNet"]["parameter_maps"] = ["Rigid.txt"]
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
+    reg.ImpactRegKonfAIApp().register(
+        ["Elx"], [paths["fixed"]], [paths["moving"]], output=tmp_path / "out", out_of_core="sampled", fields_only=True
+    )
+    found = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "P000" / "DVF.mha")))
+    np.testing.assert_allclose(found.reshape(-1, 3).mean(0), expected, atol=1e-3)
+
+
 def test_sampled_convexadam_registers_a_volume_one_voxel_thick_as_its_plane(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -20,6 +20,7 @@ read, the translation between two subjects' centres of mass, and whether a mask 
 import contextlib
 import os
 import tempfile
+from typing import TYPE_CHECKING
 
 import numpy as np
 import SimpleITK as sitk
@@ -36,6 +37,9 @@ from konfai.utils.dataset import (
     image_to_data,
 )
 from konfai.utils.dataset.attribute import _flatten_transforms
+
+if TYPE_CHECKING:
+    from ..native import PlaneFrame
 
 #: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
 #: elastix's rigid then B-spline as such, a field for what is dense), or its displacement on the fixed grid. A mean
@@ -91,13 +95,17 @@ def _native_file(transform: sitk.Transform, voxel: float) -> str | None:
     return path
 
 
-def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -> np.ndarray:
-    """``linear``, found in voxel units, as ``AFFINE_ATTRIBUTE`` records it, in millimetres. A plane's transform
-    gets the z row of a volume one plane thick: the shift from one plane to the other, as its field does."""
+def _world_affine(linear: sitk.Transform, voxel: float, plane: "tuple[PlaneFrame, float] | None") -> np.ndarray:
+    """``linear``, found in voxel units, as ``AFFINE_ATTRIBUTE`` records it, in millimetres. A plane's transform, found
+    in its ``PlaneFrame``, is lifted as its field is: the plane's map, the identity along its normal, and along it the
+    gap from one plane to the other."""
     matrix = affine_to_attribute(linear).reshape(linear.GetDimension(), -1)
     matrix[:, -1] *= voxel
-    if z_shift is not None:
-        matrix = np.block([[matrix[:, :2], np.zeros((2, 1)), matrix[:, 2:]], [np.array([[0.0, 0.0, 1.0, z_shift]])]])
+    if plane is not None:
+        frame, gap = plane
+        axes, normal = frame.axes, frame.normal
+        lifted = axes @ matrix[:, :2] @ axes.T + np.outer(normal, normal)
+        matrix = np.column_stack([lifted, axes @ matrix[:, 2] + gap * normal])
     return matrix.ravel()
 
 
@@ -125,9 +133,18 @@ class EngineRegistration(ExternalTool):
 
     def call(self, images: list[sitk.Image | None], device_index: int, header: Attribute) -> np.ndarray:
         flat = images[0].GetSize()[2] == 1
-        if flat:
-            z_shift = images[1].GetOrigin()[2] - images[0].GetOrigin()[2]
-            images = [image[:, :, 0] for image in images]
+        if flat:  # every plane in the fixed one's frame (``PlaneFrame``), lifted back through it
+            from ..native import PlaneFrame, PlaneHeader
+
+            frame = PlaneFrame.of(images[0].GetDirection(), 0)
+            gap = frame.gap(images[0].GetOrigin(), images[1].GetOrigin())
+            planes = []
+            for image in images:
+                seen, plane = PlaneHeader(image, 0, frame), image[:, :, 0]
+                plane.SetOrigin(seen.GetOrigin())
+                plane.SetDirection(seen.GetDirection())
+                planes.append(plane)
+            images = planes
         voxel = min(images[0].GetSpacing())
         for image in images:  # the same voxels, measured in the fixed image's finest voxel
             image.SetSpacing([v / voxel for v in image.GetSpacing()])
@@ -137,12 +154,14 @@ class EngineRegistration(ExternalTool):
             result = self._engine.register(fixed, moving, device_index, fixed_mask, moving_mask)
         transform = result if isinstance(result, sitk.Transform) else None
         field = (displacement_on(fixed, transform) if transform is not None else result) * voxel
-        if flat:  # the plane's (dx, dy), and along z from one plane to the other
-            field = np.concatenate([field, np.full_like(field[:1], z_shift)])
+        if flat:  # the plane's displacement through its frame, and along its normal from one plane to the other
+            field = np.moveaxis(frame.lift(np.moveaxis(field, 0, -1).astype(np.float64), gap), -1, 0).astype(
+                field.dtype
+            )
         # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
         header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         if transform is not None and transform.IsLinear():
-            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
+            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, (frame, gap) if flat else None)
         elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
             header[TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
         return field

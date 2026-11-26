@@ -2217,21 +2217,22 @@ class ImpactRegKonfAIApp:
         such a volume whole: the axis, the plane's finest voxel in the twins' voxels, and 2-D twins of the fixed plane
         and of the moving image's first slice along it (their masks likewise), measured in that voxel as a plane
         registered whole is. None for any other pair."""
-        from .native import PlaneHeader, open_twin, write_plane
+        from .native import PlaneFrame, PlaneHeader, open_twin, write_plane
 
         fixed = open_twin(twins["Fixed"])
         shape = list(fixed.array.shape)
         if len(shape) != 3 or shape.count(1) != 1:
             return None
         axis = shape.index(1)
-        factor = min(PlaneHeader(fixed.geometry, axis).GetSpacing())
+        frame = PlaneFrame.of(fixed.geometry.GetDirection(), axis)  # every plane in the fixed one's
+        factor = min(PlaneHeader(fixed.geometry, axis, frame).GetSpacing())
         root = twins["Fixed"].parent / "plane"
         root.mkdir(exist_ok=True)
         planes: dict[Path, Path] = {}
 
         def plane(path: Path) -> Path:
             if path not in planes:
-                planes[path] = write_plane(path, axis, root / path.name, 1 / factor)
+                planes[path] = write_plane(path, axis, root / path.name, 1 / factor, frame=frame)
             return planes[path]
 
         return (
@@ -2244,7 +2245,7 @@ class ImpactRegKonfAIApp:
     @staticmethod
     def _lift_plane(plane_field: Path, field: Path, twins: dict[str, Path], axis: int, factor: float) -> Path:
         """The field of a plane ``_plane_twins`` registered as the field of the volume one voxel thick, on the fixed
-        twin's grid in the twins' voxels: along the dropped axis the shift from one plane to the other."""
+        twin's grid in the twins' voxels, lifted through the fixed plane's frame (``lift_plane_field``)."""
         from .native import lift_plane_field, open_twin, to_millimetres
 
         to_millimetres(plane_field, factor)  # from the plane's voxels to the twins'

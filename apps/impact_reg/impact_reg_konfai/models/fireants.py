@@ -1806,6 +1806,7 @@ class FireANTsEngine:
         moving one's first slice along it, as ``EngineRegistration`` registers it on the whole pair: the plane's field
         comes back one voxel thick, along the dropped axis the shift from one plane to the other."""
         from ..native import (
+            PlaneFrame,
             PlaneHeader,
             field_map,
             lift_plane_field,
@@ -1844,10 +1845,11 @@ class FireANTsEngine:
         }
         masked = any(mask is not None for mask in masks.values())
         readers = {"fixed": read_information(fixed), "moving": read_information(moving)}
-        if plane is not None:
-            mapped = {side: plane_of(image, plane) for side, image in mapped.items()}
-            masks = {side: None if mask is None else plane_of(mask, plane) for side, mask in masks.items()}
-            readers = {side: PlaneHeader(reader, plane) for side, reader in readers.items()}
+        if plane is not None:  # every plane in the fixed one's frame
+            frame = PlaneFrame.of(readers["fixed"].GetDirection(), plane)
+            mapped = {side: plane_of(image, plane, frame) for side, image in mapped.items()}
+            masks = {side: None if mask is None else plane_of(mask, plane, frame) for side, mask in masks.items()}
+            readers = {side: PlaneHeader(reader, plane, frame) for side, reader in readers.items()}
 
         def mask_source(side: str):
             """A side's mask, read by boxes: all ones where it has none (masked mode wants one beside both images)."""

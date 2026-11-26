@@ -491,12 +491,47 @@ def to_millimetres(path: Path, voxel: float) -> None:
     os.replace(target, path)
 
 
-class PlaneHeader:
-    """A twin's header without its voxel axis ``axis`` (numpy's, of a (z, y, x) volume): what a reader of the plane
-    reads, its size, spacing, origin and direction those of the other two axes."""
+@dataclass(frozen=True)
+class PlaneFrame:
+    """The 2-D frame a plane one voxel thick along NumPy ``axis`` of a volume registers in: ``axes``, two orthonormal
+    world vectors spanning the plane (``[3, 2]``, ITK order), and its ``normal``. They are the world axes the plane
+    keeps, turned by the least rotation that takes the dropped one onto the plane's normal: a plane along world axes
+    is read as it is, an oblique one in its own orientation."""
 
-    def __init__(self, header, axis: int) -> None:
+    axis: int
+    axes: np.ndarray
+    normal: np.ndarray
+
+    @classmethod
+    def of(cls, direction: Sequence[float], axis: int) -> PlaneFrame:
+        """The frame of the plane of a volume of ``direction`` (ITK, row-major) one voxel thick along ``axis``."""
+        matrix = np.reshape(np.asarray(direction, dtype=np.float64), (3, 3))
+        dropped, keep = 2 - axis, [column for column in range(3) if column != 2 - axis]
+        world = np.eye(3)[:, dropped]
+        normal = matrix[:, dropped] if matrix[:, dropped] @ world >= 0 else -matrix[:, dropped]
+        cross = np.cross(world, normal)
+        skew = np.array([[0, -cross[2], cross[1]], [cross[2], 0, -cross[0]], [-cross[1], cross[0], 0]])
+        rotation = np.eye(3) + skew + skew @ skew / (1 + float(world @ normal))
+        return cls(axis, rotation[:, keep], normal)
+
+    def gap(self, fixed_origin: Sequence[float], moving_origin: Sequence[float]) -> float:
+        """How far the moving plane lies from the fixed one along the normal."""
+        return float(self.normal @ (np.asarray(moving_origin, dtype=np.float64) - np.asarray(fixed_origin)))
+
+    def lift(self, vectors: np.ndarray, gap: float) -> np.ndarray:
+        """In-plane vectors (``[..., 2]``, the frame's components) as world ones (``[..., 3]``, ITK order), ``gap``
+        along the normal: a plane's displacement as its volume's."""
+        return vectors @ self.axes.T + gap * self.normal
+
+
+class PlaneHeader:
+    """A header without its voxel axis ``axis`` (numpy's, of a (z, y, x) volume): what a reader of the plane reads, its
+    size and spacing those of the other two axes, its origin and direction in ``frame`` (``PlaneFrame``: its own by
+    default, a moving plane taking the fixed one's)."""
+
+    def __init__(self, header, axis: int, frame: PlaneFrame | None = None) -> None:
         self._header, self._keep = header, [a for a in range(3) if a != 2 - axis]
+        self.frame = frame or PlaneFrame.of(header.GetDirection(), axis)
 
     def GetDimension(self) -> int:
         return 2
@@ -508,11 +543,11 @@ class PlaneHeader:
         return tuple(self._header.GetSpacing()[a] for a in self._keep)
 
     def GetOrigin(self) -> tuple:
-        return tuple(self._header.GetOrigin()[a] for a in self._keep)
+        return tuple(float(value) for value in self.frame.axes.T @ np.asarray(self._header.GetOrigin()))
 
     def GetDirection(self) -> tuple:
         direction = np.reshape(self._header.GetDirection(), (3, 3))
-        return tuple(direction[np.ix_(self._keep, self._keep)].ravel())
+        return tuple(float(value) for value in (self.frame.axes.T @ direction[:, self._keep]).ravel())
 
     def GetPixelID(self) -> int:
         return self._header.GetPixelID()
@@ -522,17 +557,20 @@ class PlaneHeader:
         return (getattr(header, "GetNumberOfComponents", None) or header.GetNumberOfComponentsPerPixel)()
 
 
-def plane_of(mapped: Mapped, axis: int) -> Mapped:
+def plane_of(mapped: Mapped, axis: int, frame: PlaneFrame | None = None) -> Mapped:
     """A twin one voxel thick along numpy axis ``axis`` as its plane: a view of its first slice along it, with the
-    plane's geometry (``PlaneHeader``)."""
-    return Mapped(mapped.array[(slice(None),) * axis + (0,)], geometry_of(PlaneHeader(mapped.geometry, axis)))
+    plane's geometry in ``frame`` (``PlaneHeader``)."""
+    return Mapped(mapped.array[(slice(None),) * axis + (0,)], geometry_of(PlaneHeader(mapped.geometry, axis, frame)))
 
 
-def write_plane(twin: Path, axis: int, target: Path, scale: float = 1.0, rows: int = 256) -> Path:
+def write_plane(
+    twin: Path, axis: int, target: Path, scale: float = 1.0, rows: int = 256, frame: PlaneFrame | None = None
+) -> Path:
     """The first slice along numpy axis ``axis`` of a twin (``write_twin``) as a 2-D twin of the same form at
-    ``target``: the plane's geometry (``PlaneHeader``), its spacing and origin times ``scale``, written by rows."""
+    ``target``: the plane's geometry in ``frame`` (``PlaneHeader``), its spacing and origin times ``scale``, written
+    by rows."""
     source = open_twin(twin)
-    plane = PlaneHeader(source.geometry, axis)
+    plane = PlaneHeader(source.geometry, axis, frame)
     geometry = (
         np.asarray(plane.GetSpacing()) * scale,
         np.asarray(plane.GetOrigin()) * scale,
@@ -549,19 +587,18 @@ def write_plane(twin: Path, axis: int, target: Path, scale: float = 1.0, rows: i
 
 
 def lift_plane_field(plane: Path, path: Path, fixed: Mapped, moving: Mapped, axis: int, rows: int = 256) -> Path:
-    """The field of a plane (``plane``, ``[y, x, 2]``) as the field of the volume one voxel thick it was taken from,
-    at ``path`` on the fixed twin's grid: its two components on the plane's axes and, along the dropped one, the shift
-    from the fixed plane to the moving one, as ``EngineRegistration`` brings back a plane it registered. Row by row."""
+    """The field of a plane (``plane``, ``[y, x, 2]``, in the fixed plane's ``PlaneFrame``) as the field of the volume
+    one voxel thick it was taken from, at ``path`` on the fixed twin's grid: lifted through the frame, along its
+    normal the gap from the fixed plane to the moving one, as ``EngineRegistration`` brings back a plane it
+    registered. Row by row."""
     _, dtype, shape, offset = _pixels(plane)
     source = np.memmap(plane, dtype=dtype, mode="r", offset=offset, shape=shape)
-    dropped = 2 - axis  # the (x, y, z) component along the dropped voxel axis
-    keep = [a for a in range(3) if a != dropped]
-    shift = moving.geometry.GetOrigin()[dropped] - fixed.geometry.GetOrigin()[dropped]
+    frame = PlaneFrame.of(fixed.geometry.GetDirection(), axis)
+    gap = frame.gap(fixed.geometry.GetOrigin(), moving.geometry.GetOrigin())
     target = field_map(path, fixed)
     lifted = target[(slice(None),) * axis + (0,)]
     for start in range(0, shape[0], rows):
-        lifted[start : start + rows, ..., keep] = source[start : start + rows]
-        lifted[start : start + rows, ..., dropped] = shift
+        lifted[start : start + rows] = frame.lift(np.asarray(source[start : start + rows], dtype=np.float64), gap)
     target.flush()
     return path
 
