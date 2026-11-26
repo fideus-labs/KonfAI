@@ -560,7 +560,7 @@ def test_job_registry_latest_and_get_unknown() -> None:
         registry.get("missing")
 
 
-def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
+def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = WorkspaceLayout(tmp_path)
     workspace = layout.ensure_session_workspace()
     layout.jobs_dir().mkdir(parents=True, exist_ok=True)
@@ -595,7 +595,9 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
     )
 
     assert workspace == tmp_path / "sessions" / "default"
-    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+    jobs = importlib.import_module("konfai_mcp.server_jobs")
+    monkeypatch.setattr(jobs, "_pid_alive", lambda pid: False)  # the recorded pid may be alive on the machine
+    registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
 
     payload = registry.payload(registry.get("job5"), _isoformat)
 
@@ -631,7 +633,9 @@ def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
     )
 
 
-def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(tmp_path: Path) -> None:
+def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A job that was over before this server started keeps the config edited since out of its record."""
     layout = WorkspaceLayout(tmp_path)
     layout.ensure_session_workspace()
@@ -641,8 +645,10 @@ def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_st
         layout.job_dir(job_id).mkdir(parents=True)
         layout.job_state_path(job_id).write_text(_persisted_job_record(job_id, status, config_path), encoding="utf-8")
         layout.job_manifest_path(job_id).write_text("{}", encoding="utf-8")
+    jobs = importlib.import_module("konfai_mcp.server_jobs")
+    monkeypatch.setattr(jobs, "_pid_alive", lambda pid: False)  # the recorded pid may be alive on the machine
 
-    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+    registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
 
     assert registry.get("finished_before").status == "done"
     assert json.loads(layout.job_manifest_path("finished_before").read_text(encoding="utf-8")) == {}
