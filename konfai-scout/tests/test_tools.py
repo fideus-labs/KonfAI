@@ -2,11 +2,14 @@
 """The tools' checks: evidence must exist, a confirmation needs a measurement, a verdict says what it rests on."""
 
 import json
+from types import SimpleNamespace
 
+import pytest
 from konfai_scout.config import ScoutConfig
 from konfai_scout.evaluation import RegionEvaluator
 from konfai_scout.planes import box_to_dict
 from konfai_scout.providers.base import ToolCall
+from konfai_scout.survey import Lead
 from konfai_scout.tools import Toolbox, _unsourced_figures
 from konfai_scout.views import Renderer
 
@@ -89,6 +92,36 @@ def test_notes_need_known_evidence_and_confirmation_needs_a_measurement(fixtures
     conclusion = run(box, "conclude", verdict="defective", summary="s", confidence=0.9)["conclusion"]
     assert conclusion["note"] and "no confirmed error" in conclusion["note"]
     assert box.conclusion is not None and box.conclusion.reason
+
+
+def test_a_view_takes_a_leads_id_as_its_zoom(fixtures, tmp_path):
+    case, defects = fixtures["segmentation"]
+    box = toolbox(fixtures, "segmentation", tmp_path)
+    lead = Lead("l1", "component", defects["missing_cube"]["box_mm"], "a component the prediction lacks")
+    box.leads = [lead]
+    field = box.lead_field(lead, "axial")
+    bounds = box_to_dict(case.grid.world_box())
+    for axis in range(2):  # in the plane: wider than the lead, inside the image
+        assert bounds["min"][axis] <= field["min"][axis] <= lead.box_mm["min"][axis]
+        assert lead.box_mm["max"][axis] <= field["max"][axis] <= bounds["max"][axis]
+    assert (field["min"][2], field["max"][2]) == (lead.box_mm["min"][2], lead.box_mm["max"][2])  # across: the lead
+    run(box, "view", plane="axial", zoom="l1")
+    assert box.lead_views(lead) == box.calls[-1].views != []
+    assert "no lead 'l9'" in run(box, "view", plane="axial", zoom="l9")["error"]
+
+    # the widths, worked out apart: 100 mm about a small lead, 1.3 times a wide one, never past the image
+    def width(low: float, high: float, image: float) -> float:
+        box.renderer = SimpleNamespace(
+            grid=SimpleNamespace(
+                world_box=lambda: SimpleNamespace(low_xyz=(0.0, 0.0, 0.0), high_xyz=(image, image, image))
+            )
+        )
+        field = box.lead_field(Lead("l", "component", {"min": [low] * 3, "max": [high] * 3}, ""), "axial")
+        return field["max"][0] - field["min"][0]
+
+    assert width(200.0, 210.0, 500.0) == pytest.approx(100.0)
+    assert width(100.0, 300.0, 500.0) == pytest.approx(260.0)
+    assert width(20.0, 30.0, 80.0) == pytest.approx(80.0)
 
 
 def test_errors_are_reported_to_the_model_and_logged(fixtures, tmp_path):

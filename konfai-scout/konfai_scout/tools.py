@@ -21,7 +21,7 @@ from .case import MASK_ROLES, InspectionCase
 from .config import ScoutConfig
 from .evaluation import DEFAULT_THRESHOLDS, EvaluationError, RegionEvaluator
 from .measure import intensity_stats, label_stats
-from .planes import PLANES, box_from_dict, box_intersection, box_to_dict, window_of
+from .planes import PLANE_WORLD_AXIS, PLANES, box_from_dict, box_intersection, box_to_dict, window_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import (
     DEFECTS,
@@ -48,6 +48,7 @@ _BOX = {
     "additionalProperties": False,
 }
 _IDS = {"type": "array", "items": {"type": "string"}}
+_LEAD = {"type": "string", "description": "A lead's id."}
 
 
 def _schema(properties: dict[str, Any]) -> dict[str, Any]:
@@ -98,14 +99,15 @@ class Toolbox:
                 ToolSpec(
                     "view",
                     "One slice: a plane and a world position, an index, or a zoom box (the slice through its centre, "
-                    "cropped to the box).",
+                    "cropped to the box), or a lead's id as the zoom (a reader's field about the lead, the slice "
+                    "through it).",
                     _schema(
                         {
                             "plane": plane,
                             "mode": mode,
                             "position_mm": _nullable(_XYZ),
                             "index": _nullable({"type": "integer"}),
-                            "zoom": _nullable(_BOX),
+                            "zoom": _nullable({"anyOf": [_BOX, _LEAD]}),
                             "window": window,
                             "label": _nullable({"type": "integer", "description": "Show this label only."}),
                         }
@@ -151,7 +153,7 @@ class Toolbox:
                         "severity": {"type": "string", "enum": list(SEVERITIES)},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                         "description": {"type": "string", "description": f"{MAX_WORDS['note']} words at most."},
-                        "box_mm": _nullable({"anyOf": [_BOX, {"type": "string", "description": "A lead's id."}]}),
+                        "box_mm": _nullable({"anyOf": [_BOX, _LEAD]}),
                         "plane": _nullable(plane),
                         "views": _IDS,
                         "measurements": _IDS,
@@ -221,6 +223,8 @@ class Toolbox:
         window: object = None,
         label: int | None = None,
     ) -> tuple[dict[str, Any], list[ImageContent]]:
+        if isinstance(zoom, str):
+            zoom = self.lead_field(self._lead(zoom), plane)
         box = box_from_dict(zoom) if zoom else None
         png, view = self.renderer.render(
             plane, mode, index=index, position_mm=position_mm, window=window, zoom=box, label=label
@@ -380,10 +384,7 @@ class Toolbox:
                 f"unknown evidence id(s) {unknown}; cite ids returned by view, montage, measure or region_stats"
             )
         if isinstance(box_mm, str):  # a lead's id: its box, rather than coordinates read off a view
-            leads = {lead.id: lead for lead in self.leads}
-            if box_mm not in leads:
-                raise ValueError(f"no lead {box_mm!r}; leads: {', '.join(leads) or 'none'}")
-            box_mm = leads[box_mm].box_mm
+            box_mm = self._lead(box_mm).box_mm
         box = box_from_dict(box_mm) if box_mm else None
         cited_views = [known_views[v] for v in views]
         cited = [known_measurements[m] for m in measurements]
@@ -543,6 +544,31 @@ class Toolbox:
             and o.severity in ("major", "critical")
             and o.confidence >= 0.5
         ]
+
+    def _lead(self, lead_id: str) -> Lead:
+        leads = {lead.id: lead for lead in self.leads}
+        if lead_id not in leads:
+            raise ValueError(f"no lead {lead_id!r}; leads: {', '.join(leads) or 'none'}")
+        return leads[lead_id]
+
+    def lead_field(self, lead: Lead, plane: str) -> dict[str, list[float]]:
+        """A reader's field about a lead: in the plane, 1.3 times the lead's box and 100 mm at the least, inside the
+        image; across it, the lead's own extent, so that the slice goes through the lead. A lead of a few voxels
+        shows nothing of what lies around it, and a model asked for the box works the field out wrong."""
+        if plane not in PLANES:
+            raise ValueError(f"unknown plane {plane!r}; one of {', '.join(PLANES)}")
+        bounds = box_to_dict(self.renderer.grid.world_box())
+        field: dict[str, list[float]] = {"min": [], "max": []}
+        for axis, (low, high, first, last) in enumerate(
+            zip(lead.box_mm["min"], lead.box_mm["max"], bounds["min"], bounds["max"], strict=True)
+        ):
+            if axis != PLANE_WORLD_AXIS[plane]:
+                size = min(max(1.3 * (high - low), 100.0), last - first)
+                start = min(max((low + high - size) / 2, first), last - size)
+                low, high = round(start, 1), round(start + size, 1)
+            field["min"].append(low)
+            field["max"].append(high)
+        return field
 
     def lead_views(self, lead: Lead) -> list[str]:
         """The slice views (not montage tiles) the model was sent that show some of a lead's box."""
