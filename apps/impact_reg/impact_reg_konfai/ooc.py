@@ -57,6 +57,15 @@ class RegionSource:
     def close(self) -> None:
         """Release what the source holds outside the process; nothing for most."""
 
+    def gather(self, indices: Sequence[torch.Tensor]) -> torch.Tensor:
+        """The voxels at ``indices`` (sorted, one tensor an axis) of every channel, as ``[1, C, *counts]``: read as the
+        box they span, then picked, unless the source reads them alone."""
+        start, stop = [int(index[0]) for index in indices], [int(index[-1]) + 1 for index in indices]
+        region = self.read(start, stop)
+        for axis, (index, low) in enumerate(zip(indices, start, strict=True)):
+            region = region.index_select(2 + axis, (index - low).to(region.device))
+        return region
+
 
 def tiles(shape: Sequence[int], box: int) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
     """The boxes of ``box`` voxels a side (the last one along an axis takes what is left) tiling a grid, in C order."""
@@ -122,6 +131,11 @@ class ArraySource(RegionSource):
 
     def __del__(self) -> None:
         self.close()
+
+    def gather(self, indices: Sequence[torch.Tensor]) -> torch.Tensor:
+        region = self.array[np.ix_(np.arange(self.channels), *(index.cpu().numpy() for index in indices))]
+        self.bytes_read += region.nbytes
+        return to_device(region, self.device).unsqueeze(0)
 
     def read(self, start: Sequence[int], stop: Sequence[int]) -> torch.Tensor:
         region = self.array[(slice(None), *(slice(a, b) for a, b in zip(start, stop, strict=True)))]
@@ -244,31 +258,28 @@ class ResampledSource(RegionSource):
         self.channels, self.device = source.channels, source.device
 
     def read(self, start: Sequence[int], stop: Sequence[int]) -> torch.Tensor:
-        lows, weights = [], []
+        lows, weights, needed = [], [], []
         for a, b, old, new in zip(start, stop, self.source.shape, self.shape, strict=True):
             at = torch.arange(a, b, dtype=torch.float64) * (old / new)
             lows.append(at.floor().long())
             weights.append(at - lows[-1])
-        inner = [
-            (int(low[0]), min(int(low[-1]) + 2, old)) for low, old in zip(lows[1:], self.source.shape[1:], strict=True)
-        ]
-        # Only the planes of the first axis a point interpolates from, read in runs of at most 2**dims times the box
-        # (one plane at least): downsampling by r would otherwise read r**dims times the box, most of it between points.
-        needed = torch.unique(torch.cat([lows[0], lows[0] + 1]).clamp(max=self.source.shape[0] - 1))
-        plane = math.prod(b - a for a, b in inner)
-        span = max(1, 2 ** len(self.shape) * math.prod(b - a for a, b in zip(start, stop, strict=True)) // plane)
+            needed.append(torch.unique(torch.cat([lows[-1], lows[-1] + 1]).clamp(max=old - 1)))
+        # Only the voxels a point interpolates from, along every axis (``gather``), the planes of the first in runs of
+        # at most 2**dims times the box: downsampling by r would otherwise read r**dims times it, most of it between
+        # points.
+        across = math.prod(len(index) for index in needed[1:])
+        span = max(1, 2 ** len(self.shape) * math.prod(b - a for a, b in zip(start, stop, strict=True)) // across)
         pieces, i = [], 0
-        while i < len(needed):
-            j = int(torch.searchsorted(needed, needed[i] + span))
-            first, last = int(needed[i]), int(needed[j - 1]) + 1
-            region = self.source.read([first, *(a for a, _ in inner)], [last, *(b for _, b in inner)])
-            region = region.index_select(2, (needed[i:j] - first).to(region.device))
-            for axis, (low, weight) in enumerate(zip(lows[1:], weights[1:], strict=True), start=1):
-                region = _lerp(region, axis, low - inner[axis - 1][0], weight)
+        while i < len(needed[0]):
+            j = int(torch.searchsorted(needed[0], needed[0][i] + span))
+            region = self.source.gather([needed[0][i:j], *needed[1:]])
+            for axis in range(
+                1, len(self.shape)
+            ):  # a point's second voxel is the next needed one, or zeros past the last
+                region = _lerp(region, axis, torch.searchsorted(needed[axis], lows[axis]), weights[axis])
             pieces.append(region)
             i = j
-        # The second plane a point reads is the next needed one, or zeros past the source's last.
-        return _lerp(torch.cat(pieces, 2), 0, torch.searchsorted(needed, lows[0]), weights[0])
+        return _lerp(torch.cat(pieces, 2), 0, torch.searchsorted(needed[0], lows[0]), weights[0])
 
     @property
     def bytes_read(self) -> int:  # type: ignore[override]
