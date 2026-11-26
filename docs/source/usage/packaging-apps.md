@@ -99,6 +99,11 @@ KonfAI library on the model page, with the commands to list and run its apps. Ev
 of the folder is uploaded, whatever a `.gitignore` says: remove anything private first.
 Anyone who can read the repository runs it with
 `konfai-apps infer your-name/my-apps@main:CT_SEG -i ./Dataset/CASE_000/CT.mha`.
+
+An app can ship `Prediction_uncertainty.yml` alongside `Prediction.yml` when recording uncertainty needs a
+different prediction pipeline. `konfai-apps infer -uncertainty` uses that file when available. An explicit
+`--prediction-file` with a different filename takes precedence. `Uncertainty.yml` reads the resulting
+inference stack.
 `@main` reads what you just published even where the repository carries a release tag,
 and `--force-update` fetches it again over an earlier download.
 

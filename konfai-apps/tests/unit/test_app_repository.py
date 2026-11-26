@@ -1958,6 +1958,41 @@ def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspa
     assert completed.stdout.strip() == "6"
 
 
+@pytest.mark.parametrize(
+    ("prediction_file", "uncertainty", "has_alternate", "expected"),
+    [
+        ("Prediction.yml", True, True, "stack"),
+        ("Prediction.yml", True, False, "standard"),
+        ("Prediction.yml", False, True, "standard"),
+        ("Custom.yml", True, True, "custom"),
+    ],
+)
+def test_install_inference_selects_the_uncertainty_config_only_for_a_default_uncertainty_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prediction_file: str,
+    uncertainty: bool,
+    has_alternate: bool,
+    expected: str,
+) -> None:
+    app_root = _write_app_with_two_checkpoints(tmp_path, declare=True)
+    configs = {"Prediction.yml": "standard", "Custom.yml": "custom"}
+    if has_alternate:
+        configs["Prediction_uncertainty.yml"] = "stack"
+    for name, train_name in configs.items():
+        (app_root / name).write_text(
+            f"Predictor:\n  train_name: {train_name}\n  Dataset:\n    augmentations: {{}}\n  outputs_dataset: {{}}\n"
+        )
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    repo.install_inference(0, 1, [], 0, uncertainty, prediction_file)
+
+    assert YAML().load(Path(prediction_file))["Predictor"]["train_name"] == expected
+
+
 def test_disabling_uncertainty_drops_the_replaced_reduction_block(tmp_path: Path) -> None:
     """Uncertainty off swaps the output reduction to Mean: the old operator's argument block goes with
     it, else the run warns of a key nothing reads (`OutputDataset.Concat`)."""

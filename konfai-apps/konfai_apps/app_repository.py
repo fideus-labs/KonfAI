@@ -1738,8 +1738,13 @@ class LocalAppRepository(AppRepositoryInfo):
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
 
+        source_config = prediction_file
+        if uncertainty and prediction_file == "Prediction.yml":
+            alternate = "Prediction_uncertainty.yml"
+            if self._find_repo_filename(alternate, self._all_repo_filenames()) is not None:
+                source_config = alternate
         models_path, inference_file_path, codes_path = self.download_inference(
-            number_of_model, name_of_models, prediction_file
+            number_of_model, name_of_models, source_config
         )
         # Copy every bundle asset into the workspace first, then write (and tweak) the prediction config
         # last so its modifications are never clobbered by a raw copy of the same file.
