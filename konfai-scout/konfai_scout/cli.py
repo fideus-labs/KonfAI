@@ -57,6 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--max-seconds", type=float)
     p.add_argument("--max-usd", type=float)
     p.add_argument(
+        "--max-context-tokens", type=int, help="A local model's window, less room for a last view and the conclusion."
+    )
+    p.add_argument(
         "--allow-cloud-images", action="store_true", help="Authorise sending images of the case to a cloud API."
     )
     p.add_argument(
@@ -129,7 +132,7 @@ def _config_from_args(args: argparse.Namespace) -> ScoutConfig:
         if value is not None:
             data[key] = value
     config = ScoutConfig.from_dict(data)
-    for key in ("max_tool_calls", "max_images", "max_seconds", "max_usd"):
+    for key in ("max_tool_calls", "max_images", "max_seconds", "max_usd", "max_context_tokens"):
         value = getattr(args, key)
         if value is not None:
             setattr(config.budget, key, value)

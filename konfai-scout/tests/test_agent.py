@@ -92,6 +92,12 @@ def test_the_budget_ends_an_endless_explorer(fixtures, tmp_path):
     assert len([c for c in report.tool_calls if c.tool == "view"]) <= 4  # three, plus the one of the final turn
     assert report.error is None
 
+    # a model's context, filled: the same end, before the window overflows
+    budget = Budget(max_tool_calls=100, max_context_tokens=1)
+    report = inspect(case, ScoutConfig(provider="mock", budget=budget, max_px=200), tmp_path / "context", Endless([]))
+    assert report.budget["exhausted"] and "tokens of context" in report.budget["exhausted"]
+    assert report.conclusion.by == "scout" and report.error is None
+
 
 def test_a_retryable_provider_error_is_retried_and_a_fatal_one_recorded(fixtures, tmp_path):
     case, _ = fixtures["segmentation_clean"]

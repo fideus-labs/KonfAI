@@ -68,6 +68,7 @@ konfai-scout inspect --task synthesis --name ct01 \
 
 - `--depth quick|standard|deep`: 10, 25 or 40 tool calls; `deep` adds a blind second reading of each error.
 - `--max-usd`, `--max-seconds`: stop an inspection at a cost or a time.
+- `--max-context-tokens`: a local model's window, less room to conclude: the model concludes before it overflows.
 - `--allow-cloud-images`: required to send images of the case to a cloud model. A local server (`--base-url
   http://localhost:11434/v1`) needs none.
 - `--provider mock`: the whole loop with a heuristic model, no API at all.

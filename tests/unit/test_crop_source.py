@@ -34,6 +34,7 @@ from konfai.utils.errors import TransformError  # noqa: E402
 
 # The synthetic case of the fixture, in nibabel's (i, j, k) order: a label map and its CT on one grid.
 SHAPE_IJK = (30, 36, 40)
+BUDGET = "256MiB"  # the auto budget of a starved runner can fall to 0 B, which refuses the whole-volume route
 ZOOMS = (0.8, 0.7, 1.25)  # 20 / float32(0.8) truncates to 24 voxels where float64 gives 25
 
 # The boxes of the mask ``np.isin(labels, ...)`` (all non-zero for None) on that case, grown by
@@ -85,9 +86,10 @@ def test_crop_to_another_groups_box_grown_by_a_margin_in_mm(
     crop = Crop(source="total", labels=labels, margin_mm=margin_mm, inverse=False)
     chains = {"CT": {"CT": [crop, Write(dataset=f"./Out:{stored}")]}}
 
-    plan = api.plan_transform("PLAN", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "T", quiet=True)
+    options: dict[str, Any] = {"transforms_dir": tmp_path / "T", "memory_budget": BUDGET, "quiet": True}
+    plan = api.plan_transform("PLAN", f"./Raw:{stored}", chains, **options)
     assert [entry.verdict for entry in plan.entries] == [verdict]
-    api.transform("CROP", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "T", quiet=True)
+    api.transform("CROP", f"./Raw:{stored}", chains, **options)
 
     expected = sitk.RegionOfInterest(ct, [b - a for a, b in box_ijk], [a for a, _ in box_ijk])
     written = sitk.ReadImage(str(tmp_path / "Out" / "P000" / f"CT.{stored}"))
@@ -190,7 +192,7 @@ def test_an_empty_crop_under_empty_fill_hands_on_the_near_corner_voxel_streamed_
     ct = _write_case(tmp_path / "Raw", stored)
     crop = Crop(source="total", labels=[42], margin_mm=20.0, fill=0, empty="fill", inverse=False)
     chains = {"CT": {"CT": [crop, Write(dataset=f"./Out:{stored}")]}}
-    api.transform("CROP", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "T", quiet=True)
+    api.transform("CROP", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "T", memory_budget=BUDGET, quiet=True)
 
     written = sitk.ReadImage(str(tmp_path / "Out" / "P000" / f"CT.{stored}"))
     assert written.GetSize() == (25, 29, 17)
@@ -220,9 +222,15 @@ def test_the_inverse_of_an_empty_crop_under_empty_fill_is_the_fill_on_the_whole_
         Crop(source="total", fill=0, empty="zeros")
 
 
-def test_a_handed_box_is_its_own_chains_when_two_chains_share_their_stage_names() -> None:
+def test_a_handed_box_is_its_own_chains_when_two_chains_share_their_stage_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # CT -> CT_1mm and CT -> CT_2mm: the same class names before the Crop, configured otherwise. The box is
     # remembered per chain, not per sequence of class names, so each chain crops its own volume's foreground.
+    import konfai.utils.budget as budget
+
+    monkeypatch.setattr(budget, "per_rank_budget_bytes", lambda: 256.0 * 2**20)  # the replay is priced (BUDGET)
+
     class KeepHalf:
         def __init__(self, first: bool) -> None:
             self.first = first

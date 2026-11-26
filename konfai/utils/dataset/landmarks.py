@@ -48,6 +48,12 @@ def read_landmarks(filename: Path) -> tuple[np.ndarray, list[str]]:
     rows = list(csv.reader(line for line in lines if line.strip() and not line.startswith("#")))
     data = np.zeros((len(rows), 3), dtype=np.double)
     for i, row in enumerate(rows):
+        if len(row) < 4:
+            raise DatasetManagerError(
+                f"'{filename}' holds a record of {len(row)} column(s) at row {i + 1}, and a landmark's are its id then"
+                " its three coordinates.",
+                "Give each row its id, x, y and z.",
+            )
         data[i] = np.array(row[1:4], dtype=np.double)
     if coordinate_system.upper() in _RAS:
         data[:, :2] *= -1

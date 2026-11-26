@@ -122,6 +122,9 @@ like any image. `itktransform` names the backend: files are `.h5` or `.tfm`, nev
 - Landmarks are read and written in LPS. A `.fcsv` whose `# CoordinateSystem` is `RAS` is converted; `LPS`,
   `0`, `1` or no line are read as LPS. A file from 3D Slicer older than 4.11 writes `0` over RAS points: set
   its line to `RAS`.
+- A fiducial file is a group of its own. `CT.fcsv` beside `CT.mha`, or beside any other entry stored under
+  the same name, is refused with both files named, by the write that would put one beside the other and by
+  the read of a pair already there: store the points under their own group (`Prompts.fcsv`).
 
 ## DICOM series
 

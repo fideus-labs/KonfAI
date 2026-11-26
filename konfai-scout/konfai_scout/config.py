@@ -35,6 +35,9 @@ class Budget:
     max_images: int = 60
     max_seconds: float | None = 900.0
     max_usd: float | None = None
+    #: The model's context window, less room to conclude: once a request's tokens reach it, the model is told to note
+    #: and conclude. A local model's window is small, and its overflow ends an inspection before the model concludes.
+    max_context_tokens: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

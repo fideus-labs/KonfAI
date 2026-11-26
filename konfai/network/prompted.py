@@ -43,6 +43,9 @@ from typing import Any, TypeVar
 
 import numpy as np
 
+# The kinds of point every prompted tool knows (any other label is a kind of the app's own, ``Prompts.of``), and the
+# indices of a point on a grid.
+from konfai.data.transform.prompts import BOX, NEGATIVE, POSITIVE, on_grid
 from konfai.network import network
 from konfai.network.external import ExternalNet, ExternalTool
 from konfai.utils.dataset import Attribute, is_an_image
@@ -65,10 +68,6 @@ def kept(key: Hashable, make: Callable[[], T]) -> T:
     if key not in _KEPT:
         _KEPT[key] = make()
     return _KEPT[key]
-
-
-#: The kinds of point every prompted tool knows. Any other label is a kind of the app's own (``Prompts.of``).
-POSITIVE, NEGATIVE, BOX = "positive", "negative", "box"
 
 
 @dataclass
@@ -113,10 +112,10 @@ class PromptedTool(ExternalTool):
         grid = ("GetSize", "GetOrigin", "GetSpacing", "GetDirection")
         if not all(np.allclose(getattr(image, get)(), getattr(previous, get)(), rtol=0, atol=1e-6) for get in grid):
             raise KonfAIError("Prompted tool", "The last mask is not on the image's grid: resample it onto the image.")
-        rank = image.GetDimension()  # a fiducial file holds 3D points, a 2D image takes their first two
-        voxels = [image.TransformPhysicalPointToContinuousIndex(point[:rank])[::-1] for point in points.tolist()]
+        # The image's grid is the first branch's header; a fiducial file holds 3D points, a 2D image takes their first two.
+        voxels = on_grid(points, header, image.GetDimension(), "none")
         mask = sitk.GetArrayViewFromImage(previous) > 0.5
-        prompts = Prompts(np.array(voxels, float).reshape(-1, rank), kinds, mask if mask.any() else None)
+        prompts = Prompts(voxels, kinds, mask if mask.any() else None)
         return self._engine(image, prompts, device_index)
 
 

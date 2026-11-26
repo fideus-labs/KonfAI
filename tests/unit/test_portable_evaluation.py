@@ -472,6 +472,26 @@ def test_a_crop_after_a_stage_moving_the_values_is_refused_in_an_evaluation_chai
         _group_steps("Output", {"KonfAIInference": {"repo_id": "a"}, "Crop": {}}, tmp_path, {}, exporter)
 
 
+@pytest.mark.parametrize(
+    ("chain", "groups"),
+    [
+        ({"PointsOnGrid": {"reference": "CT"}}, "'CT'"),
+        ({"DrawPrompts": {"points": "PROMPTS", "previous": "LAST"}}, "'PROMPTS' and 'LAST'"),
+        ({"Crop": {"shape": [8, 8, 8], "points": "PROMPTS"}}, "'PROMPTS'"),
+        ({"Crop": {"shape": [8, 8, 8], "onto": "LAST"}}, "'LAST'"),
+    ],
+)
+def test_a_prompt_stage_is_refused_by_name_in_an_evaluation_chain(tmp_path: Path, chain: dict, groups: str) -> None:
+    from konfai.portable_evaluation import _group_steps
+
+    # The runtime hands an evaluation chain the group it prepares and no other: its plan and its run would refuse a
+    # stage reading the prompts, or the group they lie on, once the program is written.
+    (stage,) = chain
+    refused = f"(?s)Transform '{stage}' of group 'Output' reads {groups} beside the case.*konfai EVALUATION"
+    with pytest.raises(EvaluatorError, match=refused):
+        _group_steps("Output", chain, tmp_path, {}, None)
+
+
 def test_sam_perceptual_names_its_graph_after_the_network_it_loads(tmp_path: Path, monkeypatch) -> None:
     import konfai.portable_evaluation as portable_evaluation
     from konfai.metric.measure import impact

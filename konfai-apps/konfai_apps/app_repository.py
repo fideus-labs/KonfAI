@@ -260,6 +260,14 @@ def _apps_in(files: list[str]) -> list[str]:
     return [path.split("/")[0] for path in files if PurePosixPath(path).parts[1:] == ("app.json",)]
 
 
+_HUB_ACCESS_HINT = (
+    "If the repository is private or gated, log in once with `hf auth login` (`huggingface-cli login` before"
+    " huggingface_hub 0.34), or set HF_TOKEN, with an account that has access to it, on the machine that resolves"
+    " the app: the server's, with --host."
+)
+_URL_QUERY = re.compile(r"(https?://[^\s?#]+)[?#]\S*")
+
+
 def _cached_apps(repo_id: str, revision: str | None) -> list[str] | None:
     """The folders whose ``app.json`` the local cache holds at ``revision``, or ``None`` when it holds no snapshot."""
     cache = Path(constants.HF_HUB_CACHE) / _cache_name(repo_id)
@@ -299,7 +307,8 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool = False) -> l
         raise AppRepositoryError(
             f"Failed to inspect Hugging Face repository '{repo_id}'. Check that the repository exists, that you "
             "have access to it and that your internet connection is working; offline, only cached apps are listed.\n"
-            f"Original error: {failure or 'HF_HUB_OFFLINE is set and nothing is cached'}"
+            f"Original error: {failure or 'HF_HUB_OFFLINE is set and nothing is cached'}",
+            _HUB_ACCESS_HINT,
         ) from failure
     return cached
 
@@ -2015,7 +2024,8 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                     "This prevents verifying whether it is a valid application folder. "
                     "Please check that the repository exists, that the path is correct, "
                     "and that you have sufficient access rights.\n"
-                    f"Original error: {exc}"
+                    f"Original error: {exc}",
+                    _HUB_ACCESS_HINT,
                 ) from exc
         try:
             base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
@@ -2082,9 +2092,11 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                 )  # nosec B615
                 return Path(snapshot_dir) / filename_path
             except Exception as exc:
+                detail = _URL_QUERY.sub(r"\1", str(exc))  # a file the CDN serves is named by a signed URL
                 raise AppRepositoryError(
                     f"Failed to download '{filename}' from '{repo_id}'. "
-                    "Check your internet connection or repository access."
+                    f"Check your internet connection or repository access.\nOriginal error: {detail}",
+                    _HUB_ACCESS_HINT,
                 ) from exc
         try:
             return Path(

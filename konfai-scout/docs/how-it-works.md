@@ -72,12 +72,13 @@ a CT preset (in HU, shifted by 1024 on a CT stored as HU + 1024).
 The survey of where to look, the coverage montages, the rules on what a report holds and Scout's own check of each
 flagged box are the same at every depth.
 
-`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd` bound an inspection; when a limit is reached the
+`--max-tool-calls`, `--max-images`, `--max-seconds`, `--max-usd`, `--max-context-tokens` bound an inspection; when a limit is reached the
 model gets one last turn to note and conclude, else Scout concludes "insufficient evidence" itself and says why. The
 call budget counts the calls that explore (`view`, `montage`, `measure`, `region_stats`): a `note` or `conclude` is
 never refused. With `claude-code` and `codex`, whose CLI runs the whole loop in one request, the calls and the time
-are counted inside the served tools, and `claude-code`'s cost message by message; `codex` reports its cost only once
-its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price is unknown).
+are counted inside the served tools, and `claude-code`'s cost and context message by message; `codex` reports its
+usage only once its loop has run, so the report says `max_usd` was not enforced (as it does for a model whose price
+is unknown) and its context is checked between its turns only.
 `--second-reading` adds, after the inspection, one short session per error observation for the blind re-read. It
 runs past the limits above: its cost is added to the report's, not bounded by `--max-usd`.
 Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is taken as local (Scout cannot tell whether that server forwards what it receives). The cost
