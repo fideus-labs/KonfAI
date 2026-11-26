@@ -864,6 +864,40 @@ def test_seed_seeds_each_pass_whose_engine_draws_with_one(
     assert shares["P"]["global"] == share and shares["P"]["tile"] == share
 
 
+def test_seed_seeds_the_engine_a_sampled_run_reads(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sampled route reads Prediction.yml in this process: --seed reaches its engine even where the global pass's
+    config (tiling['global'], another engine's) takes none, and a --set of the seed still wins."""
+    fixed, moving = _pair(tmp_path)
+    seeds = []
+
+    class Reached(Exception):
+        pass
+
+    def elastix(self, run):
+        seeds.append(run.config["Predictor"]["Model"]["RegistrationNet"]["seed"])
+        raise Reached
+
+    config = json.loads((presets / "Elx" / "Prediction.yml").read_text(encoding="utf-8"))
+    config["Predictor"]["outputs_dataset"] = {"dvf": {"OutputDataset": {"group": "DVF"}}}
+    other = {"Predictor": {"Model": {"classpath": OTHER, "RegistrationNet": {}}}}
+    manifest = json.loads((presets / "Elx" / "app.json").read_text(encoding="utf-8"))
+    tiling = {"global": "Global.yml", "tile": "Prediction_tile.yml"}
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {**manifest, "tiling": tiling})
+    monkeypatch.setattr(
+        reg, "_preset_config", lambda preset, name: json.loads(json.dumps(other if name == "Global.yml" else config))
+    )
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_sampled_elastix", elastix)
+    for overrides, expected in (([], 11), (["Elx:seed=3"], 3)):  # the preset's own seed is 7
+        with pytest.raises(Reached):
+            reg.ImpactRegKonfAIApp().register(
+                ["Elx"], [fixed], [moving], output=tmp_path / "out", out_of_core="sampled", seed=11,
+                config_overrides=overrides,
+            )  # fmt: skip
+        assert seeds.pop() == expected
+
+
 @pytest.mark.parametrize("engine", reg._SAMPLED_ENGINES)
 def test_every_engine_of_impact_reg_takes_a_seed(engine: str) -> None:
     # --seed seeds an engine of this package whose config leaves its seed out (_draws_with_seed).

@@ -1270,6 +1270,7 @@ class ImpactRegKonfAIApp:
         # Each preset pass runs on this server when set; the ensemble, the evaluation and the uncertainty
         # stay here, on the fields it sends back.
         self._remote = remote_server
+        self._seed: int | None = None  # register's --seed
         # The --set overrides each preset run took, by its workspace (``label``): ``applied`` in register.json.
         self._applied: dict[str, list[str]] = {}
         # Per preset, the voxels it registers whole and those a tile holds, KonfAI's ``max_voxels``: ``plans`` in
@@ -1488,6 +1489,7 @@ class ImpactRegKonfAIApp:
             )
         overrides = _preset_overrides(presets, config_overrides, quiet, seed, routed=True)
         self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._seed = seed  # the sampled route runs here: its engine takes it from its share
         self._moved_format = None
         # The form each output is asked in (None: every output), for a field this layer writes itself (sampled).
         self._forms: dict[str | None, tuple[str, str]] = {}
@@ -2021,7 +2023,9 @@ class ImpactRegKonfAIApp:
                 f"--out-of-core sampled runs the preset's engine in this process, which needs {error.name}.",
                 "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
             ) from error
-        apply_overrides(config, config_overrides["global"], lambda config: network)
+        # --seed as the run reads it (this config's engine draws with one), before the share's own --set of it.
+        seeded = [f"seed={self._seed}"] if self._seed is not None and _draws_with_seed(config) else []
+        apply_overrides(config, [*seeded, *config_overrides["global"]], lambda config: network)
         self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
         # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
         # in the same order, and the transform is the run in memory's.
@@ -2106,6 +2110,7 @@ class ImpactRegKonfAIApp:
         args += [f"set={override}" for override in config_overrides["global"]]
         args += [f"{name}={value}" for name, value in (("samples", samples), ("epochs", epochs)) if value is not None]
         args += [f"tta={tta}"] if tta else []
+        args += [f"seed={self._seed}"] if self._seed is not None else []
         out = work / _workspace(f"{preset}_remote")
         KonfAIAppClient(app_id(IMPACT_REG_KONFAI_REPO, app), self._remote).run(
             "impact_reg_sampled",
