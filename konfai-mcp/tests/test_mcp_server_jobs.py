@@ -59,13 +59,6 @@ def _pid_alive(pid: int) -> bool:
             return False
 
 
-def _dead_pid() -> int:
-    """A pid no process holds now: a fixed one may belong to a live process on the runner."""
-    process = subprocess.Popen([sys.executable, "-c", ""])
-    process.wait()
-    return process.pid
-
-
 def _wait_pid_dead(pid: int, timeout: float) -> bool:
     # Poll instead of a fixed sleep: process teardown timing varies under load (the full suite).
     deadline = time.time() + timeout
@@ -567,7 +560,7 @@ def test_job_registry_latest_and_get_unknown() -> None:
         registry.get("missing")
 
 
-def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
+def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = WorkspaceLayout(tmp_path)
     workspace = layout.ensure_session_workspace()
     layout.jobs_dir().mkdir(parents=True, exist_ok=True)
@@ -585,7 +578,7 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
   "config_path": "/tmp/Config.yml",
   "created_at": 1.0,
   "status": "running",
-  "pid": PID,
+  "pid": 4321,
   "returncode": null,
   "started_at": 1.5,
   "finished_at": null,
@@ -597,12 +590,14 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
   "manifest_path": null,
   "recovered": false
 }
-        """.strip().replace("PID", str(_dead_pid())),
+        """.strip(),
         encoding="utf-8",
     )
 
     assert workspace == tmp_path / "sessions" / "default"
-    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+    jobs = importlib.import_module("konfai_mcp.server_jobs")
+    monkeypatch.setattr(jobs, "_pid_alive", lambda pid: False)  # the recorded pid may be alive on the machine
+    registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
 
     payload = registry.payload(registry.get("job5"), _isoformat)
 
@@ -623,7 +618,7 @@ def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
             "config_path": str(config_path),
             "created_at": 1.0,
             "status": status,
-            "pid": _dead_pid(),
+            "pid": 4321,
             "returncode": None,
             "started_at": 1.5,
             "finished_at": 2.0 if status == "done" else None,
@@ -638,7 +633,9 @@ def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
     )
 
 
-def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(tmp_path: Path) -> None:
+def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A job that was over before this server started keeps the config edited since out of its record."""
     layout = WorkspaceLayout(tmp_path)
     layout.ensure_session_workspace()
@@ -648,8 +645,10 @@ def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_st
         layout.job_dir(job_id).mkdir(parents=True)
         layout.job_state_path(job_id).write_text(_persisted_job_record(job_id, status, config_path), encoding="utf-8")
         layout.job_manifest_path(job_id).write_text("{}", encoding="utf-8")
+    jobs = importlib.import_module("konfai_mcp.server_jobs")
+    monkeypatch.setattr(jobs, "_pid_alive", lambda pid: False)  # the recorded pid may be alive on the machine
 
-    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+    registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
 
     assert registry.get("finished_before").status == "done"
     assert json.loads(layout.job_manifest_path("finished_before").read_text(encoding="utf-8")) == {}
