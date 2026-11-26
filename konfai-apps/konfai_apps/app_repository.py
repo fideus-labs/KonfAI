@@ -262,7 +262,8 @@ def _apps_in(files: list[str]) -> list[str]:
 
 _HUB_ACCESS_HINT = (
     "If the repository is private or gated, log in once with `hf auth login` (`huggingface-cli login` before"
-    " huggingface_hub 0.34), or set HF_TOKEN, with an account that has access to it."
+    " huggingface_hub 0.34), or set HF_TOKEN, with an account that has access to it, on the machine that resolves"
+    " the app: the server's, with --host."
 )
 _URL_QUERY = re.compile(r"(https?://[^\s?#]+)[?#]\S*")
 
