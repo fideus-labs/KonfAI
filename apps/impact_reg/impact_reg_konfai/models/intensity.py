@@ -20,6 +20,7 @@ read, the translation between two subjects' centres of mass, and whether a mask 
 import contextlib
 import os
 import tempfile
+from typing import TYPE_CHECKING
 
 import numpy as np
 import SimpleITK as sitk
@@ -36,6 +37,9 @@ from konfai.utils.dataset import (
     image_to_data,
 )
 from konfai.utils.dataset.attribute import _flatten_transforms
+
+if TYPE_CHECKING:
+    from ..native import PlaneFrame
 
 #: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
 #: elastix's rigid then B-spline as such, a field for what is dense), or its displacement on the fixed grid. A mean
@@ -91,13 +95,17 @@ def _native_file(transform: sitk.Transform, voxel: float) -> str | None:
     return path
 
 
-def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -> np.ndarray:
-    """``linear``, found in voxel units, as ``AFFINE_ATTRIBUTE`` records it, in millimetres. A plane's transform
-    gets the z row of a volume one plane thick: the shift from one plane to the other, as its field does."""
+def _world_affine(linear: sitk.Transform, voxel: float, plane: "tuple[PlaneFrame, float] | None") -> np.ndarray:
+    """``linear``, found in voxel units, as ``AFFINE_ATTRIBUTE`` records it, in millimetres. A plane's transform, found
+    in its ``PlaneFrame``, is lifted as its field is: the plane's map, the identity along its normal, and along it the
+    gap from one plane to the other."""
     matrix = affine_to_attribute(linear).reshape(linear.GetDimension(), -1)
     matrix[:, -1] *= voxel
-    if z_shift is not None:
-        matrix = np.block([[matrix[:, :2], np.zeros((2, 1)), matrix[:, 2:]], [np.array([[0.0, 0.0, 1.0, z_shift]])]])
+    if plane is not None:
+        frame, gap = plane
+        axes, normal = frame.axes, frame.normal
+        lifted = axes @ matrix[:, :2] @ axes.T + np.outer(normal, normal)
+        matrix = np.column_stack([lifted, axes @ matrix[:, 2] + gap * normal])
     return matrix.ravel()
 
 
@@ -125,9 +133,18 @@ class EngineRegistration(ExternalTool):
 
     def call(self, images: list[sitk.Image | None], device_index: int, header: Attribute) -> np.ndarray:
         flat = images[0].GetSize()[2] == 1
-        if flat:
-            z_shift = images[1].GetOrigin()[2] - images[0].GetOrigin()[2]
-            images = [image[:, :, 0] for image in images]
+        if flat:  # every plane in the fixed one's frame (``PlaneFrame``), lifted back through it
+            from ..native import PlaneFrame, PlaneHeader
+
+            frame = PlaneFrame.of(images[0].GetDirection(), 0)
+            gap = frame.gap(images[0].GetOrigin(), images[1].GetOrigin())
+            planes = []
+            for image in images:
+                seen, plane = PlaneHeader(image, 0, frame), image[:, :, 0]
+                plane.SetOrigin(seen.GetOrigin())
+                plane.SetDirection(seen.GetDirection())
+                planes.append(plane)
+            images = planes
         voxel = min(images[0].GetSpacing())
         for image in images:  # the same voxels, measured in the fixed image's finest voxel
             image.SetSpacing([v / voxel for v in image.GetSpacing()])
@@ -137,12 +154,14 @@ class EngineRegistration(ExternalTool):
             result = self._engine.register(fixed, moving, device_index, fixed_mask, moving_mask)
         transform = result if isinstance(result, sitk.Transform) else None
         field = (displacement_on(fixed, transform) if transform is not None else result) * voxel
-        if flat:  # the plane's (dx, dy), and along z from one plane to the other
-            field = np.concatenate([field, np.full_like(field[:1], z_shift)])
+        if flat:  # the plane's displacement through its frame, and along its normal from one plane to the other
+            field = np.moveaxis(frame.lift(np.moveaxis(field, 0, -1).astype(np.float64), gap), -1, 0).astype(
+                field.dtype
+            )
         # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
         header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         if transform is not None and transform.IsLinear():
-            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
+            header[AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, (frame, gap) if flat else None)
         elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
             header[TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
         return field
@@ -159,34 +178,33 @@ def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sit
 
 
 def center_of_mass_translation(
-    fixed: sitk.Image, moving: sitk.Image, fixed_mask: sitk.Image | None = None, moving_mask: sitk.Image | None = None
+    fixed: sitk.Image,
+    moving: sitk.Image,
+    fixed_mask: sitk.Image | None = None,
+    moving_mask: sitk.Image | None = None,
+    kind: str = "com",
 ) -> list[float]:
     """The translation from ``fixed``'s centre of mass to ``moving``'s: where a linear stage starts for a preset that
-    declares ``moments_init: com``.
+    declares ``moments_init: com`` (with ``kind='cof'``, from the centre of one frame to the other's).
 
     Each centre is taken in its image's own physical space, inside its mask if it has one, on intensities winsorised
-    to their 0.5-99.5 percentiles and rescaled to [0, 1]. Raw, a background outweighs a sparse subject (the 36 um
-    between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue, and
-    a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
-    ambiguous principal axes.
+    to their 0.5-99.5 percentiles and counted from the lower one. Raw, a background outweighs a sparse subject (the
+    36 um between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue,
+    and a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
+    ambiguous principal axes. It is ``native.mapped_centre``, the one the out-of-core route takes on the twins, so that
+    both start from the same translation to the bit.
     """
+    from ..native import Mapped, geometry_of, mapped_centre
 
     def centre(image: sitk.Image, mask: sitk.Image | None) -> np.ndarray:
-        rescaled = sitk.RescaleIntensity(winsorized(sitk.Cast(image, sitk.sitkFloat32), 0.5, 99.5), 0.0, 1.0)
-        if mask is None:
-            region = sitk.Image(image.GetSize(), sitk.sitkUInt8) + 1
-            region.CopyInformation(image)
-        else:
+        image = sitk.Cast(image, sitk.sitkFloat32)
+        region = None
+        if mask is not None:
             # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
             identity = sitk.Transform(image.GetDimension(), sitk.sitkIdentity)
-            region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
-        stats = sitk.LabelIntensityStatisticsImageFilter()
-        stats.SetComputePerimeter(False)
-        stats.Execute(region, rescaled)
-        if stats.HasLabel(1) and stats.GetSum(1) > 0:
-            return np.asarray(stats.GetCenterOfGravity(1))
-        # A constant subject (all 0 once rescaled) has no centre of mass: its grid's centre, as centring frames.
-        return np.asarray(image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()]))
+            mask = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
+            region = Mapped(sitk.GetArrayViewFromImage(mask), geometry_of(mask))
+        return mapped_centre(Mapped(sitk.GetArrayViewFromImage(image), geometry_of(image)), region, kind)
 
     return (centre(moving, moving_mask) - centre(fixed, fixed_mask)).tolist()
 
@@ -198,3 +216,25 @@ def is_partial_mask(mask: sitk.Image | None) -> bool:
         return False
     array = sitk.GetArrayViewFromImage(mask)
     return bool((array != 0).any()) and bool((array == 0).any())
+
+
+def engine_of(config: dict, network_class: type, level_class: type):
+    """The engine a prediction config describes, built as the config binder builds ``network_class`` (a backend's
+    ``RegistrationNet``, its levels ``level_class``): for the out-of-core run, which drives the engine itself rather
+    than through a KonfAI prediction."""
+    from konfai_apps.app_repository import LocalAppRepository
+
+    from .impact_loss import ModelSpec
+
+    def specs(models: dict | None) -> dict:
+        return {name: ModelSpec(**spec) for name, spec in (models or {}).items()}
+
+    block = dict(LocalAppRepository._model_param_block(config)[1])
+    for key in ("optimizer", "schedulers", "outputs_criterions"):
+        block.pop(key, None)
+    block["models"] = specs(block.get("models"))
+    block["levels"] = {
+        name: level_class(**{**level, "models": specs(level.get("models"))})
+        for name, level in (block.get("levels") or {}).items()
+    }
+    return network_class(**block).get_submodule("Registration")._engine

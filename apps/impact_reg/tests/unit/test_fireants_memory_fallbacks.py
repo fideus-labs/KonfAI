@@ -19,6 +19,7 @@ letting konfai cut the registration into patches: the IMPACT metric in checkpoin
 correlation a few channels at a time. Both are the same value with the same gradient."""
 
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import torch
@@ -94,7 +95,9 @@ def test_the_static_lncc_falls_back_to_fewer_channels(monkeypatch: pytest.Monkey
     loss._specs, loss._levels, loss._channels, loss._level, loss._factors = [spec], [[0]], [[6]], -1, None
     loss._cores = [SimpleNamespace(kept=[0])]
     loss._generator = torch.Generator().manual_seed(0)
-    loss._sampling, loss._patch = 1.0, []
+    loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
+    loss._statistics, loss._cells, loss._layer_sums, loss._level_weight, loss._place = {}, {}, {}, 0.0, None
+    loss._bases = {}
     whole = loss(moved, fixed)
     (whole_gradient,) = torch.autograd.grad(whole, moved)
 
@@ -121,32 +124,110 @@ def _static_loss(tmp_path: Path) -> "fireants.ImpactFeatureLoss":
     return fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
 
 
-def test_a_static_extraction_that_does_not_fit_tiles_both_images_alike(
+class _Averaged(torch.nn.Module):
+    """Two layers with a receptive field of 3 voxels: the input averaged over 3^3 voxels, and its square."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layers: torch.Tensor,
+        stats: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+        direction: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+    ) -> list[torch.Tensor]:
+        y = x[:, :1]
+        return [torch.nn.functional.avg_pool3d(y, 3, 1, 1), y * y]
+
+
+def test_a_static_extraction_in_patches_is_the_one_pass_s_for_both_images(tmp_path: Path) -> None:
+    # Too large for one pass, or given a patch, every model is predicted by blocks as a segmentation is: both images
+    # come back as the one pass gives them, whatever their extents (a fixed image tiled where the moving one is not).
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    whole = loss.extract(fixed, moving, 0)
+    patched = loss.extract(fixed, moving, 16)
+    for reference, found in zip(whole, patched, strict=True):
+        assert found.shape == reference.shape
+        torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
+
+
+def test_a_static_extraction_the_device_cannot_hold_whole_goes_by_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The whole-image pass runs out of memory: the larger image finds the tile that fits, the other goes straight
-    # through the same one, and a thin axis is one tile of its own rather than padded up to a 256-voxel cube
-    # (an overlap of 64 voxels did not even fit a 40-voxel axis).
-    from konfai.metric.measure.impact import ImpactFeatureModel
+    # One pass that runs out of the card's memory is predicted by blocks, which halve until one fits: the one pass's
+    # features all the same.
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    model = loss.cores[0].model
+    model.fov = [3, 3]  # each layer's field, which the blocks read around them
+    whole = loss.extract(fixed, moving, 0)
+    volume = model.volume
 
-    torch.manual_seed(0)
-    tiles: list[tuple[tuple[int, ...], int]] = []
-    volume = ImpactFeatureModel._volume
+    def out_of_memory_above_20_cubed(image, *args, **kwargs):
+        if image[0, 0].numel() > 20**3:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.10 GiB.")
+        return volume(image, *args, **kwargs)
 
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap):
-        tiles.append((tuple(image.shape[2:]), patch))
-        if patch == 0:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
-        return volume(self, image, normalization, patch, overlap)
+    monkeypatch.setattr(model, "volume", out_of_memory_above_20_cubed)
+    for reference, found in zip(whole, loss.extract(fixed, moving, 0), strict=True):
+        assert found.shape == reference.shape
+        torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
 
-    monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
-    loss = _static_loss(tmp_path)
-    loss.cores[0].model.multiple = 16
-    fixed, moving = torch.rand(1, 1, 20, 40, 300), torch.rand(1, 1, 24, 40, 280)
-    fixed_volume, moving_volume = loss.extract(fixed, moving, 0, 0.25)
-    assert tiles == [((24, 40, 280), 0), ((24, 40, 280), 256), ((20, 40, 300), 256)]
-    torch.testing.assert_close(fixed_volume, torch.cat([fixed * 2.0, fixed * fixed], dim=1))
-    assert moving_volume.shape == (1, 2, 24, 40, 280)
+
+@pytest.mark.skipif(not Path("/proc/self/maps").exists(), reason="the process's mappings are read off /proc")
+def test_a_static_extraction_by_blocks_maps_no_file_its_directory_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows cannot remove a file still mapped: the blocks' memmaps are gone before their directory is.
+    import tempfile
+
+    directory = tempfile.TemporaryDirectory
+
+    class Checked(directory):  # type: ignore[valid-type, misc]
+        def __exit__(self, *args):
+            mapped = [line for line in Path("/proc/self/maps").read_text().splitlines() if self.name in line]
+            assert not mapped, mapped
+            return super().__exit__(*args)
+
+    monkeypatch.setattr(fireants.tempfile, "TemporaryDirectory", Checked)
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    loss.extract(
+        torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator), 16
+    )
+
+
+def test_a_patch_extracts_by_blocks_with_no_whole_image_resampled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model at a finer voxel_size had both whole images resampled before the patch sent it by blocks, which read
+    # regions of their own; the whole resampling alone could run the device out.
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1", voxel_size=[0.5, 0.5, 0.5])
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    loss.cores[0].model.fov = [3, 3]
+    resampled = []
+    original = fireants.resampled
+    monkeypatch.setattr(
+        fireants,
+        "resampled",
+        lambda image, *args, **kwargs: (resampled.append(tuple(image.shape)), original(image, *args, **kwargs))[1],
+    )
+    generator = torch.Generator().manual_seed(0)
+    fixed, moving = torch.rand(1, 1, 20, 18, 16, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator)
+    volumes = loss.extract(fixed, moving, 16, ([16.0, 18.0, 20.0], [10.0, 12.0, 14.0]))
+    assert not resampled and volumes[0].shape[2:] == fixed.shape[2:]
 
 
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:
@@ -155,7 +236,7 @@ def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> Non
     torch.manual_seed(0)
     loss = _static_loss(tmp_path)
     loss.cores[0].pca = 1
-    volumes = loss.extract(torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8), 0, 0.25)
+    volumes = loss.extract(torch.rand(1, 1, 8, 8, 8), torch.rand(1, 1, 8, 8, 8), 0)
     assert [volume.shape[1] for volume in volumes] == [2, 2] and loss._channels == [[1, 1]]
 
 

@@ -99,6 +99,15 @@ def halve_on_oom(run: Callable[[], _T], narrow: Callable[[], bool], on_cuda: boo
         torch.cuda.empty_cache()
 
 
+def peak_bytes(run: Callable[[], _T], device: torch.device | str) -> tuple[_T, int]:
+    """``run()``'s result, and the bytes it took on the CUDA ``device`` at its peak above what was allocated before."""
+    torch.cuda.synchronize(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    before = torch.cuda.memory_allocated(device)
+    result = run()
+    return result, int(torch.cuda.max_memory_allocated(device) - before)
+
+
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:
     """The VRAM a step's transient may claim: free memory under the safety margin, minus what must
     stay resident alongside the step (accumulators and the streamed assembly window for prediction;

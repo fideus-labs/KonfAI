@@ -274,7 +274,7 @@ def test_a_moved_file_stands_beside_a_field_in_a_store(tmp_path: Path) -> None:
     sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
 
     moving_path = {"P000": tmp_path / "moving.mha"}  # the fixed image is lent to an affine alone: a field has a grid
-    ImpactRegKonfAIApp()._derive_moved(moving_path, moving_path, "Transform", output, work, [], 1, True)
+    ImpactRegKonfAIApp()._derive_moved(moving_path, moving_path, set(), "Transform", output, work, [], 1, True)
 
     assert sorted(path.name for path in (output / "P000").iterdir()) == ["Moved.mha", "Transform.ome.zarr"]
     assert sitk.ReadImage(str(output / "P000" / "Moved.mha")).GetSize() == (6, 5, 4)

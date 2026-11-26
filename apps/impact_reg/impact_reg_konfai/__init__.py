@@ -21,9 +21,15 @@ import os
 #: The revision of ``VBoussot/ImpactReg`` this package resolves its presets at. A release pins it here, to the
 #: Hugging Face tag of the presets it was tested against, so that a later edit of the presets never reaches an
 #: install that does not know their keys; "main" follows the repository as it moves.
-PRESETS_REVISION = "89e10b46039b9342f79f987b7723125635276f4c"
+PRESETS_REVISION = "69a916f13f91d8179ad49c7e538c2708d47fe987"
 
 #: Where the presets are resolved from: ``KONFAI_IMPACTREG_REPO`` when set (a local directory of preset folders,
 #: for development and offline use, or a Hugging Face ``<repo>[@<revision>]``), else ``PRESETS_REVISION`` of
 #: ``VBoussot/ImpactReg``. Here rather than in ``impact_reg`` so that reading it imports no torch.
+#: How a case registers (``--out-of-core``): auto, whole where it fits the device and sampled where it does not (a
+#: preset of another engine than elastix, ConvexAdam and FireANTs: tiled where it declares a tile pass, else whole on
+#: a resampled pair); whole, in one piece on its native grid; tiled, a global pass on the pair resampled to fit, then
+#: the deformable stage on native tiles; sampled, at native resolution, by boxes.
+ROUTES = ("auto", "whole", "tiled", "sampled")
+
 PRESETS_REPO = os.environ.get("KONFAI_IMPACTREG_REPO", f"VBoussot/ImpactReg@{PRESETS_REVISION}")

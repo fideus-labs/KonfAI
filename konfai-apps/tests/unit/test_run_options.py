@@ -71,10 +71,10 @@ def test_the_seed() -> None:
 @pytest.mark.parametrize("root", ["Predictor", "Trainer"])
 def test_the_seed_applies_to_a_config_that_leaves_manual_seed_to_its_default(root: str) -> None:
     config = {root: {"Model": {"classpath": "Model:Net", "Net": {}}}}
-    apply_overrides(config, run_overrides(config, seed=7), lambda: None)
+    apply_overrides(config, run_overrides(config, seed=7), lambda config: None)
     assert config[root]["manual_seed"] == 7
     with pytest.raises(AppRepositoryError, match="does not exist"):  # the one root key a config may omit
-        apply_overrides(config, [f"{root}.other_seed=7"], lambda: None)
+        apply_overrides(config, [f"{root}.other_seed=7"], lambda config: None)
 
 
 def test_a_format_for_every_output_of_an_app_that_writes_none_is_refused() -> None:
@@ -94,7 +94,7 @@ def test_a_format_or_an_output_the_app_cannot_write_is_refused(spec: str, messag
 
 def test_they_resolve_as_any_other_set_does() -> None:
     config = _config()
-    apply_overrides(config, run_overrides(config, ["omezarr"], seed=5), lambda: None)
+    apply_overrides(config, run_overrides(config, ["omezarr"], seed=5), lambda config: None)
     assert config["Predictor"]["outputs_dataset"]["DisplacementField"]["OutputDataset"]["dataset_filename"] == (
         "Transform:omezarr"
     )

@@ -32,6 +32,8 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 - ``uncertainty`` : from the per-preset displacement fields, compute the voxel-wise spread map.
 """
 
+import dataclasses
+import itertools
 import json
 import math
 import os
@@ -41,7 +43,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import SimpleITK as sitk
@@ -58,20 +63,39 @@ from konfai.utils.dataset import (
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import field_reach
-from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
+from konfai.utils.runtime import apply_cpu_thread_budget
+from konfai.utils.utils import (
+    SUPPORTED_BACKEND_FORMATS,
+    SUPPORTED_FORMATS,
+    format_token,
+    path_format_token,
+    split_format_level,
+    storage_form,
+)
 from konfai_apps import KonfAIApp
-from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
+from konfai_apps.app_repository import (
+    AppRepositoryError,
+    LocalAppRepository,
+    apply_overrides,
+    check_overrides,
+    did_you_mean,
+    model_config,
+    pass_cost,
+)
 from konfai_apps.cli import app_file, app_id, app_names
 from konfai_apps.ensemble import STACK, combine, stack_file
 from konfai_apps.ensemble import _token as member_token
 from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
-from impact_reg_konfai import PRESETS_REPO
+from impact_reg_konfai import PRESETS_REPO, ROUTES
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 
 # Preset apps live on this Hugging Face repo, at the revision this release pins; KONFAI_IMPACTREG_REPO points
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
 IMPACT_REG_KONFAI_REPO = PRESETS_REPO
+
+if TYPE_CHECKING:
+    from .native import AxisMap
 
 
 #: The app ``evaluate`` runs: the image, segmentation and landmark evaluation configs, as package data.
@@ -97,6 +121,16 @@ def _form(path: Path) -> str:
     if not form and path.is_dir() and path_format_token(path) == "omezarr":
         return ".ome.zarr"
     return form
+
+
+def _asked_form(kind: str) -> tuple[str, str]:
+    """The suffix an output asked in the format ``kind`` (``--output-format``) is published under and the token it
+    is written through: a backend token names its file (``itktransform`` an ``.h5``, ``mha.gz`` a compressed
+    ``.mha``), an OME-Zarr store is ``.ome.zarr``."""
+    if kind in SUPPORTED_BACKEND_FORMATS:
+        return (".h5" if kind == "itktransform" else f".{kind.removesuffix('.gz')}"), kind
+    token = format_token(f".{kind}")
+    return (".ome.zarr" if token == "omezarr" else f".{kind}"), token
 
 
 def _format_token(form: str) -> str:
@@ -135,14 +169,19 @@ def _transform_kinds(path: Path) -> list[str]:
 
 
 def _is_flat_field(path: Path) -> bool:
-    """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
+    """Whether a stored registration, a transform file, an OME-Zarr store or a field stored as an image, is 2-D, read
+    off its header alone."""
     if _backend(path) == "omezarr":
         from konfai.utils.ome_zarr import get_ome_zarr_info, is_affine_store, read_ome_zarr_affine
 
         if is_affine_store(path):
             return read_ome_zarr_affine(path).GetDimension() == 2
         return "z" not in get_ome_zarr_info(path)["axes"]
-    return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
+    if _is_transform_file(path):
+        return _transform_kinds(path)[0].endswith("_2_2")
+    from .native import read_information
+
+    return read_information(path).GetDimension() == 2
 
 
 def _is_field(path: Path) -> bool:
@@ -176,7 +215,7 @@ def _compose_padding(headers: "list[dict[str, _Header]]", budget: int, reach: fl
 
     widest = [0, 0, 0]
     for case in headers:
-        shape, spacing = case["Fixed"][0][-3:], case["Fixed"][1]
+        shape, spacing = case["Fixed"][0][1:], case["Fixed"][1]
         coarse = coarse_spacing(list(shape), list(spacing), budget) or spacing
         for axis, (step, goal) in enumerate(zip(spacing, coarse, strict=True)):
             widest[axis] = max(widest[axis], math.ceil(max(8 * goal, reach + goal) / step))
@@ -227,6 +266,13 @@ def _preset_config(preset: str, filename: str) -> dict:
 
     app = split_preset(preset)[0]
     return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, app, filename).read_text(encoding="utf-8")) or {}
+
+
+def _draws_with_seed(config: dict) -> bool:
+    """Whether the engine of a preset's ``config`` draws with a seed of its own: a ``seed`` the config sets, or the
+    one every engine of this package takes, left to its default."""
+    network = ((config.get("Predictor") or {}).get("Model") or {}).get("RegistrationNet")
+    return isinstance(network, dict) and ("seed" in network or _config_engine(config) is not None)
 
 
 def _app_preset_sets(preset: str) -> list[str]:
@@ -298,7 +344,11 @@ def _scopes(override: str, presets: list[str]) -> tuple[str | None, str | None, 
 
 
 def _preset_overrides(
-    presets: list[str], overrides: list[str] | None, quiet: bool = False
+    presets: list[str],
+    overrides: list[str] | None,
+    quiet: bool = False,
+    seed: int | None = None,
+    routed: bool = False,
 ) -> dict[str, dict[str, list[str]]]:
     """Each preset's share of the ``--set`` overrides, per pass, checked against the configs they run before anything
     runs.
@@ -319,7 +369,8 @@ def _preset_overrides(
 
     Each pass's share is applied to a copy of its config by konfai-apps' own resolver, so a name, a value or a range
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
-    nothing cached) leaves its share to that resolver, in the preset's own process.
+    nothing cached) leaves its share to that resolver, in the preset's own process. With ``routed``, the global share
+    is left to ``_check_routed_shares``, once the cases are routed: the configs it is read with depend on the route.
     """
     shares: dict[str, list[tuple[str | None, str]]] = {
         preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
@@ -330,10 +381,11 @@ def _preset_overrides(
             shares[member].append((stage, rest))
     passes: dict[str, dict[str, list[str]]] = {preset: {stage: [] for stage in _PASSES} for preset in presets}
     for preset, share in shares.items():
-        if not share:
+        if not share and seed is None:
             continue
         tiling = _manifest(preset).get("tiling") or {}
-        files = {"global": tiling.get("global") or "Prediction.yml", "tile": tiling.get("tile")}
+        files = {"global": tiling.get("global") or "Prediction.yml"}
+        files["tile"] = tiling.get("tile")
         configs = {}
         for stage, filename in files.items():
             try:
@@ -341,6 +393,10 @@ def _preset_overrides(
                     configs[stage] = _preset_config(preset, filename)
             except Exception:  # offline, nothing cached: konfai-apps checks this share in the preset's own process
                 continue
+        # --seed: the seed of each pass whose engine draws with one of its own, before any --set of it.
+        for stage, config in configs.items():
+            if seed is not None and _draws_with_seed(config):
+                passes[preset][stage].append(f"seed={seed}")
         where = {
             ("global", "tile"): "the preset and its tiles",
             ("global",): "the preset, not its tiles" if files["tile"] else files["global"],
@@ -381,17 +437,40 @@ def _preset_overrides(
             for target in targets:
                 passes[preset][target].append(override)
         for stage, config in configs.items():
-            try:
-                check_overrides(config, passes[preset][stage])
-            except AppRepositoryError as error:
-                raise KonfAIError(
-                    "ImpactReg",
-                    f"{preset} ({files[stage]}): {error.args[0]}",
-                    f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
-                    f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
-                    " for this preset alone.",
-                ) from None
+            if stage == "tile" or not routed:
+                _check_share(preset, files[stage], config, passes[preset][stage])
     return passes
+
+
+def _check_share(preset: str, filename: str, config: dict, share: list[str]) -> None:
+    """Refuse the ``--set`` of ``share`` the preset's config ``filename`` would refuse."""
+    try:
+        check_overrides(config, share)
+    except AppRepositoryError as error:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset} ({filename}): {error.args[0]}",
+            f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
+            f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
+            " for this preset alone.",
+        ) from None
+
+
+def _check_routed_shares(passes: dict[str, dict[str, list[str]]], routes: dict[str, "_Route"]) -> None:
+    """Each preset's global share checked against every config its route reads it with, once a config:
+    ``Prediction.yml`` for the cases registered whole or sampled, the global pass's own (``tiling["global"]``) for
+    those tiled. A config that cannot be read leaves the share to konfai-apps, in the preset's own process."""
+    for preset, route in routes.items():
+        tiling = _manifest(preset).get("tiling") or {}
+        files = {"Prediction.yml"} if route.sampled or not route.tiled else set()
+        if route.tiled and tiling.get("global"):
+            files.add(tiling["global"])
+        for filename in sorted(files):
+            try:
+                config = _preset_config(preset, filename)
+            except Exception:  # offline, nothing cached
+                continue
+            _check_share(preset, filename, config, passes[preset]["global"])
 
 
 def _plan(
@@ -414,6 +493,40 @@ def _plan(
     return voxels_on(whole.get("vram"), whole.get("ram"), at, remote_server), voxels_on(
         tile.get("vram"), tile.get("ram"), at, remote_server
     ) if tile else None
+
+
+@dataclass(frozen=True)
+class _Route:
+    """Where the cases of one preset register: those of ``sampled`` (by index) sampled, the others whole, or in two
+    passes with ``tiled``; ``budget`` and ``tile_budget`` are the preset's plan (``_plan``)."""
+
+    budget: int | None
+    tile_budget: int | None
+    sampled: list[int]
+    tiled: bool
+
+
+def _route(
+    choice: str, preset: str, voxels: list[int], plan: tuple[int | None, int | None], overrides: Sequence[str] = ()
+) -> _Route:
+    """Each case's route under ``choice`` (``ROUTES``), from ``voxels``, the largest image of each case, and the
+    preset's ``plan``. Under auto, a case over the budget goes where the preset can take it: sampled for an engine the
+    sampled route drives, else in two passes where the preset declares them, else whole on a grid KonfAI resamples to
+    fit. tiled refuses a preset with no tile pass or no declared cost to size it by."""
+    budget, tile_budget = plan
+    tiles = bool((_manifest(preset).get("tiling") or {}).get("tile")) and bool(budget and tile_budget)
+    if choice == "tiled" and not tiles:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset} declares no tile pass, or no memory cost to size one by, which --out-of-core tiled needs.",
+            "Choose --out-of-core auto, whole or sampled.",
+        )
+    over = [index for index, size in enumerate(voxels) if budget and size > budget]
+    if choice == "sampled":
+        return _Route(budget, tile_budget, list(range(len(voxels))), False)
+    if choice == "auto" and over and _sampled_engine(preset, overrides):
+        return _Route(budget, tile_budget, over, False)
+    return _Route(budget, tile_budget, [], choice == "tiled" or (choice == "auto" and bool(over) and tiles))
 
 
 def _find_output_group(root: Path) -> str:
@@ -492,6 +605,11 @@ def _units(paths: list[Path]) -> list[Path]:
 
 #: An image's ``[C, Z, Y, X]`` shape and its ``(x, y, z)`` spacing, origin and flattened direction, from its header.
 _Header = tuple[list[int], list[float], list[float], list[float]]
+
+
+def _some_cases(groups: dict[str, list[Path]], indices: list[int]) -> dict[str, list[Path]]:
+    """The units of the cases ``indices``, in every group."""
+    return {group: [units[index] for index in indices] for group, units in groups.items()}
 
 
 def _cases(groups: dict[str, list[Path]]) -> list[list[Path]]:
@@ -674,10 +792,17 @@ def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None
 
 
 def _same_grid(first: _Header, second: _Header) -> bool:
-    """Whether two images lie on one voxel grid: the same extent, spacing, origin and direction."""
-    return first[0][-3:] == second[0][-3:] and all(
-        np.allclose(one, other, atol=1e-4) for one, other in zip(first[1:], second[1:], strict=True)
-    )
+    """Whether two images lie on one voxel grid: the same extent, and every voxel of one within a thousandth of a
+    voxel of the other's, which leaves the rounding a format stores a header with; read value by value, a spacing
+    1e-4 mm off moves the 1000th voxel of a 0.04 mm grid by 2.5 voxels. The two grids are farthest apart at a
+    corner."""
+
+    def corners(header: _Header) -> np.ndarray:
+        shape, spacing, origin, direction = header
+        index = np.array(list(itertools.product(*[(0, extent - 1) for extent in shape[:0:-1]])), dtype=float)
+        return np.asarray(origin) + (index * spacing) @ np.reshape(direction, (len(spacing), len(spacing))).T
+
+    return first[0][1:] == second[0][1:] and np.abs(corners(first) - corners(second)).max() <= 1e-3 * min(first[1])
 
 
 def _neutral_fixed_masks(work: Path, fixed: list[Path]) -> list[Path]:
@@ -729,11 +854,22 @@ def _work_dir(tmp_dir: Path | None, output: Path, prefix: str) -> Path:
         return Path(tempfile.mkdtemp(prefix=f".{prefix}", dir=output))
 
 
-def _check_space(work: Path, headers: list[dict[str, _Header]], presets: int) -> None:
+def _check_space(work: Path, headers: list[dict[str, _Header]], presets: list[str], sampled: bool) -> None:
     """Warn when the disk under ``work`` holds less than the run may stage there: 24 bytes a fixed voxel for each
     preset's field and for their mean, and 40 more for the moved image and a tiled pass, whose composition holds the
-    tiles' field, the global field on the native grid and their sum at once."""
-    need = sum(math.prod(case["Fixed"][0][-3:]) for case in headers) * (24 * (presets + (presets > 1)) + 40)
+    tiles' field, the global field on the native grid and their sum at once. With ``sampled``, the twins too
+    (``_native_twins``): a byte a voxel of every case's masks, on their image's grid, and four a voxel of the
+    largest case's images; and for FireANTs the warps of its deformable stage, where they live in files: forward and
+    reverse, each with its next step and its two Adam moments (96 bytes a fixed voxel), and an eighth more while a
+    scale's generation stands beside the next one's."""
+    count = len(presets)
+    need = sum(math.prod(case["Fixed"][0][1:]) for case in headers) * (24 * (count + (count > 1)) + 40)
+    if sampled:
+        sizes = [{group: math.prod(case[group.removesuffix("Mask")][0][1:]) for group in case} for case in headers]
+        need += sum(size for case in sizes for group, size in case.items() if group.endswith("Mask"))
+        need += max(4 * (case["Fixed"] + case["Moving"]) for case in sizes)
+        if any(split_preset(preset)[0] == "FireANTs" for preset in presets):
+            need += max(108 * case["Fixed"] for case in sizes)
     free = shutil.disk_usage(work).free
     if free < need:
         print(
@@ -856,6 +992,15 @@ def _version(package: str) -> str | None:
         return None
 
 
+def _recorded_compacts(output: Path) -> dict[str, list[str]]:
+    """The compact transforms the last ``register`` into ``output`` published beside each case's field, by name, as its
+    ``register.json`` records them; none without a record."""
+    try:
+        return json.loads((output / "register.json").read_text(encoding="utf-8")).get("compacts", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def _record(
     output: Path,
     run: dict,
@@ -939,6 +1084,185 @@ def _run_transform(
             torch.cuda.empty_cache()
 
 
+#: The engines whose presets run by the sampled strategy, as the module of ``impact_reg_konfai.models`` a preset's
+#: classpath names: the sampled route drives those engines themselves, so a class of another package is refused.
+_SAMPLED_ENGINES = ("convexadam", "elastix", "fireants")
+
+
+def _config_engine(config: dict) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` a preset's ``config`` names by its classpath; None for any other class."""
+    classpath = str(((config.get("Predictor") or {}).get("Model") or {}).get("classpath") or "")
+    return next((m for m in _SAMPLED_ENGINES if classpath == f"{__package__}.models.{m}:RegistrationNet"), None)
+
+
+def _numpy_axes(dims: Sequence[int], ndim: int) -> tuple[int, ...]:
+    """The NumPy axes of an image of ``ndim`` axes the channel-first tensor dims ``dims`` of the volume a run of the
+    preset reads name (a 2-D image is read one plane thick, its plane's axes the last two)."""
+    return tuple(dim - 1 - (3 - ndim) for dim in dims if dim - 1 - (3 - ndim) >= 0)
+
+
+def _plane_field(field: Path) -> Path:
+    """Where a plane's 2-D field is written before ``_lift_plane`` lifts it to ``field``: a folder of its own beside
+    it, whatever the output group names ``field``."""
+    (field.parent / "plane").mkdir(parents=True, exist_ok=True)
+    return field.parent / "plane" / "field.mha"
+
+
+def _mirrored_views(run: "_SampledRun", index: int, mirror: Sequence[int]) -> list[int]:
+    """The axes of case ``index``'s twins (the fixed image's view, ``maps``) a test-time copy reverses: the fixed
+    image's own axes the tensor dims ``mirror`` name, as the predictor flips a pair it holds on the fixed grid."""
+    fixed_map = run.maps[index]["Fixed"]
+    return [fixed_map.inverse().axes[axis] for axis in _numpy_axes(mirror, len(fixed_map.axes))]
+
+
+def _copy_reflection(run: "_SampledRun", index: int, group: str) -> tuple[tuple[int, ...], np.ndarray]:
+    """What a test-time copy does to the image of ``group`` of case ``index`` for its twin to be the image reflected
+    through the fixed grid's mirror planes (each through the fixed grid's centre, normal to a mirrored axis): the
+    image's own grid axes to reverse, and the shift (mm) of its origin that takes its own centre's planes onto the
+    fixed grid's. An axis of the image not along the fixed one's would need resampling, and is refused."""
+    views = _mirrored_views(run, index, run.mirror)
+    dims = len(run.headers[index][group][0]) - 1
+    shift = np.zeros(dims)
+    if not views:
+        return (), shift
+
+    def centre(header) -> tuple[np.ndarray, np.ndarray]:
+        extents, steps, start, axes = header
+        matrix = np.reshape(np.asarray(axes, dtype=np.float64), (dims, dims))
+        half = np.asarray(steps, dtype=np.float64) * (np.asarray(extents[1:][::-1], dtype=np.float64) - 1) / 2
+        return np.asarray(start, dtype=np.float64) + matrix @ half, matrix
+
+    fixed_centre, fixed_axes = centre(run.headers[index]["Fixed"])
+    own_centre, own_axes = centre(run.headers[index][group])
+    for view in views:
+        column = dims - 1 - view  # ITK's axis of a NumPy one
+        normal = fixed_axes[:, column]
+        if abs(abs(float(own_axes[:, column] @ normal)) - 1) > 1e-6:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{run.cases[index]}: a test-time copy mirrors the pair on the fixed grid, along which the {group}"
+                " image has no axis; by boxes it is not resampled onto it.",
+                "Drop --tta, or choose --out-of-core whole or tiled.",
+            )
+        shift += 2 * float((fixed_centre - own_centre) @ normal) * normal
+    return tuple(run.maps[index][group].axes[view] for view in views), shift
+
+
+def _tta_mirrors(config: dict, copies: int, preset: str) -> list[tuple[int, ...]]:
+    """The flips of the ``copies`` test-time copies a run of the preset's ``config`` makes, as the channel-first tensor
+    dims each reverses: its ``Flip`` takes the distinct mirrors of the axes it may flip in turn, at prediction, and
+    the copies' fields are averaged (``reduction: Mean``). Any other test-time augmentation or reduction, which the
+    sampled route does not undo, is refused."""
+    if copies <= 0:
+        return []
+    predictor = config["Predictor"]
+    stages = list(((predictor.get("Dataset") or {}).get("augmentations") or {}).values())
+    draws = (stages[0] or {}).get("data_augmentations") or {} if len(stages) == 1 else {}
+    flip = draws.get("Flip") if list(draws) == ["Flip"] else None
+    reductions = {
+        str((sink.get("OutputDataset", sink) or {}).get("reduction", "Mean"))
+        for sink in (predictor.get("outputs_dataset") or {}).values()
+        if isinstance(sink, dict)
+    }
+    if flip is None or not (flip or {}).get("vector_field") or reductions - {"Mean"}:
+        raise KonfAIError(
+            "ImpactReg",
+            f"{preset}: the sampled route takes test-time copies that flip the pair (Flip, vector_field: true) and"
+            " averages their fields (reduction: Mean); its config asks for other ones.",
+            "Drop --tta, or choose --out-of-core whole or tiled.",
+        )
+    probabilities = (flip or {}).get("f_prob", [0.33, 0.33, 0.33])
+    axes = [dim for dim, probability in zip((1, 2, 3), probabilities, strict=False) if probability > 0]
+    mirrors = [mirror for size in range(1, len(axes) + 1) for mirror in itertools.combinations(axes, size)]
+    return [mirrors[copy % len(mirrors)] if mirrors else () for copy in range(copies)]
+
+
+def _sampled_engine(preset: str, overrides: Sequence[str] = ()) -> str | None:
+    """The engine of ``_SAMPLED_ENGINES`` the sampled route drives for ``preset``: the classpath of its config, or the
+    one a --set of ``overrides`` gives it; None for any other class."""
+    return _config_engine(model_config(_preset_config(preset, "Prediction.yml"), list(overrides)))
+
+
+@dataclass
+class _SampledRun:
+    """What one preset's sampled run is given (``_register_sampled``)."""
+
+    preset: str
+    config: dict
+    inputs: dict[str, list[Path]]
+    headers: "list[dict[str, _Header]]"
+    work: Path
+    gpu: list[int]
+    cpu: int | None
+    quiet: bool
+    region_size: int
+    samples: int | None
+    epochs: int | None
+    output_group: str
+    cases: list[str]
+    # Each case's view of its fixed and moving image (``native.AxisMap.to_lps``): the twins, and ``headers``, are the
+    # pair as a run on the whole pair reorients it.
+    maps: "list[dict[str, AxisMap]]"
+    #: The channel-first tensor dims a test-time copy reverses in every image, its headers kept (``_tta_mirrors``).
+    mirror: tuple[int, ...] = ()
+
+    @property
+    def device_index(self) -> int:
+        """The GPU the engine runs on, -1 for the CPU."""
+        return self.gpu[0] if self.gpu else -1
+
+
+def _partial_masks(twins: dict[str, Path], case: str) -> tuple[list[Path | None], int]:
+    """The fixed and moving mask twins of ``case`` (``twins``, by group) that restrict their image, as the engines
+    read a mask on the whole pair: None for a side that has no mask, or one that restricts nothing (all in, or for
+    the moving side all out); and the voxels the fixed one keeps (0 when it is None). An empty fixed mask is kept, at
+    0 voxels: it leaves nothing to register."""
+    from .native import nonzero, open_twin
+
+    masks: list[Path | None] = []
+    kept = 0
+    for group in ("FixedMask", "MovingMask"):
+        path = twins.get(group)
+        mapped = open_twin(path) if path is not None else None
+        inside = nonzero(mapped) if mapped is not None else 0
+        restricts = mapped is not None and inside < math.prod(mapped.array.shape) and (inside or group == "FixedMask")
+        masks.append(path if restricts else None)
+        if group == "FixedMask" and restricts:
+            kept = inside
+    return masks, kept
+
+
+def _viewed(header: _Header, axis_map: "AxisMap") -> _Header:
+    """``header`` as ``axis_map`` (``native.AxisMap``) views its grid."""
+    shape, spacing, origin, direction = header
+    geometry = axis_map.geometry(spacing, origin, direction, shape[1:])
+    return ([shape[0], *axis_map.extents(shape[1:])], *geometry)
+
+
+def _config_output_form(preset: str, overrides: Sequence[str] = ()) -> tuple[str, str] | None:
+    """The form a preset writes its output in (its OutputDataset's ``dataset_filename``, ``Transform:itktransform``
+    an ``.h5``), as ``_asked_form`` gives it, those of the ``--set`` ``overrides`` that set its outputs applied; None
+    where the config names a file without a backend token."""
+    config = _preset_config(preset, "Prediction.yml")
+    outputs = [entry for entry in overrides if entry.partition("=")[0].strip().startswith("Predictor.outputs_dataset")]
+    apply_overrides(config, outputs, lambda config: None)
+    for sink in config["Predictor"].get("outputs_dataset", {}).values():
+        block = sink.get("OutputDataset", sink) if isinstance(sink, dict) else {}
+        name, _, token = str(block.get("dataset_filename", "")).rpartition(":")
+        if name and token:
+            return _asked_form(token)
+    return None
+
+
+def _config_output_group(config: dict) -> str:
+    """The output group a preset's config names (``Predictor.outputs_dataset.*.OutputDataset.group``)."""
+    for sink in config["Predictor"].get("outputs_dataset", {}).values():
+        block = sink.get("OutputDataset", sink) if isinstance(sink, dict) else {}
+        if "group" in block:
+            return str(block["group"])
+    raise KonfAIError("ImpactReg", "The preset's config names no output group.", "Give its OutputDataset a group.")
+
+
 class ImpactRegKonfAIApp:
     """Run IMPACT-Reg preset apps, ensemble their displacement fields, evaluate, and estimate uncertainty."""
 
@@ -950,6 +1274,7 @@ class ImpactRegKonfAIApp:
         # Each preset pass runs on this server when set; the ensemble, the evaluation and the uncertainty
         # stay here, on the fields it sends back.
         self._remote = remote_server
+        self._seed: int | None = None  # register's --seed
         # The --set overrides each preset run took, by its workspace (``label``): ``applied`` in register.json.
         self._applied: dict[str, list[str]] = {}
         # Per preset, the voxels it registers whole and those a tile holds, KonfAI's ``max_voxels``: ``plans`` in
@@ -1106,6 +1431,10 @@ class ImpactRegKonfAIApp:
         max_voxels: int | None = None,
         output_format: list[str] | None = None,
         seed: int | None = None,
+        out_of_core: str = "auto",
+        region_size: int = 64,
+        samples: int | None = None,
+        epochs: int | None = None,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -1126,6 +1455,14 @@ class ImpactRegKonfAIApp:
         tile``); the two fields are composed on the native fixed grid (see ``_register_tiled``). The sizes are what
         the device holds when the run starts at the peak costs the preset declares (``_plan``); ``max_voxels``
         overrides the size registered whole, the tiles following in proportion.
+
+        ``out_of_core`` "sampled" is the second strategy: a pair over the budget registers at native resolution in
+        one pass, never resampled and never held whole, its engine scoring a random subset of it at every iteration
+        (``_register_sampled``). ``samples`` is how many an iteration draws, anew at each one, which its memory and
+        its time follow: elastix that many points, its images mapped from files; ConvexAdam and FireANTs that many
+        voxels, in random boxes of ``region_size`` voxels at most, a box of their deformable stages stepping
+        ``epochs`` times on average (the stage's iterations when unset). A pair the device holds whole runs as it
+        does.
 
         ``fields_only`` writes the transforms and stops there. The moved image is derived FROM the
         transform, at the cost of a full-size resample and a full-size rewrite: worth it for a
@@ -1150,11 +1487,20 @@ class ImpactRegKonfAIApp:
             inputs["MovingMask"] = _units(list(moving_masks))
         _check_inputs(inputs, output)
         _check_presets(presets)
-        overrides = _preset_overrides(presets, config_overrides, quiet)
+        if out_of_core not in ROUTES:
+            raise KonfAIError(
+                "ImpactReg", f"--out-of-core {out_of_core} is not a route.", f"Use one of {', '.join(ROUTES)}."
+            )
+        overrides = _preset_overrides(presets, config_overrides, quiet, seed, routed=True)
         self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._seed = seed  # the sampled route runs here: its engine takes it from its share
         self._moved_format = None
+        # The form each output is asked in (None: every output), for a field this layer writes itself (sampled).
+        self._forms: dict[str | None, tuple[str, str]] = {}
         for spec in output_format or []:
             name, assigned, file_format = spec.rpartition("=")
+            if name != "Moved":
+                self._forms[name if assigned else None] = _asked_form(split_format_level(file_format)[0])
             if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
                 if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
                     raise KonfAIError(
@@ -1169,9 +1515,10 @@ class ImpactRegKonfAIApp:
         # A transform keeps its native form (an affine, elastix's rigid then B-spline) where it is the result: one
         # preset, no TTA, registered whole. An ensemble averages fields, and so does a TTA; a tiled run composes them.
         self._dense = len(presets) > 1 or bool(tta)
-        self._applied, self._plans, self._ran = {}, {}, {}
+        self._applied, self._plans, self._ran, self._compact = {}, {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
+        published: list[Path] = []  # this run's compacts, gone again if the run fails before they are recorded
         try:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
@@ -1179,42 +1526,117 @@ class ImpactRegKonfAIApp:
             headers = self._headers(inputs, work)
             _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
-            lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
-            if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
+            flat = is_flat(headers[0]["Fixed"][0])
+            voxels = [max(math.prod(header[0][1:]) for header in case.values()) for case in headers]
+            routes = {
+                preset: _route(
+                    out_of_core,
+                    preset,
+                    voxels,
+                    _plan(_manifest(preset), gpu, max_voxels, self._remote),
+                    overrides[preset]["global"],
+                )
+                for preset in presets
+            }
+            if flat:  # a case of a 2-D pair is on its own grid for every preset of an ensemble, or one plane thick
+                sampled = sorted({index for route in routes.values() for index in route.sampled})
+                for preset, route in routes.items():
+                    if (
+                        sampled
+                        and route.sampled != sampled
+                        and _sampled_engine(preset, overrides[preset]["global"]) is None
+                    ):
+                        raise KonfAIError(
+                            "ImpactReg",
+                            f"{preset} has no sampled route, which the other presets of this 2-D ensemble take.",
+                            "Register the presets apart, or choose --out-of-core whole or tiled.",
+                        )
+                    routes[preset] = dataclasses.replace(route, sampled=sampled, tiled=route.tiled and not sampled)
+            _check_routed_shares(overrides, routes)
+            sampled_presets = [preset for preset, route in routes.items() if route.sampled]
+            sampled_cases = {f"P{index:03d}" for route in routes.values() for index in route.sampled}
+            # The sampled route registers a case on its own grid, of any dimension; the presets a case of a 2-D pair
+            # on volumes one plane thick, on one z grid (plane.py), which reads a plane whole.
+            native_headers, lifted = headers, inputs
+            if flat:
+                kept = [index for index in range(len(headers)) if f"P{index:03d}" not in sampled_cases]
                 lifted = {
                     group: [
-                        lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
+                        unit
+                        if index not in kept
+                        else lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
                         for index, unit in enumerate(units)
                     ]
                     for group, units in inputs.items()
                 }
                 headers = self._headers(lifted, work / "planes")
-            _check_space(work, headers, len(presets))
-            on_grid = None
+            copies: dict[str, int] = {}  # each sampled preset's test-time copies
+            for preset in sampled_presets if tta else []:
+                # --tta as konfai-apps takes it on the other routes: up to the copies the app allows (app.json 'tta').
+                allowed = int(_manifest(preset).get("tta") or 0)
+                if tta > allowed:
+                    print(
+                        f"[ImpactReg] {preset}: {tta} test-time augmentation(s) asked, but it allows {allowed}"
+                        f" (app.json 'tta'): running {allowed}.",
+                        flush=True,
+                    )
+                copies[preset] = min(tta, allowed)
+            # The twins of a sampled run are written where it runs: on the server, with --host.
+            _check_space(work, headers, presets, bool(sampled_presets) and self._remote is None)
+            on_grid: dict[tuple[int, ...], tuple] = {}  # the cases registered whole, onto their fixed grids, by cases
             fields_by_preset = {}
             for index, preset in enumerate(presets, 1):
                 if len(presets) > 1 and not quiet:
                     print(f"[ImpactReg] preset {index}/{len(presets)}: {preset}", flush=True)
-                manifest = _manifest(preset)
-                tiling = manifest.get("tiling") or {}
-                budget, tile_budget = _plan(manifest, gpu, max_voxels, self._remote)
-                self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
-                largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
-                tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
+                tiling, route = _manifest(preset).get("tiling") or {}, routes[preset]
+                self._plans[preset] = {"whole_voxels": route.budget, "tile_voxels": route.tile_budget}
+                # The cases registered sampled keep their case ID; the others register as they would alone.
+                over = route.sampled
+                rest = [index for index in range(len(headers)) if index not in over]
+                if over:
+                    sampled_run = self._register_sampled if self._remote is None else self._register_sampled_remote
+                    fields_by_preset[preset] = sampled = sampled_run(
+                        preset,
+                        _some_cases(inputs, over),
+                        [native_headers[index] for index in over],
+                        [f"P{index:03d}" for index in over],
+                        work,
+                        gpu,
+                        cpu,
+                        quiet,
+                        overrides[preset],
+                        region_size,
+                        samples,
+                        epochs,
+                        copies.get(preset, 0),
+                    )
+                    if not rest:
+                        continue
+                if over and not quiet:
+                    print(
+                        f"[ImpactReg] {preset}: {', '.join(f'P{index:03d}' for index in rest)} fit the device;"
+                        " registered whole.",
+                        flush=True,
+                    )
+                tiled = route.tiled
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
                 onto_fixed = bool(tta or (tiled and not tiling.get("global")))
+                # The cases that fit, as a cohort of their own when others went sampled; onto the fixed grid alone.
+                pair = (_some_cases(lifted, rest), [headers[index] for index in rest]) if over else (lifted, headers)
                 if onto_fixed:
-                    on_grid = on_grid or self._onto_fixed_grid(lifted, headers, work, gpu, cpu, quiet)
-                pair = on_grid if onto_fixed else (lifted, headers)
+                    key = tuple(rest) if over else tuple(range(len(headers)))
+                    if key not in on_grid:
+                        on_grid[key] = self._onto_fixed_grid(*pair, work / f"cases_{len(on_grid)}", gpu, cpu, quiet)
+                    pair = on_grid[key]
                 if tiled:
                     fields_by_preset[preset] = self._register_tiled(
                         preset,
                         tiling,
                         *pair,
-                        budget,
-                        tile_budget,
+                        route.budget,
+                        route.tile_budget,
                         work,
                         gpu,
                         cpu,
@@ -1224,7 +1646,9 @@ class ImpactRegKonfAIApp:
                     )
                     continue
                 # Registered whole: KonfAI resamples a pair over the budget onto a coarser grid and its field back
-                # onto the native fixed grid (the preset's patch ``mode: resample``).
+                # onto the native fixed grid (the preset's patch ``mode: resample``); --out-of-core whole holds it
+                # on its native grid, and refuses a pass KonfAI had to resample once it ran out of memory.
+                native = out_of_core == "whole"
                 fields_by_preset[preset] = self._infer_preset(
                     preset,
                     *(pair[0].get(group, []) for group in ("Fixed", "Moving", "FixedMask", "MovingMask")),
@@ -1234,9 +1658,31 @@ class ImpactRegKonfAIApp:
                     quiet,
                     tta,
                     overrides[preset]["global"],
-                    max_voxels=budget,
+                    max_voxels=max(voxels[index] for index in rest) if native else route.budget,
                     uncertainty=uncertainty and bool(tta) and not flat,
                 )
+                resampled = [
+                    plan["resample_voxels"] for plan in self._ran.get(preset, []) if plan.get("resample_voxels")
+                ]
+                if native and resampled:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"{preset}: the pair does not fit the device whole; KonfAI resampled it to"
+                        f" {min(resampled):,} voxels once it ran out of memory.",
+                        "Choose --out-of-core auto or sampled, which register it at native resolution by boxes.",
+                    )
+                if over:
+                    (sampled_group, sampled_fields), (group, whole_fields) = sampled, fields_by_preset[preset]
+                    if group != sampled_group:
+                        raise RuntimeError(
+                            f"preset '{preset}' named its output '{sampled_group}' sampled and '{group}' whole; the"
+                            " cases of one preset must share one group."
+                        )
+                    ids = {f"P{position:03d}": f"P{index:03d}" for position, index in enumerate(rest)}
+                    fields_by_preset[preset] = (
+                        group,
+                        {**sampled_fields, **{ids[c]: f for c, f in whole_fields.items()}},
+                    )
             groups = {group for group, _ in fields_by_preset.values()}
             if len(groups) != 1:
                 raise RuntimeError(
@@ -1264,24 +1710,45 @@ class ImpactRegKonfAIApp:
                     "the moved image is derived per case and needs the two to line up."
                 )
 
+            # The compact transforms the sampled routes keep beside the dense field (``<preset>_<name>``), by case:
+            # the record of a case this run leaves alone stands.
+            stale = _recorded_compacts(output)
+            compacts = {case: names for case, names in stale.items() if case not in cases}
             for case in cases:
                 # konfai-apps already named the cases; reusing its names keeps the two layers' notion of
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
+                # A compact transform stands beside the field it was found with: those an earlier run recorded go
+                # before the field is replaced, this run's once every output stands (below), so that no failure leaves
+                # a field beside another's transform, nor a compact the record does not hold.
+                for name in stale.get(case, ()):
+                    (case_out / Path(name).name).unlink(missing_ok=True)
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
                 stack = None
-                if sources == members and len(presets) == 1:
+                # A sampled field (a MetaImage) is written here in the form asked for it, else the preset's own, as the
+                # whole run writes it (Transform:itktransform, an .h5); a preset run whole wrote its own.
+                asked = (
+                    self._forms.get(group)
+                    or self._forms.get(None)
+                    or _config_output_form(presets[0], overrides[presets[0]]["global"])
+                    if case in sampled_cases
+                    else None
+                )
+                form, token = asked or (_form(members[0]), member_token(members[0]))
+                same = _form(members[0]) == form and member_token(members[0]) == token  # mha.gz is .mha, compressed
+                if sources == members and len(presets) == 1 and same:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
                     # An ensemble is konfai-apps' (konfai_apps/ensemble.py): every member reduced into the field,
-                    # slab by slab, the members on one grid. With --uncertainty their stack is kept beside it, built
-                    # here, or for a 2-D pair once its members are planes again (below).
-                    form = _form(members[0])
-                    stack = case_out / stack_file(form) if uncertainty and not flat else None
-                    combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
+                    # slab by slab, the members on one grid, in ``form``. With --uncertainty their stack is kept
+                    # beside it, built here, or for a 2-D pair lifted to volumes once its members are planes again
+                    # (below); a case registered on its own grid has planes already.
+                    lifted_case = flat and case not in sampled_cases
+                    stack = case_out / stack_file(form) if uncertainty and not lifted_case else None
+                    combine(sources, "Mean", case_out / f"{group}{form}", token, stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
                 # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
                 _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
@@ -1293,6 +1760,7 @@ class ImpactRegKonfAIApp:
                 self._derive_moved(
                     dict(zip(cases, lifted["Moving"], strict=True)),
                     dict(zip(cases, lifted["Fixed"], strict=True)),
+                    sampled_cases if flat else set(),
                     group,
                     output,
                     work,
@@ -1302,6 +1770,8 @@ class ImpactRegKonfAIApp:
                 )
             if flat:
                 for case, moving in zip(cases, moving_units, strict=True):
+                    if case in sampled_cases:  # registered on its own grid: its outputs are 2-D already
+                        continue
                     project_field(_the_output(output / case, group))
                     if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
                         moved = _the_output(output / case, "Moved")
@@ -1323,7 +1793,15 @@ class ImpactRegKonfAIApp:
                         file=sys.stderr,
                         flush=True,
                     )
+            for case in cases:
+                for preset in presets:
+                    for compact in self._compact.get(preset, {}).get(case, ()):
+                        dest = output / case / f"{_workspace(preset)}_{compact.name}"
+                        published.append(_publish_output(compact, dest, move=True))
+                        compacts.setdefault(case, []).append(dest.name)
         except BaseException as error:
+            for dest in published:
+                dest.unlink(missing_ok=True)
             _leave(work, error)
             raise
         _leave(work, None)
@@ -1335,7 +1813,9 @@ class ImpactRegKonfAIApp:
             "applied": self._applied,
             "plans": self._plans,
             "ran": self._ran,
+            "compacts": compacts,
             "tta": tta,
+            "out_of_core": out_of_core,
             "device": f"cuda:{','.join(map(str, gpu))}" if gpu else f"cpu ({cpu or 1} worker(s))",
             "versions": {package: _version(package) for package in ("impact-reg-konfai", "konfai", "konfai-apps")},
             "runtime_s": round(time.monotonic() - started, 1),
@@ -1488,6 +1968,590 @@ class ImpactRegKonfAIApp:
         shutil.rmtree(read, ignore_errors=True)
         return composed
 
+    def _register_sampled(
+        self,
+        preset: str,
+        inputs: dict[str, list[Path]],
+        headers: "list[dict[str, _Header]]",
+        cases: list[str],
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        config_overrides: dict[str, list[str]],
+        region_size: int,
+        samples: int | None,
+        epochs: int | None,
+        tta: int = 0,
+    ) -> tuple[str, dict[str, Path]]:
+        """One preset on pairs too large for the device by the second out-of-core strategy (``--out-of-core
+        sampled``): the preset whole (the config a pair that fits registers with) on the native pair of each of
+        ``cases`` (their IDs in the cohort; ``inputs`` and ``headers`` are theirs), never resampled and never held
+        whole, each engine evaluating its loss on a random subset of the pair at every iteration, as its own algorithm
+        allows. ``config_overrides`` holds the ``--set`` share of each pass; ``applied`` records the one it takes.
+
+        The native pair is first written as twins, from one read of each input by bands (``_native_twins``). Then:
+
+        - ConvexAdam (``_sampled_convexadam``): its coarse stage by regions, its fine stage on random boxes of the
+          control grid.
+        - elastix (``_sampled_elastix``): elastix as it is, which draws its samples at every iteration, with every
+          image of the run mapped from files and paged by the kernel.
+        - FireANTs (``_sampled_fireants``): its rigid, affine and deformable stages on random boxes of the pair, the
+          warps on the device, in host memory or in files.
+
+        Each leaves the dense field on the native fixed grid, written by regions, and a compact transform beside it.
+        With ``tta`` test-time copies, as a run of the preset whole: each copy, the pair flipped as the preset's
+        ``Flip`` flips it (``_tta_mirrors``), is registered the same way, its field brought back, and the fields'
+        mean is the case's, dense.
+        """
+        import importlib
+
+        from konfai_apps.app_repository import get_app_repository_info
+
+        from .models.intensity import world_transform
+        from .native import AxisMap, fold_mirrored, remap, to_millimetres
+
+        config = _preset_config(preset, "Prediction.yml")
+        # A --set of the classpath may name another of ImpactReg's engines, whose class then checks the other --set.
+        module = _sampled_engine(preset, config_overrides["global"])
+        if module is None:
+            raise KonfAIError(
+                "ImpactReg",
+                f"{preset} cannot run --out-of-core sampled: its engine has no stage that runs on a subset of the"
+                " pair.",
+                "Choose --out-of-core auto, whole or tiled.",
+            )
+        # The engine runs here: its requirements are installed as resolving the app installs them.
+        get_app_repository_info(app_id(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0]), False).install_requirements()
+        try:
+            network = importlib.import_module(f".models.{module}", __package__).RegistrationNet
+        except ModuleNotFoundError as error:
+            raise KonfAIError(
+                "ImpactReg",
+                f"--out-of-core sampled runs the preset's engine in this process, which needs {error.name}.",
+                "Install the preset's requirements (KONFAI_APPS_INSTALL_REQUIREMENTS=0 turns their installation off).",
+            ) from error
+        # --seed as the run reads it (this config's engine draws with one), before the share's own --set of it.
+        seeded = [f"seed={self._seed}"] if self._seed is not None and _draws_with_seed(config) else []
+        apply_overrides(config, [*seeded, *config_overrides["global"]], lambda config: network)
+        self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
+        # The engine takes the cores a run of one rank takes: a sum split over threads (elastix's metric) then adds
+        # in the same order, and the transform is the run in memory's.
+        apply_cpu_thread_budget(1)
+        # The pair as a run on the whole pair reorients it: each image's voxel axes along LPS, nothing resampled.
+        maps = [{group: AxisMap.to_lps(case[group][3]) for group in ("Fixed", "Moving")} for case in headers]
+        views = [
+            {group: _viewed(header, case_maps[group.removesuffix("Mask")]) for group, header in case.items()}
+            for case, case_maps in zip(headers, maps, strict=True)
+        ]
+        run = _SampledRun(
+            preset,
+            config,
+            inputs,
+            views,
+            work,
+            gpu,
+            cpu,
+            quiet,
+            region_size,
+            samples,
+            epochs,
+            _config_output_group(config),
+            cases,
+            maps,
+        )
+        route = getattr(self, f"_sampled_{module}")
+        fields = route(run)
+        shutil.rmtree(work / _workspace(f"{preset}_native"), ignore_errors=True)
+        copied = []
+        for copy, mirror in enumerate(_tta_mirrors(config, tta, preset), 1):
+            copy_work = work / _workspace(f"{preset}_copy{copy}")
+            copied.append((copy_work, mirror, route(dataclasses.replace(run, work=copy_work, mirror=mirror))))
+        for index, case in enumerate(run.cases if copied else ()):
+            # The fields lie on the fixed twin, in the view the twins were mirrored in.
+            fold_mirrored(
+                fields[case], [(found[case], _mirrored_views(run, index, mirror)) for _, mirror, found in copied]
+            )
+        for copy_work, _, _ in copied:
+            shutil.rmtree(copy_work, ignore_errors=True)
+        if copied:  # the mean of the copies' fields is no copy's transform
+            self._compact[preset] = {}
+        # The engines measured the pair in the fixed image's finest voxel: the fields and the compact transforms
+        # come back in millimetres, a field on the fixed image's own grid.
+        for index, case in enumerate(run.cases):
+            voxel = min(headers[index]["Fixed"][1])
+            to_millimetres(fields[case], voxel)
+            if not maps[index]["Fixed"].identity:
+                remap(fields[case], maps[index]["Fixed"].inverse())
+            for compact in self._compact.get(preset, {}).get(case, ()):
+                if compact.suffix == ".h5":
+                    sitk.WriteTransform(world_transform(sitk.ReadTransform(str(compact)), voxel), str(compact))
+                else:
+                    to_millimetres(compact, voxel)
+        return run.output_group, fields
+
+    def _register_sampled_remote(
+        self,
+        preset: str,
+        inputs: dict[str, list[Path]],
+        headers: "list[dict[str, _Header]]",
+        cases: list[str],
+        work: Path,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        config_overrides: dict[str, list[str]],
+        region_size: int,
+        samples: int | None,
+        epochs: int | None,
+        tta: int = 0,
+    ) -> tuple[str, dict[str, Path]]:
+        """``_register_sampled`` on the konfai-apps server ``--host`` names, by its runner ``impact_reg_sampled``
+        (``remote.py``): the cases' images go up in a stream, the server registers them as this machine would, and
+        their fields and compact transforms come back; the moved images are derived here, as after a local run."""
+        from konfai_apps.app import KonfAIAppClient
+
+        assert self._remote is not None
+        app = split_preset(preset)[0]  # its own --set are in this pass's share (see _preset_overrides)
+        names = [group for group in ("Fixed", "Moving", "FixedMask", "MovingMask") if inputs.get(group)]
+        args = [f"groups={','.join(names)}", f"region_size={region_size}"]
+        args += [f"set={override}" for override in config_overrides["global"]]
+        args += [f"{name}={value}" for name, value in (("samples", samples), ("epochs", epochs)) if value is not None]
+        args += [f"tta={tta}"] if tta else []
+        args += [f"seed={self._seed}"] if self._seed is not None else []
+        out = work / _workspace(f"{preset}_remote")
+        KonfAIAppClient(app_id(IMPACT_REG_KONFAI_REPO, app), self._remote).run(
+            "impact_reg_sampled",
+            [[str(path) for path in inputs[group]] for group in names],
+            output=out,
+            runner_args=args,
+            gpu=gpu,
+            cpu=cpu,
+            quiet=quiet,
+        )
+        self._applied[f"{preset}_sampled"] = list(config_overrides["global"])
+        # The server named the cases it was sent P000, P001, ... in their order, and recorded each one's field as its
+        # run named it, the --set applied; its compact transforms carry its preset's name, which publishing here
+        # gives them again.
+        record, prefix = json.loads((out / "register.json").read_text(encoding="utf-8")), f"{_workspace(app)}_"
+        fields, compacts = {}, {}
+        # By their names in the case's folder alone: the record comes from another machine.
+        for index, case in enumerate(cases):
+            sent = out / f"P{index:03d}"
+            fields[case] = sent / Path(record["cases"][sent.name]["transform"]).name
+            names = [Path(name).name for name in record.get("compacts", {}).get(sent.name, [])]
+            compacts[case] = [(sent / name).rename(sent / name.removeprefix(prefix)) for name in names]
+        self._compact[preset] = compacts
+        field = fields[cases[0]]
+        return field.name.removesuffix(_form(field)), fields
+
+    def _native_twins(
+        self, run: "_SampledRun", fields: dict[str, Path], *, chunked: bool, clipped: bool, positive: bool = False
+    ) -> Iterator[tuple[int, str, dict[str, Path], list[Path | None], int]]:
+        """The native pair of each case as twins under ``<work>/<preset>_native/<case>``, from one read of each input
+        by bands (``native.write_twin``): an uncompressed MetaImage per image and mask, which an engine memory-maps,
+        or with ``chunked`` an HDF5 image in ITK's layout with chunks, which ITK's readers stream by boxes. Their
+        geometry is measured in the fixed image's finest voxel, as ``EngineRegistration`` measures a pair registered
+        whole. ``clipped`` winsorises the MetaImage twins (KonfAI's quantiles, by bounded passes). A mask goes onto
+        its image's grid first (KonfAI TRANSFORM, streamed), and is written binary: its non-zero voxels, or with
+        ``positive`` its positive ones, as the engine reads a mask on the whole pair.
+
+        The masks of every case come first (``_partial_masks``); then one case at a time, its images: each case is
+        handed over as its index, its ID, its twins by group, its partial masks and the voxels its fixed mask keeps,
+        and its twins go once the next case is asked for. A case whose fixed mask is empty is not handed over: it
+        leaves nothing to register, and its zero field goes into ``fields``, as the engines answer it on the whole
+        pair. The disk holds the masks and the twins of one case."""
+        from konfai.data.transform import Resample, TensorCast, Write
+
+        from .native import open_twin, write_field, write_twin
+
+        native_root = run.work / _workspace(f"{run.preset}_native")
+
+        def twin(index: int, case: str, group: str) -> Path:
+            root, source = native_root / case, run.inputs[group][index]
+            mask = group.endswith("Mask")
+            image_group = group.removesuffix("Mask")
+            if mask and not _same_grid(run.headers[index][group], run.headers[index][image_group]):
+                roots = [
+                    _stage_group(root / "stage", group, {case: source}),
+                    _stage_group(root / "stage", image_group, {case: run.inputs[image_group][index]}),
+                ]
+                chain = [
+                    Resample(reference="{case}", reference_group=image_group, interpolation="nearest"),
+                    TensorCast(dtype="float32"),
+                    Write(dataset=f"{root / 'on_grid'}:mha"),
+                ]
+                _run_transform(
+                    f"impact_reg_native_{group}_{case}",
+                    roots,
+                    {group: {group: chain}},
+                    run.work,
+                    run.gpu,
+                    run.cpu,
+                    run.quiet,
+                )
+                source = root / "on_grid" / case / f"{group}.mha"
+            mirror, shift = _copy_reflection(run, index, image_group)  # a mask is on its image's grid
+            staged, _, backend = _stage_group(root / "stage", group, {case: source}).rpartition(":")
+            dataset = Dataset(staged, backend)
+            clip = None
+            if clipped and not mask:
+                # KonfAI's own quantile: the value numpy gives on the whole image, read by bounded passes.
+                clip = tuple(float(dataset.read_data_quantile(group, case, q)) for q in (0.0001, 0.9999))
+                clip = clip if clip[1] > clip[0] else None  # as intensity.winsorized leaves such an image
+            return write_twin(
+                dataset,
+                group,
+                case,
+                root / f"{group}{'.h5' if chunked else '.mha'}",
+                dtype="uint8" if mask else "float32",
+                clip=clip,
+                voxel=min(run.headers[index]["Fixed"][1]),
+                positive=positive,
+                axis_map=run.maps[index][image_group],
+                mirror=mirror,
+                shift=shift,
+            )
+
+        masks = {}
+        for index, case in enumerate(run.cases):
+            twins = {group: twin(index, case, group) for group in run.inputs if group.endswith("Mask")}
+            masks[case] = (twins, *_partial_masks(twins, case))
+        for index, case in enumerate(run.cases):
+            twins, partial, kept = masks.pop(case)
+            if partial[0] is not None and not kept:
+                field = run.work / _workspace(f"{run.preset}_fields") / case / f"{run.output_group}.mha"
+                field.parent.mkdir(parents=True, exist_ok=True)
+                grid = open_twin(partial[0])  # the fixed mask twin, on the fixed twin's grid
+                fields[case] = write_field(field, grid, sitk.AffineTransform(grid.array.ndim))
+            else:
+                twins.update((group, twin(index, case, group)) for group in ("Fixed", "Moving"))
+                yield index, case, twins, partial, kept
+            shutil.rmtree(native_root / case, ignore_errors=True)
+
+    @staticmethod
+    def _plane_twins(
+        twins: dict[str, Path], masks: list[Path | None]
+    ) -> tuple[int, float, dict[str, Path], list[Path | None]] | None:
+        """A fixed twin one voxel thick along one axis is registered as its plane, as ``EngineRegistration`` registers
+        such a volume whole: the axis, the plane's finest voxel in the twins' voxels, and 2-D twins of the fixed plane
+        and of the moving image's first slice along it (their masks likewise), measured in that voxel as a plane
+        registered whole is. None for any other pair."""
+        from .native import PlaneFrame, PlaneHeader, open_twin, write_plane
+
+        fixed = open_twin(twins["Fixed"])
+        shape = list(fixed.array.shape)
+        if len(shape) != 3 or shape.count(1) != 1:
+            return None
+        axis = shape.index(1)
+        frame = PlaneFrame.of(fixed.geometry.GetDirection(), axis)  # every plane in the fixed one's
+        factor = min(PlaneHeader(fixed.geometry, axis, frame).GetSpacing())
+        root = twins["Fixed"].parent / "plane"
+        root.mkdir(exist_ok=True)
+        planes: dict[Path, Path] = {}
+
+        def plane(path: Path) -> Path:
+            if path not in planes:
+                planes[path] = write_plane(path, axis, root / path.name, 1 / factor, frame=frame)
+            return planes[path]
+
+        return (
+            axis,
+            factor,
+            {group: plane(path) for group, path in twins.items()},
+            [None if mask is None else plane(mask) for mask in masks],
+        )
+
+    @staticmethod
+    def _lift_plane(plane_field: Path, field: Path, twins: dict[str, Path], axis: int, factor: float) -> Path:
+        """The field of a plane ``_plane_twins`` registered as the field of the volume one voxel thick, on the fixed
+        twin's grid in the twins' voxels, lifted through the fixed plane's frame (``lift_plane_field``)."""
+        from .native import lift_plane_field, open_twin, to_millimetres
+
+        to_millimetres(plane_field, factor)  # from the plane's voxels to the twins'
+        lift_plane_field(plane_field, field, open_twin(twins["Fixed"]), open_twin(twins["Moving"]), axis)
+        plane_field.unlink()
+        return field
+
+    def _sampled_convexadam(self, run: "_SampledRun") -> dict[str, Path]:
+        """The ConvexAdam preset by regions (itk-impact's ``RegionSize``). The coarse stage, when the preset has one:
+        one pass over the boxes pools the native features to its coarse grid, its cost volume is built by boxes of
+        that grid, never whole, and its field starts the fine stage. The fine stage: one pass over the boxes of
+        ``region_size`` voxels, read with their halo, pools the native features to the control grid; where the
+        pooled maps fit the device the iterations run on them whole (ConvexAdam's own Static mode), and where
+        they do not they live in files of the workspace and every iteration steps every cell, by bricks the
+        device holds: the same iterations. The dense field on the fixed grid is written by regions; the field on
+        the control grid is kept beside it."""
+        from .models.convexadam import LevelSpec, RegistrationNet, refuse_linear_keys, region_geometry, require_regions
+        from .models.intensity import engine_of
+        from .native import open_twin
+
+        refuse_linear_keys(LocalAppRepository._model_param_block(run.config)[1] or {})
+        engine = engine_of(run.config, RegistrationNet, LevelSpec)
+        engine.check_gradients()
+        require_regions()  # before any twin is written
+        if not engine._deformable_masked:  # no stage reads the masks, which ConvexAdam drops on the whole pair too
+            inputs = {group: units for group, units in run.inputs.items() if not group.endswith("Mask")}
+            run = dataclasses.replace(run, inputs=inputs)
+        # The stage's iterations are ConvexAdam's, one step fewer: it returns the field its last iteration evaluates.
+        visits = int(run.epochs) if run.epochs else max(engine._iterations - 1, 0)
+        # With ``--samples``, an iteration draws that many voxels, in boxes that hold no more.
+        samples = run.samples
+        fields_root = run.work / _workspace(f"{run.preset}_fields")
+        fields: dict[str, Path] = {}
+        compact: dict[str, list[Path]] = {}
+        # The stages read the images as they are, as ConvexAdam does.
+        for index, case, native, masks, _ in self._native_twins(run, fields, chunked=True, clipped=False):
+            size = [int(extent) for extent in run.headers[index]["Fixed"][0][1:]][::-1]
+            volume, plane = native, self._plane_twins(native, masks)
+            if plane is not None:
+                _, _, native, masks = plane
+                size = [int(extent) for extent in open_twin(native["Fixed"]).array.shape][::-1]
+            region_size = run.region_size
+            if samples is not None:  # boxes that hold no more than an iteration draws, in the pair's dimension
+                region_size = min(region_size, max(8, round(samples ** (1 / len(size)))))
+            grid_shrink = engine._grid_shrink
+            geometry = region_geometry(size, grid_shrink, region_size)
+            if not run.quiet and "fine" not in engine._stages:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: coarse stage by regions (itk-impact ImpactCoarseRegistration)"
+                    f" on {' x '.join(map(str, size))} native voxels, its field written by regions.",
+                    flush=True,
+                )
+            elif not run.quiet:
+                cells = math.prod(geometry["cells"])
+                schedule = (
+                    f"one pass over the boxes pools the features to the control grid, then {visits} iterations on"
+                    " them, on the device where they fit and from files of the workspace otherwise"
+                )
+                if samples is not None:
+                    schedule = (
+                        "one pass over the boxes pools the features to the control grid, on the device where they fit"
+                        " and in files of the workspace otherwise;"
+                        f" an iteration then steps the boxes it draws, {samples:,} voxels of them, each box"
+                        f" {visits} times on average"
+                    )
+                start = (
+                    "from the coarse stage's field, computed by regions too"
+                    if "coarse" in engine._stages
+                    else "from the identity"
+                )
+                if engine._moments_init != "none":
+                    centres = "of mass" if engine._moments_init == "com" else "of the frames"
+                    start += f", the moving image first translated by the centres {centres}"
+                print(
+                    f"[ImpactReg] {run.preset} {case}: fine stage by random boxes (itk-impact ImpactFineRegistration) on"
+                    f" {' x '.join(map(str, size))} native voxels, {start}: control grid every"
+                    f" {grid_shrink} voxels ({cells:,} cells, about"
+                    f" {cells * len(size) * 4 * 5 / 2**20:,.0f} MiB on the device), boxes of {region_size} voxels"
+                    f" ({geometry['regions']} boxes) read with their halo from HDF5 chunks; {schedule}.",
+                    flush=True,
+                )
+            fields[case] = fields_root / case / f"{run.output_group}.mha"
+            fields[case].parent.mkdir(parents=True, exist_ok=True)
+            result = engine.refine_by_regions(
+                native["Fixed"],
+                native["Moving"],
+                *masks,
+                run.device_index,
+                region_size,
+                visits,
+                fields[case] if plane is None else _plane_field(fields[case]),
+                samples=samples,
+            )
+            compact[case] = [result.control_grid]
+            if plane is not None:  # a plane's transform is written as its field, as a plane registered whole
+                compact[case] = []
+                self._lift_plane(_plane_field(fields[case]), fields[case], volume, plane[0], plane[1])
+            self._ran[f"{run.preset}_regions_{case}"] = {
+                "resident_features": result.resident,
+                "iterations": result.iterations,
+                "regions": result.regions,
+                "bytes_read": result.bytes_read,
+                "streamed": {"fixed": result.streamed[0], "moving": result.streamed[1]},
+                "seconds": round(result.seconds, 1),
+                "device_peak_bytes": result.device_peak_bytes,
+                "loss": [result.metric_values[0], result.metric_values[-1]] if result.metric_values else [],
+            }
+            if result.coarse is not None:
+                self._ran[f"{run.preset}_regions_{case}"]["coarse"] = {
+                    "seconds": round(result.coarse[0], 1),
+                    "bytes_read": result.coarse[1],
+                }
+            if not run.quiet:
+                streamed = "by regions" if all(result.streamed) else "whole (the readers could not stream)"
+                route = "pooled maps resident" if result.resident else "box by box"
+                if result.coarse is not None:
+                    print(
+                        f"[ImpactReg] {run.preset} {case}: coarse stage by regions in {_duration(result.coarse[0])},"
+                        f" {result.coarse[1] / 2**30:.2f} GiB read.",
+                        flush=True,
+                    )
+                if "fine" in engine._stages:
+                    loss = (
+                        f", loss {result.metric_values[0]:.4f} -> {result.metric_values[-1]:.4f}"
+                        if result.metric_values
+                        else ""
+                    )
+                    print(
+                        f"[ImpactReg] {run.preset} {case}: {route}, {result.iterations:,} iterations in"
+                        f" {_duration(result.seconds)},"
+                        f" {result.bytes_read / 2**30:.2f} GiB read {streamed}, device peak"
+                        f" {(result.device_peak_bytes or 0) / 2**20:,.0f} MiB{loss}.",
+                        flush=True,
+                    )
+        self._compact[run.preset] = compact
+        return fields
+
+    def _sampled_elastix(self, run: "_SampledRun") -> dict[str, Path]:
+        """The elastix preset on the native pair. elastix draws the samples of its metric at every iteration: what
+        kept a large pair out of its reach is that it holds every image whole (the pair, each pyramid level, the
+        coefficients of each interpolator). It runs here as it is, with those images mapped from files of the
+        workspace and paged by the system (its ``-out-of-core``): the transform is the one of a run in memory. The dense
+        field is its transform sampled on the fixed grid band by band; the transform itself is kept beside it."""
+        from .models.elastix import ElastixLevelSpec, RegistrationNet
+        from .models.elastix_engine import with_shift
+        from .models.intensity import engine_of
+        from .native import mapped_centre, mmap_image, shift_origin, write_field
+
+        block = LocalAppRepository._model_param_block(run.config)[1]
+        # The engine looks its parameter maps up beside the config a KonfAI prediction stages; here they are the
+        # preset's own files, or a map of one's own given by an absolute path, as the engine honours it.
+        block["parameter_maps"] = [
+            name
+            if Path(name).is_absolute() and Path(name).is_file()
+            else str(app_file(IMPACT_REG_KONFAI_REPO, split_preset(run.preset)[0], Path(name).name))
+            for name in block["parameter_maps"]
+        ]
+        if run.samples is not None:  # the points every map draws, whatever the image holds
+            block["spatial_samples"], block["voxel_sampling"] = int(run.samples), 1.0
+        engine = engine_of(run.config, RegistrationNet, ElastixLevelSpec)
+        if not engine.supports_mapped_images():
+            raise KonfAIError(
+                "ImpactReg",
+                f"{run.preset} cannot run --out-of-core sampled with this elastix ({engine._elastix_bin}): it has no"
+                " -out-of-core option, which keeps the images of a registration in files.",
+                "Point KONFAI_ELASTIX_DIR at an elastix-IMPACT build that has it.",
+            )
+        impact = bool(engine._feature_models)
+        fields_root = run.work / _workspace(f"{run.preset}_fields")
+        fields: dict[str, Path] = {}
+        compact: dict[str, list[Path]] = {}
+        # Grey values alone are winsorised, as the engine does; IMPACT's models read the intensities they know.
+        for index, case, raw, masks, inside in self._native_twins(run, fields, chunked=False, clipped=not impact):
+            volume, plane = raw, self._plane_twins(raw, masks)
+            if plane is not None:
+                _, _, raw, masks = plane
+            fixed = mmap_image(raw["Fixed"])
+            shift = None
+            if engine._moments_init == "com":
+                # The moving twin goes there by its origin, as the engine moves a pair registered whole, its centre
+                # taken by a pass over the twin; the shift is added back to the transform.
+                mapped = [None if path is None else mmap_image(path) for path in masks]
+                shift = mapped_centre(mmap_image(raw["Moving"]), mapped[1], "com") - mapped_centre(
+                    fixed, mapped[0], "com"
+                )
+                for path in (raw["Moving"], masks[1]):
+                    if path is not None:
+                        shift_origin(path, shift)
+            # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
+            voxels = inside or fixed.array.size
+            out = fields_root / case
+            out.mkdir(parents=True, exist_ok=True)
+            if not run.quiet:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: elastix on {' x '.join(map(str, fixed.array.shape[::-1]))}"
+                    " native voxels, its images kept in files and paged by the system (-out-of-core).",
+                    flush=True,
+                )
+            start = time.perf_counter()
+            transform = engine.register_mapped(
+                raw["Fixed"],
+                raw["Moving"],
+                masks[0],
+                masks[1],
+                run.device_index,
+                out / "elastix",
+                tuple(fixed.geometry.GetSpacing())
+                if plane is not None
+                else tuple(v / min(run.headers[index]["Fixed"][1]) for v in run.headers[index]["Fixed"][1]),
+                voxels,
+            )
+            transform = with_shift(transform, None if shift is None else shift.tolist())
+            seconds = time.perf_counter() - start
+            if plane is None:
+                compact[case] = [out / "Transform.h5"]
+                sitk.WriteTransform(transform, str(compact[case][0]))
+                fields[case] = write_field(out / f"{run.output_group}.mha", fixed, transform)
+            else:  # a plane's transform is written as its field, as a plane registered whole
+                compact[case] = []
+                flat = write_field(_plane_field(out / f"{run.output_group}.mha"), fixed, transform)
+                fields[case] = self._lift_plane(flat, out / f"{run.output_group}.mha", volume, plane[0], plane[1])
+            shutil.rmtree(out / "elastix", ignore_errors=True)
+            self._ran[f"{run.preset}_mapped_{case}"] = {"seconds": round(seconds, 1), "sampled_voxels": voxels}
+            if not run.quiet:
+                print(f"[ImpactReg] {run.preset} {case}: registered in {_duration(seconds)}.", flush=True)
+        self._compact[run.preset] = compact
+        return fields
+
+    def _sampled_fireants(self, run: "_SampledRun") -> dict[str, Path]:
+        """The FireANTs preset on boxes of the native pair (``FireANTsEngine.register_sampled``): its rigid
+        and affine stages start a scale on random boxes and end it on every box of the level, by packets of
+        ``samples`` voxels; its deformable stage (greedy or SyN) takes FireANTs' iteration on the whole grid box by
+        box, every box once an epoch, a box holding no more than ``samples``, the pyramid levels in files of the workspace, the warps on the GPU when they fit, in files
+        otherwise. The deformable stage is FireANTs' on the whole image, the linear ones with every box in one
+        iteration. The displacement field is written by blocks."""
+        from .models.fireants import RegistrationNet
+        from .models.impact_loss import LevelSpec
+        from .models.intensity import engine_of
+
+        engine = engine_of(run.config, RegistrationNet, LevelSpec)
+        for index in range(len(run.cases)):
+            engine.check_sampled(*(run.headers[index][group][0][1:] for group in ("Fixed", "Moving")))
+        fields: dict[str, Path] = {}
+        # FireANTs keeps a mask's positive voxels (``fireants.py``), the other engines its non-zero ones.
+        for index, case, raw, masks, _ in self._native_twins(run, fields, chunked=False, clipped=False, positive=True):
+            out = run.work / _workspace(f"{run.preset}_fields") / case
+            out.mkdir(parents=True, exist_ok=True)
+            fields[case] = out / f"{run.output_group}.mha"
+            if not run.quiet:
+                shape = run.headers[index]["Fixed"][0][1:]
+                drawn = (
+                    f"{run.samples:,} voxels at once" if run.samples is not None else "what the device holds at once"
+                )
+                print(
+                    f"[ImpactReg] {run.preset} {case}: FireANTs on boxes of {' x '.join(map(str, shape[::-1]))} native"
+                    f" voxels: {drawn}, the warps on the device when they fit, else in host memory or in files.",
+                    flush=True,
+                )
+            start = time.perf_counter()
+            measured = engine.register_sampled(
+                raw["Fixed"],
+                raw["Moving"],
+                masks[0],
+                masks[1],
+                run.device_index,
+                out / "warps",
+                fields[case],
+                run.region_size,
+                run.samples,
+                run.epochs,
+            )
+            shutil.rmtree(out / "warps", ignore_errors=True)
+            seconds = time.perf_counter() - start
+            self._ran[f"{run.preset}_boxes_{case}"] = {
+                "seconds": round(seconds, 1),
+                **{key: round(value, 1) if isinstance(value, float) else value for key, value in measured.items()},
+            }
+            if not run.quiet:
+                print(
+                    f"[ImpactReg] {run.preset} {case}: registered in {_duration(seconds)},"
+                    f" {measured.get('bytes_read', 0) / 2**30:.2f} GiB read"
+                    f"{', boxes a scale ' + str(measured['boxes_per_scale']) if 'boxes_per_scale' in measured else ''}.",
+                    flush=True,
+                )
+        return fields
+
     def _register_tiled(
         self,
         preset: str,
@@ -1521,7 +2585,7 @@ class ImpactRegKonfAIApp:
         cases = [f"P{index:03d}" for index in range(len(inputs["Fixed"]))]
         fixed = dict(zip(cases, inputs["Fixed"], strict=True))
         if not quiet:
-            shape = max((case["Fixed"][0][-3:] for case in headers), key=math.prod)
+            shape = max((case["Fixed"][0][1:] for case in headers), key=math.prod)
             tiles = f"native tiles of at most {tile_budget:,} voxels"
             plan = (
                 f"the preset on {tiles}"
@@ -1607,6 +2671,7 @@ class ImpactRegKonfAIApp:
         self,
         cases: dict[str, Path],
         fixed: dict[str, Path],
+        planes: set[str],
         group: str,
         output: Path,
         work: Path,
@@ -1614,7 +2679,10 @@ class ImpactRegKonfAIApp:
         cpu: int | None,
         quiet: bool,
     ) -> None:
-        """The moved images, derived from the transforms, one streamed run over the whole cohort.
+        """The moved images, derived from the transforms, one streamed run over the cohort for each form its
+        transforms and moving images take: a cohort routed case by case holds the dense field of a case registered
+        sampled beside the native form of one registered whole, and a staged root has one backend. ``planes`` are the
+        cases of a 2-D pair registered on their own grid, apart from the others, lifted to volumes one plane thick.
 
         A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
@@ -1632,42 +2700,49 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
-        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
-        # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
-        backend = self._moved_format or _backend(next(iter(cases.values())))
-        roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
-        if _is_field(next(iter(fields.values()))):
-            resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
-        else:
-            roots.append(_stage_group(work / "moved_stage", "Fixed", fixed))
-            resample = Resample(
-                reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
-            )
-        # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
-        # store, here or left by an earlier run, a moved file would come out as a store.
-        root = work / "moved"
-        _run_transform(
-            "impact_reg_moved",
-            roots,
-            {
-                "Moving": {
-                    "Moved": [
-                        resample,
-                        Write(
-                            dataset=f"{root}:{backend}",
-                            scale_factors="auto" if backend == "omezarr" else None,
-                        ),
-                    ]
+        forms: dict[tuple[str, bool, str, bool], dict[str, Path]] = {}
+        for case, field in fields.items():
+            key = (_form(field).lower(), _is_field(field), _form(cases[case]).lower(), case in planes)
+            forms.setdefault(key, {})[case] = field
+        for number, ((_, dense, _, _), members) in enumerate(forms.items()):
+            stage, root = work / "moved_stage" / str(number), work / "moved" / str(number)
+            moving = {case: cases[case] for case in members}
+            # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form
+            # may be an ITK transform file, which cannot hold an image. The members' moving images share one form.
+            backend = self._moved_format or _backend(next(iter(moving.values())))
+            roots = [_stage_group(stage, "Moving", moving), _stage_group(stage, "DVF", members)]
+            if dense:
+                resample = Resample(
+                    reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"
+                )
+            else:
+                roots.append(_stage_group(stage, "Fixed", {case: fixed[case] for case in members}))
+                resample = Resample(
+                    reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
+                )
+            # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside
+            # a store, here or left by an earlier run, a moved file would come out as a store.
+            _run_transform(
+                f"impact_reg_moved_{number}",
+                roots,
+                {
+                    "Moving": {
+                        "Moved": [
+                            resample,
+                            Write(
+                                dataset=f"{root}:{backend}",
+                                scale_factors="auto" if backend == "omezarr" else None,
+                            ),
+                        ]
+                    },
                 },
-            },
-            work,
-            gpu,
-            cpu,
-            quiet,
-        )
-        for case in fields:
-            _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
+                work,
+                gpu,
+                cpu,
+                quiet,
+            )
+            for case in members:
+                _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
 
     # ------------------------------------------------------------------ evaluate
 

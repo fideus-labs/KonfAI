@@ -66,8 +66,8 @@ repository, the versions, the overrides and the inputs of each case.
 | a rigid or affine stage lands millimetres to centimetres off on an image with a few extreme voxels (light-sheet microscopy, a bright artefact) | mutual information bins each image between its minimum and maximum, so a handful of voxels far above the rest squeeze the tissue into one bin. Every intensity stage clamps each image to its 0.01 and 99.99 percentiles first (FireANTs to 0.5 and 99.5); the rigid stage of an elastix IMPACT preset reads the raw intensities its feature models need, so clamp such images yourself before an IMPACT preset |
 | `register` refuses an input "in a case directory this run writes" | the moving image is an output of an earlier run into the same `-o`: write the new run elsewhere |
 | a CPU run takes very long | FireANTs and the IMPACT metric are GPU methods; on the CPU prefer `Elastix#rigid`, `Elastix#rigid_bspline` and `ConvexAdam#*` |
-| out of GPU memory | runs are sized from the memory free at start and shrink once if a pass still runs out; a process that grabs the card mid-run can exhaust that. Lower `--max-voxels` |
-| a CPU run is killed by the system | the run is sized from the RAM available at start; something else took RAM during the run. Lower `--max-voxels` |
-| results differ between two runs of a large pair | the plan follows the free memory at start: pin `--max-voxels` |
+| out of GPU memory | runs are sized from the memory free at start and shrink once if a pass still runs out; a process that grabs the card mid-run can exhaust that. `--out-of-core sampled` holds what the device has room for |
+| a CPU run is killed by the system | the run is sized from the RAM available at start; something else took RAM during the run. `--out-of-core sampled` reads the images from files |
+| results differ between two runs of a large pair | a tiled run is sized from the memory free at start: `--out-of-core whole` or `sampled` |
 
 The failed preset's logs and configuration are kept, and the message says where.

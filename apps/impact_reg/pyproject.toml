@@ -39,6 +39,10 @@ Presets = "https://huggingface.co/VBoussot/ImpactReg"
 [project.scripts]
 impact-reg-konfai = "impact_reg_konfai.cli:main"
 
+# A konfai-apps server runs it for a client's --host with --out-of-core sampled (konfai_apps.app_server.run).
+[project.entry-points."konfai_apps.runners"]
+impact_reg_sampled = "impact_reg_konfai.remote:main"
+
 [tool.setuptools_scm]
 root = "../.."
 tag_regex = "^v(?P<version>.*)$"

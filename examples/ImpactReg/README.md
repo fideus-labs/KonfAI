@@ -65,15 +65,18 @@ FireANTs needs a CUDA GPU. Set `KONFAI_IMPACTREG_REPO` to a local bundle directo
 
 ## A volume too large for one pass
 
-Add patch overrides and KonfAI registers overlapping patches, then reassembles the moved image and the
-displacement field with a `Cosinus` partition-of-unity window, which leaves no seam in the field:
+Nothing to add: `--out-of-core auto` (the default) registers a pair whole where it fits the device. A pair that does
+not fit is registered at native resolution, never resampled: an elastix, ConvexAdam or FireANTs preset goes `sampled`,
+its images read from files by boxes. A preset of another engine is tiled after one global pass on a coarse copy when
+it declares a tile pass, else registered whole on a coarser grid.
 
 ```bash
-impact-reg-konfai register FireANTs#syn -f fixed.mha -m moving.mha -o Output --gpu 0 --max-voxels 20000000
+impact-reg-konfai register FireANTs#syn -f fixed.mha -m moving.mha -o Output --gpu 0 --region-size 96
 ```
 
-A pair larger than what the preset registers whole is registered at native resolution in tiles, after one
-global pass on a coarse copy; `--max-voxels` sets that size and `--patch-size` the tile.
+What fits follows the device's free memory; `IMPACT_REG_MAX_VOXELS` pins it. `--region-size` sets the side of a box
+of the sampled route, `--samples` how many voxels an iteration draws, and `--out-of-core whole`, `tiled` or `sampled`
+forces a route.
 
 ## What to adapt first
 

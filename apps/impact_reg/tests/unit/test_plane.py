@@ -75,6 +75,36 @@ def test_the_engine_registers_the_plane_of_a_volume_one_plane_thick() -> None:
     np.testing.assert_allclose(field.numpy()[0, 2], 1.5)
 
 
+def test_a_moving_plane_tilted_against_the_fixed_one_is_refused() -> None:
+    # Registered in the fixed plane's frame and lifted by one gap along its normal, a tilted moving plane's height,
+    # which varies along it, was dropped: a match at x = 4 landed at z = 0 instead of 3.
+    from impact_reg_konfai.native import PlaneFrame, PlaneHeader
+
+    fixed, tilted = sitk.Image([8, 6, 1], sitk.sitkFloat32), sitk.Image([8, 6, 1], sitk.sitkFloat32)
+    tilted.SetDirection((0.8, 0, -0.6, 0, 1, 0, 0.6, 0, 0.8))  # voxel x along (0.8, 0, 0.6)
+    frame = PlaneFrame.of(fixed.GetDirection(), 0)
+    with pytest.raises(KonfAIError, match="tilted"):
+        PlaneHeader(tilted, 0, frame)
+    shifted = sitk.Image(fixed)
+    shifted.SetOrigin((0.0, 0.0, 2.0))  # parallel with a gap: the plane route
+    assert PlaneHeader(shifted, 0, frame).GetDirection() == (1.0, 0.0, 0.0, 1.0)
+
+    geometry = []
+    for image in (fixed, tilted, fixed, tilted):
+        attribute = Attribute()
+        attribute["Origin"], attribute["Spacing"] = np.zeros(3), np.ones(3)
+        attribute["Direction"] = np.asarray(image.GetDirection())
+        geometry.append([attribute])
+    tensor = torch.zeros(1, 1, 1, 6, 8)
+
+    class Engine:
+        def register(self, *args):
+            pytest.fail("a tilted pair was registered")
+
+    with pytest.raises(KonfAIError, match="tilted"):
+        EngineRegistration(Engine())(tensor, tensor, tensor + 1, tensor + 1, attributes=geometry)
+
+
 def test_a_file_goes_through_one_plane_and_comes_back_in_its_form(tmp_path: Path) -> None:
     values = np.arange(20.0).reshape(4, 5)
     sitk.WriteImage(_flat(values), str(tmp_path / "image.nii.gz"))
@@ -187,6 +217,38 @@ def test_a_2d_field_goes_one_plane_thick_for_the_later_steps(tmp_path: Path) -> 
     sitk.WriteTransform(sitk.BSplineTransform(2), str(spline))
     with pytest.raises(ValueError, match="reads displacement fields and linear transforms"):
         lift_field(spline, tmp_path / "planes")
+
+
+def test_a_2d_field_stored_as_an_image_warps_and_evaluates_as_its_transform_file(tmp_path: Path) -> None:
+    """A 2-D field written as an image (a sampled 2-D run's under --output-format mha) is the same registration as
+    that field in an ITK transform file, for apply and for eval."""
+    from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
+
+    y, x = np.mgrid[0:32, 0:40]
+    sitk.WriteImage(_flat(x * 10.0 + y, (1.0, 1.0), (0.0, 0.0)), str(tmp_path / "moving.mha"))
+    sitk.WriteImage(_flat(np.zeros((32, 40)), (1.0, 1.0), (0.0, 0.0)), str(tmp_path / "fixed.mha"))
+    field = sitk.GetImageFromArray(np.stack([np.full((32, 40), 3.0), np.zeros((32, 40))], axis=-1), isVector=True)
+    sitk.WriteImage(sitk.Cast(field, sitk.sitkVectorFloat32), str(tmp_path / "field.mha"))
+    sitk.WriteTransform(sitk.DisplacementFieldTransform(field), str(tmp_path / "field.h5"))
+    moved, summaries = [], []
+    for name in ("field.h5", "field.mha"):
+        app, out = ImpactRegKonfAIApp(), tmp_path / name.replace(".", "_")
+        (written,) = app.apply(
+            tmp_path / name, tmp_path / "fixed.mha", [tmp_path / "moving.mha"], out, cpu=1, quiet=True
+        )
+        moved.append(sitk.GetArrayFromImage(sitk.ReadImage(str(written))))
+        app.evaluate(
+            fixed_images=[tmp_path / "fixed.mha"],
+            moving_images=[tmp_path / "moving.mha"],
+            transforms=[tmp_path / name],
+            output=out / "eval",
+            cpu=1,
+            quiet=True,
+        )
+        summaries.append(json.loads((out / "eval" / "Evaluation_summary.json").read_text())["case"])
+    np.testing.assert_array_equal(moved[0], moved[1])
+    np.testing.assert_allclose(moved[1][:, :30], (x * 10.0 + y)[:, 3:33])
+    assert summaries[0] == summaries[1]
 
 
 def test_a_one_plane_store_comes_back_as_a_2d_rfc5_field_and_goes_one_plane_thick_again(tmp_path: Path) -> None:

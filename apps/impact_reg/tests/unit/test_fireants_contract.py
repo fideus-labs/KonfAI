@@ -114,7 +114,9 @@ def _bare_loss(mode: str, core: torch.nn.Module, spec: "fireants.ModelSpec") -> 
     loss._specs, loss._levels, loss._cores = [spec], [[0]], torch.nn.ModuleList([core])
     loss._channels, loss._level, loss._factors = [[2]], -1, None
     loss._generator = torch.Generator().manual_seed(0)
-    loss._sampling, loss._patch = 1.0, []
+    loss._sampling, loss._patch, loss._draw, loss._pooled = 1.0, [], None, None
+    loss._statistics, loss._cells, loss._layer_sums, loss._level_weight, loss._place = {}, {}, {}, 0.0, None
+    loss._bases = {}
     return loss
 
 
@@ -129,7 +131,7 @@ def test_the_custom_losses_leave_out_what_the_moving_mask_leaves_out() -> None:
             super().__init__()
             self.kept = [0]
 
-        def distances(self, moved, fixed, mask, terms, seed, kernel):
+        def distances(self, moved, fixed, mask, terms, seed, kernel, *pooled):
             self.mask = mask
             return [moved.sum() * 0.0]
 
@@ -219,6 +221,36 @@ def test_a_layers_mask_longer_than_the_model_s_outputs_fails_at_build(tmp_path) 
     with pytest.raises(RuntimeError, match="number of weights"):
         fireants._ImpactCore(fireants.ModelSpec(ref=str(path), layers_mask="01"), False)
     fireants._ImpactCore(fireants.ModelSpec(ref=str(path)), False)
+
+
+@pytest.mark.parametrize(
+    ("dimension", "distance", "pca", "mode", "refused"),
+    [
+        (2, "NCC", 2, "Jacobian", True),
+        (3, "NCC", 2, "Jacobian", False),
+        (2, "NCC", 0, "Jacobian", False),
+        (2, "L2", 2, "Jacobian", False),
+        (2, "NCC", 2, "Static", False),
+    ],
+)
+def test_a_2d_jacobian_ncc_layer_with_pca_is_refused_by_boxes_before_any_read(
+    tmp_path, dimension, distance, pca, mode, refused
+):
+    """By boxes, a Jacobian NCC layer reduced by PCA takes the whole fixed map's basis from the boxes' sums, which a 2-D
+    network's, fitted on slices spread over the map, cannot: the pair's shapes alone refuse it, naming what
+    registers it."""
+    from konfai.utils.errors import ConfigError
+
+    path = tmp_path / "one_layer.pt"
+    torch.jit.script(_OneLayer()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), distance=distance, pca=pca)
+    engine = _engine(deformable_method="greedy", deformable_metric="impact", mode=mode, impact_levels=[[spec]])
+    engine._impact_loss().cores[0].dimension = dimension  # a local file is a 3-D model to the registry
+    if refused:
+        with pytest.raises(ConfigError, match="--out-of-core whole"):
+            engine.check_sampled((40, 40, 40), (40, 40, 40))
+    else:
+        engine.check_sampled((40, 40, 40), (40, 40, 40))
 
 
 class _HeldConstant(torch.nn.Module):

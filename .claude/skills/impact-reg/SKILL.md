@@ -80,13 +80,14 @@ elastix samples its metric at random: a single `Elastix#rigid*` run can land far
 
 ## Large images: coarse globally, then native tiles
 
-Never answer "too large" by downsampling the pair. `register` handles it: when a pair exceeds what the preset
-registers whole in the free memory (its `app.json` cost per voxel), it runs the whole preset once on a coarse copy
-(from the OME-Zarr pyramid when there is one), pre-warps the moving image onto the native grid, refines with the
-preset's deformable stage on native tiles, and composes the fields. Presets without a local stage stop at the global
-pass. Levers: `--max-voxels` (whole/tiled threshold), `--patch-size` (tile), `--tmp-dir` (intermediates: ~60 bytes a
-voxel at the peak, on disk), streamable formats (`.mha`, `.nii`, OME-Zarr). Pin `--max-voxels` and `--patch-size` for
-reproducibility: the automatic plan follows the free memory. Keep `TMPDIR` short (PyTorch socket path limit).
+Never answer "too large" by downsampling the pair. `register` handles it (`--out-of-core auto`, the default): when a
+pair exceeds what the preset registers whole in the free memory (its `app.json` cost per voxel), an elastix, ConvexAdam
+or FireANTs preset registers it `sampled`, at native resolution, its images read from files by boxes. A preset of
+another engine runs once on a coarse copy and refines with its deformable stage on native tiles where it declares a
+tile pass (`tiled`), else registers whole on a coarser grid. Levers: `IMPACT_REG_MAX_VOXELS` (environment variable:
+what registers whole), `--region-size` (a sampled box), `--samples` (voxels an iteration draws), `--out-of-core` (force
+`whole`, `tiled` or `sampled`), `--tmp-dir` (intermediates: ~60 bytes a voxel at the peak, on disk), streamable formats
+(`.mha`, `.nii`, OME-Zarr). Pin `IMPACT_REG_MAX_VOXELS` for reproducibility: the automatic plan follows the free memory. Keep `TMPDIR` short (PyTorch socket path limit).
 
 ## Tuning order
 

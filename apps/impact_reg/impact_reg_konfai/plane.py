@@ -76,9 +76,12 @@ def lift_plane(path: Path, dest: Path, z_mm: float) -> Path:
 
 
 def _read_2d_transform(path: Path) -> sitk.Transform | sitk.Image:
-    """What the 2-D transform ``path`` stores: a linear transform, or a field as its vector image."""
+    """What the 2-D transform ``path`` stores: a linear transform, or a field as its vector image. A file an image
+    reader takes is a field stored as an image; any other, a transform file."""
     if path.is_dir():
         return read_ome_zarr_affine(path) if is_affine_store(path) else read_displacement_field(path)
+    if sitk.ImageFileReader.GetImageIOFromFileName(str(path)):
+        return read_displacement_field(path)
     transform = sitk.ReadTransform(str(path))
     if transform.IsLinear():
         return transform
@@ -90,11 +93,11 @@ def _read_2d_transform(path: Path) -> sitk.Transform | sitk.Image:
 
 
 def lift_field(path: Path, dest: Path) -> Path:
-    """The 2-D transform ``path``, a transform file or an OME-Zarr store, as a transform file one plane thick under
-    ``dest``: a field one plane thick, or a 3-D affine acting on the plane. A registration's later steps read it as
-    they read every transform."""
+    """The 2-D transform ``path``, a transform file, an OME-Zarr store or a field stored as an image, as a transform
+    file one plane thick under ``dest``: a field one plane thick, or a 3-D affine acting on the plane. A
+    registration's later steps read it as they read every transform."""
     dest.mkdir(parents=True, exist_ok=True)
-    target = dest / (f"{path.name.removesuffix(storage_form(path))}.h5" if path.is_dir() else path.name)
+    target = dest / f"{path.name.removesuffix(storage_form(path))}.h5"
     field = _read_2d_transform(path)
     if isinstance(field, sitk.Transform):
         sitk.WriteTransform(_lifted_affine(field), str(target))

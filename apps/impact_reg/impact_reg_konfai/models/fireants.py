@@ -66,9 +66,12 @@ import functools
 import gc
 import math
 import os
+import shutil
 import tempfile
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterable, Sequence
 from functools import reduce
+from pathlib import Path
 from typing import Annotated, Literal, cast
 from unittest import mock
 
@@ -85,6 +88,8 @@ from konfai.metric.measure.impact import (
     distance,
     draw_centres,
     grid_size,
+    ncc_of_sums,
+    ncc_sums,
     no_texpr_fuser,
     normalized_features,
     onto_image_grid,
@@ -94,10 +99,11 @@ from konfai.metric.measure.impact import (
 )
 from konfai.network import network
 from konfai.utils.config import Choices, Range
-from konfai.utils.dataset import image_to_data
-from konfai.utils.errors import MeasureError
-from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch
+from konfai.utils.dataset import Attribute, image_to_data
+from konfai.utils.errors import ConfigError, MeasureError
+from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch, peak_bytes
 
+from ..ooc import free_bytes, resized
 from .impact_loss import (
     FeatureMapUpdateInterval,
     LevelSpec,
@@ -122,6 +128,25 @@ from .orientation import world_aligned_pair
 
 DIM = 3
 
+
+def _fitting_tile(core, images: dict[str, torch.Tensor]) -> int:
+    """The tile a Static extraction takes ``images`` in on their CUDA device: 0, each whole, when one pass over the
+    larger fits half the free memory beside the layers both leave, else the widest cube that does, a whole number of
+    the input multiple; measured on a corner of the larger, 64 voxels a side. 0 off CUDA."""
+    larger = max(images.values(), key=lambda image: image.numel())
+    if not larger.is_cuda:
+        return 0
+    probe = larger[(slice(None), slice(None), *[slice(0, max(64, core.model.multiple))] * (larger.dim() - 2))]
+    layers, taken = peak_bytes(lambda: core.model.volume(probe, core.normalization, 0, 0.0), larger.device)
+    voxels = probe[0, 0].numel()
+    left = sum(layer.numel() * layer.element_size() for layer in layers) / voxels
+    room = free_bytes(larger.device) / 2 - left * sum(image[0, 0].numel() for image in images.values())
+    if taken / voxels * larger[0, 0].numel() <= room:
+        return 0
+    step = max(MIN_TILE, core.model.multiple)
+    return max(step, int((max(room, 0.0) * voxels / taken) ** (1 / (larger.dim() - 2))) // step * step)
+
+
 #: Linear stages a preset may ask for. The engine checks against this rather than trusting the
 #: ``Literal`` annotation, which only binds a config-driven call and not a direct Python one.
 _LINEAR_METHODS = ("rigid_affine", "rigid", "none")
@@ -135,6 +160,10 @@ class _StepPerElement:
 
     def __init__(self, optimizer, steps: list) -> None:
         self._optimizer, self._steps = optimizer, steps
+
+    @property
+    def param_groups(self) -> list:
+        return self._optimizer.param_groups
 
     def zero_grad(self, *args, **kwargs) -> None:
         self._optimizer.zero_grad(*args, **kwargs)
@@ -152,6 +181,57 @@ def _on_model_grid(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """The pair resampled on a model's grid (``resampled``), its mask by nearest neighbour."""
     return resampled(moved, size), resampled(fixed, size), None if mask is None else resampled(mask, size, "nearest")
+
+
+def _model_cells(low: int, high: int, voxels: int, cells: int) -> tuple[int, int]:
+    """The cells ``[first, last)`` of a model grid of ``cells`` over a level axis of ``voxels`` whose positions
+    (``resampled``: cell j at the level's continuous index j * voxels / cells) a box ``[low, high)`` holds with both
+    voxels it interpolates between; at the level's end, every cell left, which reads zeros past it as the whole does."""
+    first = -(-low * cells // voxels)
+    last = cells if high == voxels else ((high - 1) * cells) // voxels + 1
+    return first, max(first, last)
+
+
+def _box_on_model_grid(
+    moved: torch.Tensor,
+    fixed: torch.Tensor,
+    mask: torch.Tensor | None,
+    place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+    size: tuple[int, ...],
+    stride: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """A box of the pair (``place``: its ``low`` and ``high`` in a level of ``grid`` voxels) on the cells of the
+    level's model grid of ``size`` it holds (``_model_cells``), from one on ``stride`` to one as far from the grid's end
+    as a whole number of it, so that a strided layer meets the whole grid's cells; interpolated as ``resampled``
+    interpolates the whole level: linearly, zero past the level's end, its mask at the level's nearest voxel, ties
+    broken alike in every box."""
+    low, high, grid = place
+    axes, nearest = [], []
+    for a, b, voxels, cells in zip(low, high, grid, size, strict=True):
+        first, last = _model_cells(a, b, voxels, cells)
+        first = -(-first // stride) * stride
+        last = max(first, last - (cells - last) % stride)
+        position = torch.arange(first, last, dtype=torch.float64) * voxels / cells
+        axes.append(2 * (position - a) / max(b - a - 1, 1) - 1)
+        # The voxel the whole level's nearest resampling picks: its float32 grid coordinate brought back to an index
+        # as grid_sample does, and rounded half to even; b - a: past the level's end.
+        whole = (2 * position / max(voxels - 1, 1) - 1).float()
+        index = torch.round((whole + 1) / 2 * (voxels - 1)).long()
+        nearest.append((index - a).clamp(0, b - a))
+    coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij")[::-1], dim=-1)[None]
+
+    def sample(tensor: torch.Tensor) -> torch.Tensor:
+        source = tensor if tensor.is_floating_point() else tensor.float()
+        grid_ = coordinates.to(source.device, source.dtype).expand(source.shape[0], *coordinates.shape[1:])
+        return torch.nn.functional.grid_sample(source, grid_, mode="bilinear", padding_mode="zeros", align_corners=True)
+
+    def pick(tensor: torch.Tensor) -> torch.Tensor:
+        for axis, index in enumerate(nearest):
+            padded = torch.nn.functional.pad(tensor, [0, 0] * (tensor.dim() - 3 - axis) + [0, 1])  # zeros past it
+            tensor = padded.index_select(2 + axis, index.to(tensor.device))
+        return tensor
+
+    return sample(moved), sample(fixed), None if mask is None else pick(mask.float())
 
 
 def _require_fireants() -> None:
@@ -186,25 +266,83 @@ def _patch_distances(
     kept: list[int],
     terms: list[tuple[str, int]],
     normalization: str,
-    project: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None,
+    project: Callable[[int, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None,
     seed: int,
     kernel: int,
+    pooled: "dict[int, tuple[torch.Tensor, float, float]] | None" = None,
 ) -> torch.Tensor:
     """Each kept layer's distance on one patch, stacked: the network run on both images, each layer normalised, reduced
-    by PCA, cut to its channel subset and compared, in itk-impact's order."""
+    by PCA, cut to its channel subset and compared, in itk-impact's order. A layer in ``pooled`` (an NCC whose level
+    sums ``ImpactFeatureLoss.pool`` gave: their derivative, the level's value, and the inverse of the stage's weight of
+    the piece) takes the level's value, and through the patch's sums the level's gradient."""
     moved_layers, fixed_layers = model(moved, *moved_rest), model(fixed, *fixed_rest)
     values = []
     for index, (layer, (name, subset)) in enumerate(zip(kept, terms, strict=True)):
         moved_features = normalized_features(moved_layers[layer].float(), normalization)
         fixed_features = normalized_features(fixed_layers[layer].float(), normalization)
         if project is not None:
-            moved_features, fixed_features = project(moved_features, fixed_features)
+            moved_features, fixed_features = project(index, moved_features, fixed_features)
         moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
         layer_mask = None
         if mask is not None:
             layer_mask = torch.nn.functional.interpolate(mask.float(), size=moved_features.shape[2:], mode="nearest")
-        values.append(distance(name, moved_features, fixed_features, layer_mask, kernel, 0))
+        if pooled is not None and index in pooled:
+            derivative, value, scale = pooled[index]
+            weight = layer_mask if layer_mask is not None else torch.ones_like(moved_features[:, :1])
+            surrogate = (derivative.to(moved_features.device) * ncc_sums(moved_features, fixed_features, weight)).sum()
+            values.append((value + (surrogate - surrogate.detach()) * scale).float())
+        else:
+            values.append(distance(name, moved_features, fixed_features, layer_mask, kernel, 0))
     return torch.stack(values)
+
+
+def _on_basis(feature: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
+    """``feature`` ``[B, C, *spatial]`` on the PCA ``basis`` ``[C, K]``, uncentred: a piece centred by its own mean
+    would not add up to the level, and an NCC takes each component's mean off itself."""
+    return torch.einsum("bc...,ck->bk...", feature, basis.to(feature.device, feature.dtype))
+
+
+def _level_basis(total: tuple[torch.Tensor, torch.Tensor, torch.Tensor], components: int) -> torch.Tensor:
+    """The basis ``[C, K]`` of the ``components`` principal components of a layer from its level sums (``pca_sums``:
+    its cells, their channels' sums and cross-products), as ``pca_project`` fits it on the whole map."""
+    count, sums, products = total
+    mean = sums / count
+    covariance = (products - count * torch.outer(mean, mean)) / max(float(count) - 1, 1.0)
+    channels = covariance.shape[0]
+    return torch.linalg.eigh(covariance)[1][:, channels - min(components, channels) :].float()
+
+
+def _level_ncc(total: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """The NCC of a layer's level sums and its derivative with respect to them."""
+    total.requires_grad_()
+    value = ncc_of_sums(total)
+    (derivative,) = torch.autograd.grad(value, total)
+    return derivative, float(value.detach())
+
+
+class _Intensities:
+    """An image's intensity statistics over the voxels pieces of it own, added piece by piece: what ``_statistics``
+    reads off the whole image (its unbiased standard deviation, over every channel)."""
+
+    def __init__(self) -> None:
+        self.count, self.total, self.squares = 0, 0.0, 0.0
+        self.low, self.high = math.inf, -math.inf
+
+    def add(self, image: torch.Tensor, region: torch.Tensor) -> None:
+        values = image[0][:, region[0, 0] > 0.5].double()
+        if values.numel() == 0:
+            return
+        self.count += values.numel()
+        self.total += float(values.sum())
+        self.squares += float((values * values).sum())
+        self.low, self.high = min(self.low, float(values.min())), max(self.high, float(values.max()))
+
+    def attribute(self) -> Attribute:
+        mean = self.total / self.count
+        variance = max(self.squares - self.count * mean * mean, 0.0) / max(self.count - 1, 1)
+        return Attribute(
+            {"ImageMin": self.low, "ImageMax": self.high, "ImageMean": mean, "ImageStd": math.sqrt(variance)}
+        )
 
 
 class _ImpactCore(torch.nn.Module):
@@ -229,6 +367,7 @@ class _ImpactCore(torch.nn.Module):
         self.kept = self.model.kept
         # The tile each pyramid level is scored in once its whole image has run out of the card's memory.
         self._tiles: dict[tuple[int, ...], list[int]] = {}
+        self._layer_rules: list[list[tuple[int, bool]]] | None = None  # each kept layer's stride and rounding
         self._last_shape: tuple[int, ...] | None = None  # the level scored last, for narrow()
 
     def _pca_project(
@@ -245,20 +384,32 @@ class _ImpactCore(torch.nn.Module):
         terms: list[tuple[str, int]],
         seed: int,
         kernel: int,
+        pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None,
+        bases: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Each kept layer's distance, averaged over the patches the mask reaches (the whole image when untiled)."""
+        """Each kept layer's distance, averaged over the patches the mask reaches (the whole image when untiled);
+        ``bases``, each layer's PCA basis when the level's sums gave it (``ImpactFeatureLoss.pool``)."""
         network = self.model.network(moved.device)
         moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
-        project = self._pca_project if self.pca > 0 else None
+        project = None
+        if bases is not None:
+            project = lambda index, moved, fixed: (_on_basis(moved, bases[index]), _on_basis(fixed, bases[index]))  # noqa: E731
+        elif self.pca > 0:
+            project = lambda index, moved, fixed: self._pca_project(moved, fixed)  # noqa: E731
+        patches = [
+            (moved_patch, fixed_patch, mask_patch)
+            for moved_patch, fixed_patch, mask_patch in _patch_views(
+                moved_inputs[0], fixed_inputs[0], mask, self.model.shape
+            )
+            if mask_patch is None or torch.any(mask_patch == 1)
+        ]
+        # The patches' sums add up to the piece's: each patch's surrogate counts whole in their average.
+        pooled = {layer: (d, v, scale * len(patches)) for layer, (d, v, scale) in (pooled or {}).items()} or None
         total: torch.Tensor | None = None
         count = 0
-        for moved_patch, fixed_patch, mask_patch in _patch_views(
-            moved_inputs[0], fixed_inputs[0], mask, self.model.shape
-        ):
-            if mask_patch is not None and not torch.any(mask_patch == 1):
-                continue
+        for moved_patch, fixed_patch, mask_patch in patches:
             args = (network, moved_patch, fixed_patch, mask_patch, moved_inputs[1:], fixed_inputs[1:], self.kept, terms)
-            args += (self.normalization, project, seed, kernel)
+            args += (self.normalization, project, seed, kernel, pooled)
             if self.model.checkpoint:
                 values = torch.utils.checkpoint.checkpoint(_patch_distances, *args, use_reentrant=False)
             else:
@@ -277,37 +428,25 @@ class _ImpactCore(torch.nn.Module):
         terms: list[tuple[str, int]],
         seed: int,
         kernel: int,
+        statistics: tuple[Attribute, Attribute] | None = None,
+        pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+        bases: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Each kept layer's distance over the whole image, or over tiles once the whole image has run out of memory.
+        ``statistics`` are the moved and fixed images' intensity statistics when the two tensors are pieces of them
+        (``ImpactFeatureLoss.pool``), their own otherwise; ``pooled``, the NCC layers whose level sums it gave;
+        ``place``, where a piece lies in its level (``_prepared``); ``bases``, the layers' PCA bases the level's
+        sums gave.
 
         A level that runs out is scored again in tiles half as wide, and in tiles half as wide again if it
         still does not fit; the tile is kept for that level, so the retry happens once per registration.
         This keeps the registration one global registration, where cutting the volume would estimate its
         rigid and affine stages patch by patch.
         """
-        voxel_size = self.model.voxel_size
-        if voxel_size is not None and self.dimension == DIM:
-            moved, fixed, mask = _on_model_grid(
-                moved, fixed, mask, grid_size(self.extent, voxel_size, tuple(moved.shape[2:]))
-            )
-        if self.dimension < DIM:
-            # Swept along an axis drawn at each evaluation (``swept_order``).
-            order = swept_order(seed)
-            if voxel_size is not None:
-                # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
-                sides = list(reversed(self.extent)) if self.extent is not None else [float(n) for n in moved.shape[2:]]
-                size = [0, 0, 0]
-                size[order[2] - 2] = moved.shape[order[2]]
-                for axis, step in zip(order[3:], voxel_size, strict=True):
-                    size[axis - 2] = max(1, int(sides[axis - 2] / step + 0.5))
-                moved, fixed, mask = _on_model_grid(moved, fixed, mask, tuple(size))
-            moved, fixed, mask = (
-                moved.permute(order),
-                fixed.permute(order),
-                None if mask is None else mask.permute(order),
-            )
+        moved, fixed, mask = self._prepared(moved, fixed, mask, seed, place)
         shape = self._last_shape = tuple(moved.shape[2:])
-        statistics = (_statistics(moved)[0], _statistics(fixed)[0])
+        statistics = statistics or (_statistics(moved)[0], _statistics(fixed)[0])
 
         def run() -> torch.Tensor:
             tile = self._tiles.get(shape)
@@ -315,10 +454,139 @@ class _ImpactCore(torch.nn.Module):
             # (SyN warps the fixed one too), so a whole-image pass keeps two networks' activations until the backward.
             # The intensity statistics stay the whole image's, so every tile is normalised alike.
             self.model.shape, self.model.checkpoint = tile, tile is not None
-            return self._scored(moved, fixed, mask, statistics, terms, seed, kernel)
+            return self._scored(moved, fixed, mask, statistics, terms, seed, kernel, pooled, bases)
 
         with no_texpr_fuser():
             return halve_on_oom(run, self._narrow_tile, moved.is_cuda)
+
+    def ncc_sums(
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        weight: torch.Tensor,
+        statistics: tuple[Attribute, Attribute],
+        terms: list[tuple[str, int]],
+        seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+        bases: list[torch.Tensor] | None = None,
+    ) -> dict[int, torch.Tensor]:
+        """Each NCC layer's ``ncc_sums`` over one piece, the voxels ``weight`` keeps on its grid, its features on its
+        PCA basis when ``bases`` gives it: what the level's sums add up from it (``ImpactFeatureLoss.pool``). The
+        network runs on the whole piece, as ``distances`` does."""
+        moved, fixed, weight = self._prepared(moved, fixed, weight, seed, place)
+        network = self.model.network(moved.device)
+        moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
+        with torch.no_grad(), no_texpr_fuser():
+            moved_layers, fixed_layers = network(*moved_inputs), network(*fixed_inputs)
+        sums = {}
+        for index, (layer, (name, subset)) in enumerate(zip(self.kept, terms, strict=True)):
+            if name != "NCC":
+                continue
+            moved_features = normalized_features(moved_layers[layer].float(), self.normalization)
+            fixed_features = normalized_features(fixed_layers[layer].float(), self.normalization)
+            if bases is not None:
+                moved_features, fixed_features = (_on_basis(f, bases[index]) for f in (moved_features, fixed_features))
+            moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
+            layer_weight = torch.nn.functional.interpolate(
+                weight.float(), size=moved_features.shape[2:], mode="nearest"
+            )
+            sums[index] = ncc_sums(moved_features, fixed_features, layer_weight).cpu()
+        return sums
+
+    def pca_sums(
+        self,
+        fixed: torch.Tensor,
+        region: torch.Tensor,
+        statistics: Attribute,
+        seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Each kept layer's fixed features over the cells of one piece ``region`` covers on its grid: their count,
+        their channels' sums and cross-products, in double. Over the pieces of a level they add up to what ``pca_project``
+        fits its basis on, every cell of the whole map (``_level_basis``)."""
+        fixed, _, region = self._prepared(fixed, fixed, region, seed, place)
+        with torch.no_grad(), no_texpr_fuser():
+            layers = self.model.network(fixed.device)(*self.model.inputs(fixed, statistics))
+        sums = []
+        for layer in self.kept:
+            features = normalized_features(layers[layer].float(), self.normalization)
+            weight = torch.nn.functional.interpolate(region.float(), size=features.shape[2:], mode="nearest")
+            flat, kept = features[0].flatten(1).double(), weight.flatten().double()
+            sums.append(((kept.sum()).cpu(), (flat @ kept).cpu(), ((flat * kept) @ flat.t()).cpu()))
+        return sums
+
+    def layer_cells(self, weight: torch.Tensor) -> list[float]:
+        """Each kept layer's cells over a piece ``weight`` ``[1, 1, *spatial]`` covers as the network reads it (after
+        ``_prepared``): the cells its nearest voxel puts in, counted on the layer's own grid (``layer_shapes``)."""
+        return [
+            float(torch.nn.functional.interpolate(weight.float(), size=shape, mode="nearest").sum())
+            for shape in self.layer_shapes(tuple(weight.shape[2:]), weight.device)
+        ]
+
+    def layer_shapes(self, shape: tuple[int, ...], device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each kept layer's grid for an input of ``shape``: its stride along each axis, and whether it rounds a
+        remainder up, read once off a probe of an odd side."""
+        if self._layer_rules is None:
+            side = 2 * math.lcm(max(1, int(self.model.multiple)), self.model.block_stride(device)) + 1
+            probe = torch.rand((1, self.model.in_channels, *[side] * len(shape)), device=device)
+            with torch.no_grad(), no_texpr_fuser():
+                outputs = self.model.network(probe.device)(*self.model.inputs(probe, _statistics(probe)[0]))
+            self._layer_rules = [
+                [
+                    (stride, int(cells) * stride >= side)
+                    for stride, cells in zip(strides, outputs[layer].shape[2:], strict=True)
+                ]
+                for layer, strides in zip(self.kept, self.model.layer_strides(device), strict=True)
+            ]
+        return [
+            tuple(-(-n // stride) if up else max(1, n // stride) for n, (stride, up) in zip(shape, rule, strict=True))
+            for rule in self._layer_rules
+        ]
+
+    def model_size(self, level: tuple[int, ...], seed: int) -> tuple[int, ...] | None:
+        """The grid a model with a voxel_size reads a level of ``level`` voxels on (None without one): the level's
+        extent at its voxel_size, a network of one dimension fewer keeping the level's voxels along the axis it sweeps."""
+        voxel_size = self.model.voxel_size
+        if voxel_size is None:
+            return None
+        if self.dimension in (DIM, len(level)):  # a network of the level's own dimension: no axis swept
+            return grid_size(self.extent, voxel_size, level)
+        order = swept_order(seed)
+        # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
+        sides = list(reversed(self.extent)) if self.extent is not None else [float(n) for n in level]
+        size = [0, 0, 0]
+        size[order[2] - 2] = level[order[2] - 2]
+        for axis, step in zip(order[3:], voxel_size, strict=True):
+            size[axis - 2] = max(1, int(sides[axis - 2] / step + 0.5))
+        return tuple(size)
+
+    def _prepared(
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        mask: torch.Tensor | None,
+        seed: int,
+        place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """The two images and the mask as the network reads them: on its grid at its voxel_size, and for a network
+        of one dimension fewer, with the axis it sweeps (drawn at each evaluation, ``swept_order``) first. ``place``
+        (a box's ``low`` and ``high`` in a level of ``grid`` voxels) has a box take the cells of the level's model grid
+        that fall in it, as the whole level's resampling places them."""
+        size = self.model_size(place[2] if place is not None else tuple(moved.shape[2:]), seed)
+        if size is not None:
+            if place is None:
+                moved, fixed, mask = _on_model_grid(moved, fixed, mask, size)
+            else:
+                stride = self.model.block_stride(moved.device)
+                moved, fixed, mask = _box_on_model_grid(moved, fixed, mask, place, size, stride)
+        if self.dimension < moved.dim() - 2:  # a 2-D network swept over a volume, not run on a plane
+            order = swept_order(seed)
+            moved, fixed, mask = (
+                moved.permute(order),
+                fixed.permute(order),
+                None if mask is None else mask.permute(order),
+            )
+        return moved, fixed, mask
 
     def sampled_distances(
         self,
@@ -436,6 +704,16 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._channels: list[list[int]] = []  # Static: each model's kept layers' channels in the volumes
         self._level = -1  # the FireANTs scale running, advanced by set_current_scale_and_iterations
         self._factors: list[float] | None = None  # each layer's normalization at this level
+        self._draw: int | None = None  # the draw every piece of an iteration takes (``draw``)
+        self._pooled: dict[int, tuple[torch.Tensor, float, float]] | None = None  # NCC layers' level sums (``pool``)
+        # Jacobian: each model's intensities over the level, the cells it weighs, and where a piece lies (``pool``)
+        self._statistics: dict[int, tuple[Attribute, Attribute]] = {}
+        self._cells: dict[int, list[float]] = {}  # each model's kept layers' cells the level weighs
+        self._place: tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None = None
+        # Jacobian: each model's NCC layers' derivative and value from the level's sums, and the level's weight
+        self._layer_sums: dict[int, dict[int, tuple[torch.Tensor, float]]] = {}
+        self._bases: dict[int, list[torch.Tensor]] = {}  # each model's layers' PCA bases over the level (``pool``)
+        self._level_weight = 0.0
 
     @property
     def cores(self) -> list[_ImpactCore]:
@@ -444,12 +722,19 @@ class ImpactFeatureLoss(torch.nn.Module):
     def reset(self) -> None:
         """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
         the draws start again from the seed."""
-        self._level, self._factors = -1, None
+        self._level, self._factors, self._draw, self._pooled, self._place = -1, None, None, None, None
+        self._statistics, self._cells, self._layer_sums, self._bases = {}, {}, {}, {}
         self._generator.manual_seed(self._seed)
+
+    def draw(self) -> None:
+        """An iteration evaluated by pieces of the level begins: every piece takes this draw (the channels a layer
+        keeps, the axis a 2-D network sweeps), as one evaluation of the whole level does."""
+        self._draw = int(torch.randint(2**31 - 1, (1,), generator=self._generator))
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
-        self._level, self._factors = self._level + 1, None
+        self._level, self._factors, self._pooled = self._level + 1, None, None
+        self._statistics, self._cells, self._layer_sums, self._bases = {}, {}, {}, {}
 
     def start_at(self, level: int) -> None:
         """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
@@ -482,7 +767,6 @@ class ImpactFeatureLoss(torch.nn.Module):
         fixed: torch.Tensor,
         moving: torch.Tensor,
         patch: int,
-        overlap: float,
         extents: tuple[list[float] | None, list[float] | None] = (None, None),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Static mode: the fixed and moving volumes of every model's kept layers, concatenated along the channels.
@@ -490,7 +774,30 @@ class ImpactFeatureLoss(torch.nn.Module):
         A model with a ``voxel_size`` extracts on the image resampled at that resolution (``extents``: each image's
         size in mm along L, P, S) and its features are brought back onto the image's grid, as elastix interpolates
         its feature maps at its points: FireANTs registers them at the image's resolution."""
-        fixed_sides, moving_sides, self._channels = [], [], []
+        # One pass over each image, or, where a model does not fit one (or the preset gives a patch), every model by
+        # blocks as a segmentation is predicted, which gives the one pass's features whatever each image's extent.
+        tiles = [patch]
+        if not patch:
+            try:
+                with out_of_memory_as_torch(fixed.is_cuda):
+                    found = self._whole(fixed, moving, extents)
+                if isinstance(found, tuple):
+                    return found
+                tiles = found
+            except torch.cuda.OutOfMemoryError:
+                tiles = [64]  # the probe's side: the blocks halve from it while one does not fit
+            # Out of the handler, the tensors its traceback held are released.
+            gc.collect()
+            torch.cuda.empty_cache()
+        print(f"[FireANTs] feature extraction does not fit whole: extracted by blocks of {max(tiles)} voxels.")
+        return self._by_blocks(fixed, moving, max(tiles), extents)
+
+    def _whole(
+        self, fixed: torch.Tensor, moving: torch.Tensor, extents: tuple[list[float] | None, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor] | list[int]:
+        """``extract`` in one pass where every model fits it (``_fitting_tile``), each image resampled at a model's
+        voxel_size first; else each model's tile, the resampled images let go."""
+        resampled_images = []
         for core in self.cores:
             images = {"fixed": fixed, "moving": moving}
             if core.model.voxel_size is not None:
@@ -498,16 +805,19 @@ class ImpactFeatureLoss(torch.nn.Module):
                     side: resampled(image, grid_size(extent, core.model.voxel_size, tuple(image.shape[2:])))
                     for (side, image), extent in zip(images.items(), extents, strict=True)
                 }
-            # Both images through the same tile, the larger first: two volumes assembled alike (a model that sees the
-            # whole image, as anatomix does, gives other features in tiles).
-            layers, tile = {}, patch
-            for side, image in sorted(images.items(), key=lambda item: -item[1].numel()):
-                layers[side], tile = core.model.volume(image, core.normalization, tile, overlap)
-            if tile != patch:
-                print(
-                    f"[FireANTs] feature extraction did not fit whole: extracted in tiles of {tile} voxels.", flush=True
-                )
-            fixed_layers, moving_layers = layers["fixed"], layers["moving"]
+            resampled_images.append(images)
+        tiles = [_fitting_tile(core, images) for core, images in zip(self.cores, resampled_images, strict=True)]
+        return tiles if any(tiles) else self._one_pass(fixed, moving, resampled_images)
+
+    def _one_pass(
+        self, fixed: torch.Tensor, moving: torch.Tensor, resampled_images: list[dict[str, torch.Tensor]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``extract`` in one pass of every model over each image (``resampled_images``: as each model reads them)."""
+        fixed_sides, moving_sides, self._channels = [], [], []
+        for core, images in zip(self.cores, resampled_images, strict=True):
+            fixed_layers, moving_layers = (
+                core.model.volume(images[side], core.normalization, 0, 0.0) for side in ("fixed", "moving")
+            )
             if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
                 for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
                     moving_layers[index], fixed_layers[index] = core._pca_project(moving_layer, fixed_layer)
@@ -517,12 +827,28 @@ class ImpactFeatureLoss(torch.nn.Module):
             if core.model.voxel_size is not None:
                 fixed_layers = [resampled(layer, tuple(fixed.shape[2:]), padding="border") for layer in fixed_layers]
                 moving_layers = [resampled(layer, tuple(moving.shape[2:]), padding="border") for layer in moving_layers]
-            del images
             self._channels.append([layer.shape[1] for layer in fixed_layers])
             fixed_sides += fixed_layers
             moving_sides += moving_layers
         # A single layer is returned as it is: concatenating it would copy the whole volume.
         return tuple(sides[0] if len(sides) == 1 else torch.cat(sides, dim=1) for sides in (fixed_sides, moving_sides))
+
+    def _by_blocks(
+        self, fixed: torch.Tensor, moving: torch.Tensor, block: int, extents: tuple[list[float] | None, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Both images' feature volumes predicted by blocks of ``block`` voxels a side at least, as the sampled route
+        predicts them (``static_feature_sources``): the one pass's features, the fixed image's PCA basis projecting
+        both."""
+        from ..ooc import TensorSource
+        from .fireants_sampled import static_feature_sources
+
+        with tempfile.TemporaryDirectory(prefix="impact_static_") as directory:
+            sources = static_feature_sources(
+                self, TensorSource(fixed[0]), TensorSource(moving[0]), Path(directory), block=block, extents=extents
+            )
+            volumes = [source.read([0] * len(source.shape), list(source.shape)).to(fixed.device) for source in sources]
+            del sources  # their memmaps: Windows removes no file still mapped
+        return volumes[0], volumes[1]
 
     def _reach(self, index: int, shape: tuple[int, ...]) -> int:
         """The cube, in voxels of this level, that model ``index``'s sampled patch spans: its receptive field, wider when
@@ -539,11 +865,9 @@ class ImpactFeatureLoss(torch.nn.Module):
         spec = self._specs[index]
         return [(spec.distance, int(spec.subset_features))] * len(self.cores[index].kept)
 
-    def _static_distances(
-        self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
-    ) -> list[torch.Tensor]:
-        """Each kept layer's distance between the warped feature volumes, read off their channels."""
-        values = []
+    def _static_layers(self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, seed: int):
+        """Each kept layer of the warped feature volumes, read off their channels: its distance's name and its moved
+        and fixed maps."""
         for index in level:
             start = sum(sum(layers) for layers in self._channels[:index])
             for layer, (channels, (name, subset)) in enumerate(
@@ -555,20 +879,187 @@ class ImpactFeatureLoss(torch.nn.Module):
                     subset,
                     seed + 1000 * index + layer,
                 )
-                values.append(distance(name, moved_layer, fixed_layer, mask, self._kernel, self._chunk))
+                yield name, moved_layer, fixed_layer
                 start += channels
+
+    def _static_distances(
+        self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
+    ) -> list[torch.Tensor]:
+        """Each kept layer's distance between the warped feature volumes, read off their channels; an NCC layer whose
+        level sums ``pool`` gave, the level's (see ``pool``)."""
+        values = []
+        pooled = self._pooled or {}
+        for layer, (name, moved_layer, fixed_layer) in enumerate(self._static_layers(level, moved, fixed, seed)):
+            if layer in pooled:
+                # The level's NCC, and through this piece's sums the level's gradient at its voxels, weighed against
+                # the stage's weight of a piece (its voxels over the level's) so that the two cancel.
+                derivative, counted, value = pooled[layer]
+                weight = mask if mask is not None else torch.ones_like(moved_layer[:, :1])
+                piece = ncc_sums(moved_layer, fixed_layer, weight)
+                surrogate = (derivative.to(piece.device) * piece).sum()
+                scale = counted / max(float(piece[0, 0]), 1e-8)
+                values.append((value + (surrogate - surrogate.detach()) * scale).float())
+            else:
+                values.append(distance(name, moved_layer, fixed_layer, mask, self._kernel, self._chunk))
         return values
 
-    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
-        mask: torch.Tensor | None = None
-        if self._masked:
-            # A voxel counts where the fixed mask and the warped moving mask both hold it, as in FireANTs' own
-            # masked metrics.
-            mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype)
-            moved, fixed = moved[:, :-1], fixed[:, :-1]
+    @property
+    def pools(self) -> bool:
+        """Whether an evaluation by pieces of the level needs the level's sums first (``pool``): Jacobian mode, whose
+        networks normalise their inputs by the whole images' intensity statistics, and Static mode at a level with an
+        NCC layer, an NCC being no mean of its voxels' values."""
+        if self._sampling < 1 or not self._levels:
+            return False
+        if self._mode == "Jacobian":
+            return True
+        level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
+        return any(name == "NCC" for index in level for name, _ in self._terms(index))
+
+    def stride(self, device: torch.device | str) -> int:
+        """The stride a piece of the level must start on, and end as far from its end as a whole number of, for every
+        network run on it to meet the whole level's cells (``ImpactFeatureModel.block_stride``, the input multiple):
+        Jacobian mode on whole pieces; 1 otherwise, and for a model read on its own grid (a voxel_size)."""
+        if self._mode != "Jacobian" or self._sampling < 1:
+            return 1
+        strides = [
+            math.lcm(max(1, int(core.model.multiple)), core.model.block_stride(device))
+            for core in self.cores
+            if core.model.voxel_size is None
+        ]
+        return math.lcm(1, *strides)  # every network's
+
+    def place(self, low: Sequence[int], high: Sequence[int], grid: Sequence[int]) -> None:
+        """Where the next piece lies: ``[low, high)`` of a level of ``grid`` voxels (a registration by boxes says so
+        before each), for a model that reads the level on its own grid (``_ImpactCore._prepared``)."""
+        self._place = (tuple(low), tuple(high), tuple(grid))
+
+    def _split(
+        self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """The two images and the voxels they are compared over, ``region`` (all when None). Masked, the images lose
+        their mask channel and a voxel counts where the fixed mask and the warped moving mask both hold it, as in
+        FireANTs' own masked metrics."""
+        if not self._masked:
+            return moved, fixed, region
+        weight = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype) * (1.0 if region is None else region)
+        return moved[:, :-1], fixed[:, :-1], weight
+
+    def pool(
+        self,
+        pieces: Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | Callable[[], Iterable[tuple]],
+    ) -> None:
+        """The level's sums over the voxels the pieces own (each a moved and a fixed tensor read with its halo, and
+        ones on its own voxels), under this iteration's draw. Static mode: each NCC layer's, its NCC, the voxels it
+        counts and its derivative with respect to the sums, which give every piece's evaluation the level's value and
+        gradient. Jacobian mode: the intensity statistics each network normalises by, then its NCC layers'."""
+        if self._draw is None:
+            self.draw()
+        assert self._draw is not None
+        level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
+        read = pieces if callable(pieces) else (lambda: pieces)  # a callable reads them again for a second pass
+        self._pooled = {}
+        if self._mode == "Jacobian":
+            self._pool_intensities(read, level)
+            self._pool_layers(read, level)
+            return
+        totals: dict[int, torch.Tensor] = {}
+        with torch.no_grad():
+            for pieces in read():
+                moved, fixed, mask = self._split(*pieces)
+                for layer, (name, moved_layer, fixed_layer) in enumerate(
+                    self._static_layers(level, moved, fixed, self._draw)
+                ):
+                    if name == "NCC":
+                        piece = ncc_sums(moved_layer, fixed_layer, mask).cpu()
+                        totals[layer] = piece if layer not in totals else totals[layer] + piece
+        for layer, total in totals.items():
+            derivative, value = _level_ncc(total)
+            self._pooled[layer] = (derivative, float(total[0, 0]), value)
+
+    def _pool_intensities(self, read: Callable[[], Iterable[tuple]], level: list[int]) -> None:
+        """Jacobian mode: the intensity statistics of the warped images as each network reads them, over the voxels
+        the pieces own (on its grid, for a model with a voxel_size), and the cells of that grid the level weighs
+        (those both masks keep, when masked): what the whole level's evaluation computes on the whole images."""
+        assert self._draw is not None
+        sized = [index for index in level if self.cores[index].model.voxel_size is not None]
+        intensities = {index: (_Intensities(), _Intensities()) for index in [None, *sized]}
+        self._cells = {index: [0.0] * len(self.cores[index].kept) for index in level}
+        self._level_weight = 0.0
+        with torch.no_grad():
+            for moved, fixed, region in read():
+                moved, fixed, weight = self._split(moved, fixed, region)
+                self._level_weight += float(weight.sum())  # as the stage weighs a piece: its voxels, or its support
+                intensities[None][0].add(moved, region)
+                intensities[None][1].add(fixed, region)
+                for index in level:
+                    seed = self._draw + 1000 * index
+                    core = self.cores[index]
+                    if index in sized:
+                        on_grid, fixed_on_grid, own = core._prepared(moved, fixed, region, seed, self._place)
+                        intensities[index][0].add(on_grid, own)
+                        intensities[index][1].add(fixed_on_grid, own)
+                    # The cells of each layer the piece owns (those both masks keep), on the layer's own grid.
+                    own_weight = core._prepared(weight, weight, weight, seed, self._place)[2]
+                    for layer, cells in enumerate(core.layer_cells(own_weight)):
+                        self._cells[index][layer] += cells
+        self._statistics = {}
+        for index in level:
+            moved_side, fixed_side = intensities[index if index in sized else None]
+            if moved_side.count > 0:
+                self._statistics[index] = (moved_side.attribute(), fixed_side.attribute())
+
+    def _pool_layers(self, read: "Callable[[], Iterable[tuple]]", level: list[int]) -> None:
+        """Jacobian mode: each NCC layer's sums over the voxels the pieces own, their networks run on the level's
+        intensities (a second pass, once those are known), and the level's weight as the stage weighs a piece (its
+        voxels, or those both masks keep)."""
+        self._layer_sums, self._bases = {}, {}
+        assert self._draw is not None
+        models = [index for index in level if any(name == "NCC" for name, _ in self._terms(index))]
+        if not models or any(index not in self._statistics for index in models):
+            return
+        # A PCA is fitted on the whole fixed map, every cell (``pca_project``): its basis from the pieces' sums.
+        reduced = [index for index in models if self.cores[index].pca > 0]
+        if reduced:
+            fitted: dict[int, list] = {}
+            for _, fixed, region in read():
+                fixed = fixed[:, :-1] if self._masked else fixed
+                for index in reduced:
+                    seed = self._draw + 1000 * index
+                    piece = self.cores[index].pca_sums(fixed, region, self._statistics[index][1], seed, self._place)
+                    fitted[index] = (
+                        piece
+                        if index not in fitted
+                        else [
+                            tuple(a + b for a, b in zip(total, part, strict=True))
+                            for total, part in zip(fitted[index], piece, strict=True)
+                        ]
+                    )
+            self._bases = {
+                index: [_level_basis(total, self.cores[index].pca) for total in totals]
+                for index, totals in fitted.items()
+            }
+        totals: dict[tuple[int, int], torch.Tensor] = {}
+        for pieces in read():
+            moved, fixed, weight = self._split(*pieces)
+            for index in models:
+                seed = self._draw + 1000 * index
+                core, terms, bases = self.cores[index], self._terms(index), self._bases.get(index)
+                for layer, piece in core.ncc_sums(
+                    moved, fixed, weight, self._statistics[index], terms, seed, self._place, bases
+                ).items():
+                    totals[(index, layer)] = piece if (index, layer) not in totals else totals[(index, layer)] + piece
+        for (index, layer), total in totals.items():
+            self._layer_sums.setdefault(index, {})[layer] = _level_ncc(total)
+
+    def _values(
+        self, moved: torch.Tensor, fixed: torch.Tensor, region: torch.Tensor | None = None
+    ) -> tuple[list[float], list[torch.Tensor]]:
+        """Each kept layer's weight and its distance between the two images, at the current level, over the voxels
+        ``region`` holds (``[1, 1, *spatial]``, all when None)."""
+        moved, fixed, mask = self._split(moved, fixed, region)
         level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
         # One draw per evaluation, the same channels in every patch and in the checkpoints' second pass.
-        seed = int(torch.randint(2**31 - 1, (1,), generator=self._generator))
+        seed = self._draw if self._draw is not None else int(torch.randint(2**31 - 1, (1,), generator=self._generator))
         weights = [weight for index in level for weight in layer_weights([self._specs[index]])]
         if self._mode == "Jacobian" and self._sampling < 1:
             values = []
@@ -591,32 +1082,87 @@ class ImpactFeatureLoss(torch.nn.Module):
                     )
                 )
         elif self._mode == "Jacobian":
-            values = [
-                value
-                for index in level
-                for value in self.cores[index].distances(
-                    moved, fixed, mask, self._terms(index), seed + 1000 * index, self._kernel
+            # An NCC layer pooled over the level: the inverse of the stage's weight of this piece, so that its
+            # surrogate's gradient is the level's.
+            piece = float(mask.sum()) if mask is not None else float(math.prod(moved.shape[2:]))
+            scale = self._level_weight / max(piece, 1e-8)
+            values = []
+            for index in level:
+                core, pooled = self.cores[index], self._layer_sums.get(index, {})
+                distances = core.distances(
+                    moved,
+                    fixed,
+                    mask,
+                    self._terms(index),
+                    seed + 1000 * index,
+                    self._kernel,
+                    self._statistics.get(index),
+                    {layer: (d, v, scale) for layer, (d, v) in pooled.items()} or None,
+                    self._place,
+                    self._bases.get(index),
                 )
-            ]
+                if index in self._cells:
+                    # A layer's mean over the piece's cells, weighed as the stage weighs the piece (its voxels of the
+                    # level, or its support): brought to the cells' share of the level's, which the whole level
+                    # averages, on the layer's own grid (strided, or a model's at its voxel_size).
+                    cells = mask if mask is not None else torch.ones_like(moved[:, :1])
+                    held = core.layer_cells(core._prepared(cells, cells, cells, seed + 1000 * index, self._place)[2])
+                    distances = torch.stack(
+                        [
+                            value if layer in pooled else value * held[layer] / max(total, 1e-8) * scale
+                            for layer, (value, total) in enumerate(zip(distances, self._cells[index], strict=True))
+                        ]
+                    )
+                values += list(distances)
         else:
             if self._sampling < 1:
                 # The same voxels for every layer, compared as [1, C, N]: the mask is already in the draw.
                 # A mask that keeps no voxel stays on the whole maps, where the masked mean is 0.
                 centres = draw_centres(tuple(moved.shape[2:]), mask, 1, self._sampling, self._generator, moved.device)
                 if centres is not None:
-                    _, height, width = moved.shape[2:]
-                    voxels = (centres[:, 0] * height + centres[:, 1]) * width + centres[:, 2]
+                    voxels = centres[:, 0]  # each centre's index in the flattened grid, a plane's or a volume's
+                    for axis, extent in enumerate(moved.shape[3:], start=1):
+                        voxels = voxels * extent + centres[:, axis]
                     moved, fixed, mask = moved.flatten(2)[:, :, voxels], fixed.flatten(2)[:, :, voxels], None
             # Half as many channels a LNCC pass when it does not fit, kept for the registration.
             values = halve_on_oom(
                 lambda: self._static_distances(level, moved, fixed, mask, seed), self.narrow, moved.is_cuda
             )
+        return weights, values
+
+    def latch(self, pieces: "Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]") -> None:
+        """Latch the level's normalisation on pieces of the pair instead of on the first evaluation: a registration
+        by boxes hands each box read with its halo (a moved and a fixed tensor) and ones on the box's own voxels.
+        Each layer's start is its mean over the voxels the boxes own, weighed by the voxels each counts (those both
+        masks keep, when masked): the level's mean, however its boxes cut it. Masks that meet nowhere leave every
+        layer at 1, as a layer at 0 is."""
+        if not self._normalize:
+            return
+        totals: list[float] = []
+        voxels = 0.0
+        with torch.no_grad():
+            for moved, fixed, region in pieces:
+                if self._masked:
+                    region = region * (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(region.dtype)
+                size = float(region.sum())
+                if size == 0:  # a box the masks miss counts no voxel
+                    continue
+                values = [float(value) * size for value in self._values(moved, fixed, region)[1]]
+                totals = [total + value for total, value in zip(totals or [0.0] * len(values), values, strict=True)]
+                voxels += size
+        self._latch([total / max(voxels, 1.0) for total in totals])
+
+    def _latch(self, starts: list[float]) -> None:
+        self._factors = [1.0 / start if start > 0 and np.isfinite(start) else 1.0 for start in starts]
+
+    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+        weights, values = self._values(moved, fixed)
         if self._normalize:
             if self._factors is None:
                 # Latched once a level, at the transform the scale starts from; a layer already at 0 keeps 1.
-                starts = [float(value.detach()) for value in values]
-                self._factors = [1.0 / start if start > 0 and np.isfinite(start) else 1.0 for start in starts]
-            values = [value * factor for value, factor in zip(values, self._factors, strict=True)]
+                self._latch([float(value.detach()) for value in values])
+            factors = self._factors or [1.0] * len(values)  # none latched: no voxel counted
+            values = [value * factor for value, factor in zip(values, factors, strict=True)]
         return reduce(torch.add, [weight * value for weight, value in zip(weights, values, strict=True)])
 
 
@@ -659,6 +1205,21 @@ def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
     )
 
 
+def _inverse_on(shape: tuple[int, ...]) -> Callable:
+    """FireANTs' ``compositive_warp_inverse`` with its result brought onto ``shape`` by linear interpolation: SyN's
+    ``get_warp_parameters``, handed an inverse of another size (an axis under 32 voxels, which FireANTs computes at
+    32), interpolates the reverse warp itself in its place, not its inverse."""
+    from fireants.utils.warputils import compositive_warp_inverse
+
+    def inverse(image, ref_disp: torch.Tensor, **kwargs) -> torch.Tensor:
+        warp = compositive_warp_inverse(image, ref_disp, **kwargs)
+        if tuple(warp.shape[1:-1]) == shape:
+            return warp
+        return resized(warp.movedim(-1, 1), shape).movedim(1, -1)
+
+    return inverse
+
+
 class FireANTsEngine:
     """Register a fixed/moving pair with FireANTs (Rigid -> Affine -> [SyN | Greedy | none]); return
     the displacement field on the fixed grid.
@@ -688,7 +1249,6 @@ class FireANTsEngine:
         mode: str = "Static",
         feature_patch: int = 0,
         feature_chunk: int = 0,
-        feature_overlap: float = 0.25,
         deformable_masked: bool = True,
         normalize: bool = True,
         feature_map_update_interval: int = -1,
@@ -723,6 +1283,8 @@ class FireANTsEngine:
         if cc_kernel % 2 == 0:
             # FireANTs' own cross-correlation refuses an even window, which has no centre voxel.
             raise ValueError(f"cc_kernel must be odd, got {cc_kernel}: an even window has no centre voxel.")
+        if deformable_method not in ("syn", "greedy", "none"):
+            raise ValueError(f"Unknown deformable_method '{deformable_method}' (expected 'syn', 'greedy' or 'none').")
         if linear_method == "none" and deformable_method == "none":
             # It would optimise nothing and return an identity no downstream check tells from a result.
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
@@ -741,7 +1303,6 @@ class FireANTsEngine:
         self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
-        self._feature_overlap = float(feature_overlap)
         self._normalize = bool(normalize)
         self._lncc_kernel = int(lncc_kernel)
         self._mixed_precision = bool(mixed_precision)
@@ -853,7 +1414,6 @@ class FireANTsEngine:
                 pair[0].array[:, :1],
                 pair[1].array[:, :1],
                 self._feature_patch,
-                self._feature_overlap,
                 (_extent(fixed), _extent(warped)),
             )
             for stage_image, features in zip(pair, volumes, strict=True):
@@ -897,8 +1457,11 @@ class FireANTsEngine:
 
         FireANTs serialises the total field (ANTs convention, fixed grid) only to a file, so it is
         round-tripped through a temporary NIfTI: its public API, no internals reimplemented."""
+        from fireants.registration import syn
+
         reg.optimize()
-        with tempfile.TemporaryDirectory() as tmp:
+        inverse = _inverse_on(tuple(reg.fixed_images.shape[2:]))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(syn, "compositive_warp_inverse", inverse):
             # Uncompressed: the file is read back at once.
             warp_path = os.path.join(tmp, "total_warp.nii")
             if reg.dims == 2:
@@ -951,22 +1514,7 @@ class FireANTsEngine:
             # their voxel axes in one order, so the fixed and moving features compare the same descriptors.
             fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
         _require_fireants()
-        from fireants.utils.globals import MIN_IMG_SIZE
-
-        # FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a
-        # fixed image with a thinner axis, and SyN cannot invert a warp larger than the image on every axis.
-        # Both fail only once the optimisation is over, so the sizes are checked before it starts.
-        thin = [extent < MIN_IMG_SIZE for extent in fixed.GetSize()]
-        if self._deformable_method == "greedy" and any(thin):
-            raise ValueError(
-                f"FireANTs' greedy registration needs every axis of the fixed image to span at least {MIN_IMG_SIZE} "
-                f"voxels, got {fixed.GetSize()}: use deformable_method 'syn', which takes a thin axis."
-            )
-        if self._deformable_method == "syn" and all(thin):
-            raise ValueError(
-                f"FireANTs' SyN needs one axis of the fixed image to span at least {MIN_IMG_SIZE} voxels, got "
-                f"{fixed.GetSize()}: register the whole image, or tiles of at least {MIN_IMG_SIZE} a side."
-            )
+        self._check_thin(fixed.GetSize())
         if self._deformable_metric == "impact" and self._deformable_method != "none":
             loss = self._impact_loss()  # before any compute: a model that cannot be had or probed fails here
             for core in loss.cores:  # the model grids and the sampled patches are laid out in mm
@@ -1094,12 +1642,8 @@ class FireANTsEngine:
         else:
             if self._deformable_method == "syn":
                 from fireants.registration.syn import SyNRegistration as Deformable
-            elif self._deformable_method == "greedy":
-                from fireants.registration.greedy import GreedyRegistration as Deformable
             else:
-                raise ValueError(
-                    f"Unknown deformable_method '{self._deformable_method}' (expected 'syn', 'greedy' or 'none')."
-                )
+                from fireants.registration.greedy import GreedyRegistration as Deformable
             # The linear stage's images go before this stage builds its own: FireANTs keeps its tensors in
             # reference cycles, which only the cyclic collector frees.
             if self._linear_method != "none":
@@ -1127,7 +1671,6 @@ class FireANTsEngine:
                         fixed_img.array[:, :1],
                         moving_img.array[:, :1],
                         self._feature_patch,
-                        self._feature_overlap,
                         tuple(_extent(image) for image in (fixed, moving)),
                     )
                     for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
@@ -1199,6 +1742,351 @@ class FireANTsEngine:
             torch.cuda.synchronize()
         dvf_np, _ = image_to_data(field)
         return dvf_np
+
+    def check_sampled(self, fixed_shape, moving_shape) -> None:
+        """Refuse what ``register_sampled`` cannot register, from the pair's voxel shapes ((z, y, x)) alone, before
+        anything is read."""
+        _require_fireants()
+        # A volume one voxel thick along one axis registers as its plane (``register_sampled``), as on the whole pair.
+        plane = len(fixed_shape) == 3 and list(fixed_shape).count(1) == 1
+        if 1 in (*fixed_shape, *moving_shape) and not plane:
+            raise NotImplementedError(
+                "an image with an axis of one voxel has no extent along it for FireANTs' normalized coordinates:"
+                " by boxes, a volume one voxel thick along one axis registers as its plane, and nothing thinner."
+            )
+        if self._deformable_method == "none":
+            return
+        if self._deformable_metric == "impact" and self._mode == "Jacobian" and self._voxel_sampling >= 1:
+            # By boxes, a Jacobian NCC layer reduced by PCA takes the basis of the whole fixed map from the boxes'
+            # sums; a 2-D network's is fitted on slices spread over the map, which no box holds.
+            for spec, core in zip(self._impact_loss()._specs, self._impact_loss().cores, strict=True):
+                if spec.pca > 0 and spec.distance == "NCC" and core.dimension < DIM:
+                    raise ConfigError(
+                        f"FireANTs by boxes cannot score '{spec.ref}' in Jacobian mode: a 2-D network's NCC layer with"
+                        f" pca {spec.pca} fits its basis on slices spread over the whole level.",
+                        "Set mode: Static or pca: 0, or choose --out-of-core whole.",
+                    )
+        self._check_thin([extent for extent in fixed_shape if extent != 1] if plane else fixed_shape)
+
+    def _check_thin(self, size) -> None:
+        """FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a fixed
+        image with a thinner axis, and SyN cannot invert a warp larger than the image on every axis. Both fail only
+        once the optimisation is over, so the sizes are checked before it starts, whole or by boxes."""
+        from fireants.utils.globals import MIN_IMG_SIZE
+
+        thin = [extent < MIN_IMG_SIZE for extent in size]
+        if self._deformable_method == "greedy" and any(thin):
+            raise ValueError(
+                f"FireANTs' greedy registration needs every axis of the fixed image to span at least {MIN_IMG_SIZE} "
+                f"voxels, got {tuple(size)}: use deformable_method 'syn', which takes a thin axis."
+            )
+        if self._deformable_method == "syn" and all(thin):
+            raise ValueError(
+                f"FireANTs' SyN needs one axis of the fixed image to span at least {MIN_IMG_SIZE} voxels, got "
+                f"{tuple(size)}: register the whole image, or tiles of at least {MIN_IMG_SIZE} a side."
+            )
+
+    def register_sampled(
+        self,
+        fixed: Path,
+        moving: Path,
+        fixed_mask: Path | None,
+        moving_mask: Path | None,
+        device_index: int,
+        scratch: Path,
+        field: Path,
+        box: int,
+        samples: int | None = None,
+        epochs: int | None = None,
+        plane: int | None = None,
+    ) -> dict:
+        """Register the uncompressed MetaImage ``moving`` onto ``fixed`` (float32, their masks binary, on their
+        image's grid) without ever holding an image or a warp whole: the images are memory mapped and read by boxes,
+        the pyramid levels and the warps live in files of ``scratch``.
+
+        ``samples`` is how many voxels an iteration draws, in random boxes drawn anew at every iteration, as elastix
+        draws its points: an iteration's memory and time follow them and not the image. Unset, every stage takes
+        every box of a level at every iteration, on boxes as large as the device holds, which is FireANTs' own
+        iteration. Drawn, the rigid and affine stages run the preset's iterations on their draws, their step falling
+        as elastix's gain does, which takes them to the whole pair's optimum as the iterations grow; the deformable
+        stage steps the boxes it draws, each box as often on average as the preset gives a scale iterations
+        (``epochs`` for every scale, when given). A level the samples hold whole is registered as FireANTs registers
+        it. The displacement field, physical, on the fixed grid, is written to ``field`` block by block. Returns what
+        the run measured.
+
+        A fixed volume one voxel thick along an axis is registered as its plane (``plane``, that numpy axis), the
+        moving one's first slice along it, as ``EngineRegistration`` registers it on the whole pair: the plane's field
+        comes back one voxel thick, along the dropped axis the shift from one plane to the other."""
+        from ..native import (
+            PlaneFrame,
+            PlaneHeader,
+            field_map,
+            lift_plane_field,
+            mapped_centre,
+            mapped_window,
+            mmap_image,
+            plane_of,
+            read_information,
+            write_field,
+        )
+        from ..ooc import ArraySource, HeaderImages, OnesSource, RegionSource, RescaledSource, StackedSource, tiles
+        from .fireants_sampled import (
+            _TOGETHER,
+            read_through,
+            sampled_deformable_class,
+            sampled_linear_alignment,
+            static_feature_sources,
+        )
+
+        shape = mmap_image(fixed).array.shape
+        self.check_sampled(shape, mmap_image(moving).array.shape)
+        if plane is None and len(shape) == 3 and shape.count(1) == 1:
+            flat = scratch / "plane_field.mha"
+            scratch.mkdir(parents=True, exist_ok=True)
+            arguments = (fixed, moving, fixed_mask, moving_mask, device_index, scratch, flat, box, samples, epochs)
+            measured = self.register_sampled(*arguments, plane=shape.index(1))
+            lift_plane_field(flat, field, mmap_image(fixed), mmap_image(moving), shape.index(1))
+            flat.unlink()
+            return measured
+        torch.manual_seed(self._seed)
+        device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
+        mapped = {"fixed": mmap_image(fixed), "moving": mmap_image(moving)}
+        masks = {
+            side: mmap_image(path) if path is not None else None
+            for side, path in (("fixed", fixed_mask), ("moving", moving_mask))
+        }
+        masked = any(mask is not None for mask in masks.values())
+        readers = {"fixed": read_information(fixed), "moving": read_information(moving)}
+        if plane is not None:  # every plane in the fixed one's frame
+            frame = PlaneFrame.of(readers["fixed"].GetDirection(), plane)
+            mapped = {side: plane_of(image, plane, frame) for side, image in mapped.items()}
+            masks = {side: None if mask is None else plane_of(mask, plane, frame) for side, mask in masks.items()}
+            readers = {side: PlaneHeader(reader, plane, frame) for side, reader in readers.items()}
+
+        def mask_source(side: str):
+            """A side's mask, read by boxes: all ones where it has none (masked mode wants one beside both images)."""
+            if masks[side] is None:
+                return OnesSource(mapped[side].array.shape, device)
+            return ArraySource(masks[side].array[None], device)
+
+        def sources(metric: str, with_masks: bool) -> list:
+            """The fixed and moving images of a stage scoring ``metric``, read by boxes: rescaled for MI (see
+            ``_unit_range``, the percentiles taken by passes over the twin), with the mask as a last channel of both in
+            masked mode (all ones where a side has none)."""
+            pair = []
+            for side in ("fixed", "moving"):
+                source = ArraySource(mapped[side].array[None], device)
+                if metric == "mi":
+                    source = RescaledSource(source, *mapped_window(mapped[side]), _UNIT_TOP)
+                pair.append(StackedSource([source, mask_source(side)]) if with_masks else source)
+            return pair
+
+        scratch.mkdir(parents=True, exist_ok=True)
+        started, measured = time.perf_counter(), {}
+        affine_matrix: torch.Tensor | None = None
+        if self._linear_method != "none":
+            init_translation: str | torch.Tensor = "cof"
+            if self._moments_init == "none":
+                init_translation = torch.zeros((1, mapped["fixed"].array.ndim), device=device, dtype=torch.float32)
+            elif self._moments_init == "com":
+                centres = [mapped_centre(mapped[side], masks[side], "com") for side in ("moving", "fixed")]
+                init_translation = torch.tensor(np.subtract(*centres), device=device, dtype=torch.float32).reshape(
+                    1, -1
+                )
+            pair = sources(self._affine_metric, masked)
+            affine_matrix = sampled_linear_alignment(
+                readers["fixed"],
+                readers["moving"],
+                *pair,
+                scales=self._scales,
+                iterations=self._affine_iterations,
+                loss_type=f"masked_{self._affine_metric}" if masked else self._affine_metric,
+                optimizer_lr=self._affine_lr,
+                translation_lr=self._translation_lr,
+                cc_kernel_size=self._cc_kernel,
+                init_translation=init_translation,
+                device=device,
+                # Every box of a level, unless told how many voxels to draw: FireANTs' own iteration. Drawn, small
+                # boxes in many places: a global metric is estimated on them, and boxes side by side tell it less than
+                # boxes apart.
+                box=box if samples is None else max(box // 3, 8),
+                boxes=len(tiles(mapped["fixed"].array.shape, box))
+                if samples is None
+                else max(1, samples // max(box // 3, 8) ** mapped["fixed"].array.ndim),
+                together=samples or _TOGETHER,
+                seed=self._seed,
+                affine=self._linear_method != "rigid",
+                scratch=scratch,
+            )
+            measured["linear_seconds"] = time.perf_counter() - started
+            measured["bytes_read"] = sum(source.bytes_read for source in pair)
+
+        if self._deformable_method == "none":
+            write_field(field, mapped["fixed"], self._affine_to_sitk(affine_matrix))
+            return measured
+        deformable_masked = masked and self._deformable_masked
+        custom_loss, loss_halo = None, None
+        if self._deformable_metric == "impact":
+            custom_loss = self._impact_loss()
+            custom_loss._masked = deformable_masked
+            custom_loss.reset()
+            for core in custom_loss.cores:  # a 2-D pair: planes, which a 3-D network lifts to volumes one voxel thick
+                core.model.planes = mapped["fixed"].array.ndim == 2
+            extent = _extent(readers["fixed"])
+            for core in custom_loss.cores:
+                core.extent = extent
+            loss_type = "custom"
+            if self._mode == "Static":
+                # The loss compares the volumes' channels: twice the radius of a local correlation's window.
+                loss_halo = 2 * ((self._lncc_kernel - 1) // 2)
+            else:
+                # A network's feature at a voxel reads its receptive field around it, and so does the feature's
+                # gradient: twice its radius; half a box for a model that sees whole images, as patches overlap.
+                # A model with a voxel_size reads its field in its own cells, a stride more either side for a box to
+                # start on it (``_box_on_model_grid``): counted in the image's voxels.
+                loss_halo = 0
+                for core in custom_loss.cores:
+                    try:
+                        reach = core.model.receptive_field - 1
+                        if core.model.voxel_size is not None:
+                            sizes, spacing = core.model.voxel_size, readers["fixed"].GetSpacing()
+                            # A network of another dimension than the pair's (a 2-D one sweeping any axis of a volume)
+                            # has its values along any of the pair's axes.
+                            ratio = (
+                                max(size / step for size, step in zip(sizes, spacing, strict=True))
+                                if len(sizes) == len(spacing)
+                                else max(sizes) / min(spacing)
+                            )
+                            reach = math.ceil((reach + 2 * core.model.block_stride(device)) * max(ratio, 1.0))
+                        loss_halo = max(loss_halo, reach)
+                    except MeasureError:
+                        loss_halo = max(loss_halo, box // 2)
+        else:
+            loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
+        deformable_started = time.perf_counter()
+        iterations = [int(epochs)] * len(self._scales) if epochs else list(self._deformable_iterations)
+
+        def stage(scales: list[int], counts: list[int], pair: list, moving_reader, init, out: Path, seed: int):
+            """The deformable stage over boxes of ``pair``, its field written to ``out`` on the fixed grid, its draws
+            from ``seed``."""
+            registration = sampled_deformable_class()(
+                scales,
+                counts,
+                HeaderImages(readers["fixed"], pair[0].channels, device),
+                HeaderImages(moving_reader, pair[0].channels, device),
+                *pair,
+                scratch=scratch,
+                symmetric=self._deformable_method == "syn",
+                loss_type=loss_type,
+                custom_loss=custom_loss,
+                cc_kernel_size=self._cc_kernel,
+                loss_halo=loss_halo,
+                smooth_warp_sigma=self._smooth_warp_sigma,
+                smooth_grad_sigma=self._smooth_grad_sigma,
+                optimizer_lr=self._deformable_lr,
+                init_affine=init,
+                box=box,
+                samples=samples,
+                seed=seed,
+                # The points of a sampled Jacobian loss read a patch of the receptive field around them, which a box
+                # at the image's edge, short and with no halo past it, would not hold.
+                least=max(getattr(custom_loss, "_patch", None) or [1]),
+            )
+            try:
+                registration.optimize()
+                written = field_map(out, mapped["fixed"])
+                registration.write_field(written)
+                written.flush()
+            finally:
+                registration.close()
+            return registration, written
+
+        def static_pair(moving_source: RegionSource, moving_mask: RegionSource, moving_reader) -> list:
+            """Static: the feature volumes extracted by blocks into files, with the mask channel beside them so that
+            masked still means what it says."""
+            features = static_feature_sources(
+                custom_loss,
+                sources("impact", False)[0],
+                moving_source,
+                scratch,
+                block=max(box, 64),
+                extents=(_extent(readers["fixed"]), _extent(moving_reader)),
+            )
+            custom_loss.release()
+            if not deformable_masked:
+                return list(features)
+            return [StackedSource([features[0], mask_source("fixed")]), StackedSource([features[1], moving_mask])]
+
+        refresh = custom_loss is not None and self._mode == "Static" and self._update_interval > 0
+        if not refresh:
+            pair = sources(self._deformable_metric, deformable_masked)
+            if custom_loss is not None and self._mode == "Static":
+                pair = static_pair(sources("impact", False)[1], mask_source("moving"), readers["moving"])
+            registration, _ = stage(self._scales, iterations, pair, readers["moving"], affine_matrix, field, self._seed)
+        else:
+            # feature_map_update_interval, as a run on the whole pair (``_refreshed_stage``): runs of that many
+            # iterations at one scale, each from the identity on the moving image read through the field so far,
+            # its features extracted again, and the fields composed, the new run's first.
+            runs = [
+                (level, scale, min(self._update_interval, count - done))
+                for level, (scale, count) in enumerate(zip(self._scales, iterations, strict=True))
+                for done in range(0, count, self._update_interval)
+            ]
+            fixed_geometry, extents = mapped["fixed"].geometry, mapped["fixed"].array.shape
+            total: np.memmap | None = None
+            held_files: list[Path] = []  # what the field so far rests on, gone once the next one stands
+
+            def read_moved(image, field_so_far: np.ndarray, path: Path, nearest: bool = False) -> ArraySource:
+                """``image`` read through the field so far onto the fixed grid, into a float32 file at ``path``."""
+                out = np.lib.format.open_memmap(str(path), mode="w+", dtype=np.float32, shape=(1, *extents))
+                source = ArraySource(image.array[None], device)
+                read_through(source, image.geometry, field_so_far, fixed_geometry, out, block=box, nearest=nearest)
+                return ArraySource(out, device)
+
+            for number, (level, scale, count) in enumerate(runs):
+                moving_source, moving_mask, moving_reader, init = (
+                    sources("impact", False)[1],
+                    mask_source("moving"),
+                    readers["moving"],
+                    affine_matrix,
+                )
+                if total is not None:
+                    moving_source = read_moved(mapped["moving"], total, scratch / f"moved_{number}.npy")
+                    moving_reader, init = readers["fixed"], None
+                    moving_mask = OnesSource(extents, device)
+                    if masks["moving"] is not None:
+                        path = scratch / f"moved_mask_{number}.npy"
+                        moving_mask = read_moved(masks["moving"], total, path, nearest=True)
+                custom_loss.start_at(level)
+                pair = static_pair(moving_source, moving_mask, moving_reader)
+                # Each run draws boxes of its own, as one stage's iterations draw anew.
+                step_path = scratch / f"run_{number}.mha"
+                registration, step = stage([scale], [count], pair, moving_reader, init, step_path, self._seed + number)
+                if total is None:
+                    total, held_files = step, [step_path]
+                    continue
+                composed = field_map(scratch / f"total_{number}.mha", mapped["fixed"])
+                previous = ArraySource(np.moveaxis(total, -1, 0), device)
+                read_through(previous, fixed_geometry, step, fixed_geometry, np.moveaxis(composed, -1, 0), block=box)
+                for start, stop in tiles(extents, box):
+                    region = tuple(slice(a, b) for a, b in zip(start, stop, strict=True))
+                    composed[region] += step[region]
+                composed.flush()
+                del total, step, moving_source, moving_mask
+                for path in [*held_files, step_path, *scratch.glob(f"moved*_{number}.npy")]:
+                    path.unlink(missing_ok=True)
+                total, held_files = composed, [scratch / f"total_{number}.mha"]
+            assert total is not None
+            del total
+            # The last field, a field_map of the fixed grid as ``field`` is: its file is the result.
+            (last,) = held_files
+            shutil.move(last, field)
+        measured["deformable_seconds"] = time.perf_counter() - deformable_started
+        measured["bytes_read"] = measured.get("bytes_read", 0) + sum(source.bytes_read for source in pair)
+        measured["loss"] = [registration.losses[0], registration.losses[-1]] if registration.losses else []
+        measured["warps_resident"] = registration.resident
+        measured["boxes_per_scale"] = registration.boxes_per_scale
+        return measured
 
 
 class RegistrationNet(network.Network):
@@ -1313,9 +2201,7 @@ class RegistrationNet(network.Network):
         feature_patch: Annotated[
             int,
             "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
-            "at once. Tiles share the 'feature_overlap' share of their width and are blended by a cosine "
-            "window, so a volume larger than the card still goes through; a pass that runs out of memory is "
-            "retried in tiles half as wide (256 voxels after a whole image).",
+            "at once, or on a GPU the widest tile its free memory holds when the whole image does not fit.",
             Range(0, 1024),
         ] = 0,
         feature_chunk: Annotated[
@@ -1326,13 +2212,6 @@ class RegistrationNet(network.Network):
             "that runs out of memory is retried with half as many channels.",
             Range(0, 64),
         ] = 0,
-        feature_overlap: Annotated[
-            float,
-            "Static only: the share of its width two neighbouring extraction tiles have in common. More "
-            "overlap costs time and blends the seams further; it is ignored when the whole image goes "
-            "through in one pass.",
-            Range(0.0, 0.9),
-        ] = 0.25,
         deformable_masked: Annotated[
             bool,
             "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
@@ -1387,7 +2266,6 @@ class RegistrationNet(network.Network):
             mode,
             feature_patch,
             feature_chunk,
-            feature_overlap,
             deformable_masked,
             normalize,
             feature_map_update_interval,

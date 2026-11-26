@@ -307,6 +307,14 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
     return found
 
 
+def _detail(response: Any) -> str:
+    """The ``detail`` a server's error response gives (FastAPI's JSON body), empty when it gives none."""
+    try:
+        return str(response.json().get("detail", ""))
+    except (ValueError, AttributeError):
+        return ""
+
+
 def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
     """The request body of a remote submission, encoded as it is sent.
 
@@ -724,6 +732,13 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     ) as r:
                         if r.status_code == 401:
                             raise RuntimeError("Unauthorized: invalid or missing token")
+                        if r.status_code == 404 and _detail(r).startswith("No runner"):
+                            raise KonfAIAppClientError(
+                                f"The remote server cannot run this job for '{self.app}': {_detail(r)}",
+                                "A runner comes from a package installed beside the server (entry points of the group"
+                                " konfai_apps.runners), not from the app.",
+                                "Install the package that provides it in the server's environment and restart it.",
+                            )
                         if r.status_code == 404:
                             raise KonfAIAppClientError(
                                 f"The remote server does not serve '{self.app}'.",
@@ -850,6 +865,20 @@ class KonfAIAppClient(AbstractKonfAIApp):
         tmp_dir: Path | None = None,
     ) -> None:
         pass
+
+    @run_remote_job
+    def run(
+        self,
+        runner: str,
+        inputs: list[list[Path | str]],
+        output: Path = Path("./Output/"),
+        runner_args: list[str] | None = None,
+        gpu: list[int] = [],
+        cpu: int | None = None,
+        quiet: bool = False,
+    ) -> None:
+        """Run the server's installed ``runner`` on this app and ``inputs`` (``POST /apps/{app}/run``), its output
+        downloaded into ``output``; ``runner_args`` are NAME=VALUE strings the runner reads."""
 
     @run_remote_job
     def fine_tune(

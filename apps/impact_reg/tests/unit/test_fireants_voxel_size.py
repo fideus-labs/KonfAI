@@ -77,10 +77,10 @@ def test_static_extracts_on_the_model_grid_and_brings_the_features_back(tmp_path
     )
     fixed, moving = torch.rand(1, 1, 8, 16, 16), torch.rand(1, 1, 10, 16, 16)
     extents = ([16.0, 16.0, 8.0], [16.0, 16.0, 10.0])
-    volumes = loss.extract(fixed, moving, 0, 0.0, extents)
+    volumes = loss.extract(fixed, moving, 0, extents)
     assert volumes[0].shape[2:] == fixed.shape[2:] and volumes[1].shape[2:] == moving.shape[2:]
     loss.cores[0].model.voxel_size = None
-    on_model = loss.extract(resampled(fixed, (4, 8, 8)), resampled(moving, (5, 8, 8)), 0, 0.0)
+    on_model = loss.extract(resampled(fixed, (4, 8, 8)), resampled(moving, (5, 8, 8)), 0)
     for volume, reference, image in zip(volumes, on_model, (fixed, moving), strict=True):
         assert torch.allclose(volume, resampled(reference, tuple(image.shape[2:]), padding="border"), atol=1e-5)
 
@@ -88,3 +88,21 @@ def test_static_extracts_on_the_model_grid_and_brings_the_features_back(tmp_path
 def test_a_voxel_size_takes_one_value_per_image_axis(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="expected 3"):
         ImpactFeatureLoss([[ModelSpec(ref=_echo(tmp_path), voxel_size=[2.0, 2.0])]], "Static", False, 5, 0, 0, False)
+
+
+@pytest.mark.parametrize(("voxels", "cells"), [(65, 26), (40, 16), (37, 50), (64, 24)])
+def test_a_box_picks_the_mask_voxels_the_whole_level_picks(voxels: int, cells: int) -> None:
+    # A model grid cell at a half voxel (65 voxels on 26 cells: cell 1 at 2.5) took the voxel above it by boxes and
+    # the one grid_sample rounds to over the whole level.
+    from impact_reg_konfai.models import fireants as engine
+
+    mask = (torch.rand(1, 1, 1, 1, voxels, generator=torch.Generator().manual_seed(voxels)) > 0.5).float()
+    image = torch.zeros_like(mask)
+    whole = engine._on_model_grid(image, image, mask, (1, 1, cells))[2]
+    for low, high in ((0, voxels // 2), (voxels // 2, voxels), (3, voxels - 5)):
+        first, last = engine._model_cells(low, high, voxels, cells)
+        place = ((0, 0, low), (1, 1, high), (1, 1, voxels))
+        box = engine._box_on_model_grid(
+            image[..., low:high], image[..., low:high], mask[..., low:high], place, (1, 1, cells)
+        )[2]
+        assert torch.equal(box, whole[..., first:last])

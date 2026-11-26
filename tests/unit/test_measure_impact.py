@@ -16,6 +16,7 @@
 
 """The IMPACT feature models: a ref fetched at its pinned revision, shaped by the registry, probed once."""
 
+import itertools
 import json
 import os
 from pathlib import Path
@@ -139,6 +140,54 @@ def test_cosine_l1cosine_and_ncc_follow_itk_impact() -> None:
     assert distance("NCC", moved, fixed, None, 3, 0).item() == pytest.approx(1 - ncc.mean(), abs=1e-5)
 
 
+class _Faint(torch.nn.Module):
+    """A layer of small features, as a deep layer's are: a mean loss over many of them hands each a gradient
+    float16 rounds to zero."""
+
+    def forward(self, x: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [x * 0.001 + x * x * 0.0005]
+
+
+@pytest.mark.parametrize("reduce", [lambda layer: layer.pow(2).mean(), torch.sum], ids=["mean", "sum"])
+def test_a_half_network_gives_the_input_the_float32_gradient(tmp_path: Path, monkeypatch, reduce) -> None:
+    # A mean over many features hands each a gradient float16 rounds to zero; a sum one that, scaled by their count,
+    # overflows it: the gradient is scaled by its own magnitude instead.
+    path = tmp_path / "faint.pt"
+    torch.jit.script(_Faint()).save(str(path))
+    model = ImpactFeatureModel(str(path), 1, [1.0], None, 3)
+    image = torch.rand((1, 1, 64, 64, 64), generator=torch.Generator().manual_seed(0))
+    stats = impact._statistics(image)[0]
+    gradients = []
+    for half in (False, True):
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        moved = image.clone().requires_grad_()
+        (layer,) = model.network(moved.device)(*model.inputs(moved, stats))
+        (gradient,) = torch.autograd.grad(reduce(layer.float()), moved)
+        gradients.append(gradient)
+    assert gradients[1].dtype == torch.float32 and torch.isfinite(gradients[1]).all()
+    assert (gradients[1] == 0).float().mean() < 0.05
+    whole, half = (gradient.flatten().double() / gradient.abs().max() for gradient in gradients)  # above cosine's eps
+    assert torch.nn.functional.cosine_similarity(whole, half, dim=0) > 0.999
+
+
+def test_an_ncc_with_a_constant_channel_is_finite_whole_and_pooled_and_they_agree() -> None:
+    # A constant channel correlates with nothing: the square root of its variance at 0 gave NaN gradients, and by
+    # pieces (the level's sums) a NaN value.
+    generator = torch.Generator().manual_seed(0)
+    moved = torch.rand((1, 2, 6, 7, 8), generator=generator, dtype=torch.float64).requires_grad_()
+    fixed = torch.rand((1, 2, 6, 7, 8), generator=generator, dtype=torch.float64)
+    fixed[:, 1] = 0.5
+    whole = distance("NCC", moved, fixed)
+    ones = torch.ones_like(fixed[:, :1, ..., :4])
+    pooled = impact.ncc_of_sums(
+        sum(impact.ncc_sums(moved[..., part], fixed[..., part], ones) for part in (slice(0, 4), slice(4, 8)))
+    )
+    (whole_gradient,), (pooled_gradient,) = (torch.autograd.grad(value, moved) for value in (whole, pooled))
+    assert torch.isfinite(whole) and torch.isfinite(whole_gradient).all() and torch.isfinite(pooled_gradient).all()
+    torch.testing.assert_close(pooled, whole)
+    torch.testing.assert_close(pooled_gradient, whole_gradient)
+
+
 @pytest.mark.parametrize(("name", "formula"), [("L1", lambda d: d.abs()), ("L2", lambda d: d.pow(2))])
 def test_l1_and_l2_are_the_mean_of_their_terms_for_both_maps_and_in_half_precision(name: str, formula) -> None:
     # Unmasked, they run through torch.dist and mse_loss, which keep less memory: the same value and gradients, the
@@ -163,6 +212,20 @@ def test_the_lncc_a_few_channels_a_pass_is_the_lncc() -> None:
     chunked = distance("LNCC", moved, fixed, None, 3, 3)
     torch.testing.assert_close(chunked, whole)
     torch.testing.assert_close(torch.autograd.grad(chunked, moved)[0], torch.autograd.grad(whole, moved)[0])
+
+
+def test_the_lncc_reads_the_whole_window_around_a_voxel() -> None:
+    """Against the window's means taken in one pooling of the three axes, borders included."""
+    moved, fixed = _features()
+    kernel = 3
+
+    def mean(tensor: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.avg_pool3d(tensor, kernel, stride=1, padding=kernel // 2, count_include_pad=False)
+
+    covariance = mean(moved * fixed) - mean(moved) * mean(fixed)
+    variances = [(mean(t * t) - mean(t) ** 2).clamp_min(impact._LNCC_VARIANCE_FLOOR) for t in (moved, fixed)]
+    expected = 1.0 - (covariance**2 / (variances[0] * variances[1])).mean()
+    torch.testing.assert_close(distance("LNCC", moved, fixed, None, kernel, 0), expected, rtol=1e-4, atol=1e-6)
 
 
 class _TwoLayers(torch.nn.Module):
@@ -308,9 +371,238 @@ class _Constant(torch.nn.Module):
 
 def test_a_tiled_volume_leaves_no_seam() -> None:
     # KonfAI's cosine window sums to one over the overlap: constant features come back constant.
-    (volume,), tile = _stub_model(_Constant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32, overlap=0.25)
-    assert tile == 32 and volume.shape == (1, 2, 40, 24, 70)
+    (volume,) = _stub_model(_Constant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32, overlap=0.25)
+    assert volume.shape == (1, 2, 40, 24, 70)
     assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
+
+
+class _InstanceNormed(torch.nn.Module):
+    """A convolution, then an instance normalisation by the statistics it is handed (``norms``) or else by its
+    input's own, with the ``norm_input``/``norm_count`` protocol of the published TS and MIND models."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def norm_count(self, nb_layers: int) -> int:
+        return 1
+
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        return self.conv(tile)
+
+    def forward(self, tile, nb_layers, stats, direction=None, norms=None) -> list[torch.Tensor]:
+        x = self.conv(tile)
+        if not norms:
+            return [torch.nn.functional.instance_norm(x)]
+        mean, var = norms[0]
+        return [(x - mean.view(1, -1, 1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1, 1) + 1e-5)]
+
+
+class _PooledNormed(_InstanceNormed):
+    """``_InstanceNormed`` on a layer of half the resolution: its normalisation's cells two voxels a side."""
+
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        return torch.nn.functional.avg_pool3d(self.conv(tile), 2)
+
+    def forward(self, tile, nb_layers, stats, direction=None, norms=None) -> list[torch.Tensor]:
+        x = torch.nn.functional.avg_pool3d(self.conv(tile), 2)
+        if not norms:
+            return [torch.nn.functional.instance_norm(x)]
+        mean, var = norms[0]
+        return [(x - mean.view(1, -1, 1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1, 1) + 1e-5)]
+
+
+class _Pooled(torch.nn.Module):
+    """A layer at the image's resolution and one pooled by ``kernel`` voxels a side."""
+
+    def __init__(self, kernel: int) -> None:
+        super().__init__()
+        self.kernel = kernel
+
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [tile, torch.nn.functional.avg_pool3d(tile, self.kernel)]
+
+
+@pytest.mark.parametrize("kernel", [4, 3])
+def test_blocks_start_on_the_stride_of_the_weighted_layers(kernel: int) -> None:
+    # A block owns whole cells of a layer pooled by any whole number of voxels, a power of two or not.
+    model = _stub_model(_Pooled(kernel), [1.0, 1.0])
+    assert model.layer_strides("cpu") == [(1, 1, 1), (kernel,) * 3]
+    assert model.block_stride("cpu") == kernel and model.norm_stride("cpu") == 1
+
+
+class _Smoothed(torch.nn.Module):
+    """A 3-D convolution of 3 voxels a side, padded: features a patch around a point reads as the whole image does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv3d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [self.conv(tile)]
+
+
+def test_a_plane_is_sampled_at_its_points_as_it_is_read_whole() -> None:
+    # A 3-D network handed planes runs on a square patch around each point, lifted one voxel thick, as on the whole
+    # plane: the point's feature is the whole plane's there.
+    model = _stub_model(_Smoothed(), [1.0])
+    model.planes = True
+    plane = torch.rand(1, 1, 20, 24, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6], [10, 12], [14, 3]])
+    ((moved, fixed),) = model.sampled(plane, plane, centres, 5)
+    (whole,) = model.volume(plane)
+    expected = whole[0][:, centres[:, 0], centres[:, 1]]
+    assert torch.allclose(moved[0], expected, atol=1e-5) and torch.allclose(fixed[0], expected, atol=1e-5)
+
+
+class _Planar(torch.nn.Module):
+    """A 2-D convolution of 3 pixels a side, padded."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(1, 2, 3, padding=1, bias=False)
+        torch.nn.init.normal_(self.conv.weight, generator=torch.Generator().manual_seed(0))
+
+    def forward(self, tile, nb_layers, stats, direction=None) -> list[torch.Tensor]:
+        return [self.conv(tile)]
+
+
+def test_a_2d_network_samples_its_points_in_float16_as_in_float32(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Its patches went into the network cast to float16 as they came, in float32.
+    volume = torch.rand(1, 1, 12, 14, 16, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6, 7], [8, 4, 10]])
+    features = []
+    for half in (False, True):
+        model = _stub_model(_Planar(), [1.0])
+        model.dim = 2
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        ((moved, _),) = model.sampled(volume, volume, centres, 5, seed=3)
+        features.append(moved)
+    assert torch.allclose(features[1], features[0], atol=1e-2)
+
+
+def test_a_2d_network_samples_a_plane_at_its_voxel_size() -> None:
+    # A 2-D pair's points went to the 3-D cube helper, which read a third voxel_size value a 2-D network has not.
+    model = _stub_model(_Planar(), [1.0])
+    model.dim, model.planes = 2, True
+    plane = torch.rand(1, 1, 20, 24, generator=torch.Generator().manual_seed(1))
+    centres = torch.tensor([[5, 6], [10, 12], [14, 3]])
+    ((native, _),) = model.sampled(plane, plane, centres, 5)
+    model.voxel_size = [1.0, 1.0]  # the image's own voxels: the same patches, read on a grid
+    ((sized, _),) = model.sampled(plane, plane, centres, 5)
+    assert torch.allclose(sized, native, atol=1e-5)
+
+
+def test_a_padded_image_is_normalised_over_its_own_cells() -> None:
+    # Padded up to its input multiple, the whole image is normalised over its own voxels, as its blocks are: the two
+    # routes give the same features.
+    model = _stub_model(_InstanceNormed(), [1.0])
+    model.multiple = 4
+    image = torch.rand(1, 1, 18, 14, 10, generator=torch.Generator().manual_seed(2)) * torch.linspace(1, 3, 10)
+    statistics = impact._statistics(image)[0]
+    (whole,) = model.volume(image, statistics=statistics)
+    norms = model.norms(lambda: impact._blocks(image, 8, 4, 4), statistics)  # on the multiple, as volume cuts them
+    (gathered,) = model.volume(image, statistics=statistics, norms=norms)
+    assert torch.allclose(whole, gathered, atol=1e-5)
+
+
+class _Broadcast(torch.nn.Module):
+    """A layer that adds its input's mean over the whole tile: a reduction whose backward sums every element's
+    gradient into one."""
+
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [tile * 0.5 + tile.mean((2, 3, 4), keepdim=True)]
+
+
+def test_a_half_network_s_reductions_do_not_overflow_its_scaled_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each element's gradient scaled to 1, the mean's backward summed 64^3 of them past float16's largest: inf.
+    image = torch.rand(1, 1, 64, 64, 64, generator=torch.Generator().manual_seed(0))
+    gradients = []
+    for half in (False, True):
+        model = _stub_model(_Broadcast(), [1.0])
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        moved = image.clone().requires_grad_()
+        (layer,) = model.network(moved.device)(*model.inputs(moved, impact._statistics(image)[0]))
+        gradients.append(torch.autograd.grad(layer.float().mean(), moved)[0])
+    assert torch.isfinite(gradients[1]).all()
+    torch.testing.assert_close(gradients[1], gradients[0], rtol=1e-2, atol=1e-8)
+
+
+def test_a_half_network_s_blocks_are_normalised_as_the_whole_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    # In float16 the normalisations went unseen: every block was normalised by its own statistics, not the image's.
+    image = torch.rand(1, 1, 24, 20, 18, generator=torch.Generator().manual_seed(2)) * torch.linspace(1, 3, 18)
+    statistics = impact._statistics(image)[0]
+    blocks = []
+    for half in (False, True):
+        model = _stub_model(_InstanceNormed(), [1.0])
+        model.fov = [3]
+        monkeypatch.setattr(model, "_half", lambda device, half=half: half)  # float16 on the CPU: no pooling here
+        assert len(model.norms(lambda model=model: impact._blocks(image, 8, 4), statistics)) == 1
+        blocks.append(model.volume(image, patch=12, statistics=statistics)[0])
+    assert torch.allclose(blocks[1], blocks[0], atol=1e-2)
+
+
+def test_the_normalisations_of_a_tiled_volume_are_gathered_on_their_stride(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Blocks of 9 would start the second one on an odd voxel, its cells of 2 then not the whole image's: the pass
+    # that gathers the normalisations takes its blocks and halos on their stride.
+    model = _stub_model(_PooledNormed(), [1.0])
+    model.fov = [6]
+    assert model.norm_stride("cpu") == 2
+    seen: list[tuple[int, int, int]] = []
+    blocks = impact._blocks
+    monkeypatch.setattr(
+        impact,
+        "_blocks",
+        lambda image, block, halo, stride: (seen.append((block, halo, stride)), blocks(image, block, halo, stride))[1],
+    )
+    model.volume(torch.rand(1, 1, 20, 18, 22), patch=9)
+    assert seen and all(block % 2 == 0 and halo % 2 == 0 and stride == 2 for block, halo, stride in seen)
+
+
+def test_blocks_normalised_by_the_gathered_statistics_give_the_whole_images_features() -> None:
+    # An instance normalisation of a block reads that block's statistics; with the whole image's, gathered by a pass
+    # over the blocks, each block's own voxels get the whole image's features.
+    model, image = _stub_model(_InstanceNormed(), [1.0]), torch.rand(1, 1, 20, 16, 12) * torch.linspace(1, 3, 12)
+    statistics = impact._statistics(image)[0]
+    (whole,) = model.volume(image, statistics=statistics)
+    norms = model.norms(lambda: impact._blocks(image, 8, 2), statistics)
+    errors = {}
+    for given in (None, norms):
+        tiled = torch.zeros_like(whole)
+        for start in itertools.product(*(range(0, n, 8) for n in image.shape[2:])):
+            low = [max(0, a - 2) for a in start]
+            own = [slice(a, min(a + 8, n)) for a, n in zip(start, image.shape[2:], strict=True)]
+            box = image[
+                (..., *(slice(lo, min(o.stop + 2, n)) for lo, o, n in zip(low, own, image.shape[2:], strict=True)))
+            ]
+            (layer,) = model.volume(box, statistics=statistics, norms=given)
+            tiled[(..., *own)] = layer[
+                (..., *(slice(o.start - lo, o.stop - lo) for o, lo in zip(own, low, strict=True)))
+            ]
+        errors[given is None] = float((tiled - whole).abs().max())
+    assert len(norms) == 1 and errors[False] < 1e-5 < 1e-2 < errors[True]
+
+
+class _NormedOnSixteen(_InstanceNormed):
+    def norm_input(self, tile, stats, direction, norms) -> torch.Tensor:
+        if any(size % 16 for size in tile.shape[2:]):
+            raise RuntimeError(f"sizes of tensors must match: {tuple(tile.shape[2:])}")
+        return self.conv(tile)
+
+
+def test_the_normalisations_are_gathered_on_blocks_padded_to_the_models_multiple() -> None:
+    # A network whose input must be a multiple of 16 is handed its blocks as a tile is: padded up to it, the padding
+    # left out of the statistics, which are then the whole image's (to float32's rounding of a convolution summed
+    # over another extent).
+    torch.manual_seed(0)
+    model, image = _stub_model(_NormedOnSixteen(), [1.0]), torch.rand(1, 1, 20, 32, 40)
+    model.multiple = 16
+    (mean, var), *_ = model.norms(lambda: impact._blocks(image, 16, 16), impact._statistics(image)[0])
+    features = model.model.conv(image).double()
+    assert torch.allclose(mean.double(), features.mean((0, 2, 3, 4)), atol=1e-5)
+    assert torch.allclose(var.double(), features.var((0, 2, 3, 4), unbiased=False), atol=1e-5)
 
 
 class _NeedsSixteen(torch.nn.Module):
@@ -326,7 +618,7 @@ def test_a_volume_rounds_its_input_up_to_the_models_multiple() -> None:
     with pytest.raises(RuntimeError, match="sizes of tensors"):
         model.volume(image)
     model.multiple = 16
-    assert model.volume(image)[0][0].shape == (1, 4, 40, 40, 40)
+    assert model.volume(image)[0].shape == (1, 4, 40, 40, 40)
 
 
 class _TwoResolutions(torch.nn.Module):
@@ -343,10 +635,10 @@ class _HalfConstant(torch.nn.Module):
 def test_a_volume_blends_each_layer_on_its_own_grid() -> None:
     # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel tile). As in
     # itk-impact, they are blended and normalised on their grid, the tiles scaled to it, and read at the image voxels.
-    layers, _ = _stub_model(_TwoResolutions(), [1.0, 1.0]).volume(torch.rand(1, 1, 16, 16, 16))
+    layers = _stub_model(_TwoResolutions(), [1.0, 1.0]).volume(torch.rand(1, 1, 16, 16, 16))
     assert [tuple(layer.shape) for layer in layers] == [(1, 3, 16, 16, 16), (1, 5, 8, 8, 8)]
-    (coarse,), tile = _stub_model(_HalfConstant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32)
-    assert tile == 32 and coarse.shape == (1, 5, 20, 12, 35)
+    (coarse,) = _stub_model(_HalfConstant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32)
+    assert coarse.shape == (1, 5, 20, 12, 35)
     assert torch.allclose(coarse, torch.full_like(coarse, 3.0), atol=1e-5)
     assert onto_image_grid(coarse, (40, 24, 70)).shape == (1, 5, 40, 24, 70)
 
@@ -360,23 +652,8 @@ class _WithHead(torch.nn.Module):
 def test_a_volume_takes_a_segmentation_head_as_float_features() -> None:
     # The TotalSegmentator models end on a one-hot head in int64, which the l2 normalisation refused.
     image = torch.rand(1, 1, 16, 16, 16)
-    (volume,), _ = _stub_model(_WithHead(), [0.0, 1.0]).volume(image, "l2")
+    (volume,) = _stub_model(_WithHead(), [0.0, 1.0]).volume(image, "l2")
     assert volume.dtype == torch.float32 and torch.equal(volume[:, 1:], (image > 0.5).float())
-
-
-def test_a_volume_that_does_not_fit_is_extracted_again_in_smaller_tiles(monkeypatch) -> None:
-    # A whole image that runs out of memory is cut in FIRST_FEATURE_TILE tiles, halved below the longest axis.
-    model, passes = _stub_model(_Constant(), [1.0]), []
-    whole = ImpactFeatureModel._volume
-
-    def out_of_memory_on_the_whole_image(self, image, normalization, patch, overlap):
-        passes.append(patch)
-        if patch == 0:
-            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 9.10 GiB.")
-        return whole(self, image, normalization, patch, overlap)
-
-    monkeypatch.setattr(ImpactFeatureModel, "_volume", out_of_memory_on_the_whole_image)
-    assert model.volume(torch.rand(1, 1, 20, 40, 100))[1] == 64 and passes == [0, 64]
 
 
 def test_draw_centres_keeps_every_patch_inside_the_image_and_the_mask() -> None:

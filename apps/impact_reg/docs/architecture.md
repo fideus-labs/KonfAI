@@ -5,9 +5,10 @@ cli.py                    argparse front end: list, show, register, eval, uncert
   │
 impact_reg.py             ImpactRegKonfAIApp: the orchestration, one method per command
   │   register  ─► validate inputs, presets and --set, before anything runs
-  │             ─► per preset: a plan from its declared cost (konfai.utils.vram.max_voxels), then whole
-  │                (_infer_preset) or in two passes (_register_tiled: global pass, resampled by KonfAI →
-  │                _prewarp → tile pass, tiled by KonfAI → _compose)
+  │             ─► per preset: a plan from its declared cost (konfai.utils.vram.max_voxels) and a route per
+  │                case (_route, --out-of-core), then whole (_infer_preset), sampled (_register_sampled) or in
+  │                two passes (_register_tiled: global pass, resampled by KonfAI → _prewarp → tile pass, tiled
+  │                by KonfAI → _compose)
   │             ─► ensemble (konfai_apps.ensemble.combine: the mean, and the stack with --uncertainty)
   │             ─► moved image (_derive_moved) ─► register.json and the summary
   │   evaluate / uncertainty: konfai-apps eval / uncertainty with the configs shipped in evaluation/

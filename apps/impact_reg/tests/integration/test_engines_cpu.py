@@ -113,7 +113,7 @@ def test_convexadam_recovers_a_translation(pair: tuple) -> None:
     fixed, moving, inside = pair
     mind = ModelSpec(ref="VBoussot/impact-torchscript-models:MIND/R1D2_3D.pt", voxel_size=[1.5, 1.5, 1.5])
     # The presets' 80 fine steps: the 2-voxel step of the reference's refinement settles over them, not over 20.
-    net = RegistrationNet(models={"0": mind}, iterations=80, linear_iterations=50, displacement_half_width=3)
+    net = RegistrationNet(models={"0": mind}, iterations=80, displacement_half_width=3)
     _assert_shift(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 
@@ -166,7 +166,7 @@ def test_convexadam_recovers_a_translation_in_2d_on_the_2d_version_of_its_model(
 
     fixed, moving, inside = flat_pair
     mind = ModelSpec(ref="VBoussot/impact-torchscript-models:MIND/R1D2_3D.pt", voxel_size=[1.0, 1.0, 1.0])
-    net = RegistrationNet(models={"0": mind}, iterations=80, linear_iterations=50, displacement_half_width=3)
+    net = RegistrationNet(models={"0": mind}, iterations=80, displacement_half_width=3)
     _assert_shift_2d(_field(net.Registration._engine.register(fixed, moving, -1), fixed), inside)
 
 

@@ -1574,6 +1574,44 @@ def test_set_leaves_a_loader_block_to_the_binder(tmp_path: Path) -> None:
         repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.optimizer.betas=[0.9, 0.99]"])
 
 
+class _FirstNet:
+    def __init__(self, iterations: int = 1) -> None:
+        pass
+
+
+class _LastNet:
+    def __init__(self, iterations: int = 1, steps: int = 1) -> None:
+        pass
+
+
+def test_set_applies_in_its_order_its_model_keys_checked_against_the_class_the_run_builds() -> None:
+    # A --set of the classpath went first, whatever its place: a later one replacing the Model block undid it.
+    classes = {"first:Net": _FirstNet, "last:Net": _LastNet}
+
+    def model_class(config) -> type | None:
+        return classes.get(config["Predictor"]["Model"]["classpath"])
+
+    def config() -> dict:
+        return {"Predictor": {"Model": {"classpath": "first:Net", "Net": {"iterations": 1}}}}
+
+    data = config()
+    app_repository_module.apply_overrides(
+        data,
+        ["Predictor.Model={classpath: 'other:Net', Net: {iterations: 2}}", "Predictor.Model.classpath=last:Net"],
+        model_class,
+    )
+    assert data["Predictor"]["Model"] == {"classpath": "last:Net", "Net": {"iterations": 2}}
+    data = config()
+    app_repository_module.apply_overrides(data, ["steps=3", "Predictor.Model.classpath=last:Net"], model_class)
+    assert data["Predictor"]["Model"]["Net"]["steps"] == 3
+    with pytest.raises(AppRepositoryError, match="'steps' does not exist"):
+        app_repository_module.apply_overrides(
+            config(),
+            ["Predictor.Model.classpath=last:Net", "steps=3", "Predictor.Model.classpath=first:Net"],
+            model_class,
+        )
+
+
 def test_set_refuses_a_value_that_is_not_yaml(tmp_path: Path) -> None:
     # A malformed value ended the run on a ruamel traceback.
     repo, prediction = _nested_repo(tmp_path)

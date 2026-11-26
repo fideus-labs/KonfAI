@@ -50,7 +50,7 @@ repos). See {doc}`../usage/python-api`.
 
 ### Job submission
 
-All five accept a **multipart form** and return the same job envelope:
+All six accept a **multipart form** and return the same job envelope:
 
 | Method | Path | Runs |
 | --- | --- | --- |
@@ -59,6 +59,7 @@ All five accept a **multipart form** and return the same job envelope:
 | `POST` | `/apps/{app_name}/uncertainty` | `konfai-apps uncertainty` |
 | `POST` | `/apps/{app_name}/pipeline` | `konfai-apps pipeline` |
 | `POST` | `/apps/{app_name}/fine_tune` | `konfai-apps fine-tune` |
+| `POST` | `/apps/{app_name}/run` | an installed runner (`python -m konfai_apps.runner`) |
 
 ```json
 {
@@ -91,8 +92,14 @@ size is a positive integer and they add up to the files sent, else **422**):
   protection and bounded by `KONFAI_APPS_MAX_DATASET_BYTES`, see the limits below),
   `name` (`Finetune`), `epochs` (10), `it_validation` (1000), `models` (CSV),
   `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
+- **run**: `runner` (required), `inputs` (files, required), `inputs_groups`,
+  `runner_args` (repeated `NAME=VALUE` strings), `gpu`/`cpu`/`quiet`. `runner` names
+  an entry point of the group `konfai_apps.runners` a package installed on the server
+  registers (IMPACT-Reg's `impact_reg_sampled` runs the sampled route for `--host`); an
+  unknown name is **404**, and a runner is never a module the client names. Each
+  `runner_args` entry reaches it as `--arg NAME=VALUE`; one starting with `-` is **422**.
 
-Every one of the five also takes **`options`** (a JSON object, default `"{}"`): the
+Every one of them also takes **`options`** (a JSON object, default `"{}"`): the
 only channel for the tunables the plain form fields cannot carry: `patch_size` on
 `infer`/`pipeline`, `batch_size` on those two and on `fine_tune` (where it writes the
 training `Trainer.Dataset.batch_size`), and `config_overrides` on all three. An

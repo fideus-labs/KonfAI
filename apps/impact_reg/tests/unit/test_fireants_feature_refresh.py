@@ -91,6 +91,104 @@ def test_the_runs_fields_are_composed_each_after_the_ones_before(
     assert len(seen) == 3 and not seen[0] == seen[1]  # the moving features were extracted again after a run
 
 
+def test_the_runs_by_boxes_are_the_whole_run_s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # By boxes, the runs go as the whole run's: each at its scale and level, on the moving image read through the
+    # field so far, its features extracted again, the fields composed (three runs of 1 mm along x: 3 mm).
+    pytest.importorskip("fireants")
+    from impact_reg_konfai.models import fireants_sampled
+
+    paths = []
+    for name, image in (("fixed", _blob()), ("moving", _blob(2.0))):
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    runs: list[tuple] = []
+
+    class Translation:
+        def __init__(self, scales, iterations, fixed_images, moving_images, fixed, moving, **kwargs) -> None:
+            self.scales, self.iterations, self.loss = scales, iterations, kwargs["custom_loss"]
+            self.moving, self.losses, self.resident, self.boxes_per_scale = moving, [], True, [1]
+
+        def optimize(self) -> None:
+            self.loss.set_current_scale_and_iterations(self.scales[0], self.iterations[0])
+            seen = float(self.moving.read([0, 0, 0], list(self.moving.shape)).sum())
+            runs.append((list(self.scales), list(self.iterations), self.loss._level, seen))
+
+        def write_field(self, field) -> None:
+            field[:] = 0.0
+            field[..., 0] = 1.0
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(fireants_sampled, "sampled_deformable_class", lambda: Translation)
+    (tmp_path / "scratch").mkdir()
+    _engine(tmp_path).register_sampled(*paths, None, None, -1, tmp_path / "scratch", tmp_path / "field.mha", box=16)
+    field = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "field.mha")))
+    # scales [2, 1] with [3, 2] iterations in runs of 2: 2 + 1 at scale 2 (level 0), then 2 at scale 1 (level 1)
+    assert [run[:3] for run in runs] == [([2], [2], 0), ([2], [1], 0), ([1], [2], 1)]
+    assert np.allclose(field[16, 16, 16], [3.0, 0.0, 0.0])  # three runs of 1 mm, composed
+    assert len({run[3] for run in runs}) == 3  # the moving features were extracted again after each run
+    leftovers = [
+        path.name for pattern in ("run_*", "total_*", "moved*") for path in (tmp_path / "scratch").glob(pattern)
+    ]
+    assert not leftovers  # each run's files go once the field after it stands
+
+
 def test_jacobian_mode_refuses_an_update_interval(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Jacobian mode extracts them at every step"):
         _engine(tmp_path, mode="Jacobian")
+
+
+def test_without_samples_the_linear_stages_take_every_box(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not told how many voxels to draw, the rigid and affine stages take every box of a level at every iteration, as
+    # the deformable stage does: FireANTs' own iteration, not a draw.
+    pytest.importorskip("fireants")
+    from impact_reg_konfai.models import fireants_sampled
+    from impact_reg_konfai.ooc import tiles
+
+    paths = []
+    for name, image in (("fixed", _blob()), ("moving", _blob(2.0))):
+        paths.append(tmp_path / f"{name}.mha")
+        sitk.WriteImage(image, str(paths[-1]))
+    asked: dict = {}
+
+    def alignment(*args, box, boxes, **kwargs):
+        asked.update(box=box, boxes=boxes)
+        return torch.eye(4)[None]
+
+    monkeypatch.setattr(fireants_sampled, "sampled_linear_alignment", alignment)
+    monkeypatch.setattr(fireants_sampled, "_TOGETHER", 8**3)  # a draw far smaller than the image
+    (tmp_path / "scratch").mkdir()
+    engine = fireants.FireANTsEngine(
+        [2, 1], [1, 1], [0, 0], 3, "mse", 0.01, "none", "rigid_affine", "none", "cc", 0.1, 0.5, 1.0, 0, []
+    )
+    engine.register_sampled(*paths, None, None, -1, tmp_path / "scratch", tmp_path / "field.mha", box=16)
+    assert asked["boxes"] >= len(tiles((32, 32, 32), asked["box"]))
+
+
+def test_a_volume_one_voxel_thick_registers_as_its_plane(tmp_path: Path) -> None:
+    # As EngineRegistration registers it on the whole pair: the plane, its field brought back one voxel thick with,
+    # along the dropped axis, the shift from the fixed plane to the moving one.
+    pytest.importorskip("fireants")
+    y, x = np.mgrid[:40, :44].astype(np.float32)
+    planes = [np.exp(-((x - 20 - shift) ** 2 + (y - 18) ** 2) / 60.0).astype(np.float32) for shift in (0.0, 1.5)]
+    paths: dict[str, list[Path]] = {"volume": [], "plane": []}
+    for name, plane, z in (("fixed", planes[0], 0.0), ("moving", planes[1], 2.0)):
+        volume = sitk.GetImageFromArray(plane[None])
+        volume.SetOrigin((0.0, 0.0, z))
+        for form, image in (("volume", volume), ("plane", sitk.GetImageFromArray(plane))):
+            paths[form].append(tmp_path / f"{name}_{form}.mha")
+            sitk.WriteImage(image, str(paths[form][-1]))
+    fields = {}
+    for form in ("volume", "plane"):
+        engine = fireants.FireANTsEngine(
+            [2, 1], [1, 1], [3, 2], 3, "mse", 0.01, "none", "none", "syn", "cc", 0.1, 0.5, 1.0, 0, []
+        )
+        (tmp_path / form).mkdir()
+        field = tmp_path / f"{form}_field.mha"
+        engine.register_sampled(*paths[form], None, None, -1, tmp_path / form, field, box=16)
+        fields[form] = sitk.GetArrayFromImage(sitk.ReadImage(str(field)))
+    assert fields["volume"].shape == (1, 40, 44, 3) and np.abs(fields["plane"]).max() > 0.05  # the plane moved
+    assert np.allclose(fields["volume"][0, ..., :2], fields["plane"], atol=1e-6)
+    assert np.allclose(fields["volume"][0, ..., 2], 2.0)
+    assert not (tmp_path / "volume" / "plane_field.mha").exists()

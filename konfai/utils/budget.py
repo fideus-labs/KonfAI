@@ -73,18 +73,25 @@ class MemoryBudget:
     total_bytes: float
     description: str
     shared_across_ranks: bool
+    #: The process an ``auto`` budget was measured in and what it held then (``held_bytes``).
+    measured_in: tuple[int, int] | None = None
 
     def per_rank_bytes(self, world_size: int) -> float:
         return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
 
     def work_bytes(self, world_size: int) -> float:
         """What is left of this rank's budget for the work itself. An ``auto`` budget is the MACHINE's
-        figure, so what the process already holds resident is taken off it; a DECLARED budget states what
-        the work may take, so nothing is. Never below zero."""
+        figure, of what was free when it was measured: what the process has come to hold since (``held_bytes``,
+        not the pages of the files it maps) is taken off it, which is all it holds in a rank spawned after the measure and what it grew by in
+        the process that measured. A DECLARED budget states what the work may take, so nothing is. Never
+        below zero."""
         per_rank = self.per_rank_bytes(world_size)
         if not self.shared_across_ranks:
             return per_rank
-        return max(0.0, per_rank - (resident_bytes() or 0))
+        resident = held_bytes() or 0
+        if self.measured_in is not None and self.measured_in[0] == os.getpid():
+            resident = max(0, resident - self.measured_in[1])
+        return max(0.0, per_rank - resident)
 
 
 #: How a declared per-rank budget divides between the consumers that can be holding AT ONCE:
@@ -189,6 +196,17 @@ def run_peak_scope() -> Iterator[None]:
         yield
     finally:
         _peak_before_resets = max(_peak_before_resets, before or 0)
+
+
+def held_bytes() -> int | None:
+    """What this process holds that the kernel cannot take back without swap: ``RssAnon`` and ``RssShmem``.
+    The pages of the files it maps (``RssFile``) are page cache, which the kernel drops under a limit: a budget
+    that charged them would refuse the work its out-of-core files leave room for. ``resident_bytes`` where the
+    kernel does not split the resident set."""
+    anonymous = _status_bytes("RssAnon")
+    if anonymous is None:
+        return resident_bytes()
+    return anonymous + (_status_bytes("RssShmem") or 0)
 
 
 def resident_bytes() -> int | None:
@@ -433,18 +451,20 @@ def _slurm_memory_grant() -> int | None:
     return None
 
 
-def available_memory_bytes() -> tuple[int, str]:
+def available_memory_bytes(held: int | None = None) -> tuple[int, str]:
     """Return ``(bytes a process may safely allocate, source label)``: the tightest of the cgroup's
-    remaining room (its ceiling minus what it already holds), a SLURM memory grant and the host's free
-    RAM. The label names which bound won."""
+    remaining room (its ceiling minus what it already holds), what this process has left of a SLURM memory
+    grant (``held``: what it holds, ``held_bytes`` when not given) and the host's free RAM. The label names
+    which bound won."""
     candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
     cgroup = _read_cgroup_memory_limit()
     if cgroup is not None:
-        limit, held = cgroup
-        candidates.append((max(0, limit - held), "cgroup limit"))
+        limit, in_cgroup = cgroup
+        candidates.append((max(0, limit - in_cgroup), "cgroup limit"))
     slurm = _slurm_memory_grant()
     if slurm is not None:
-        candidates.append((slurm, "SLURM memory grant"))
+        held = (held_bytes() or 0) if held is None else held
+        candidates.append((max(0, slurm - held), "SLURM memory grant"))
     return min(candidates, key=lambda candidate: candidate[0])
 
 
@@ -489,11 +509,14 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
     ``AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable memory, a NODE budget which the ranks
     sharing the node split, where an explicit budget is per rank as declared."""
     if memory_budget is None or (isinstance(memory_budget, str) and memory_budget.strip().lower() == "auto"):
-        node_bytes, source = available_memory_bytes()
+        # One reading of what the process holds: the one the headroom leaves out is the one the work is charged from.
+        held = held_bytes() or 0
+        node_bytes, source = available_memory_bytes(held)
         return MemoryBudget(
             node_bytes * AUTO_MEMORY_SAFETY_FRACTION,
             f"auto: {format_bytes(node_bytes)} {source} x {AUTO_MEMORY_SAFETY_FRACTION:.0%}",
             shared_across_ranks=True,
+            measured_in=(os.getpid(), held),
         )
     declared = parse_memory_budget_bytes(memory_budget)
     if declared < MINIMUM_DECLARED_BUDGET_BYTES:

@@ -23,7 +23,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -35,6 +35,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 from konfai.data.patching import Accumulator, Cosinus, ModelPatch, blend_axes, blend_overlap
+from konfai.data.patching.sweep import _sweep_targets
 from konfai.metric.measure.adversarial import Gram
 from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
@@ -145,7 +146,7 @@ MODELS_REPO = "VBoussot/impact-torchscript-models"
 
 #: The models and their registry are read at this revision of ``MODELS_REPO``, so a re-export on the Hub cannot change
 #: a result silently. A ref names another revision with ``repo@revision:path``.
-MODELS_REVISION = "47ffad660e67cebbac8d74aecf0fa181c5dac042"
+MODELS_REVISION = "08b63be03712138dcc634154b08f847cf1b4f141"
 
 
 def _is_local_ref(ref: str) -> bool:
@@ -210,7 +211,17 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor | None) -> torch.Tenso
 def _lncc_piece(moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, kernel: int) -> torch.Tensor:
     """1 - the squared local correlation of each channel over a window of ``kernel`` voxels a side, averaged."""
     pool = F.avg_pool3d if moved.dim() == 5 else F.avg_pool2d
-    mean = lambda t: pool(t, kernel, stride=1, padding=kernel // 2, count_include_pad=False)  # noqa: E731
+    axes = moved.dim() - 2
+
+    def mean(t: torch.Tensor) -> torch.Tensor:
+        # The window's mean one axis at a time: the same value (a window cut by the border is cut along each axis),
+        # for 3 x kernel readings a voxel in place of kernel ** 3.
+        for axis in range(axes):
+            size, padding = [1] * axes, [0] * axes
+            size[axis], padding[axis] = kernel, kernel // 2
+            t = pool(t, size, stride=1, padding=padding, count_include_pad=False)
+        return t
+
     moved_mean, fixed_mean = mean(moved), mean(fixed)
     covariance = mean(moved * fixed) - moved_mean * fixed_mean
     moved_var = (mean(moved * moved) - moved_mean * moved_mean).clamp_min(_LNCC_VARIANCE_FLOOR)
@@ -234,6 +245,30 @@ def _lncc(moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, k
     if total is None:
         raise RuntimeError("the feature maps carry no channel to correlate")
     return total
+
+
+def ncc_sums(moved: torch.Tensor, fixed: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """What an NCC over the pieces of a level adds up, each channel's weighed sums ``[w, w m, w f, w m^2, w f^2,
+    w m f]`` (``[6, C]``) over a piece's voxels, in double: ``ncc_of_sums`` reads ``distance('NCC')`` off them."""
+    axes = [0, *range(2, moved.dim())]
+    m, f, w = moved.double(), fixed.double(), weight.double()
+    return torch.stack([(w * torch.ones_like(m)).sum(axes), *((w * t).sum(axes) for t in (m, f, m * m, f * f, m * f))])
+
+
+def ncc_of_sums(sums: torch.Tensor) -> torch.Tensor:
+    """``distance('NCC')`` of the voxels whose ``ncc_sums`` are ``sums``: 1 - each channel's correlation, averaged."""
+    count, moved, fixed, moved_moved, fixed_fixed, moved_fixed = sums
+    count = count.clamp_min(1.0)
+    covariance = moved_fixed - moved * fixed / count
+    variances = (moved_moved - moved * moved / count) * (fixed_fixed - fixed * fixed / count)
+    return 1.0 - _correlation(covariance, variances).mean()
+
+
+def _correlation(covariance: torch.Tensor, variances: torch.Tensor) -> torch.Tensor:
+    """Each channel's ``covariance`` over the square root of the product of its two ``variances``; 0 where that
+    product is not positive (a constant channel), where the square root has no gradient."""
+    held = variances > 0
+    return torch.where(held, covariance / (torch.where(held, variances, 1.0).sqrt() + _EPS), 0.0)
 
 
 def distance(
@@ -274,8 +309,8 @@ def distance(
         count = weight.sum(axes, keepdim=True).clamp_min(1.0)
         moved_c = moved - (moved * weight).sum(axes, keepdim=True) / count
         fixed_c = fixed - (fixed * weight).sum(axes, keepdim=True) / count
-        norms = ((moved_c * moved_c * weight).sum(axes) * (fixed_c * fixed_c * weight).sum(axes)).sqrt()
-        return 1.0 - ((moved_c * fixed_c * weight).sum(axes) / (norms + _EPS)).mean()
+        variances = (moved_c * moved_c * weight).sum(axes) * (fixed_c * fixed_c * weight).sum(axes)
+        return 1.0 - _correlation((moved_c * fixed_c * weight).sum(axes), variances).mean()
     if name == "LNCC":
         return _lncc(moved, fixed, mask, kernel, chunk)
     raise MeasureError(f"Unknown IMPACT distance '{name}'.", f"Choose one of {', '.join(DISTANCES)}.")
@@ -503,12 +538,16 @@ def pca_project(
     return torch.stack(projected[0]), torch.stack(projected[1])
 
 
+#: The slices a 2-D network swept over a volume runs on at once (``_SliceSweep``).
+SWEEP_BATCH = 8
+
+
 class _SliceSweep(torch.nn.Module):
     """A 2-D network swept over a volume ``[B, C, D, H, W]`` slice by slice along its first spatial axis, as itk-impact
     sweeps it for its feature maps, each slice told the plane's own axes. Each output layer comes back as a volume
     ``[B, C_l, D, H_l, W_l]``, like a 3-D network's."""
 
-    def __init__(self, network: torch.nn.Module, batch: int = 8) -> None:
+    def __init__(self, network: torch.nn.Module, batch: int = SWEEP_BATCH) -> None:
         super().__init__()
         self.network, self.batch = network, batch
 
@@ -527,6 +566,81 @@ class _SliceSweep(torch.nn.Module):
                 ) from error
         layers = [torch.cat([piece[index] for piece in pieces]) for index in range(len(pieces[0]))]
         return [layer.reshape(batch, depth, *layer.shape[1:]).movedim(1, 2) for layer in layers]
+
+
+#: What the layers' gradients add up to once scaled (``_ScaledLayers``): a sum of them, a reduction's backward (a
+#: mean broadcast over the layer), stays under float16's largest (65504) with room for the weights it goes through.
+_SCALED_GRADIENT_TOTAL = 2.0**12
+
+
+class _ScaledLayers(torch.autograd.Function):
+    """The identity on a network's layers; on the way back their gradients are multiplied by one power of two that
+    brings their absolute sum to ``_SCALED_GRADIENT_TOTAL``, kept in ``factor`` for ``_UnscaledImage``: a loss's
+    per-element gradient, a mean's, far under float16's range, is lifted back into it, and no sum of them overflows
+    it."""
+
+    @staticmethod
+    def forward(ctx, factor: list[float], *layers: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        ctx.factor = factor
+        return tuple(layer.view_as(layer) for layer in layers)
+
+    @staticmethod
+    def backward(ctx, *grads: torch.Tensor | None):
+        total = sum(float(grad.abs().sum(dtype=torch.float64)) for grad in grads if grad is not None)
+        ctx.factor[0] = 2.0 ** math.floor(math.log2(_SCALED_GRADIENT_TOTAL / total)) if 0 < total < math.inf else 1.0
+        return (None, *(None if grad is None else grad * ctx.factor[0] for grad in grads))
+
+
+class _UnscaledImage(torch.autograd.Function):
+    """The identity on a network's image; on the way back its gradient is divided by the factor ``_ScaledLayers``
+    multiplied the layers' by, in float32."""
+
+    @staticmethod
+    def forward(ctx, image: torch.Tensor, factor: list[float]) -> torch.Tensor:
+        ctx.factor = factor
+        return image.view_as(image)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return grad / ctx.factor[0], None
+
+
+class _HalfNetwork(torch.nn.Module):
+    """A network run in float16 on a float32 image. Differentiated, its layers come back in float32, their gradient
+    scaled into float16's range for the backward through the network and the image's scaled back in float32
+    (``_ScaledLayers``): a mean loss hands each element a gradient float16 rounds to zero, a sum one it overflows."""
+
+    def __init__(self, network: torch.nn.Module) -> None:
+        super().__init__()
+        self.network = network
+        if hasattr(network, "norm_count"):  # its normalisations, read in float16 as the network runs them
+            norm_input = cast(Callable[..., torch.Tensor], network.norm_input)
+            self.norm_count = network.norm_count
+            self.norm_input = lambda tensor, *rest: norm_input(tensor.half(), *rest).float()
+
+    def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
+        if not (torch.is_grad_enabled() and image.requires_grad):
+            return self.network(image.half(), *rest)
+        factor = [1.0]  # one per call, set on the way back
+        outputs = self.network(_UnscaledImage.apply(image.float(), factor).half(), *rest)
+        return list(_ScaledLayers.apply(factor, *(output.float() for output in outputs)))
+
+
+class _PlaneLift(torch.nn.Module):
+    """A 3-D network handed a plane ``[B, C, H, W]``: the plane lifted to a volume one voxel thick, as a run on the
+    whole pair lifts a 2-D pair, each output layer brought back to a plane; its normalisations (``norm_count``,
+    ``norm_input``) likewise, the network having them."""
+
+    def __init__(self, network: torch.nn.Module) -> None:
+        super().__init__()
+        self.network = network
+        if hasattr(network, "norm_count"):
+            norm_input = cast(Callable[..., torch.Tensor], network.norm_input)
+            self.norm_count = network.norm_count
+            self.norm_input = lambda tensor, *rest: norm_input(tensor.unsqueeze(2), *rest).squeeze(2)
+
+    def forward(self, image: torch.Tensor, *rest) -> list[torch.Tensor]:
+        return [layer.squeeze(2) for layer in self.network(image.unsqueeze(2), *rest)]
 
 
 def _statistics(tensor: torch.Tensor) -> list[Attribute]:
@@ -562,8 +676,6 @@ def _denormalized(tensor: torch.Tensor, attributes: list[Attribute]) -> torch.Te
 
 #: The smallest tile, per axis, a feature pass is cut into when the whole image does not fit the card.
 MIN_TILE = 16
-#: The tile a volume extraction falls back to when the whole image does not fit the card; halved after.
-FIRST_FEATURE_TILE = 256
 #: Input voxels one batch of a sampled pass feeds the network (patches x patch volume); halved when it does not fit.
 PATCH_BUDGET = 1 << 22
 
@@ -626,20 +738,24 @@ def draw_centres(
 
 
 def _patches(image: torch.Tensor, centres: torch.Tensor, patch: int) -> torch.Tensor:
-    """The ``patch`` cube of ``image`` [1, C, D, H, W] around each of ``centres`` [n, 3], as [n, C, patch, patch,
-    patch]: a gather, so the gradient flows back to the image."""
-    _, height, width = image.shape[2:]
+    """The ``patch`` cube (a square on a plane) of ``image`` [1, C, *spatial] around each of ``centres`` [n, dims], as
+    [n, C, patch, ...]: a gather, so the gradient flows back to the image."""
+    shape = image.shape[2:]
     offsets = torch.arange(patch, device=centres.device) - patch // 2
-    z = (centres[:, 0, None] + offsets)[:, :, None, None]
-    y = (centres[:, 1, None] + offsets)[:, None, :, None]
-    x = (centres[:, 2, None] + offsets)[:, None, None, :]
-    return image.flatten(2)[0][:, (z * height + y) * width + x].movedim(0, 1)
+    index = torch.zeros((), dtype=torch.long, device=centres.device)
+    for axis, extent in enumerate(shape):
+        along = [centres.shape[0], *[1] * len(shape)]
+        along[1 + axis] = patch
+        index = index * extent + (centres[:, axis, None] + offsets).view(along)
+    return image.flatten(2)[0][:, index].movedim(0, 1)
 
 
 def _spacing(shape: tuple[int, ...], extent: list[float] | None) -> tuple[torch.Tensor, torch.Tensor]:
     """The voxels' count and side in mm along (L, P, S), a missing ``extent`` counting one mm a voxel."""
     size = torch.tensor(list(reversed(shape)), dtype=torch.float64)
-    return size, torch.tensor(extent, dtype=torch.float64) / size if extent is not None else torch.ones(3).double()
+    return size, torch.tensor(extent, dtype=torch.float64) / size if extent is not None else torch.ones(
+        len(shape)
+    ).double()
 
 
 def _plane_grids(
@@ -682,15 +798,16 @@ def _plane_grids(
 def _cube_grids(
     centres: torch.Tensor, patch: int, shape: tuple[int, ...], extent: list[float] | None, voxel_size: list[float]
 ) -> torch.Tensor:
-    """For a 3D network with a ``voxel_size``, the ``patch`` cube each of ``centres`` [n, 3] is cut on, one step that
-    voxel_size (mm, ITK order x y z) along each axis, as grid_sample coordinates [n, patch, patch, patch, 3]
-    (align_corners, ``x, y, z`` = L, P, S): elastix's patch at the model's resolution."""
+    """For a network with a ``voxel_size`` run on an image of its own dimension, the ``patch`` cube (a square on a
+    plane) each of ``centres`` [n, dims] is cut on, one step that voxel_size (mm, ITK order) along each axis, as
+    grid_sample coordinates [n, patch, ..., dims] (align_corners, ITK order): elastix's patch at the model's
+    resolution."""
     size, spacing = _spacing(shape, extent)
     ticks = torch.arange(patch, dtype=torch.float64) - (patch - 1) / 2
-    step = torch.tensor(voxel_size, dtype=torch.float64) / spacing  # voxels of the image per model voxel, (L, P, S)
-    along_s, along_p, along_l = torch.meshgrid(ticks * step[2], ticks * step[1], ticks * step[0], indexing="ij")
-    offsets = torch.stack([along_l, along_p, along_s], dim=-1)  # [patch, patch, patch, 3] in (L, P, S) voxels
-    index = centres.detach().cpu().flip(1).double()[:, None, None, None, :] + offsets[None]
+    step = torch.tensor(voxel_size, dtype=torch.float64) / spacing  # voxels of the image per model voxel, ITK order
+    along = torch.meshgrid(*(ticks * step[axis] for axis in reversed(range(len(shape)))), indexing="ij")
+    offsets = torch.stack(along[::-1], dim=-1)  # [patch, ..., dims] in voxels, ITK order
+    index = centres.detach().cpu().flip(1).double()[(slice(None), *[None] * len(shape))] + offsets[None]
     return (2 * index / (size - 1) - 1).float().to(centres.device)
 
 
@@ -699,7 +816,8 @@ def _grid_patches(image: torch.Tensor, grids: torch.Tensor) -> torch.Tensor:
     or [n, C, patch, patch, patch] for a cube (``_cube_grids``): trilinear, so the gradient flows back to the image;
     outside the image, zeros."""
     count, *sides = grids.shape[:-1]
-    flat = grids.reshape(1, count * sides[0], *sides[1:], 3) if len(sides) == 3 else grids[None]
+    cube = len(sides) == grids.shape[-1]  # a grid of the image's own dimension, else a plane's in a volume
+    flat = grids.reshape(1, count * sides[0], *sides[1:], grids.shape[-1]) if cube else grids[None]
     sampled = F.grid_sample(image, flat.to(image.dtype), mode="bilinear", padding_mode="zeros", align_corners=True)
     return sampled[0].reshape(image.shape[1], count, *sides).movedim(1, 0)
 
@@ -733,14 +851,65 @@ def _centre_features(
     return tuple(features)
 
 
-def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
+def block_region(
+    start: Sequence[int],
+    stop: Sequence[int],
+    halo: Sequence[int],
+    shape: Sequence[int],
+    stride: int = 1,
+    least: int = 1,
+) -> tuple[list[int], list[int], tuple[slice, ...]]:
+    """The voxels ``[low, high)`` a block ``[start, stop)`` of an image of ``shape`` is read over, ``halo`` before it
+    and at least as many after it, widened inside the image to ``least`` voxels along an axis where it has them, and
+    the slices of its own voxels in them. A block that starts on a multiple of ``stride`` ends as far from the image's
+    end as a whole number of it: a network that anchors a layer's cells at the end of what it is handed (one that
+    flips an axis, as TotalSegmentator's reorientation does) then meets the whole image's cells, as one that anchors
+    them at the start does."""
+    low = [max(0, a - h) for a, h in zip(start, halo, strict=True)]
+    high = [min(n, b + h) for b, h, n in zip(stop, halo, shape, strict=True)]
+    for axis, extent in enumerate(shape):
+        side = min(least, extent)
+        if high[axis] - low[axis] < side:
+            high[axis] = min(extent, low[axis] + side)
+            low[axis] = high[axis] - side
+    high = [end + (n - end) % stride for end, n in zip(high, shape, strict=True)]
+    return low, high, tuple(slice(a - lo, b - lo) for a, b, lo in zip(start, stop, low, strict=True))
+
+
+def _blocks(
+    image: torch.Tensor, block: int, halo: int, stride: int = 1
+) -> Iterator[tuple[torch.Tensor, tuple[slice, ...]]]:
+    """``image``'s blocks of ``block`` voxels a side, each read with ``halo`` around it (``block_region``), and the
+    slices of its own voxels in it: the partition ``ImpactFeatureModel.norms`` sums over."""
+    shape = list(image.shape[2:])
+    for target in _sweep_targets(shape, [block] * len(shape)):
+        start, stop = [axis.start for axis in target], [axis.stop for axis in target]
+        low, high, own = block_region(start, stop, [halo] * len(shape), shape, stride)
+        yield image[(slice(None), slice(None), *(slice(lo, hi) for lo, hi in zip(low, high, strict=True)))], own
+
+
+def own_cells(own: Sequence[slice], strides: Sequence[int]) -> tuple[slice, ...]:
+    """The cells of a layer ``[B, C, *cells]`` of ``strides`` voxels along each axis (``ImpactFeatureModel.layer_strides``)
+    a network computed on a block that cover the block's own voxels ``own``: a cell counted in the block that holds its
+    first voxel, so that blocks starting on a multiple of the stride count every cell of the image once."""
+    return (
+        slice(None),
+        slice(None),
+        *(slice(-(-o.start // k), -(-o.stop // k)) for o, k in zip(own, strides, strict=True)),
+    )
+
+
+def _feature_grid(
+    shape: tuple[int, ...], patch: int, overlap: float, multiple: int, pad_value: float | None = None
+) -> ModelPatch:
     """The grid one extraction runs on, cut as the predictor cuts a network's input: ``patch`` 0, or an axis no longer
     than it, is one tile spanning that axis (a cube wider than the axis would pad it up to the tile); the tiles share
     ``overlap`` of their width under a raised-cosine window that sums to one; a free axis rounds up to ``multiple``
-    (an encoder-decoder's skip connections), cropped back off at blend time."""
+    (an encoder-decoder's skip connections), cropped back off at blend time, padded with ``pad_value`` (a tile's own
+    minimum when None)."""
     size = [int(patch) if 0 < patch < extent else 0 for extent in shape]
     share: float | int = float(overlap) if patch > 0 else 0
-    grid = ModelPatch(size, share)
+    grid = ModelPatch(size, share, pad_value=pad_value)
     if multiple > 1:
         grid.free_axis_multiple = [int(multiple)] * len(shape)
     grid.patch_combine = Cosinus()
@@ -787,19 +956,48 @@ def _layer_accumulator(
     return Accumulator(patches, size, combine)
 
 
-def onto_image_grid(layer: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+def _cells_read(start: int, stop: int, size: int, extent: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The two cells of a layer of ``size`` along an image axis of ``extent`` that each voxel of ``[start, stop)``
+    reads (``onto_image_grid``), and the weight of the second."""
+    at = torch.arange(start, stop, dtype=torch.float64) * (size / extent)
+    low = at.floor().long()
+    return low, (low + 1).clamp(max=size - 1), at - low
+
+
+def layer_window(box: Sequence[tuple[int, int]], grid: Sequence[int], shape: Sequence[int]) -> list[tuple[int, int]]:
+    """The cells of a layer of ``grid`` that ``onto_image_grid`` reads for the voxels ``box`` (``(start, stop)`` along
+    each axis) of an image of ``shape``."""
+    window = []
+    for (start, stop), size, extent in zip(box, grid, shape, strict=True):
+        if size == extent:
+            window.append((start, stop))
+            continue
+        low, high, _ = _cells_read(start, stop, size, extent)
+        window.append((int(low[0]), int(high[-1]) + 1))
+    return window
+
+
+def onto_image_grid(
+    layer: torch.Tensor,
+    shape: tuple[int, ...],
+    box: Sequence[tuple[int, int]] | None = None,
+    grid: Sequence[int] | None = None,
+) -> torch.Tensor:
     """A layer ``[B, C, *grid]`` brought linearly onto the image grid ``shape`` it was extracted from, placed as
     itk-impact places a feature map (``AllocateFeatureImage``): its first voxel on the image's, its spacing the image's
-    extent over its own size, a point past its last voxel reading that voxel (ITK's linear interpolator)."""
+    extent over its own size, a point past its last voxel reading that voxel (ITK's linear interpolator). With
+    ``box`` (``(start, stop)`` along each axis), the voxels of that box alone, ``layer`` then the cells of a layer of
+    ``grid`` that ``layer_window`` gives for it."""
     # ponytail: one axis at a time holds two gathered copies of the map, a slab loop if a layer ever outgrows that.
-    for axis, extent in enumerate(shape):
-        size = layer.shape[2 + axis]
-        if size == extent:
+    grid = grid or layer.shape[2:]
+    box = box or [(0, extent) for extent in shape]
+    for axis, ((start, stop), (first, _)) in enumerate(zip(box, layer_window(box, grid, shape), strict=True)):
+        if grid[axis] == shape[axis]:
+            layer = layer.narrow(2 + axis, start - first, stop - start)
             continue
-        at = torch.arange(extent, device=layer.device, dtype=torch.float64) * (size / extent)
-        low = at.floor().long()
-        high = (low + 1).clamp(max=size - 1)
-        weight = (at - low).to(layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
+        low, high, weight = _cells_read(start, stop, grid[axis], shape[axis])
+        low, high = (low - first).to(layer.device), (high - first).to(layer.device)
+        weight = weight.to(layer.device, layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
         layer = torch.lerp(layer.index_select(2 + axis, low), layer.index_select(2 + axis, high), weight)
     return layer
 
@@ -834,6 +1032,9 @@ class ImpactFeatureModel:
         self.direction: torch.Tensor | None = None
         self.voxel_size: list[float] | None = None
         self.half = False
+        # Handed planes (a 2-D pair): a 3-D network lifts them to volumes one voxel thick (``_PlaneLift``), as a run on
+        # the whole pair lifts a 2-D pair, and a 2-D one reads them as they are; otherwise it sweeps a volume's slices.
+        self.planes = False
         # Each tile under a checkpoint (see _masked_feature_loss): for a caller that differentiates through
         # the network on volumes too large to keep every tile's activations.
         self.checkpoint = False
@@ -841,6 +1042,9 @@ class ImpactFeatureModel:
         self.batch = 0
         self.model: torch.nn.Module | None = None
         self._mapped: torch.device | None = None  # where _on mapped the file; None for a network handed in
+        # Each weighted layer's and normalisation's stride along every axis, measured once (``_measure_strides``).
+        self._layer_strides: list[tuple[int, ...]] | None = None
+        self._norm_strides: list[tuple[int, ...]] | None = None
 
     @classmethod
     def download(
@@ -886,9 +1090,92 @@ class ImpactFeatureModel:
             raise MeasureError(f"'{self.model_path}' weighs its layer {deepest + 1}, past the {len(self.fov)} it has.")
         return int(self.fov[deepest])
 
+    def _probe_side(self) -> int:
+        """64 voxels, rounded up to the input multiple."""
+        multiple = max(1, self.multiple)
+        return -(-64 // multiple) * multiple
+
+    def _probe(self, device: torch.device | str, side: int) -> list:
+        """The network's inputs for a probe of ``side`` voxels a side, of what it is handed."""
+        dims = 2 if self.planes else 3
+        probe = torch.rand((1, self.in_channels, *[side] * dims), device=device)  # a spread to normalise
+        return self.inputs(probe, _statistics(probe)[0])
+
+    @torch.no_grad()
+    def _probed_layers(self, device: torch.device | str, side: int) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """The weighted layers and the normalisations' inputs (each fed the probe's own statistics of the ones before
+        it) of a probe of ``side`` voxels a side."""
+        inputs = self._probe(device, side)
+        network = self.network(inputs[0].device)
+        norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
+        norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
+        norms, gathered = [], cast(list[torch.Tensor], [])
+        if norm_count is not None:
+            tensor, _, stats, *direction = inputs
+            for _ in range(int(norm_count(len(self.weights)))):
+                layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
+                norms.append(layer)
+                axes = (0, *range(2, layer.dim()))
+                mean = layer.double().mean(axes)
+                gathered.append(torch.stack([mean, layer.double().var(axes, unbiased=False)]).float())
+        outputs = network(*inputs)
+        return [outputs[index] for index in self.kept], norms
+
+    def _measure_strides(self, device: torch.device | str) -> None:
+        """Each weighted layer's and each normalisation's stride along every axis, from its cells on two probes,
+        ``_probe_side`` and twice it a side: the voxels added over the cells added, whatever cells a layer's padding
+        or rounding adds or drops at its ends. Measured once."""
+        side = self._probe_side()
+        small, large = self._probed_layers(device, side), self._probed_layers(device, 2 * side)
+
+        def strides(layers: list[torch.Tensor], doubled: list[torch.Tensor]) -> list[tuple[int, ...]]:
+            measured = []
+            for layer, bigger in zip(layers, doubled, strict=True):
+                added = [b - a for a, b in zip(layer.shape[2:], bigger.shape[2:], strict=True)]
+                if any(cells <= 0 for cells in added):
+                    raise MeasureError(
+                        f"'{self.model_path}' gives a layer of {list(layer.shape[2:])} cells for {side} voxels a side"
+                        f" and {list(bigger.shape[2:])} for {2 * side}: no lattice of the image's voxels, which blocks"
+                        " need.",
+                        "Weigh layers whose cells follow the image's voxels.",
+                    )
+                measured.append(tuple(max(1, round(side / cells)) for cells in added))
+            return measured
+
+        self._layer_strides, self._norm_strides = strides(small[0], large[0]), strides(small[1], large[1])
+
+    def layer_strides(self, device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each weighted layer's stride along every axis, in the image's voxels (``_measure_strides``)."""
+        if self._layer_strides is None:
+            self._measure_strides(device)
+        return cast(list[tuple[int, ...]], self._layer_strides)
+
+    def norm_strides(self, device: torch.device | str) -> list[tuple[int, ...]]:
+        """Each normalisation's stride along every axis, in the image's voxels (``_measure_strides``)."""
+        if self._norm_strides is None:
+            self._measure_strides(device)
+        return cast(list[tuple[int, ...]], self._norm_strides)
+
+    def norm_stride(self, device: torch.device | str) -> int:
+        """The stride every normalisation ``norms`` gathers meets the image's voxels on (1 for a network with none):
+        blocks whose origins and halos are whole multiples of it meet their cells where the whole image does."""
+        return math.lcm(1, *(stride for strides in self.norm_strides(device) for stride in strides))
+
+    def block_stride(self, device: torch.device | str) -> int:
+        """The stride a block of the image must start on to own whole cells of every weighted layer and of every
+        normalisation (``norm_stride``), as the whole image's: the least common multiple of their strides."""
+        layers = (stride for strides in self.layer_strides(device) for stride in strides)
+        return math.lcm(self.norm_stride(device), *layers)
+
+    def reload(self) -> None:
+        """Forget the network loaded from its file, which its next use loads again: a float16 cast (``half``) rounds
+        its weights in place. A network handed in is kept."""
+        if self._mapped is not None:
+            self.model, self._mapped = None, None
+
     def _half(self, device: torch.device) -> bool:
         # float16 has no 3-D pooling on the CPU.
-        return self.half and device.type == "cuda"
+        return self.half and torch.device(device).type == "cuda"
 
     def _on(self, device: torch.device) -> torch.nn.Module:
         """The network on ``device``, its file mapped there: loaded at its first use, and again when the device
@@ -902,21 +1189,66 @@ class ImpactFeatureModel:
         along its first spatial axis."""
         network = self._on(device)
         network = network.half() if self._half(device) else network.float()
-        return _SliceSweep(network) if self.dim == 2 else network
+        if self.dim == 2 and not self.planes:
+            network = _SliceSweep(network)
+        elif self.dim == 3 and self.planes:
+            network = _PlaneLift(network)
+        return _HalfNetwork(network) if self._half(device) else network
 
-    def inputs(self, tensor: torch.Tensor, attribute: Attribute) -> list[torch.Tensor]:
-        """The ``[tensor, nb_layer, stats(, direction)]`` inputs the extractor takes, for ONE sample: the flat
+    def inputs(self, tensor: torch.Tensor, attribute: Attribute, norms: Sequence[torch.Tensor] = ()) -> list:
+        """The ``[tensor, nb_layer, stats(, direction)(, norms)]`` inputs the extractor takes, for ONE sample: the flat
         ``[ImageMin, ImageMax, ImageMean, ImageStd]`` itk-impact passes, which a model reads only when
-        ``stats.numel() == 4`` and otherwise replaces with statistics of the tensor it is handed."""
+        ``stats.numel() == 4`` and otherwise replaces with statistics of the tensor it is handed; and ``norms``, the
+        statistics of its normalisations over the whole image (``norms``), for a tensor that is a region of it."""
         if tensor.shape[1] != self.in_channels:
             tensor = tensor.repeat(1, self.in_channels, *([1] * (tensor.dim() - 2)))
         if self.denormalize:
             tensor = _denormalized(tensor, [attribute])
-        if self._half(tensor.device):
-            tensor = tensor.half()
         stats = [float(attribute[key]) for key in ("ImageMin", "ImageMax", "ImageMean", "ImageStd")]
-        direction = [] if self.direction is None else [self.direction]
-        return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats), *direction]
+        direction = self.direction
+        if direction is None and self.dim == 2 and self.planes:  # the plane's own axes, as the sweep tells a slice
+            direction = torch.eye(2, dtype=torch.int16)
+        rest: list = [] if direction is None else [direction]
+        if norms:  # after the direction, an empty one when the images are fed as given
+            rest = [*(rest or [torch.tensor([])]), list(norms)]
+        return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats), *rest]
+
+    @torch.no_grad()
+    def norms(
+        self, boxes: Callable[[], Iterable[tuple[torch.Tensor, tuple[slice, ...]]]], statistics: Attribute
+    ) -> list[torch.Tensor]:
+        """The statistics over the whole image of the normalisations the network applies by its input's own (TS's
+        instance normalisation, MIND's bound on its variance), up to its deepest weighted layer: what makes a region
+        of the image read as it does in the whole image, handed to ``inputs`` and ``volume``. One pass over the image
+        a normalisation: ``boxes()`` yields each block of it read with the receptive field around it and the slices
+        of the block's own voxels in it, the blocks covering the image once. Empty for a network without them."""
+        gathered: list[torch.Tensor] = []
+        first = next(iter(boxes()), None)
+        if first is None:
+            return gathered
+        network = self.network(first[0].device)
+        norm_count = cast(Callable[[int], int] | None, getattr(network, "norm_count", None))
+        norm_input = cast(Callable[..., torch.Tensor], getattr(network, "norm_input", None))
+        if norm_count is None:
+            return gathered
+        for strides in self.norm_strides(first[0].device)[: int(norm_count(len(self.weights)))]:
+            total: torch.Tensor | None = None
+            count = 0
+            for box, own in boxes():
+                # Padded as ``volume`` pads a tile, up to the input multiple after the block's own voxels.
+                grid = _feature_grid(tuple(box.shape[2:]), 0, 0.0, self.multiple, float(statistics["ImageMin"]))
+                (box,) = next(iter(grid.disassemble(box)))
+                tensor, _, stats, *direction = self.inputs(box, statistics)
+                layer = norm_input(tensor, stats, direction[0] if direction else torch.tensor([]), gathered)
+                part = layer[own_cells(own, strides)].double()
+                axes = (0, *range(2, part.dim()))
+                sums = torch.stack([part.sum(axes), (part**2).sum(axes)])
+                total, count = (sums if total is None else total + sums), count + part[0, 0].numel()
+            if total is None:
+                return []
+            mean = total[0] / count
+            gathered.append(torch.stack([mean, (total[1] / count - mean**2).clamp_min(0.0)]).float())
+        return gathered
 
     @property
     def kept(self) -> list[int]:
@@ -924,16 +1256,46 @@ class ImpactFeatureModel:
         return [index for index, weight in enumerate(self.weights) if weight]
 
     @torch.no_grad()
-    def _volume(self, image: torch.Tensor, normalization: str, patch: int, overlap: float) -> list[torch.Tensor]:
-        """``volume`` in tiles of ``patch``: the intensity statistics are the whole image's, so every tile is normalised
-        alike. Each layer is blended on its own grid, a segmentation network's deeper ones coarser, and normalised
-        there, as itk-impact's ImageToFeaturesMap does."""
+    def volume(
+        self,
+        image: torch.Tensor,
+        normalization: str = "none",
+        patch: int = 0,
+        overlap: float = 0.25,
+        statistics: Attribute | None = None,
+        norms: Sequence[torch.Tensor] | None = None,
+    ) -> list[torch.Tensor]:
+        """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
+        layer's own grid (``onto_image_grid`` brings it onto the image's), in one pass: tiles of ``patch`` a side (0:
+        the whole image) sharing ``overlap`` of their width, blended by a cosine window. ``statistics``: the
+        ``ImageMin``/``ImageMax``/``ImageMean``/``ImageStd`` the network normalises its input by, when ``image`` is a
+        block of a larger image (``image``'s own otherwise); ``norms``, its normalisations' (``norms``, gathered over
+        the image when not given), so every tile is normalised as the whole image. Each layer is blended on its own
+        grid, a segmentation network's deeper ones coarser, and normalised there, as itk-impact's ImageToFeaturesMap
+        does."""
         network = self.network(image.device)
-        statistics = _statistics(image)[0]
-        grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
+        statistics = statistics if statistics is not None else _statistics(image)[0]
+        # Padded with the image's minimum: a block of a larger image as the whole image is.
+        grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple, float(statistics["ImageMin"]))
+        if norms is None and 0 < patch < max(image.shape[2:]) and self.fov is not None:
+            # Blocks and halos (half the receptive field) on the normalisations' stride and the input multiple, so
+            # that each meets their cells, and is padded at the image's end, as the whole image is.
+            stride = math.lcm(self.norm_stride(image.device), max(self.multiple, 1))
+            block = -(-patch // stride) * stride
+            halo = -(-(self.receptive_field // 2) // stride) * stride
+            norms = self.norms(lambda: _blocks(image, block, halo, stride), statistics)
+        elif (
+            norms is None
+            and not 0 < patch < max(image.shape[2:])
+            and self.multiple > 1
+            and any(extent % self.multiple for extent in image.shape[2:])
+        ):
+            # One pass, padded up to the input multiple: normalised over the image's own cells, as its blocks are.
+            whole = tuple(slice(0, extent) for extent in image.shape[2:])
+            norms = self.norms(lambda: [(image, whole)], statistics)
         accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
-            outputs = network(*self.inputs(tile, statistics))
+            outputs = network(*self.inputs(tile, statistics, norms or ()))
             for rank, kept in enumerate(self.kept):
                 layer = outputs[kept].float()
                 if index == 0:
@@ -943,29 +1305,6 @@ class ImpactFeatureModel:
                 accumulators[rank].add_layer(index, layer)
             del outputs
         return [normalized_features(accumulator.assemble(), normalization) for accumulator in accumulators]
-
-    def volume(
-        self, image: torch.Tensor, normalization: str = "none", patch: int = 0, overlap: float = 0.25
-    ) -> tuple[list[torch.Tensor], int]:
-        """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
-        layer's own grid (``onto_image_grid`` brings it onto the image's), and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
-        width blended by a cosine window. A pass that does not fit the card runs again in tiles of
-        ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time."""
-        tile = patch
-
-        def narrow() -> bool:
-            nonlocal tile
-            if 0 < tile <= 2 * MIN_TILE:
-                return False
-            if tile == 0:
-                tile = FIRST_FEATURE_TILE
-                while tile > 2 * MIN_TILE and tile >= max(image.shape[2:]):
-                    tile //= 2
-            else:
-                tile //= 2
-            return True
-
-        return halve_on_oom(lambda: self._volume(image, normalization, tile, overlap), narrow, image.is_cuda), tile
 
     def sampled(
         self,
@@ -984,15 +1323,16 @@ class ImpactFeatureModel:
         that resolution (``_cube_grids``), laid out in mm over ``extent`` (L, P, S). A batch that does not fit the card
         is halved, and ``batch`` keeps it."""
         network, grids = self.network(moved.device), None
-        if self.dim == 2:
+        if self.dim == 2 and not self.planes:
             network = cast(torch.nn.Module, self.model)  # the network itself: one plane per point, not a sweep
+            network = _HalfNetwork(network) if self._half(moved.device) else network
             grids = _plane_grids(centres, patch, tuple(moved.shape[2:]), extent, seed, self.voxel_size)
         elif self.voxel_size is not None:
             grids = _cube_grids(centres, patch, tuple(moved.shape[2:]), extent, self.voxel_size)
         moved_inputs = self.inputs(moved, _statistics(moved)[0])
         fixed_inputs = self.inputs(fixed, _statistics(fixed)[0])
         kept = self.kept
-        self.batch = self.batch or max(1, PATCH_BUDGET // patch**3)
+        self.batch = self.batch or max(1, PATCH_BUDGET // patch ** (moved.dim() - 2))
 
         def run() -> list[tuple[torch.Tensor, ...]]:
             # No early stop: the centre features are the last tensors the recomputation saves, inside the TorchScript

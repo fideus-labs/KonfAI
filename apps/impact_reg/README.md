@@ -62,17 +62,18 @@ impact-reg-konfai list
 | `Elastix#rigid_bspline` | any | elastix | Rigid, then B-spline deformable refinement |
 | `Elastix#impact_static` | MRI / CT | elastix + IMPACT | Rigid, then a B-spline driven by TotalSegmentator (decoder, then segmentation head) and MIND, features extracted once |
 | `Elastix#impact_jacobian` | CT / CBCT | elastix + IMPACT | Rigid, then a B-spline driven by early TotalSegmentator layers, differentiated through the network |
-| `ConvexAdam#coarse` | any | itk-impact | Linear pre-alignment, then the global coarse coupled-convex initialisation on MIND features |
+| `ConvexAdam#coarse` | any | itk-impact | The global coarse coupled-convex initialisation on MIND features |
 | `ConvexAdam#composite` | any | itk-impact | The same coarse pass followed by the Adam instance-optimisation refinement |
 | `ConvexAdam#impact_cbct` | CT / CBCT | itk-impact | The same pipeline on the second layer of TotalSegmentator MR |
-| `ConvexAdam#impact_mrct` | MRI / CT | itk-impact | The same pipeline on the last decoder layer of TotalSegmentator MR and MIND |
+| `ConvexAdam#impact_mrct` | MRI / CT | itk-impact | The coarse initialisation alone, on the segmentation head of TotalSegmentator MR and MIND |
 | `FireANTs#syn` | any | FireANTs | Rigid, affine, then SyN diffeomorphic registration on the GPU |
 | `FireANTs#impact` | CT / CBCT | FireANTs + IMPACT | Rigid, affine, then SyN driven by IMPACT on early TotalSegmentator layers |
 | `FireANTs#anatomix` | any | FireANTs + IMPACT | anatomix and MIND features extracted once and registered as feature volumes |
 | `FireANTs#impact_mrct` | MRI / CT | FireANTs + IMPACT | Rigid, affine, then SyN on the last decoder layer of TotalSegmentator MR and MIND, extracted once |
 
-Every deformable preset aligns the pair rigidly or affinely first, so a pair that starts centimetres apart needs no
-separate rigid run. `impact-reg-konfai show NAME` says what a preset runs, needs and tunes, and
+Every elastix and FireANTs deformable preset aligns the pair rigidly or affinely first, so a pair that starts
+centimetres apart needs no separate rigid run; the ConvexAdam presets have no such stage, their coarse search covering
+a few centimetres, and `moments_init` starts them from the translation between the centres. `impact-reg-konfai show NAME` says what a preset runs, needs and tunes, and
 [the presets page](docs/presets.md) which one suits which pair, with the benchmark behind that advice.
 
 > **Give the CT a body mask** (`--fixed-mask`) whenever it shows what the other image does not: a table, a head rest,
@@ -184,7 +185,7 @@ impact-reg-konfai uncertainty -i ./Output/P000/InferenceStack.mha --gt-fixed-fid
 | `--tta` | Test-time-augmentation draws per preset | `0` |
 | `--uncertainty` | Keep the ensemble's stack, every preset's field, as `<case>/InferenceStack.mha` (`.ome.zarr` beside a store) for `uncertainty` | `False` |
 | `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
-| `--max-voxels` | Register whole a pair of at most this many voxels; a larger one runs in two passes (see *Large images*) | what the device holds at the preset's declared cost |
+| `--out-of-core ROUTE` | `auto`: whole where the pair fits the device, sampled where it does not (tiled or resampled for a preset of another engine); `whole`, `tiled` or `sampled` for every pair (see *Large images*) | `auto` |
 | `--set [PRESET:]NAME=VALUE` | Tune a preset parameter (repeatable); `PRESET:` limits it to one preset of an ensemble; checked before anything runs | *unset* |
 | `--tmp-dir` | Where the volume-sized intermediates are staged, the engines' temporary files included | hidden beside the output |
 | `--gpu` / `--cpu` | GPU id(s) / CPU worker processes | CPU if unset |
@@ -237,20 +238,28 @@ impact-reg-konfai register --help
 
 A pair of any size is registered with no option to set. Each preset declares what a voxel costs it on the GPU and in
 RAM, and KonfAI sizes the run from the GPU memory free when it starts and from the RAM budget, whichever holds fewer
-voxels. A pair that fits is registered in one piece, at native resolution. A larger one runs in two passes:
+voxels. A pair that fits is registered in one piece, at native resolution. A larger one registers sampled: the preset
+in one pass on the native pair, never resampled and never held whole, an iteration on every box of the pair or, with
+`--samples`, on a random draw of them. ConvexAdam: the coarse stage's cost built by boxes of its grid, the fine stage
+on boxes of its control grid, the pooled feature maps on the GPU where they fit and in files otherwise. FireANTs: its
+rigid, affine and deformable stages on boxes, the warps on the GPU when they fit, else in host memory while the memory
+budget holds them, in files beyond. elastix: its own samples, with its images mapped from files and paged by the
+kernel. A preset of another engine goes in two passes where it declares them, else whole on a pair KonfAI resamples
+to fit.
+
+`--out-of-core` chooses the route for every pair instead: `whole`, `sampled`, or `tiled`, two passes:
 
 1. **Global pass:** the whole preset runs on the pair resampled onto a grid coarse enough to fit, and its field comes
    back onto the native fixed grid.
 2. **Tile pass:** the preset's deformable stage refines that result on native tiles, and the two fields are composed.
-   Presets without a deformable stage worth refining locally stop after the global pass.
 
 ```text
 [ImpactReg] FireANTs#syn: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
 on the whole pair resampled to fit, then its deformable stage on native tiles of at most 17,705,407 voxels.
 ```
 
-Everything around the presets is streamed, outputs included (`.mha`, `.nii`, `.nii.gz`, `.nrrd`, OME-Zarr). Pin
-`--max-voxels` for reproducible runs. SlicerImpactReg is not streamed: it loads the moved image and, for uncertainty,
+Everything around the presets is streamed, outputs included (`.mha`, `.nii`, `.nii.gz`, `.nrrd`, OME-Zarr).
+SlicerImpactReg is not streamed: it loads the moved image and, for uncertainty,
 every preset's field whole. Details, disk and RAM: [Large images](docs/large-images.md).
 
 ---

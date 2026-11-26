@@ -17,6 +17,7 @@
 """Build-time contracts of the registration engines: promises the parameter annotations make must hold
 at construction, not surface minutes later as a cryptic subprocess or autograd failure."""
 
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -80,6 +81,7 @@ def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = 
         _max_iterations=0,
         _iterations=None,
     )
+    engine._run = partial(ElastixEngine._run, engine)
     fixed = fixed if fixed is not None else sitk.Image([6, 5, 4], sitk.sitkFloat32)
     return ElastixEngine.register(engine, fixed, sitk.Image(fixed), 0)
 
@@ -112,6 +114,8 @@ def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impac
         _stage_parameter_maps=lambda work, device_index, native_voxel_size, voxels=None: [],
         _iterations=None,
     )
+    engine._run = partial(ElastixEngine._run, engine)
+    engine._check_models = partial(ElastixEngine._check_models, engine)
     tissue = np.zeros((30, 30, 30), np.uint16)
     tissue[5:25, 5:25, 5:25] = 30
     tissue[15, 15, 15] = 21668
@@ -270,6 +274,28 @@ def test_an_exact_mixed_precision_override_stays_off_on_the_cpu() -> None:
 
     assert cpu.count("ImpactUseMixedPrecision") == 1
     assert '(ImpactUseMixedPrecision "false")' in cpu
+
+
+@pytest.mark.parametrize(
+    ("sampler", "exact", "taken"),
+    [
+        ('"RandomCoordinate" "Random"', [], "(NumberOfSpatialSamples 3000)"),
+        ('"Full"', [], None),
+        ('"Grid"', [], None),
+        ('"RandomSparseMask"', [("NumberOfSpatialSamples", "2000 4000")], "(NumberOfSpatialSamples 2000 4000)"),
+    ],
+)
+def test_spatial_samples_reach_a_map_that_leaves_the_count_to_elastix(sampler, exact, taken) -> None:
+    # A map that left NumberOfSpatialSamples to elastix's default (5000) ignored spatial_samples and --samples: a
+    # sampler that draws a count takes it, Full and Grid draw none, and an exact override of the key wins.
+    text = f'(Metric "AdvancedMattesMutualInformation")\n(ImageSampler {sampler})'
+
+    found, seen = ElastixEngine._apply_map_overrides(text, {"NumberOfSpatialSamples": "3000"}, exact, -1)
+
+    if taken is None:
+        assert "NumberOfSpatialSamples" not in found and "NumberOfSpatialSamples" not in seen
+    else:
+        assert found.count("NumberOfSpatialSamples") == 1 and taken in found
 
 
 def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
@@ -434,15 +460,10 @@ def test_fireants_impact_settings_reach_the_engine() -> None:
     # field, computed with settings the caller did not ask for.
     from impact_reg_konfai.models.fireants import RegistrationNet
 
-    engine = RegistrationNet(mode="Static", feature_overlap=0.5, normalize=False, lncc_kernel=7, mixed_precision=True)[
+    engine = RegistrationNet(mode="Static", normalize=False, lncc_kernel=7, mixed_precision=True)[
         "Registration"
     ]._engine
-    assert (engine._feature_overlap, engine._normalize, engine._lncc_kernel, engine._mixed_precision) == (
-        0.5,
-        False,
-        7,
-        True,
-    )
+    assert (engine._normalize, engine._lncc_kernel, engine._mixed_precision) == (False, 7, True)
 
 
 def test_fireants_refuses_what_its_loss_cannot_honour(tmp_path: Path) -> None:

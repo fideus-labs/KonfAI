@@ -93,7 +93,7 @@ def test_an_unset_max_voxels_is_the_tighter_of_the_gpu_and_the_host(monkeypatch:
 
     asked: list = []
     monkeypatch.setattr(konfai, "get_vram", lambda devices, remote_server=None: asked.append(devices) or (0.0, 24.0))
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (16 * 2**30, "test"))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda held=None: (16 * 2**30, "test"))
     monkeypatch.setattr(budget, "_per_rank_bytes", None)
     host = int(16 * 2**30 * budget.AUTO_MEMORY_SAFETY_FRACTION / 950)
     patch = DatasetPatch([0, 0, 0], mode="resample", vram_bytes_per_voxel=150, ram_bytes_per_voxel=950)
