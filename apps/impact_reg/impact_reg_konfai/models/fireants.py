@@ -835,6 +835,7 @@ class ImpactFeatureLoss(torch.nn.Module):
                 self, TensorSource(fixed[0]), TensorSource(moving[0]), Path(directory), block=block, extents=extents
             )
             volumes = [source.read([0] * len(source.shape), list(source.shape)).to(fixed.device) for source in sources]
+            del sources  # their memmaps: Windows removes no file still mapped
         return volumes[0], volumes[1]
 
     def _reach(self, index: int, shape: tuple[int, ...]) -> int:

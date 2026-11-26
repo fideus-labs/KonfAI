@@ -181,6 +181,32 @@ def test_a_static_extraction_the_device_cannot_hold_whole_goes_by_blocks(
         torch.testing.assert_close(found, reference, atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.skipif(not Path("/proc/self/maps").exists(), reason="the process's mappings are read off /proc")
+def test_a_static_extraction_by_blocks_maps_no_file_its_directory_removes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows cannot remove a file still mapped: the blocks' memmaps are gone before their directory is.
+    import tempfile
+
+    directory = tempfile.TemporaryDirectory
+
+    class Checked(directory):  # type: ignore[valid-type, misc]
+        def __exit__(self, *args):
+            mapped = [line for line in Path("/proc/self/maps").read_text().splitlines() if self.name in line]
+            assert not mapped, mapped
+            return super().__exit__(*args)
+
+    monkeypatch.setattr(fireants.tempfile, "TemporaryDirectory", Checked)
+    path = tmp_path / "averaged.pt"
+    torch.jit.script(_Averaged()).save(str(path))
+    spec = fireants.ModelSpec(ref=str(path), layers_mask="11", distance="L1")
+    loss = fireants.ImpactFeatureLoss([[spec]], "Static", False, 5, 0, 0, False)
+    generator = torch.Generator().manual_seed(0)
+    loss.extract(
+        torch.rand(1, 1, 40, 36, 30, generator=generator), torch.rand(1, 1, 14, 12, 10, generator=generator), 16
+    )
+
+
 def test_static_pca_reduces_each_layer_on_the_fixed_basis(tmp_path: Path) -> None:
     # Each kept layer is projected on its own, onto principal components fitted on the fixed image, as the other
     # engines fit their PCA per layer on the reference side.
