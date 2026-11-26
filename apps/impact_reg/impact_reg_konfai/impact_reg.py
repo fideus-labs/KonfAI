@@ -1583,7 +1583,7 @@ class ImpactRegKonfAIApp:
                 copies[preset] = min(tta, allowed)
             # The twins of a sampled run are written where it runs: on the server, with --host.
             _check_space(work, headers, presets, bool(sampled_presets) and self._remote is None)
-            on_grid = None
+            on_grid: dict[tuple[int, ...], tuple] = {}  # the cases registered whole, onto their fixed grids, by cases
             fields_by_preset = {}
             for index, preset in enumerate(presets, 1):
                 if len(presets) > 1 and not quiet:
@@ -1623,11 +1623,13 @@ class ImpactRegKonfAIApp:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
                 onto_fixed = bool(tta or (tiled and not tiling.get("global")))
+                # The cases that fit, as a cohort of their own when others went sampled; onto the fixed grid alone.
+                pair = (_some_cases(lifted, rest), [headers[index] for index in rest]) if over else (lifted, headers)
                 if onto_fixed:
-                    on_grid = on_grid or self._onto_fixed_grid(lifted, headers, work, gpu, cpu, quiet)
-                pair = on_grid if onto_fixed else (lifted, headers)
-                if over:  # the cases that fit, as a cohort of their own: neither tiled nor flipped (no --tta here)
-                    pair = (_some_cases(pair[0], rest), [pair[1][index] for index in rest])
+                    key = tuple(rest) if over else tuple(range(len(headers)))
+                    if key not in on_grid:
+                        on_grid[key] = self._onto_fixed_grid(*pair, work / f"cases_{len(on_grid)}", gpu, cpu, quiet)
+                    pair = on_grid[key]
                 if tiled:
                     fields_by_preset[preset] = self._register_tiled(
                         preset,

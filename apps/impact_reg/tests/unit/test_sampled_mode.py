@@ -804,6 +804,43 @@ def test_a_compact_transform_never_outlives_its_field(
     assert not compact.exists() and (out / "P000" / "DVF.mha").exists() and own.exists()
 
 
+def test_only_the_cases_registered_whole_go_onto_their_fixed_grid(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--tta registers whole a pair on its fixed grid; a case the sampled route takes is not resampled onto it, which
+    writes a volume of it for nothing."""
+
+    class Reached(Exception):
+        pass
+
+    aligned = []
+
+    def onto_fixed_grid(self, inputs, headers, *args):
+        aligned.append(len(headers))
+        raise Reached
+
+    def sampled(self, preset, inputs, headers, cases, *args):
+        return "DVF", {}
+
+    paths = {}
+    for name, side in (("fixed0", 8), ("moving0", 8), ("fixed1", 16), ("moving1", 16)):
+        paths[name] = tmp_path / f"{name}.mha"
+        sitk.WriteImage(sitk.GetImageFromArray(np.zeros((side,) * 3, dtype=np.float32)), str(paths[name]))
+    moved = sitk.GetImageFromArray(np.zeros((8,) * 3, dtype=np.float32))
+    moved.SetOrigin((1.0, 0.0, 0.0))  # the small pair's moving image on a grid of its own
+    sitk.WriteImage(moved, str(paths["moving0"]))
+    manifest = json.loads((presets / "Elx" / "app.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(reg, "_manifest", lambda preset: {**manifest, "tta": 2})
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_onto_fixed_grid", onto_fixed_grid)
+    monkeypatch.setattr(reg.ImpactRegKonfAIApp, "_register_sampled", sampled)
+    with pytest.raises(Reached):
+        reg.ImpactRegKonfAIApp().register(
+            ["Elx"], [paths["fixed0"], paths["fixed1"]], [paths["moving0"], paths["moving1"]], output=tmp_path / "out",
+            max_voxels=1000, tta=2, fields_only=True,
+        )  # fmt: skip
+    assert aligned == [1]
+
+
 @pytest.mark.parametrize("allowed", [0, 2])
 def test_tta_on_the_sampled_route_is_capped_as_konfai_apps_caps_it(
     presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: int
