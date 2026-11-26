@@ -59,6 +59,13 @@ def _pid_alive(pid: int) -> bool:
             return False
 
 
+def _dead_pid() -> int:
+    """A pid no process holds now: a fixed one may belong to a live process on the runner."""
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+    return process.pid
+
+
 def _wait_pid_dead(pid: int, timeout: float) -> bool:
     # Poll instead of a fixed sleep: process teardown timing varies under load (the full suite).
     deadline = time.time() + timeout
@@ -578,7 +585,7 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
   "config_path": "/tmp/Config.yml",
   "created_at": 1.0,
   "status": "running",
-  "pid": 4321,
+  "pid": PID,
   "returncode": null,
   "started_at": 1.5,
   "finished_at": null,
@@ -590,7 +597,7 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
   "manifest_path": null,
   "recovered": false
 }
-        """.strip(),
+        """.strip().replace("PID", str(_dead_pid())),
         encoding="utf-8",
     )
 
@@ -616,7 +623,7 @@ def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
             "config_path": str(config_path),
             "created_at": 1.0,
             "status": status,
-            "pid": 4321,
+            "pid": _dead_pid(),
             "returncode": None,
             "started_at": 1.5,
             "finished_at": 2.0 if status == "done" else None,
