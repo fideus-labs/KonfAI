@@ -2115,13 +2115,12 @@ class ImpactRegKonfAIApp:
         # gives them again.
         record, prefix = json.loads((out / "register.json").read_text(encoding="utf-8")), f"{_workspace(app)}_"
         fields, compacts = {}, {}
+        # By their names in the case's folder alone: the record comes from another machine.
         for index, case in enumerate(cases):
             sent = out / f"P{index:03d}"
-            fields[case] = out / record["cases"][sent.name]["transform"]
-            compacts[case] = [
-                (sent / name).rename(sent / name.removeprefix(prefix))
-                for name in record.get("compacts", {}).get(sent.name, [])
-            ]
+            fields[case] = sent / Path(record["cases"][sent.name]["transform"]).name
+            names = [Path(name).name for name in record.get("compacts", {}).get(sent.name, [])]
+            compacts[case] = [(sent / name).rename(sent / name.removeprefix(prefix)) for name in names]
         self._compact[preset] = compacts
         field = fields[cases[0]]
         return field.name.removesuffix(_form(field)), fields

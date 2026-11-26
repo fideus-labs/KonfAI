@@ -1300,6 +1300,48 @@ def test_with_a_host_a_set_of_the_output_group_brings_the_field_back_under_it(
     assert (tmp_path / "out" / "P000" / "Field.mha").is_file()
 
 
+def test_with_a_host_the_server_s_record_names_files_in_its_cases_alone(
+    presets: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's register.json is another machine's: a path it records outside the case's folder (absolute, or
+    up from it) names the case's own file of that name, and no file of the client's is moved."""
+    import konfai_apps.app
+    from konfai import RemoteServer
+
+    fixed, moving = _pair(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("DVF.mha", "Elx_Transform.h5"):
+        (elsewhere / name).write_bytes(b"the user's own")
+
+    class Server:
+        def __init__(self, app: str, remote_server) -> None:
+            pass
+
+        def run(self, runner, inputs, output, runner_args, gpu, cpu, quiet) -> None:
+            case = Path(output) / "P000"
+            case.mkdir(parents=True)
+            vectors = np.ones((8, 8, 8, 3), dtype=np.float32)
+            sitk.WriteImage(sitk.GetImageFromArray(vectors, isVector=True), str(case / "DVF.mha"))
+            sitk.WriteTransform(sitk.TranslationTransform(3, (1.0, 0.0, 0.0)), str(case / "Elx_Transform.h5"))
+            record = {
+                "cases": {"P000": {"transform": str(elsewhere / "DVF.mha")}},
+                "compacts": {"P000": [f"../../{elsewhere.name}/Elx_Transform.h5"]},
+            }
+            (Path(output) / "register.json").write_text(json.dumps(record), encoding="utf-8")
+
+    monkeypatch.setattr(reg, "_config_output_group", lambda config: "DVF")
+    monkeypatch.setattr(konfai_apps.app, "KonfAIAppClient", Server)
+    import konfai.utils.vram
+
+    monkeypatch.setattr(konfai.utils.vram, "max_voxels", lambda *args, **kwargs: 10**12)
+    reg.ImpactRegKonfAIApp(remote_server=RemoteServer("localhost", 8000, None)).register(
+        ["Elx"], [fixed], [moving], output=tmp_path / "out", fields_only=True, out_of_core="sampled"
+    )
+    assert all((elsewhere / name).read_bytes() == b"the user's own" for name in ("DVF.mha", "Elx_Transform.h5"))
+    assert (tmp_path / "out" / "P000" / "DVF.mha").is_file()
+
+
 def test_a_sampled_field_is_published_in_the_preset_s_own_form(monkeypatch: pytest.MonkeyPatch) -> None:
     # SlicerImpactReg loads <output>/P000/Transform.h5: a field the sampled route writes goes out in the form the
     # preset's config gives its output (Transform:itktransform, an .h5), as the whole run publishes it.
