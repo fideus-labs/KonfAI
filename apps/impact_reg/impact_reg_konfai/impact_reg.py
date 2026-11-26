@@ -1239,10 +1239,14 @@ def _viewed(header: _Header, axis_map: "AxisMap") -> _Header:
     return ([shape[0], *axis_map.extents(shape[1:])], *geometry)
 
 
-def _config_output_form(preset: str) -> tuple[str, str] | None:
+def _config_output_form(preset: str, overrides: Sequence[str] = ()) -> tuple[str, str] | None:
     """The form a preset writes its output in (its OutputDataset's ``dataset_filename``, ``Transform:itktransform``
-    an ``.h5``), as ``_asked_form`` gives it; None where the config names a file without a backend token."""
-    for sink in _preset_config(preset, "Prediction.yml")["Predictor"].get("outputs_dataset", {}).values():
+    an ``.h5``), as ``_asked_form`` gives it, those of the ``--set`` ``overrides`` that set its outputs applied; None
+    where the config names a file without a backend token."""
+    config = _preset_config(preset, "Prediction.yml")
+    outputs = [entry for entry in overrides if entry.partition("=")[0].strip().startswith("Predictor.outputs_dataset")]
+    apply_overrides(config, outputs, lambda config: None)
+    for sink in config["Predictor"].get("outputs_dataset", {}).values():
         block = sink.get("OutputDataset", sink) if isinstance(sink, dict) else {}
         name, _, token = str(block.get("dataset_filename", "")).rpartition(":")
         if name and token:
@@ -1725,7 +1729,9 @@ class ImpactRegKonfAIApp:
                 # A sampled field (a MetaImage) is written here in the form asked for it, else the preset's own, as the
                 # whole run writes it (Transform:itktransform, an .h5); a preset run whole wrote its own.
                 asked = (
-                    self._forms.get(group) or self._forms.get(None) or _config_output_form(presets[0])
+                    self._forms.get(group)
+                    or self._forms.get(None)
+                    or _config_output_form(presets[0], overrides[presets[0]]["global"])
                     if case in sampled_cases
                     else None
                 )

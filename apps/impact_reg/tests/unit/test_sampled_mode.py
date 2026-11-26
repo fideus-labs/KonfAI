@@ -1465,5 +1465,8 @@ def test_a_sampled_field_is_published_in_the_preset_s_own_form(monkeypatch: pyte
     }
     monkeypatch.setattr(reg, "_preset_config", lambda preset, filename: config)
     assert reg._config_output_form("Elastix#rigid") == (".h5", "itktransform")
+    # A --set of the file's form is the form the run writes, which the sampled field is published in.
+    form = "Predictor.outputs_dataset.Field.OutputDataset.dataset_filename=Transform:mha"
+    assert reg._config_output_form("Elastix#rigid", ["max_iterations=3", form]) == (".mha", "mha")
     config["Predictor"]["outputs_dataset"]["Field"]["OutputDataset"]["dataset_filename"] = "Transform.mha"
     assert reg._config_output_form("Elastix#rigid") is None
