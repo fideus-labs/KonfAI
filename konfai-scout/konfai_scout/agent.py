@@ -79,6 +79,11 @@ def _versions(provider: Provider) -> dict[str, str]:
     return out
 
 
+def context_of(usage: TokenUsage) -> int:
+    """The tokens a request held: a prompt read from or written to a cache is in the model's context all the same."""
+    return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens
+
+
 @dataclass
 class BudgetState:
     config: ScoutConfig
@@ -86,7 +91,8 @@ class BudgetState:
     calls: int = 0
     images: int = 0
     tokens: int = 0
-    #: The tokens of the last request, its question and its answer: what the model's context holds.
+    #: The most tokens a request held, its question and its answer: a conversation's context only grows, and a limit
+    #: once reached stays reached (a final turn's smaller tool list must not reopen the exploration).
     context: int = 0
     usd: float = 0.0
     #: The cost of the request in flight, as a provider that runs the tool loop reports it message by message.
@@ -238,6 +244,7 @@ class Inspector:
     def _running(self, usage: TokenUsage) -> None:
         """One message's usage while the provider's request is in flight: what ``max_usd`` stops on mid-request."""
         self.budget.running_usd += cost_usd(usage, self.price) or 0.0
+        self.budget.context = max(self.budget.context, context_of(usage))
 
     def _request(self, call) -> Turn:
         attempts = 0
@@ -259,14 +266,7 @@ class Inspector:
         self.usage.cache_read_tokens += turn.usage.cache_read_tokens
         self.usage.cache_write_tokens += turn.usage.cache_write_tokens
         self.budget.tokens = self.usage.input_tokens + self.usage.output_tokens
-        self.budget.context = sum(  # a prompt read from or written to a cache is in the context all the same
-            (
-                turn.usage.input_tokens,
-                turn.usage.cache_read_tokens,
-                turn.usage.cache_write_tokens,
-                turn.usage.output_tokens,
-            )
-        )
+        self.budget.context = max(self.budget.context, context_of(turn.usage))
         cost = cost_usd(turn.usage, self.price)
         if cost is not None:
             self.budget.usd += cost

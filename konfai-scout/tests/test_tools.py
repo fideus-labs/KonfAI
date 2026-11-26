@@ -2,7 +2,9 @@
 """The tools' checks: evidence must exist, a confirmation needs a measurement, a verdict says what it rests on."""
 
 import json
+from types import SimpleNamespace
 
+import pytest
 from konfai_scout.config import ScoutConfig
 from konfai_scout.evaluation import RegionEvaluator
 from konfai_scout.planes import box_to_dict
@@ -106,6 +108,20 @@ def test_a_view_takes_a_leads_id_as_its_zoom(fixtures, tmp_path):
     run(box, "view", plane="axial", zoom="l1")
     assert box.lead_views(lead) == box.calls[-1].views != []
     assert "no lead 'l9'" in run(box, "view", plane="axial", zoom="l9")["error"]
+
+    # the widths, worked out apart: 100 mm about a small lead, 1.3 times a wide one, never past the image
+    def width(low: float, high: float, image: float) -> float:
+        box.renderer = SimpleNamespace(
+            grid=SimpleNamespace(
+                world_box=lambda: SimpleNamespace(low_xyz=(0.0, 0.0, 0.0), high_xyz=(image, image, image))
+            )
+        )
+        field = box.lead_field(Lead("l", "component", {"min": [low] * 3, "max": [high] * 3}, ""), "axial")
+        return field["max"][0] - field["min"][0]
+
+    assert width(200.0, 210.0, 500.0) == pytest.approx(100.0)
+    assert width(100.0, 300.0, 500.0) == pytest.approx(260.0)
+    assert width(20.0, 30.0, 80.0) == pytest.approx(80.0)
 
 
 def test_errors_are_reported_to_the_model_and_logged(fixtures, tmp_path):
