@@ -65,9 +65,9 @@ The `app` argument accepted by `konfai-apps` supports three main forms:
 - local app directory: `/path/to/my_app`
 - remote app execution: same app identifier, plus `--host ...`
 
-A private or gated Hugging Face repository needs a token: log in once with `hf auth login`, or set
-`HF_TOKEN`, with an account that has access to it. With `--host`, the server resolves the app, so the token
-belongs on the server.
+A private or gated Hugging Face repository needs a token: log in once with `hf auth login`
+(`huggingface-cli login` before huggingface_hub 0.34), or set `HF_TOKEN`, with an account that has access to it.
+With `--host`, the server resolves the app, so the token belongs on the server.
 
 Examples:
 

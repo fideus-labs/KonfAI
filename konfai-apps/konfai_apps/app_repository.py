@@ -261,9 +261,10 @@ def _apps_in(files: list[str]) -> list[str]:
 
 
 _HUB_ACCESS_HINT = (
-    "If the repository is private or gated, log in once with `hf auth login`, or set HF_TOKEN, with an account"
-    " that has access to it."
+    "If the repository is private or gated, log in once with `hf auth login` (`huggingface-cli login` before"
+    " huggingface_hub 0.34), or set HF_TOKEN, with an account that has access to it."
 )
+_URL_QUERY = re.compile(r"(https?://[^\s?#]+)[?#]\S*")
 
 
 def _cached_apps(repo_id: str, revision: str | None) -> list[str] | None:
@@ -2054,9 +2055,10 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
                 )  # nosec B615
                 return Path(snapshot_dir) / filename_path
             except Exception as exc:
+                detail = _URL_QUERY.sub(r"\1", str(exc))  # a file the CDN serves is named by a signed URL
                 raise AppRepositoryError(
                     f"Failed to download '{filename}' from '{repo_id}'. "
-                    f"Check your internet connection or repository access.\nOriginal error: {exc}",
+                    f"Check your internet connection or repository access.\nOriginal error: {detail}",
                     _HUB_ACCESS_HINT,
                 ) from exc
         try:
